@@ -979,7 +979,7 @@ mod tests {
 
         let runner = MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
-                path: MountPoint("/mnt/storage".to_owned()),
+                path: MountPoint::new("/mnt/storage".to_owned()),
             },
             ok_raw("mountpoint"),
         );
@@ -1010,7 +1010,7 @@ mod tests {
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-disk1".into(),
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 MOUNT_TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw("cryptsetup open"),
@@ -1018,7 +1018,7 @@ mod tests {
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-disk2".into(),
-                    mapper: MapperName("braid-disk2".into()),
+                    mapper: MapperName::from_basename("braid-disk2".into()),
                 },
                 MOUNT_TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw("cryptsetup open"),
@@ -1027,7 +1027,7 @@ mod tests {
             .with_output(
                 CmdRequest::Mount {
                     device: "/dev/mapper/braid-disk1".into(),
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                    mount_point: MountPoint::new("/mnt/storage".to_owned()),
                 },
                 ok_raw("mount"),
             );
@@ -1089,7 +1089,7 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::MountpointCheck {
-                    path: MountPoint("/mnt/storage".to_owned()),
+                    path: MountPoint::new("/mnt/storage".to_owned()),
                 },
                 err_raw("mountpoint", 1, ""),
             )
@@ -1169,7 +1169,7 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::MountpointCheck {
-                    path: MountPoint("/mnt/storage".to_owned()),
+                    path: MountPoint::new("/mnt/storage".to_owned()),
                 },
                 err_raw("mountpoint", 1, ""),
             )
@@ -1195,7 +1195,7 @@ mod tests {
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-disk1".into(),
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 b"testpass".to_vec(),
                 ok_raw("cryptsetup open"),
@@ -1203,7 +1203,7 @@ mod tests {
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-disk2".into(),
-                    mapper: MapperName("braid-disk2".into()),
+                    mapper: MapperName::from_basename("braid-disk2".into()),
                 },
                 b"testpass".to_vec(),
                 ok_raw("cryptsetup open"),
@@ -1212,7 +1212,7 @@ mod tests {
             .with_output(
                 CmdRequest::MountWithOptions {
                     device: "/dev/mapper/braid-disk1".into(),
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                    mount_point: MountPoint::new("/mnt/storage".to_owned()),
                     options: vec!["degraded".to_owned()],
                 },
                 ok_raw("mount -o degraded"),
@@ -1271,7 +1271,7 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::MountpointCheck {
-                    path: MountPoint("/mnt/storage".to_owned()),
+                    path: MountPoint::new("/mnt/storage".to_owned()),
                 },
                 err_raw("mountpoint", 1, ""),
             )
@@ -1297,7 +1297,7 @@ mod tests {
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-disk1".into(),
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 b"testpass".to_vec(),
                 ok_raw("cryptsetup open"),
@@ -1305,7 +1305,7 @@ mod tests {
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-disk2".into(),
-                    mapper: MapperName("braid-disk2".into()),
+                    mapper: MapperName::from_basename("braid-disk2".into()),
                 },
                 b"testpass".to_vec(),
                 ok_raw("cryptsetup open"),
@@ -1606,7 +1606,7 @@ mod tests {
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-disk1".into(),
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 MOUNT_TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw("cryptsetup open"),
@@ -1614,7 +1614,7 @@ mod tests {
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-disk2".into(),
-                    mapper: MapperName("braid-disk2".into()),
+                    mapper: MapperName::from_basename("braid-disk2".into()),
                 },
                 MOUNT_TEST_PASSPHRASE_BYTES.to_vec(),
                 err_raw(
@@ -1660,7 +1660,7 @@ mod tests {
 
         let runner = MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
-                path: MountPoint("/mnt/storage".to_owned()),
+                path: MountPoint::new("/mnt/storage".to_owned()),
             },
             err_raw("mountpoint", 1, ""),
         );
@@ -1707,7 +1707,7 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::MountpointCheck {
-                    path: MountPoint("/mnt/storage".to_owned()),
+                    path: MountPoint::new("/mnt/storage".to_owned()),
                 },
                 err_raw("mountpoint", 1, ""),
             )
@@ -1730,7 +1730,7 @@ mod tests {
             .with_output(
                 CmdRequest::Mount {
                     device: "/dev/mapper/braid-disk1".into(),
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                    mount_point: MountPoint::new("/mnt/storage".to_owned()),
                 },
                 ok_raw("mount"),
             );
@@ -1783,7 +1783,7 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::MountpointCheck {
-                    path: MountPoint("/mnt/storage".to_owned()),
+                    path: MountPoint::new("/mnt/storage".to_owned()),
                 },
                 err_raw("mountpoint", 1, ""),
             )
@@ -2144,7 +2144,7 @@ pool already mounted at /mnt/storage
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::MountpointCheck {
-                    path: MountPoint("/mnt/storage".to_owned()),
+                    path: MountPoint::new("/mnt/storage".to_owned()),
                 },
                 err_raw("mountpoint", 1, ""),
             )
@@ -2166,7 +2166,7 @@ pool already mounted at /mnt/storage
             .with_output(
                 CmdRequest::MountWithOptions {
                     device: "/dev/mapper/braid-disk2".into(),
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                    mount_point: MountPoint::new("/mnt/storage".to_owned()),
                     options: vec!["degraded".to_owned()],
                 },
                 ok_raw("mount -o degraded"),
@@ -2266,7 +2266,7 @@ pool already mounted at /mnt/storage
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::MountpointCheck {
-                    path: MountPoint("/mnt/storage".to_owned()),
+                    path: MountPoint::new("/mnt/storage".to_owned()),
                 },
                 err_raw("mountpoint", 1, ""),
             )
@@ -2373,7 +2373,7 @@ pool already mounted at /mnt/storage
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-disk1".into(),
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 MOUNT_TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw("cryptsetup open"),
@@ -2382,7 +2382,7 @@ pool already mounted at /mnt/storage
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-disk2".into(),
-                    mapper: MapperName("braid-disk2".into()),
+                    mapper: MapperName::from_basename("braid-disk2".into()),
                 },
                 MOUNT_TEST_PASSPHRASE_BYTES.to_vec(),
                 err_raw(
@@ -2456,7 +2456,7 @@ pool already mounted at /mnt/storage
             .with_output(
                 CmdRequest::CryptsetupLuksOpenKeyFile {
                     device: "/dev/disk/by-id/virtio-disk1".into(),
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                     key_file_path: kf.path().display().to_string(),
                 },
                 ok_raw("cryptsetup open"),
@@ -2465,7 +2465,7 @@ pool already mounted at /mnt/storage
             .with_output(
                 CmdRequest::CryptsetupLuksOpenKeyFile {
                     device: "/dev/disk/by-id/virtio-disk2".into(),
-                    mapper: MapperName("braid-disk2".into()),
+                    mapper: MapperName::from_basename("braid-disk2".into()),
                     key_file_path: kf.path().display().to_string(),
                 },
                 err_raw(
@@ -2622,7 +2622,7 @@ pool already mounted at /mnt/storage
             .with_output(
                 CmdRequest::Mount {
                     device: "/dev/mapper/braid-disk1".into(),
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                    mount_point: MountPoint::new("/mnt/storage".to_owned()),
                 },
                 err_raw("mount", 32, "wrong fs type"),
             )
@@ -2637,13 +2637,13 @@ pool already mounted at /mnt/storage
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 ok_raw("cryptsetup close"),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-disk2".into()),
+                    mapper: MapperName::from_basename("braid-disk2".into()),
                 },
                 ok_raw("cryptsetup close"),
             );
@@ -2664,8 +2664,8 @@ pool already mounted at /mnt/storage
         assert_eq!(
             failure.opened_mappers,
             vec![
-                MapperName("braid-disk1".into()),
-                MapperName("braid-disk2".into()),
+                MapperName::from_basename("braid-disk1".into()),
+                MapperName::from_basename("braid-disk2".into()),
             ]
         );
 
@@ -2726,8 +2726,8 @@ pool already mounted at /mnt/storage
         assert_eq!(
             failure.opened_mappers,
             vec![
-                MapperName("braid-disk1".into()),
-                MapperName("braid-disk2".into()),
+                MapperName::from_basename("braid-disk1".into()),
+                MapperName::from_basename("braid-disk2".into()),
             ]
         );
     }
@@ -2778,7 +2778,7 @@ pool already mounted at /mnt/storage
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-disk2".into(),
-                    mapper: MapperName("braid-disk2".into()),
+                    mapper: MapperName::from_basename("braid-disk2".into()),
                 },
                 b"testpass".to_vec(),
                 ok_raw("cryptsetup open"),
@@ -2795,7 +2795,7 @@ pool already mounted at /mnt/storage
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-disk2".into()),
+                    mapper: MapperName::from_basename("braid-disk2".into()),
                 },
                 ok_raw("cryptsetup close"),
             );
@@ -2812,7 +2812,7 @@ pool already mounted at /mnt/storage
         .expect_err("scan should fail");
         assert_eq!(
             failure.opened_mappers,
-            vec![MapperName("braid-disk2".into())],
+            vec![MapperName::from_basename("braid-disk2".into())],
             "unexpected failure: {}",
             failure.error
         );
@@ -2842,7 +2842,7 @@ pool already mounted at /mnt/storage
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-disk2".into(),
-                    mapper: MapperName("braid-disk2".into()),
+                    mapper: MapperName::from_basename("braid-disk2".into()),
                 },
                 b"testpass".to_vec(),
                 err_raw("cryptsetup open", 1, "open failed"),
@@ -2857,7 +2857,7 @@ pool already mounted at /mnt/storage
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 ok_raw("cryptsetup close"),
             );
@@ -2877,7 +2877,7 @@ pool already mounted at /mnt/storage
         );
         assert_eq!(
             failure.opened_mappers,
-            vec![MapperName("braid-disk1".into())]
+            vec![MapperName::from_basename("braid-disk1".into())]
         );
 
         close_opened_mappers(&runner, &NoopSleeper, &fs, &failure.opened_mappers, false).unwrap();
@@ -2892,8 +2892,8 @@ pool already mounted at /mnt/storage
     fn cleanup_busy_close_attempts_later_mappers_and_reports_guidance() {
         let fs = direct_two_disk_fs_with_mappers();
         let opened = vec![
-            MapperName("braid-disk1".into()),
-            MapperName("braid-disk2".into()),
+            MapperName::from_basename("braid-disk1".into()),
+            MapperName::from_basename("braid-disk2".into()),
         ];
         let runner = MockRunner::default()
             .with_output(
@@ -2907,13 +2907,13 @@ pool already mounted at /mnt/storage
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 err_raw("cryptsetup close", 5, "busy"),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-disk2".into()),
+                    mapper: MapperName::from_basename("braid-disk2".into()),
                 },
                 ok_raw("cryptsetup close"),
             );
@@ -3083,7 +3083,7 @@ pool already mounted at /mnt/storage
             .with_output(
                 CmdRequest::CryptsetupLuksOpenKeyFile {
                     device: "/dev/disk/by-id/virtio-disk1".into(),
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                     key_file_path: keyfile_path.clone(),
                 },
                 ok_raw("cryptsetup open"),
@@ -3091,7 +3091,7 @@ pool already mounted at /mnt/storage
             .with_output(
                 CmdRequest::CryptsetupLuksOpenKeyFile {
                     device: "/dev/disk/by-id/virtio-disk2".into(),
-                    mapper: MapperName("braid-disk2".into()),
+                    mapper: MapperName::from_basename("braid-disk2".into()),
                     key_file_path: keyfile_path,
                 },
                 ok_raw("cryptsetup open"),
@@ -3111,13 +3111,13 @@ pool already mounted at /mnt/storage
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 ok_raw("cryptsetup close"),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-disk2".into()),
+                    mapper: MapperName::from_basename("braid-disk2".into()),
                 },
                 ok_raw("cryptsetup close"),
             );
@@ -3134,8 +3134,8 @@ pool already mounted at /mnt/storage
         assert_eq!(
             failure.opened_mappers,
             vec![
-                MapperName("braid-disk1".into()),
-                MapperName("braid-disk2".into()),
+                MapperName::from_basename("braid-disk1".into()),
+                MapperName::from_basename("braid-disk2".into()),
             ]
         );
 
@@ -3185,8 +3185,8 @@ pool already mounted at /mnt/storage
     fn cleanup_forget_failure_warns_and_still_closes_all_mappers() {
         let fs = direct_two_disk_fs_with_mappers();
         let opened = vec![
-            MapperName("braid-disk1".into()),
-            MapperName("braid-disk2".into()),
+            MapperName::from_basename("braid-disk1".into()),
+            MapperName::from_basename("braid-disk2".into()),
         ];
         let runner = MockRunner::default()
             .with_output(
@@ -3200,13 +3200,13 @@ pool already mounted at /mnt/storage
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 ok_raw("cryptsetup close"),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-disk2".into()),
+                    mapper: MapperName::from_basename("braid-disk2".into()),
                 },
                 ok_raw("cryptsetup close"),
             );
@@ -3443,14 +3443,14 @@ pool already mounted at /mnt/storage
         let (open1_req, open1_out) = (
             CmdRequest::CryptsetupLuksOpen {
                 device: "/dev/disk/by-id/virtio-disk1".into(),
-                mapper: MapperName("braid-disk1".into()),
+                mapper: MapperName::from_basename("braid-disk1".into()),
             },
             ok_raw("cryptsetup open"),
         );
         let (open2_req, open2_out) = (
             CmdRequest::CryptsetupLuksOpen {
                 device: "/dev/disk/by-id/virtio-disk2".into(),
-                mapper: MapperName("braid-disk2".into()),
+                mapper: MapperName::from_basename("braid-disk2".into()),
             },
             err_raw(
                 "cryptsetup open",
@@ -3539,7 +3539,7 @@ pool already mounted at /mnt/storage
         let (open1_req, open1_out) = (
             CmdRequest::CryptsetupLuksOpenKeyFile {
                 device: "/dev/disk/by-id/virtio-disk1".into(),
-                mapper: MapperName("braid-disk1".into()),
+                mapper: MapperName::from_basename("braid-disk1".into()),
                 key_file_path: kf_path.clone(),
             },
             ok_raw("cryptsetup open"),
@@ -3547,7 +3547,7 @@ pool already mounted at /mnt/storage
         let (open2_req, open2_out) = (
             CmdRequest::CryptsetupLuksOpenKeyFile {
                 device: "/dev/disk/by-id/virtio-disk2".into(),
-                mapper: MapperName("braid-disk2".into()),
+                mapper: MapperName::from_basename("braid-disk2".into()),
                 key_file_path: kf_path,
             },
             err_raw("cryptsetup open", 1, "Cannot read LUKS header"),

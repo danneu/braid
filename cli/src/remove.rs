@@ -1548,19 +1548,19 @@ mod tests {
             devices: vec![
                 PoolDevice {
                     devid: Devid::new(1),
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                     luks_uuid: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
                     underlying: "/dev/vda".into(),
                 },
                 PoolDevice {
                     devid: Devid::new(2),
-                    mapper: MapperName("braid-disk2".into()),
+                    mapper: MapperName::from_basename("braid-disk2".into()),
                     luks_uuid: target_uuid.clone(),
                     underlying: "/dev/vdb".into(),
                 },
                 PoolDevice {
                     devid: Devid::new(3),
-                    mapper: MapperName("braid-disk3".into()),
+                    mapper: MapperName::from_basename("braid-disk3".into()),
                     luks_uuid: LuksUuid::parse("33333333-3333-3333-3333-333333333333").unwrap(),
                     underlying: "/dev/vdc".into(),
                 },
@@ -1571,7 +1571,7 @@ mod tests {
             fsid: Some(Fsid::parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").unwrap()),
             null_underlying: vec![],
         };
-        let mount_point = MountPoint("/mnt/storage".into());
+        let mount_point = MountPoint::new("/mnt/storage".into());
         let steps = remove_present_work_plan_for_test(name, &target_uuid, &pool, &mount_point)
             .unwrap()
             .render_steps();
@@ -1603,13 +1603,13 @@ mod tests {
             devices: vec![
                 PoolDevice {
                     devid: Devid::new(1),
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                     luks_uuid: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
                     underlying: "/dev/vda".into(),
                 },
                 PoolDevice {
                     devid: Devid::new(2),
-                    mapper: MapperName("braid-disk2".into()),
+                    mapper: MapperName::from_basename("braid-disk2".into()),
                     luks_uuid: target_uuid.clone(),
                     underlying: "/dev/vdb".into(),
                 },
@@ -1620,7 +1620,7 @@ mod tests {
             fsid: Some(Fsid::parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").unwrap()),
             null_underlying: vec![],
         };
-        let mount_point = MountPoint("/mnt/storage".into());
+        let mount_point = MountPoint::new("/mnt/storage".into());
         let steps = remove_present_work_plan_for_test(name, &target_uuid, &pool, &mount_point)
             .unwrap()
             .render_steps();
@@ -1700,13 +1700,13 @@ mod tests {
             devices: vec![
                 PoolDevice {
                     devid: Devid::new(1),
-                    mapper: MapperName("braid-decoy".into()),
+                    mapper: MapperName::from_basename("braid-decoy".into()),
                     luks_uuid: decoy_uuid,
                     underlying: "/dev/vda".into(),
                 },
                 PoolDevice {
                     devid: Devid::new(2),
-                    mapper: MapperName("braid-renamed".into()),
+                    mapper: MapperName::from_basename("braid-renamed".into()),
                     luks_uuid: target_uuid.clone(),
                     underlying: "/dev/vdb".into(),
                 },
@@ -1717,7 +1717,7 @@ mod tests {
             fsid: Some(Fsid::parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").unwrap()),
             null_underlying: vec![],
         };
-        let mount_point = MountPoint("/mnt/storage".into());
+        let mount_point = MountPoint::new("/mnt/storage".into());
 
         let steps = remove_present_work_plan_for_test(name, &target_uuid, &pool, &mount_point)
             .unwrap()
@@ -1955,7 +1955,7 @@ mod tests {
             })),
             _ => None,
         });
-        let mount = MountPoint("/mnt/storage".to_owned());
+        let mount = MountPoint::new("/mnt/storage".to_owned());
         let target = target_device("disk1");
         // remaining: 2 exercises the >= 2 branch (3->2 remove), which is the
         // scenario the CommandFailed surfacing was written for.
@@ -1980,7 +1980,7 @@ mod tests {
     //   usage --raw` at all.
     fn check_eviction_space_2to1_fails_closed_on_device_usage_spawn_error() {
         let runner = MockRunner::default();
-        let mount = MountPoint("/mnt/storage".to_owned());
+        let mount = MountPoint::new("/mnt/storage".to_owned());
         let target = target_device("disk1");
         let err = check_eviction_space(&runner, &mount, &target, 1)
             .expect_err("2->1 preflight must fail closed on usage spawn error");
@@ -2013,7 +2013,7 @@ mod tests {
             ))),
             _ => None,
         });
-        let mount = MountPoint("/mnt/storage".to_owned());
+        let mount = MountPoint::new("/mnt/storage".to_owned());
         let target = target_device("disk1");
         let err = check_eviction_space(&runner, &mount, &target, 1)
             .expect_err("2->1 preflight must fail closed on usage parse error");
@@ -2044,7 +2044,7 @@ mod tests {
             ))),
             _ => None,
         });
-        let mount = MountPoint("/mnt/storage".to_owned());
+        let mount = MountPoint::new("/mnt/storage".to_owned());
         let target = target_device("disk1");
         let err = check_eviction_space(&runner, &mount, &target, 1)
             .expect_err("2->1 preflight must fail closed on df spawn error");
@@ -2079,7 +2079,7 @@ mod tests {
             ))),
             _ => None,
         });
-        let mount = MountPoint("/mnt/storage".to_owned());
+        let mount = MountPoint::new("/mnt/storage".to_owned());
         let target = target_device("disk1");
         let err = check_eviction_space(&runner, &mount, &target, 1)
             .expect_err("2->1 preflight must fail closed on df parse error");
@@ -2124,7 +2124,7 @@ mod tests {
             ))),
             _ => None,
         });
-        let mount = MountPoint("/mnt/storage".to_owned());
+        let mount = MountPoint::new("/mnt/storage".to_owned());
         let target = target_device("disk1");
         let err = check_eviction_space(&runner, &mount, &target, 1)
             .expect_err("2->1 preflight must fail closed when survivor is missing");
@@ -2161,7 +2161,7 @@ mod tests {
             })),
             _ => None,
         });
-        let mount = MountPoint("/mnt/storage".to_owned());
+        let mount = MountPoint::new("/mnt/storage".to_owned());
         let target = target_device("disk1");
         let err = check_eviction_space(&runner, &mount, &target, 1)
             .expect_err("2->1 preflight must surface df command failure");
@@ -2205,7 +2205,7 @@ mod tests {
     #[test]
     fn check_eviction_space_ge2_soft_warns_on_usage_spawn_error() {
         let runner = MockRunner::default();
-        let mount = MountPoint("/mnt/storage".to_owned());
+        let mount = MountPoint::new("/mnt/storage".to_owned());
         let target = target_device("disk1");
         let outcome = check_eviction_space(&runner, &mount, &target, 2)
             .expect("soft-warn branch must not return Err");
@@ -2251,7 +2251,7 @@ mod tests {
             ))),
             _ => None,
         });
-        let mount = MountPoint("/mnt/storage".to_owned());
+        let mount = MountPoint::new("/mnt/storage".to_owned());
         let target = target_device("disk1");
         let outcome = check_eviction_space(&runner, &mount, &target, 2)
             .expect("soft-warn branch must not return Err");

@@ -680,7 +680,7 @@ fn validate_generated_keyfile_target<R: CommandRunner>(
     }
 
     let mountpoint = runner.run(&CmdRequest::MountpointCheck {
-        path: MountPoint(dir_display.clone()),
+        path: MountPoint::new(dir_display.clone()),
     })?;
     if mountpoint.exit_status != 0 {
         let message = match phase {
@@ -1468,7 +1468,7 @@ mod tests {
         assert_eq!(
             runner.requests(),
             vec![CmdRequest::MountpointCheck {
-                path: MountPoint(target.display().to_string()),
+                path: MountPoint::new(target.display().to_string()),
             }],
             "mountpoint failure must stop before LUKS discovery"
         );
@@ -1519,7 +1519,7 @@ mod tests {
         assert_eq!(
             runner.requests(),
             vec![CmdRequest::MountpointCheck {
-                path: MountPoint(target.display().to_string()),
+                path: MountPoint::new(target.display().to_string()),
             }],
             "dry-run target validation must stop before LUKS discovery"
         );
@@ -1575,7 +1575,7 @@ mod tests {
         assert_eq!(
             runner.requests(),
             vec![CmdRequest::MountpointCheck {
-                path: MountPoint(tmp.path().display().to_string()),
+                path: MountPoint::new(tmp.path().display().to_string()),
             }],
             "existing-keyfile refusal must happen before LUKS discovery"
         );

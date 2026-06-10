@@ -212,8 +212,8 @@ mod tests {
     fn mapper_name_for_disk() {
         let toshiba = DiskName::parse("toshiba").unwrap();
         let ironwolf = DiskName::parse("ironwolf").unwrap();
-        assert_eq!(mapper_name(&toshiba), MapperName("braid-toshiba".into()));
-        assert_eq!(mapper_name(&ironwolf), MapperName("braid-ironwolf".into()));
+        assert_eq!(mapper_name(&toshiba), MapperName::from_basename("braid-toshiba".into()));
+        assert_eq!(mapper_name(&ironwolf), MapperName::from_basename("braid-ironwolf".into()));
     }
 
     // Intent: `luks_label_for(&DiskName)` returns the canonical

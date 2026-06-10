@@ -1032,7 +1032,7 @@ mod tests {
         parent_tran: Option<&str>,
         child_name: &str,
     ) -> HashMap<String, String> {
-        let mp = MountPoint("/mnt/storage".to_owned());
+        let mp = MountPoint::new("/mnt/storage".to_owned());
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
@@ -1047,7 +1047,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-vdb".into()),
+                    mapper: MapperName::from_basename("braid-vdb".into()),
                 },
                 ok_raw(
                     "cryptsetup status",
@@ -1127,7 +1127,7 @@ mod tests {
     /// allocation rows and the unallocated value for each disk.
     #[test]
     fn allocations_passed_through() {
-        let mp = MountPoint("/mnt/storage".to_owned());
+        let mp = MountPoint::new("/mnt/storage".to_owned());
 
         let runner = MockRunner::default()
             // probe_pool: btrfs filesystem show
@@ -1143,7 +1143,7 @@ mod tests {
             )
             // probe_pool: cryptsetup status for each device
             .with_output(
-                CmdRequest::CryptsetupStatus { mapper: MapperName("braid-toshiba".into()) },
+                CmdRequest::CryptsetupStatus { mapper: MapperName::from_basename("braid-toshiba".into()) },
                 ok_raw(
                     "cryptsetup status",
                     "/dev/mapper/braid-toshiba is active.\n\tdevice:  /dev/vda\n",
@@ -1154,7 +1154,7 @@ mod tests {
                 ok_raw("cryptsetup luksUUID", "11111111-1111-1111-1111-111111111111\n"),
             )
             .with_output(
-                CmdRequest::CryptsetupStatus { mapper: MapperName("braid-ironwolf".into()) },
+                CmdRequest::CryptsetupStatus { mapper: MapperName::from_basename("braid-ironwolf".into()) },
                 ok_raw(
                     "cryptsetup status",
                     "/dev/mapper/braid-ironwolf is active.\n\tdevice:  /dev/vdb\n",
@@ -1203,7 +1203,7 @@ mod tests {
         let runner = runner
             .with_output(
                 CmdRequest::BtrfsBalanceStatus {
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                    mount_point: MountPoint::new("/mnt/storage".to_owned()),
                 },
                 ok_raw(
                     "btrfs balance status",
@@ -1212,7 +1212,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::BtrfsFilesystemUsageRaw {
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                    mount_point: MountPoint::new("/mnt/storage".to_owned()),
                 },
                 ok_raw(
                     "btrfs filesystem usage",
@@ -1229,7 +1229,7 @@ mod tests {
         let result = probe_pool_for_tui(
             &runner,
             &StubFs::empty(),
-            &MountPoint("/mnt/storage".into()),
+            &MountPoint::new("/mnt/storage".into()),
             &tui_disks(),
             &test_paths().1,
             crate::test_fixtures::mock_virtio_backing_path_resolver(),
@@ -1373,7 +1373,7 @@ mod tests {
             probe_pool_for_tui(
                 &runner,
                 &StubFs::empty(),
-                &MountPoint("/mnt/storage".into()),
+                &MountPoint::new("/mnt/storage".into()),
                 &tui_disks_with_by_id(disk_by_id),
                 &test_paths().1,
                 crate::test_fixtures::mock_virtio_backing_path_resolver(),
@@ -1440,7 +1440,7 @@ mod tests {
         let (states, _pool) = probe_pool_for_tui(
             &runner,
             &StubFs::empty(),
-            &MountPoint("/mnt/storage".into()),
+            &MountPoint::new("/mnt/storage".into()),
             &tui_disks_with_by_id(disk_by_id),
             &test_paths().1,
             crate::test_fixtures::mock_virtio_backing_path_resolver(),
@@ -1475,7 +1475,7 @@ mod tests {
     /// device_errors must surface those 7 errors keyed by "toshiba".
     #[test]
     fn device_errors_keyed_by_devid_not_path() {
-        let mp = MountPoint("/mnt/storage".to_owned());
+        let mp = MountPoint::new("/mnt/storage".to_owned());
 
         let runner = MockRunner::default()
             .with_output(
@@ -1488,7 +1488,7 @@ mod tests {
                 ),
             )
             .with_output(
-                CmdRequest::CryptsetupStatus { mapper: MapperName("braid-toshiba".into()) },
+                CmdRequest::CryptsetupStatus { mapper: MapperName::from_basename("braid-toshiba".into()) },
                 ok_raw(
                     "cryptsetup status",
                     "/dev/mapper/braid-toshiba is active.\n\tdevice:  /dev/vda\n",
@@ -1554,7 +1554,7 @@ mod tests {
         let result = probe_pool_for_tui(
             &runner,
             &StubFs::empty(),
-            &MountPoint("/mnt/storage".into()),
+            &MountPoint::new("/mnt/storage".into()),
             &tui_disks(),
             &test_paths().1,
             crate::test_fixtures::mock_virtio_backing_path_resolver(),
@@ -1588,7 +1588,7 @@ mod tests {
      */
     #[test]
     fn device_errors_for_missing_devid_use_persisted_prior_binding() {
-        let mp = MountPoint("/mnt/storage".to_owned());
+        let mp = MountPoint::new("/mnt/storage".to_owned());
 
         let runner = MockRunner::default()
             .with_output(
@@ -1605,7 +1605,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-toshiba".into()),
+                    mapper: MapperName::from_basename("braid-toshiba".into()),
                 },
                 ok_raw(
                     "cryptsetup status",
@@ -1670,7 +1670,7 @@ mod tests {
             probe_pool_for_tui(
                 &runner,
                 &StubFs::empty(),
-                &MountPoint("/mnt/storage".into()),
+                &MountPoint::new("/mnt/storage".into()),
                 &tui_disks(),
                 &test_paths().1,
                 crate::test_fixtures::mock_virtio_backing_path_resolver(),
@@ -1704,7 +1704,7 @@ mod tests {
     /// sensible ~53% of logical capacity.
     #[test]
     fn capacity_used_and_total_in_same_unit() {
-        let mp = MountPoint("/mnt/storage".to_owned());
+        let mp = MountPoint::new("/mnt/storage".to_owned());
 
         let runner = MockRunner::default()
             .with_output(
@@ -1718,7 +1718,7 @@ mod tests {
                 ),
             )
             .with_output(
-                CmdRequest::CryptsetupStatus { mapper: MapperName("braid-toshiba".into()) },
+                CmdRequest::CryptsetupStatus { mapper: MapperName::from_basename("braid-toshiba".into()) },
                 ok_raw(
                     "cryptsetup status",
                     "/dev/mapper/braid-toshiba is active.\n\tdevice:  /dev/vda\n",
@@ -1729,7 +1729,7 @@ mod tests {
                 ok_raw("cryptsetup luksUUID", "11111111-1111-1111-1111-111111111111\n"),
             )
             .with_output(
-                CmdRequest::CryptsetupStatus { mapper: MapperName("braid-ironwolf".into()) },
+                CmdRequest::CryptsetupStatus { mapper: MapperName::from_basename("braid-ironwolf".into()) },
                 ok_raw(
                     "cryptsetup status",
                     "/dev/mapper/braid-ironwolf is active.\n\tdevice:  /dev/vdb\n",
@@ -1800,7 +1800,7 @@ mod tests {
         let result = probe_pool_for_tui(
             &runner,
             &StubFs::empty(),
-            &MountPoint("/mnt/storage".into()),
+            &MountPoint::new("/mnt/storage".into()),
             &tui_disks(),
             &test_paths().1,
             crate::test_fixtures::mock_virtio_backing_path_resolver(),
@@ -1854,7 +1854,7 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-toshiba".into()),
+                    mapper: MapperName::from_basename("braid-toshiba".into()),
                 },
                 ok_raw(
                     "cryptsetup status braid-toshiba",
@@ -1882,7 +1882,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-ironwolf".into()),
+                    mapper: MapperName::from_basename("braid-ironwolf".into()),
                 },
                 err_raw(
                     "cryptsetup status braid-ironwolf",
@@ -1905,7 +1905,7 @@ mod tests {
         let (states, pool) = probe_pool_for_tui(
             &runner,
             &StubFs::unmounted_with_paths(&[]),
-            &MountPoint("/mnt/storage".into()),
+            &MountPoint::new("/mnt/storage".into()),
             &tui_disks_with_by_id(disk_by_id),
             &test_paths().1,
             &resolver,
@@ -1944,7 +1944,7 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-toshiba".into()),
+                    mapper: MapperName::from_basename("braid-toshiba".into()),
                 },
                 ok_raw(
                     "cryptsetup status braid-toshiba",
@@ -1973,7 +1973,7 @@ mod tests {
         let (states, pool) = probe_pool_for_tui(
             &runner,
             &StubFs::unmounted_with_paths(&[]),
-            &MountPoint("/mnt/storage".into()),
+            &MountPoint::new("/mnt/storage".into()),
             &tui_disks_with_by_id(disk_by_id),
             &test_paths().1,
             &resolver,
@@ -2002,7 +2002,7 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-toshiba".into()),
+                    mapper: MapperName::from_basename("braid-toshiba".into()),
                 },
                 ok_raw(
                     "cryptsetup status braid-toshiba",
@@ -2025,7 +2025,7 @@ mod tests {
         let (states, pool) = probe_pool_for_tui(
             &runner,
             &StubFs::unmounted_with_paths(&[]),
-            &MountPoint("/mnt/storage".into()),
+            &MountPoint::new("/mnt/storage".into()),
             &tui_disks_with_by_id(disk_by_id),
             &test_paths().1,
             &resolver,
@@ -2062,7 +2062,7 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-toshiba".into()),
+                    mapper: MapperName::from_basename("braid-toshiba".into()),
                 },
                 ok_raw(
                     "cryptsetup status braid-toshiba",
@@ -2087,7 +2087,7 @@ mod tests {
         let (states, _pool) = probe_pool_for_tui(
             &runner,
             &StubFs::unmounted_with_paths(&[]),
-            &MountPoint("/mnt/storage".into()),
+            &MountPoint::new("/mnt/storage".into()),
             &tui_disks_with_by_id(disk_by_id),
             &test_paths().1,
             &resolver,
@@ -2110,7 +2110,7 @@ mod tests {
     /// any per-test cryptsetup mocks the caller wants to add for a
     /// declared but unpooled disk.
     fn one_disk_mounted_pool_runner() -> MockRunner {
-        let mp = MountPoint("/mnt/storage".to_owned());
+        let mp = MountPoint::new("/mnt/storage".to_owned());
         MockRunner::default()
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
@@ -2125,7 +2125,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-toshiba".into()),
+                    mapper: MapperName::from_basename("braid-toshiba".into()),
                 },
                 ok_raw(
                     "cryptsetup status",
@@ -2217,7 +2217,7 @@ mod tests {
             probe_pool_for_tui(
                 &runner,
                 &fs,
-                &MountPoint("/mnt/storage".into()),
+                &MountPoint::new("/mnt/storage".into()),
                 &tui_disks_with_by_id(disk_by_id),
                 &test_paths().1,
                 crate::test_fixtures::mock_virtio_backing_path_resolver(),
@@ -2273,7 +2273,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-ironwolf".into()),
+                    mapper: MapperName::from_basename("braid-ironwolf".into()),
                 },
                 RawCommandOutput {
                     cmd: "cryptsetup status braid-ironwolf".into(),
@@ -2302,7 +2302,7 @@ mod tests {
             probe_pool_for_tui(
                 &runner,
                 &fs,
-                &MountPoint("/mnt/storage".into()),
+                &MountPoint::new("/mnt/storage".into()),
                 &tui_disks_with_by_id(disk_by_id),
                 &test_paths().1,
                 crate::test_fixtures::mock_virtio_backing_path_resolver(),
@@ -2352,7 +2352,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-ironwolf".into()),
+                    mapper: MapperName::from_basename("braid-ironwolf".into()),
                 },
                 RawCommandOutput {
                     cmd: "cryptsetup status braid-ironwolf".into(),
@@ -2381,7 +2381,7 @@ mod tests {
             probe_pool_for_tui(
                 &runner,
                 &fs,
-                &MountPoint("/mnt/storage".into()),
+                &MountPoint::new("/mnt/storage".into()),
                 &tui_disks_with_by_id(disk_by_id),
                 &test_paths().1,
                 crate::test_fixtures::mock_virtio_backing_path_resolver(),
@@ -2430,7 +2430,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-ironwolf".into()),
+                    mapper: MapperName::from_basename("braid-ironwolf".into()),
                 },
                 RawCommandOutput {
                     cmd: "cryptsetup status braid-ironwolf".into(),
@@ -2474,7 +2474,7 @@ mod tests {
             probe_pool_for_tui(
                 &runner,
                 &fs,
-                &MountPoint("/mnt/storage".into()),
+                &MountPoint::new("/mnt/storage".into()),
                 &disks,
                 &test_paths().1,
                 crate::test_fixtures::mock_virtio_backing_path_resolver(),
@@ -2531,7 +2531,7 @@ mod tests {
             probe_pool_for_tui(
                 &runner,
                 &fs,
-                &MountPoint("/mnt/storage".into()),
+                &MountPoint::new("/mnt/storage".into()),
                 &tui_disks_with_by_id(disk_by_id),
                 &test_paths().1,
                 crate::test_fixtures::mock_virtio_backing_path_resolver(),
@@ -2601,7 +2601,7 @@ mod tests {
             probe_pool_for_tui(
                 &runner,
                 &fs,
-                &MountPoint("/mnt/storage".into()),
+                &MountPoint::new("/mnt/storage".into()),
                 &tui_disks_with_by_id(disk_by_id),
                 &test_paths().1,
                 crate::test_fixtures::mock_virtio_backing_path_resolver(),
@@ -2649,7 +2649,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-ironwolf".into()),
+                    mapper: MapperName::from_basename("braid-ironwolf".into()),
                 },
                 ok_raw(
                     "cryptsetup status braid-ironwolf",
@@ -2678,7 +2678,7 @@ mod tests {
             probe_pool_for_tui(
                 &runner,
                 &fs,
-                &MountPoint("/mnt/storage".into()),
+                &MountPoint::new("/mnt/storage".into()),
                 &tui_disks_with_by_id(disk_by_id),
                 &test_paths().1,
                 crate::test_fixtures::mock_virtio_backing_path_resolver(),
@@ -2726,7 +2726,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-ironwolf".into()),
+                    mapper: MapperName::from_basename("braid-ironwolf".into()),
                 },
                 ok_raw(
                     "cryptsetup status braid-ironwolf",
@@ -2755,7 +2755,7 @@ mod tests {
             probe_pool_for_tui(
                 &runner,
                 &fs,
-                &MountPoint("/mnt/storage".into()),
+                &MountPoint::new("/mnt/storage".into()),
                 &tui_disks_with_by_id(disk_by_id),
                 &test_paths().1,
                 crate::test_fixtures::mock_virtio_backing_path_resolver(),

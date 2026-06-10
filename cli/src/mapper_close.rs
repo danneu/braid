@@ -120,7 +120,7 @@ mod tests {
 
     fn close_request() -> CmdRequest {
         CmdRequest::CryptsetupClose {
-            mapper: MapperName("braid-disk2".into()),
+            mapper: MapperName::from_basename("braid-disk2".into()),
         }
     }
 
@@ -138,7 +138,7 @@ mod tests {
             closed = close_mapper_best_effort(
                 runner,
                 &NoopSleeper,
-                &MapperName("braid-disk2".into()),
+                &MapperName::from_basename("braid-disk2".into()),
                 "disk2",
                 false,
             );

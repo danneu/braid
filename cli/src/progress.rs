@@ -604,7 +604,7 @@ mod tests {
     }
 
     fn mp() -> MountPoint {
-        MountPoint("/mnt/storage".into())
+        MountPoint::new("/mnt/storage".into())
     }
 
     fn device_remove_request() -> CmdRequest {
@@ -875,7 +875,7 @@ mod tests {
         // Only seed the balance command, no status mock needed.
         let runner = MockRunner::default().with_output(
             CmdRequest::BtrfsBalanceRaid1 {
-                mount_point: MountPoint("/mnt/storage".to_owned()),
+                mount_point: MountPoint::new("/mnt/storage".to_owned()),
             },
             ok_raw("btrfs balance start", ""),
         );
@@ -883,7 +883,7 @@ mod tests {
         let result = run_with_progress(
             &runner,
             &CmdRequest::BtrfsBalanceRaid1 {
-                mount_point: MountPoint("/mnt/storage".to_owned()),
+                mount_point: MountPoint::new("/mnt/storage".to_owned()),
             },
             &mp(),
             ProgressOutput::Human,
@@ -897,13 +897,13 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::BtrfsBalanceRaid1 {
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                    mount_point: MountPoint::new("/mnt/storage".to_owned()),
                 },
                 ok_raw("btrfs balance start", ""),
             )
             .with_output(
                 CmdRequest::BtrfsBalanceStatus {
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                    mount_point: MountPoint::new("/mnt/storage".to_owned()),
                 },
                 ok_raw("btrfs balance status", "garbage output here"),
             );
@@ -911,7 +911,7 @@ mod tests {
         let result = run_with_progress(
             &runner,
             &CmdRequest::BtrfsBalanceRaid1 {
-                mount_point: MountPoint("/mnt/storage".to_owned()),
+                mount_point: MountPoint::new("/mnt/storage".to_owned()),
             },
             &mp(),
             ProgressOutput::Human,
@@ -924,7 +924,7 @@ mod tests {
         // BtrfsBalanceRaid1 returns exit_status=1 — error must propagate unchanged.
         let runner = MockRunner::default().with_output(
             CmdRequest::BtrfsBalanceRaid1 {
-                mount_point: MountPoint("/mnt/storage".to_owned()),
+                mount_point: MountPoint::new("/mnt/storage".to_owned()),
             },
             err_raw("btrfs balance start", 1, "balance failed"),
         );
@@ -932,7 +932,7 @@ mod tests {
         let result = run_with_progress(
             &runner,
             &CmdRequest::BtrfsBalanceRaid1 {
-                mount_point: MountPoint("/mnt/storage".to_owned()),
+                mount_point: MountPoint::new("/mnt/storage".to_owned()),
             },
             &mp(),
             ProgressOutput::Human,
@@ -948,7 +948,7 @@ mod tests {
     fn progress_off_runs_without_thread() {
         let runner = MockRunner::default().with_output(
             CmdRequest::BtrfsBalanceRaid1 {
-                mount_point: MountPoint("/mnt/storage".to_owned()),
+                mount_point: MountPoint::new("/mnt/storage".to_owned()),
             },
             ok_raw("btrfs balance start", ""),
         );
@@ -956,7 +956,7 @@ mod tests {
         let result = run_with_progress(
             &runner,
             &CmdRequest::BtrfsBalanceRaid1 {
-                mount_point: MountPoint("/mnt/storage".to_owned()),
+                mount_point: MountPoint::new("/mnt/storage".to_owned()),
             },
             &mp(),
             ProgressOutput::Off,
@@ -985,7 +985,7 @@ mod tests {
             CmdRequest::BtrfsReplaceStart {
                 devid: Devid::new(2),
                 target_device: "/dev/mapper/new".to_owned(),
-                mount_point: MountPoint("/mnt/storage".to_owned()),
+                mount_point: MountPoint::new("/mnt/storage".to_owned()),
             },
             ok_raw("btrfs replace start", ""),
         );
@@ -995,7 +995,7 @@ mod tests {
             &CmdRequest::BtrfsReplaceStart {
                 devid: Devid::new(2),
                 target_device: "/dev/mapper/new".to_owned(),
-                mount_point: MountPoint("/mnt/storage".to_owned()),
+                mount_point: MountPoint::new("/mnt/storage".to_owned()),
             },
             &mp(),
             ProgressOutput::Human,
@@ -1010,13 +1010,13 @@ mod tests {
                 CmdRequest::BtrfsReplaceStart {
                     devid: Devid::new(2),
                     target_device: "/dev/mapper/new".to_owned(),
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                    mount_point: MountPoint::new("/mnt/storage".to_owned()),
                 },
                 ok_raw("btrfs replace start", ""),
             )
             .with_output(
                 CmdRequest::BtrfsReplaceStatus {
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                    mount_point: MountPoint::new("/mnt/storage".to_owned()),
                 },
                 ok_raw("btrfs replace status", "garbage output here"),
             );
@@ -1026,7 +1026,7 @@ mod tests {
             &CmdRequest::BtrfsReplaceStart {
                 devid: Devid::new(2),
                 target_device: "/dev/mapper/new".to_owned(),
-                mount_point: MountPoint("/mnt/storage".to_owned()),
+                mount_point: MountPoint::new("/mnt/storage".to_owned()),
             },
             &mp(),
             ProgressOutput::Human,
@@ -1040,7 +1040,7 @@ mod tests {
             CmdRequest::BtrfsReplaceStart {
                 devid: Devid::new(2),
                 target_device: "/dev/mapper/new".to_owned(),
-                mount_point: MountPoint("/mnt/storage".to_owned()),
+                mount_point: MountPoint::new("/mnt/storage".to_owned()),
             },
             err_raw("btrfs replace start", 1, "replace failed"),
         );
@@ -1050,7 +1050,7 @@ mod tests {
             &CmdRequest::BtrfsReplaceStart {
                 devid: Devid::new(2),
                 target_device: "/dev/mapper/new".to_owned(),
-                mount_point: MountPoint("/mnt/storage".to_owned()),
+                mount_point: MountPoint::new("/mnt/storage".to_owned()),
             },
             &mp(),
             ProgressOutput::Human,

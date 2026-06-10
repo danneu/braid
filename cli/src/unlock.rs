@@ -289,7 +289,7 @@ mod tests {
             "/dev/disk/by-id/virtio-disk3",
         ]);
 
-        let mp = MountPoint("/mnt/storage".to_owned());
+        let mp = MountPoint::new("/mnt/storage".to_owned());
         let (uuid1_req, uuid1_out) = luks_uuid_ok(
             "/dev/disk/by-id/virtio-disk1",
             "11111111-1111-1111-1111-111111111111",
@@ -365,7 +365,7 @@ mod tests {
             "/dev/disk/by-id/virtio-disk3",
         ]);
 
-        let mp = MountPoint("/mnt/storage".to_owned());
+        let mp = MountPoint::new("/mnt/storage".to_owned());
         let (uuid1_req, uuid1_out) = luks_uuid_ok(
             "/dev/disk/by-id/virtio-disk1",
             "11111111-1111-1111-1111-111111111111",
@@ -464,7 +464,7 @@ mod tests {
                 .with_output_stdin(
                     CmdRequest::CryptsetupLuksOpen {
                         device: "/dev/disk/by-id/virtio-disk2".into(),
-                        mapper: MapperName("braid-disk2".into()),
+                        mapper: MapperName::from_basename("braid-disk2".into()),
                     },
                     MOUNT_TEST_PASSPHRASE_BYTES.to_vec(),
                     unlock_err_raw(
@@ -528,7 +528,7 @@ mod tests {
             "/dev/mapper/braid-disk2",
         ]);
 
-        let mp = MountPoint("/mnt/storage".to_owned());
+        let mp = MountPoint::new("/mnt/storage".to_owned());
         let (scan_req, scan_out) = unlock_btrfs_device_scan_ok();
         let runner = base_two_disk_runner();
         let runner =
@@ -554,13 +554,13 @@ mod tests {
                 )
                 .with_output(
                     CmdRequest::CryptsetupClose {
-                        mapper: MapperName("braid-disk1".into()),
+                        mapper: MapperName::from_basename("braid-disk1".into()),
                     },
                     unlock_err_raw("cryptsetup close", 5, "busy"),
                 )
                 .with_output(
                     CmdRequest::CryptsetupClose {
-                        mapper: MapperName("braid-disk2".into()),
+                        mapper: MapperName::from_basename("braid-disk2".into()),
                     },
                     unlock_ok_raw("cryptsetup close"),
                 );
@@ -629,7 +629,7 @@ mod tests {
     //   against a Vec<u8> writer; expect the warning flag and exact output.
     #[test]
     fn unlock_btrfs_balance_status_paused_classifies_as_paused() {
-        let mp = MountPoint("/mnt/storage".to_owned());
+        let mp = MountPoint::new("/mnt/storage".to_owned());
         let (req, out) = unlock_btrfs_balance_status_paused(&mp);
         let runner = MockRunner::default().with_output(req, out);
         let mut sink = Vec::new();
@@ -664,7 +664,7 @@ mod tests {
             "/dev/disk/by-id/virtio-disk3",
         ]);
 
-        let mp = MountPoint("/mnt/storage".to_owned());
+        let mp = MountPoint::new("/mnt/storage".to_owned());
         let (uuid1_req, uuid1_out) = luks_uuid_ok(
             "/dev/disk/by-id/virtio-disk1",
             "11111111-1111-1111-1111-111111111111",
@@ -873,7 +873,7 @@ mod tests {
         ]);
         let runner = base_two_disk_runner().with_output(
             CmdRequest::MountpointCheck {
-                path: MountPoint("/mnt/storage".to_owned()),
+                path: MountPoint::new("/mnt/storage".to_owned()),
             },
             unlock_ok_raw("mountpoint"),
         );
@@ -928,7 +928,7 @@ mod tests {
             "/dev/disk/by-id/virtio-disk2",
         ]);
 
-        let mp = MountPoint("/mnt/storage".to_owned());
+        let mp = MountPoint::new("/mnt/storage".to_owned());
         let (uuid1_req, uuid1_out) = luks_uuid_ok(
             "/dev/disk/by-id/virtio-disk1",
             "11111111-1111-1111-1111-111111111111",
@@ -1031,7 +1031,7 @@ mod tests {
             "/dev/disk/by-id/virtio-disk2",
         ]);
 
-        let mp = MountPoint("/mnt/storage".to_owned());
+        let mp = MountPoint::new("/mnt/storage".to_owned());
         let (scan_req, scan_out) = unlock_btrfs_device_scan_ok();
         let (balance_req, balance_out) = unlock_btrfs_balance_status_idle(&mp);
         let runner = base_two_disk_runner();
@@ -1115,7 +1115,7 @@ mod tests {
             "/dev/disk/by-id/virtio-disk3",
         ]);
 
-        let mp = MountPoint("/mnt/storage".to_owned());
+        let mp = MountPoint::new("/mnt/storage".to_owned());
         let (uuid1_req, uuid1_out) = luks_uuid_ok(
             "/dev/disk/by-id/virtio-disk1",
             "11111111-1111-1111-1111-111111111111",
@@ -1228,7 +1228,7 @@ mod tests {
             "/dev/disk/by-id/virtio-disk3",
         ]);
 
-        let mp = MountPoint("/mnt/storage".to_owned());
+        let mp = MountPoint::new("/mnt/storage".to_owned());
         let (uuid1_req, uuid1_out) = luks_uuid_ok(
             "/dev/disk/by-id/virtio-disk1",
             "11111111-1111-1111-1111-111111111111",
@@ -1342,7 +1342,7 @@ mod tests {
             "/dev/disk/by-id/virtio-disk3",
         ]);
 
-        let mp = MountPoint("/mnt/storage".to_owned());
+        let mp = MountPoint::new("/mnt/storage".to_owned());
         let (uuid1_req, uuid1_out) = luks_uuid_ok(
             "/dev/disk/by-id/virtio-disk1",
             "11111111-1111-1111-1111-111111111111",
@@ -1394,7 +1394,7 @@ mod tests {
             // before open, then checked by the post-mount metadata probe.
             .with_output_sequence(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 vec![
                     closed_status("braid-disk1"),
@@ -1404,7 +1404,7 @@ mod tests {
             )
             .with_output_sequence(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk2".into()),
+                    mapper: MapperName::from_basename("braid-disk2".into()),
                 },
                 vec![
                     closed_status("braid-disk2"),
@@ -1414,7 +1414,7 @@ mod tests {
             )
             .with_output_sequence(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk3".into()),
+                    mapper: MapperName::from_basename("braid-disk3".into()),
                 },
                 vec![
                     closed_status("braid-disk3"),
@@ -1519,7 +1519,7 @@ Label: none  uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
             "/dev/mapper/braid-disk3",
         ]);
 
-        let mp = MountPoint("/mnt/storage".to_owned());
+        let mp = MountPoint::new("/mnt/storage".to_owned());
         let (uuid1_req, uuid1_out) = luks_uuid_ok(
             "/dev/disk/by-id/virtio-disk1",
             "11111111-1111-1111-1111-111111111111",

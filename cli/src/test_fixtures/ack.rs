@@ -127,7 +127,7 @@ impl Filesystem for MountedFsThatTouchesSmartd<'_> {
 
 /// Canonical ack-test mount point shared by the ack runner outputs.
 pub(crate) fn ack_mp() -> MountPoint {
-    MountPoint("/mnt/storage".to_owned())
+    MountPoint::new("/mnt/storage".to_owned())
 }
 
 /// Explicit no-op beeper hook for ack tests that only care about ack logic.
@@ -271,13 +271,13 @@ pub(crate) fn ack_mounted_probe_runner() -> MockRunner {
         )
         .with_output(
             CmdRequest::CryptsetupStatus {
-                mapper: MapperName("braid-disk1".into()),
+                mapper: MapperName::from_basename("braid-disk1".into()),
             },
             cryptsetup_status_active("braid-disk1", "/dev/vda"),
         )
         .with_output(
             CmdRequest::CryptsetupStatus {
-                mapper: MapperName("braid-disk3".into()),
+                mapper: MapperName::from_basename("braid-disk3".into()),
             },
             cryptsetup_status_active("braid-disk3", "/dev/vdc"),
         )

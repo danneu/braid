@@ -129,7 +129,7 @@ pub(crate) fn unlock_with_open_mapper_ok(
     runner.with_output_stdin(
         CmdRequest::CryptsetupLuksOpen {
             device: device.to_owned(),
-            mapper: MapperName(mapper.to_owned()),
+            mapper: MapperName::from_basename(mapper.to_owned()),
         },
         MOUNT_TEST_PASSPHRASE_BYTES.to_vec(),
         ok_raw("cryptsetup open"),

@@ -534,7 +534,7 @@ mod tests {
                 },
                 source: ReplaceJournalSource::Live {
                     old_devid: Devid::new(1),
-                    old_mapper: MapperName("braid-disk1".into()),
+                    old_mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 restore_raid1_after_commit: false,
             },
@@ -841,7 +841,7 @@ mod tests {
             },
             source: ReplaceJournalSource::Live {
                 old_devid: Devid::new(1),
-                old_mapper: MapperName("braid-disk1".into()),
+                old_mapper: MapperName::from_basename("braid-disk1".into()),
             },
             restore_raid1_after_commit: true,
         };
@@ -1429,7 +1429,7 @@ mod tests {
         for s_src in [
             ReplaceJournalSource::Live {
                 old_devid: Devid::new(1),
-                old_mapper: MapperName("braid-x".into()),
+                old_mapper: MapperName::from_basename("braid-x".into()),
             },
             ReplaceJournalSource::Missing {
                 old_devid: Devid::new(9),

@@ -2451,7 +2451,7 @@ mod tests {
     }
 
     fn test_config() -> Config {
-        Config::new(MountPoint("/mnt/storage".into())).unwrap()
+        Config::new(MountPoint::new("/mnt/storage".into())).unwrap()
     }
 
     fn read_test_config(path: &Path) -> Config {
@@ -2641,7 +2641,7 @@ mod tests {
         PoolState {
             mounted: true,
             devices: vec![PoolDevice {
-                mapper: MapperName("braid-existing".into()),
+                mapper: MapperName::from_basename("braid-existing".into()),
                 luks_uuid: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
                 devid: Devid::new(1),
                 underlying: "/dev/vda".into(),
@@ -2677,7 +2677,7 @@ mod tests {
             btrfs_show_no_btrfs(),
         );
         let pool = pool_mounted_with_fsid("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
-        let mn = MapperName("braid-disk1".into());
+        let mn = MapperName::from_basename("braid-disk1".into());
 
         let result = classify_braid_disk_fsid(&runner, "disk1", &mn, &pool).unwrap();
         assert_eq!(result, AddLuksBtrfsProbe::NoBtrfs);
@@ -2695,7 +2695,7 @@ mod tests {
             btrfs_show_with_uuid(device_fsid),
         );
         let pool = pool_mounted_with_fsid(pool_fsid);
-        let mn = MapperName("braid-disk1".into());
+        let mn = MapperName::from_basename("braid-disk1".into());
 
         let result = classify_braid_disk_fsid(&runner, "disk1", &mn, &pool).unwrap();
         assert_eq!(result, AddLuksBtrfsProbe::ForeignPool);
@@ -2720,7 +2720,7 @@ mod tests {
         let pool = PoolState {
             mounted: true,
             devices: vec![PoolDevice {
-                mapper: MapperName("braid-disk1".into()),
+                mapper: MapperName::from_basename("braid-disk1".into()),
                 luks_uuid: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
                 devid: Devid::new(1),
                 underlying: "/dev/vda".into(),
@@ -2731,7 +2731,7 @@ mod tests {
             fsid: Some(Fsid::parse(fsid).unwrap()),
             null_underlying: vec![],
         };
-        let mn = MapperName("braid-disk1".into());
+        let mn = MapperName::from_basename("braid-disk1".into());
 
         let result = classify_braid_disk_fsid(&runner, "disk1", &mn, &pool).unwrap();
         assert_eq!(result, AddLuksBtrfsProbe::SamePool);
@@ -2757,7 +2757,7 @@ mod tests {
             },
         );
         let pool = pool_mounted_with_fsid("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
-        let mn = MapperName("braid-disk1".into());
+        let mn = MapperName::from_basename("braid-disk1".into());
 
         let result = classify_braid_disk_fsid(&runner, "disk1", &mn, &pool);
         assert!(result.is_err());
@@ -2783,7 +2783,7 @@ mod tests {
 
     fn live_pool_device(mapper: &str, uuid: &LuksUuid, underlying: &str) -> PoolDevice {
         PoolDevice {
-            mapper: MapperName(mapper.to_owned()),
+            mapper: MapperName::from_basename(mapper.to_owned()),
             luks_uuid: uuid.clone(),
             devid: Devid::new(1),
             underlying: underlying.to_owned(),
@@ -3017,12 +3017,12 @@ mod tests {
                 },
                 targets: vec![target],
                 initial_journal_targets,
-                mount_point: MountPoint("/mnt/storage".into()),
+                mount_point: MountPoint::new("/mnt/storage".into()),
                 pool_was_mounted: pool.mounted,
                 existing_pool_device_count: pool.devices.len(),
                 pre_add_missing_count: pool.missing_count,
             },
-            config: Config::new(MountPoint("/mnt/storage".into())).unwrap(),
+            config: Config::new(MountPoint::new("/mnt/storage".into())).unwrap(),
             parsed: vec![(name.clone(), by_id.clone())],
             names: vec![name],
             by_ids: vec![by_id],
@@ -3065,7 +3065,7 @@ mod tests {
             .collect();
         let mut runner = MockRunner::default().with_output(
             CmdRequest::BtrfsFilesystemShow {
-                mount_point: MountPoint("/mnt/storage".into()),
+                mount_point: MountPoint::new("/mnt/storage".into()),
             },
             btrfs_show_pool(fsid, &show_devices),
         );
@@ -3073,7 +3073,7 @@ mod tests {
             runner = runner
                 .with_output(
                     CmdRequest::CryptsetupStatus {
-                        mapper: MapperName((*mapper).to_owned()),
+                        mapper: MapperName::from_basename((*mapper).to_owned()),
                     },
                     mock_status_active(mapper, underlying),
                 )
@@ -3569,7 +3569,7 @@ mod tests {
         let pool = PoolState {
             mounted: true,
             devices: vec![PoolDevice {
-                mapper: MapperName("braid-WRONG".into()),
+                mapper: MapperName::from_basename("braid-WRONG".into()),
                 luks_uuid: LuksUuid::parse("22222222-2222-2222-2222-222222222222").unwrap(),
                 devid: Devid::new(4),
                 underlying: "/dev/vdc".into(),
@@ -3585,7 +3585,7 @@ mod tests {
 
         let dev = find_added_device_by_uuid(&pool, &uuid).expect("uuid should match");
         assert_eq!(dev.devid, Devid::new(4));
-        assert_eq!(dev.mapper, MapperName("braid-WRONG".into()));
+        assert_eq!(dev.mapper, MapperName::from_basename("braid-WRONG".into()));
         assert!(find_added_device_by_uuid(&pool, &missing).is_none());
     }
 
@@ -3620,7 +3620,7 @@ mod tests {
                 by_ids: &[&ByIdPath::parse("/dev/disk/by-id/disk1").unwrap()],
                 probed: &probed,
                 pool: &pool,
-                mount_point: &MountPoint("/mnt/storage".into()),
+                mount_point: &MountPoint::new("/mnt/storage".into()),
                 paths: &test_paths().1,
                 enroll_key_file: None,
                 luks_format_extra_opts: &LuksFormatExtraOpts::default(),
@@ -3662,7 +3662,7 @@ mod tests {
                 by_ids: &[&ByIdPath::parse("/dev/disk/by-id/disk1").unwrap()],
                 probed: &probed,
                 pool: &pool,
-                mount_point: &MountPoint("/mnt/storage".into()),
+                mount_point: &MountPoint::new("/mnt/storage".into()),
                 paths: &test_paths().1,
                 enroll_key_file: None,
                 luks_format_extra_opts: &LuksFormatExtraOpts::default(),
@@ -3696,7 +3696,7 @@ mod tests {
                 by_ids: &[&ByIdPath::parse("/dev/disk/by-id/disk1").unwrap()],
                 probed: &probed,
                 pool: &pool,
-                mount_point: &MountPoint("/mnt/storage".into()),
+                mount_point: &MountPoint::new("/mnt/storage".into()),
                 paths: &test_paths().1,
                 enroll_key_file: None,
                 luks_format_extra_opts: &LuksFormatExtraOpts::default(),
@@ -3734,7 +3734,7 @@ mod tests {
                 by_ids: &[&ByIdPath::parse("/dev/disk/by-id/disk1").unwrap()],
                 probed: &probed,
                 pool: &pool,
-                mount_point: &MountPoint("/mnt/storage".into()),
+                mount_point: &MountPoint::new("/mnt/storage".into()),
                 paths: &test_paths().1,
                 enroll_key_file: None,
                 luks_format_extra_opts: &LuksFormatExtraOpts::default(),
@@ -3768,7 +3768,7 @@ mod tests {
                 by_ids: &[&ByIdPath::parse("/dev/disk/by-id/disk1").unwrap()],
                 probed: &probed,
                 pool: &pool,
-                mount_point: &MountPoint("/mnt/storage".into()),
+                mount_point: &MountPoint::new("/mnt/storage".into()),
                 paths: &test_paths().1,
                 enroll_key_file: None,
                 luks_format_extra_opts: &LuksFormatExtraOpts::default(),
@@ -3823,7 +3823,7 @@ mod tests {
         let pool = PoolState {
             mounted: true,
             devices: vec![PoolDevice {
-                mapper: MapperName("braid-disk1".into()),
+                mapper: MapperName::from_basename("braid-disk1".into()),
                 luks_uuid: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
                 devid: Devid::new(1),
                 underlying: "/dev/vdb".into(),
@@ -3857,7 +3857,7 @@ mod tests {
                 by_ids: &[&by_id],
                 probed: &probed,
                 pool: &pool,
-                mount_point: &MountPoint("/mnt/storage".into()),
+                mount_point: &MountPoint::new("/mnt/storage".into()),
                 paths: &paths,
                 enroll_key_file: None,
                 luks_format_extra_opts: &LuksFormatExtraOpts::default(),
@@ -3876,7 +3876,7 @@ mod tests {
         let plan = AddPlan {
             notes: vec![],
             work_plan,
-            config: Config::new(MountPoint("/mnt/storage".into())).unwrap(),
+            config: Config::new(MountPoint::new("/mnt/storage".into())).unwrap(),
             parsed: vec![(DiskName::parse("disk2").unwrap(), by_id.clone())],
             names: vec![DiskName::parse("disk2").unwrap()],
             by_ids: vec![by_id.clone()],
@@ -4037,7 +4037,7 @@ mod tests {
                 by_ids: &[&ByIdPath::parse("/dev/disk/by-id/disk1").unwrap()],
                 probed: &probed,
                 pool: &pool,
-                mount_point: &MountPoint("/mnt/storage".into()),
+                mount_point: &MountPoint::new("/mnt/storage".into()),
                 paths: &test_paths().1,
                 enroll_key_file: None,
                 luks_format_extra_opts: &LuksFormatExtraOpts::default(),
@@ -4123,8 +4123,8 @@ mod tests {
         let runner = SpyRunner::new(MockRunner::default());
         let captured = crate::status_tag::testing::capture_with_color(false, || {
             let mut guard = LuksCleanupGuard::new(&runner);
-            guard.track(MapperName("braid-aaa".into()));
-            guard.track(MapperName("braid-bbb".into()));
+            guard.track(MapperName::from_basename("braid-aaa".into()));
+            guard.track(MapperName::from_basename("braid-bbb".into()));
             // guard drops here while still armed
         });
         let closed = runner.closed.lock().unwrap();
@@ -4164,7 +4164,7 @@ mod tests {
         });
         let captured = crate::status_tag::testing::capture_with_color(false, || {
             let mut guard = LuksCleanupGuard::new(&runner);
-            guard.track(MapperName("braid-aaa".into()));
+            guard.track(MapperName::from_basename("braid-aaa".into()));
             // guard drops here while still armed
         });
         let wait = "[wait] disk aaa: locking (cleanup)...";
@@ -4185,7 +4185,7 @@ mod tests {
         // Scenario: cleanup close for a mapper is busy once, then succeeds.
         let runner = MockRunner::default().with_output_sequence(
             CmdRequest::CryptsetupClose {
-                mapper: MapperName("braid-aaa".into()),
+                mapper: MapperName::from_basename("braid-aaa".into()),
             },
             vec![
                 RawCommandOutput {
@@ -4204,7 +4204,7 @@ mod tests {
         );
         let captured = crate::status_tag::testing::capture_with_color(false, || {
             let mut guard = LuksCleanupGuard::new(&runner);
-            guard.track(MapperName("braid-aaa".into()));
+            guard.track(MapperName::from_basename("braid-aaa".into()));
             // guard drops here while still armed
         });
 
@@ -4237,7 +4237,7 @@ mod tests {
         let runner = SpyRunner::new(MockRunner::default());
         {
             let mut guard = LuksCleanupGuard::new(&runner);
-            guard.track(MapperName("braid-aaa".into()));
+            guard.track(MapperName::from_basename("braid-aaa".into()));
             guard.disarm();
             // guard drops here, disarmed
         }
@@ -4260,7 +4260,7 @@ mod tests {
             let mut guard = LuksCleanupGuard::new(&runner);
             // Only track mappers we opened ourselves.
             // Pre-existing mapper "braid-existing" is NOT tracked.
-            guard.track(MapperName("braid-new".into()));
+            guard.track(MapperName::from_basename("braid-new".into()));
             // guard drops here while armed — simulates error path
         }
         let closed = runner.closed.lock().unwrap();
@@ -4310,7 +4310,7 @@ mod tests {
             .unwrap()
                 == OpenOutcome::Opened
             {
-                guard.track(MapperName("braid-existing".into()));
+                guard.track(MapperName::from_basename("braid-existing".into()));
             }
             // guard drops here while still armed
         }
@@ -4578,7 +4578,7 @@ mod tests {
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
         let confirm = crate::confirm::RecordingConfirm::new();
 
-        let config = crate::config::Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let config = crate::config::Config::new(MountPoint::new("/mnt/storage".into())).unwrap();
         let by_id_disk2 = ByIdPath::parse("/dev/disk/by-id/virtio-disk2").unwrap();
         let mut pool_membership = membership::PoolMembership::empty();
         pool_membership
@@ -4595,7 +4595,7 @@ mod tests {
         let pool = PoolState {
             mounted: true,
             devices: vec![PoolDevice {
-                mapper: MapperName("braid-disk1".into()),
+                mapper: MapperName::from_basename("braid-disk1".into()),
                 luks_uuid: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
                 devid: Devid::new(1),
                 underlying: "/dev/vdb".into(),
@@ -4705,7 +4705,7 @@ mod tests {
         let pool = PoolState {
             mounted: true,
             devices: vec![PoolDevice {
-                mapper: MapperName("braid-disk1".into()),
+                mapper: MapperName::from_basename("braid-disk1".into()),
                 luks_uuid: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
                 devid: Devid::new(1),
                 underlying: "/dev/vdb".into(),
@@ -4786,7 +4786,7 @@ mod tests {
         let pool = PoolState {
             mounted: true,
             devices: vec![PoolDevice {
-                mapper: MapperName("braid-disk1".into()),
+                mapper: MapperName::from_basename("braid-disk1".into()),
                 luks_uuid: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
                 devid: Devid::new(1),
                 underlying: "/dev/vdb".into(),
@@ -4854,7 +4854,7 @@ mod tests {
         let pool = PoolState {
             mounted: true,
             devices: vec![PoolDevice {
-                mapper: MapperName("braid-disk1".into()),
+                mapper: MapperName::from_basename("braid-disk1".into()),
                 luks_uuid: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
                 devid: Devid::new(1),
                 underlying: "/dev/vdb".into(),
@@ -7118,7 +7118,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 mock_status_active("braid-disk1", "/dev/vdz"),
             )
@@ -7215,7 +7215,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk2".into()),
+                    mapper: MapperName::from_basename("braid-disk2".into()),
                 },
                 mock_status_inactive("braid-disk2"),
             )
@@ -7305,7 +7305,7 @@ mod tests {
                 by_ids: &[&ByIdPath::parse("/dev/disk/by-id/disk1").unwrap()],
                 probed: &probed,
                 pool: &pool,
-                mount_point: &MountPoint("/mnt/storage".into()),
+                mount_point: &MountPoint::new("/mnt/storage".into()),
                 paths: &test_paths().1,
                 enroll_key_file: None,
                 luks_format_extra_opts: &LuksFormatExtraOpts::parse(&luks_format_extra_opts)
@@ -7364,7 +7364,7 @@ mod tests {
         let pool = PoolState {
             mounted: true,
             devices: vec![PoolDevice {
-                mapper: MapperName("braid-WRONG".into()),
+                mapper: MapperName::from_basename("braid-WRONG".into()),
                 luks_uuid: drifted_uuid.clone(),
                 devid: Devid::new(1),
                 underlying: "/dev/vda".into(),
@@ -7395,7 +7395,7 @@ mod tests {
             by_id_path: by_id.clone(),
             state: PresentConfigDiskState::PresentNotLuks,
         }];
-        let mount_point = MountPoint("/mnt/storage".into());
+        let mount_point = MountPoint::new("/mnt/storage".into());
         let extra_opts = LuksFormatExtraOpts::default();
         let (_tmp, paths) = test_paths();
         let input = AddStepsInput {
@@ -7452,7 +7452,7 @@ mod tests {
         let names = [DiskName::parse("disk1").unwrap()];
         let by_id = ByIdPath::parse("/dev/disk/by-id/disk1").unwrap();
         let by_ids = [&by_id];
-        let mount_point = MountPoint("/mnt/storage".into());
+        let mount_point = MountPoint::new("/mnt/storage".into());
         let extra_opts = LuksFormatExtraOpts::default();
         let membership = PoolMembership::empty();
         // Bind ONE StatePaths so the header-backup path is fixed across both
@@ -7521,7 +7521,7 @@ mod tests {
                 by_ids: &[&ByIdPath::parse("/dev/disk/by-id/disk1").unwrap()],
                 probed: &probed,
                 pool: &pool,
-                mount_point: &MountPoint("/mnt/storage".into()),
+                mount_point: &MountPoint::new("/mnt/storage".into()),
                 paths: &test_paths().1,
                 enroll_key_file: Some(kf),
                 luks_format_extra_opts: &LuksFormatExtraOpts::default(),
@@ -7630,7 +7630,7 @@ mod tests {
                 by_ids: &[&ByIdPath::parse("/dev/disk/by-id/disk1").unwrap()],
                 probed: &probed,
                 pool: &pool,
-                mount_point: &MountPoint("/mnt/storage".into()),
+                mount_point: &MountPoint::new("/mnt/storage".into()),
                 paths: &test_paths().1,
                 enroll_key_file: Some(kf),
                 luks_format_extra_opts: &LuksFormatExtraOpts::default(),
@@ -7715,7 +7715,7 @@ mod tests {
                 by_ids: &[&ByIdPath::parse("/dev/disk/by-id/disk1").unwrap()],
                 probed: &probed,
                 pool: &pool,
-                mount_point: &MountPoint("/mnt/storage".into()),
+                mount_point: &MountPoint::new("/mnt/storage".into()),
                 paths: &test_paths().1,
                 enroll_key_file: Some(kf),
                 luks_format_extra_opts: &LuksFormatExtraOpts::default(),
@@ -7778,7 +7778,7 @@ mod tests {
                 by_ids: &by_ids,
                 probed: &probed,
                 pool: &pool,
-                mount_point: &MountPoint("/mnt/storage".into()),
+                mount_point: &MountPoint::new("/mnt/storage".into()),
                 paths: &test_paths().1,
                 enroll_key_file: None,
                 luks_format_extra_opts: &LuksFormatExtraOpts::default(),
@@ -7825,7 +7825,7 @@ mod tests {
                 by_ids: &[&ByIdPath::parse("/dev/disk/by-id/disk2").unwrap()],
                 probed: &probed,
                 pool: &pool,
-                mount_point: &MountPoint("/mnt/storage".into()),
+                mount_point: &MountPoint::new("/mnt/storage".into()),
                 paths: &test_paths().1,
                 enroll_key_file: None,
                 luks_format_extra_opts: &LuksFormatExtraOpts::default(),
@@ -10394,7 +10394,7 @@ mod tests {
                 by_ids: &by_ids_refs,
                 probed: &probed,
                 pool: &pool,
-                mount_point: &MountPoint("/mnt/storage".into()),
+                mount_point: &MountPoint::new("/mnt/storage".into()),
                 paths: &test_paths().1,
                 enroll_key_file: None,
                 luks_format_extra_opts: &LuksFormatExtraOpts::default(),
@@ -10485,7 +10485,7 @@ mod tests {
                 by_ids: &by_ids_refs,
                 probed: &probed,
                 pool: &pool,
-                mount_point: &MountPoint("/mnt/storage".into()),
+                mount_point: &MountPoint::new("/mnt/storage".into()),
                 paths: &test_paths().1,
                 enroll_key_file: None,
                 luks_format_extra_opts: &LuksFormatExtraOpts::default(),
@@ -10540,7 +10540,7 @@ mod tests {
                 by_ids: &by_ids_refs,
                 probed: &probed,
                 pool: &pool,
-                mount_point: &MountPoint("/mnt/storage".into()),
+                mount_point: &MountPoint::new("/mnt/storage".into()),
                 paths: &test_paths().1,
                 enroll_key_file: None,
                 luks_format_extra_opts: &LuksFormatExtraOpts::default(),
@@ -10595,7 +10595,7 @@ mod tests {
                 by_ids: &by_ids_refs,
                 probed: &probed,
                 pool: &pool,
-                mount_point: &MountPoint("/mnt/storage".into()),
+                mount_point: &MountPoint::new("/mnt/storage".into()),
                 paths: &test_paths().1,
                 enroll_key_file: None,
                 luks_format_extra_opts: &LuksFormatExtraOpts::default(),
@@ -10661,7 +10661,7 @@ mod tests {
                 by_ids: &by_ids_refs,
                 probed: &probed,
                 pool: &pool,
-                mount_point: &MountPoint("/mnt/storage".into()),
+                mount_point: &MountPoint::new("/mnt/storage".into()),
                 paths: &test_paths().1,
                 enroll_key_file: None,
                 luks_format_extra_opts: &LuksFormatExtraOpts::default(),
@@ -10731,7 +10731,7 @@ mod tests {
                 by_ids: &by_ids_refs,
                 probed: &probed,
                 pool: &pool,
-                mount_point: &MountPoint("/mnt/storage".into()),
+                mount_point: &MountPoint::new("/mnt/storage".into()),
                 paths: &test_paths().1,
                 enroll_key_file: None,
                 luks_format_extra_opts: &LuksFormatExtraOpts::default(),
@@ -10814,7 +10814,7 @@ mod tests {
                 by_ids: &by_ids_refs,
                 probed: &probed,
                 pool: &pool,
-                mount_point: &MountPoint("/mnt/storage".into()),
+                mount_point: &MountPoint::new("/mnt/storage".into()),
                 paths: &test_paths().1,
                 enroll_key_file: None,
                 luks_format_extra_opts: &LuksFormatExtraOpts::default(),
@@ -11087,7 +11087,7 @@ mod tests {
                 by_ids: &by_ids_refs,
                 probed: &probed,
                 pool: &pool,
-                mount_point: &MountPoint("/mnt/storage".into()),
+                mount_point: &MountPoint::new("/mnt/storage".into()),
                 paths: &test_paths().1,
                 enroll_key_file: None,
                 luks_format_extra_opts: &LuksFormatExtraOpts::default(),
@@ -11146,7 +11146,7 @@ mod tests {
         let pool = PoolState {
             mounted: true,
             devices: vec![PoolDevice {
-                mapper: MapperName("braid-foreign".into()),
+                mapper: MapperName::from_basename("braid-foreign".into()),
                 luks_uuid: LuksUuid::parse(collision_uuid).unwrap(),
                 devid: Devid::new(1),
                 underlying: "/dev/vdb".into(),
@@ -11175,7 +11175,7 @@ mod tests {
                 by_ids: &by_ids_refs,
                 probed: &probed,
                 pool: &pool,
-                mount_point: &MountPoint("/mnt/storage".into()),
+                mount_point: &MountPoint::new("/mnt/storage".into()),
                 paths: &test_paths().1,
                 enroll_key_file: None,
                 luks_format_extra_opts: &LuksFormatExtraOpts::default(),

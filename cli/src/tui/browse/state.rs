@@ -1317,7 +1317,7 @@ mod tests {
 
     fn pool() -> PoolStatus {
         PoolStatus::Mounted(PoolState {
-            mount_point: MountPoint("/mnt/storage".to_owned()),
+            mount_point: MountPoint::new("/mnt/storage".to_owned()),
             df_entries: vec![],
             disk_usage: HashMap::new(),
             disk_transport: HashMap::new(),
@@ -1390,7 +1390,7 @@ mod tests {
     #[test]
     fn command_display_normal_btrfs_matches_selection_request() {
         let state = BrowseState::default();
-        let mount_point = MountPoint("/mnt/storage".to_owned());
+        let mount_point = MountPoint::new("/mnt/storage".to_owned());
 
         assert_eq!(
             state.command_display(&mount_point, Some(&ups())),
@@ -1414,7 +1414,7 @@ mod tests {
         };
         let disks = disk_inventory();
         let effect = state.load_current(&pool(), Some(&ups()), &DiskInventory { by_id: &disks });
-        let mount_point = MountPoint("/mnt/storage".to_owned());
+        let mount_point = MountPoint::new("/mnt/storage".to_owned());
 
         assert!(effect.is_none());
         assert_eq!(
@@ -1446,7 +1446,7 @@ mod tests {
         let pool =
             pool_with_underlying(HashMap::from([("disk1".to_owned(), "/dev/vdb".to_owned())]));
         let disks = disk_inventory();
-        let mount_point = MountPoint("/mnt/storage".to_owned());
+        let mount_point = MountPoint::new("/mnt/storage".to_owned());
 
         let effect = state.load_current(&pool, Some(&ups()), &DiskInventory { by_id: &disks });
         assert!(effect.is_none());
@@ -1476,7 +1476,7 @@ mod tests {
             program: BrowseProgram::Nut,
             ..Default::default()
         };
-        let mount_point = MountPoint("/mnt/storage".to_owned());
+        let mount_point = MountPoint::new("/mnt/storage".to_owned());
 
         assert_eq!(
             state.command_display(&mount_point, Some(&ups())),
@@ -1508,7 +1508,7 @@ mod tests {
         );
         let disks = HashMap::new();
         let _ = state.enter(&pool(), &DiskInventory { by_id: &disks });
-        let mount_point = MountPoint("/mnt/storage".to_owned());
+        let mount_point = MountPoint::new("/mnt/storage".to_owned());
 
         assert_eq!(
             state.command_display(&mount_point, Some(&ups())),
@@ -2152,13 +2152,10 @@ mod tests {
         let effect = load_current_for_test(&mut state, &pool(), Some(&ups()));
         match effect {
             Some(Effect::BrowseRunCommand {
-                request:
-                    CmdRequest::BtrfsFilesystemUsage {
-                        mount_point: MountPoint(mp),
-                    },
+                request: CmdRequest::BtrfsFilesystemUsage { mount_point },
                 generation,
             }) => {
-                assert_eq!(mp, "/mnt/storage");
+                assert_eq!(mount_point.as_str(), "/mnt/storage");
                 assert_eq!(generation, 1);
             }
             _ => panic!("unexpected effect"),

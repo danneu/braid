@@ -368,7 +368,7 @@ pub fn probe_pool_alerts<R: CommandRunner, F: Filesystem + ?Sized>(
             .to_owned();
 
         let status_raw = runner.run(&CmdRequest::CryptsetupStatus {
-            mapper: MapperName(name.clone()),
+            mapper: MapperName::from_basename(name.clone()),
         })?;
         match parse_cryptsetup_status(&status_raw)? {
             CryptsetupStatusOutput::Inactive => {
@@ -381,7 +381,7 @@ pub fn probe_pool_alerts<R: CommandRunner, F: Filesystem + ?Sized>(
                 backing: BackingDevice::Null,
             } => {
                 null_underlying.push(NullUnderlyingDevice {
-                    mapper: MapperName(name),
+                    mapper: MapperName::from_basename(name),
                     devid: bdev.devid,
                 });
             }
@@ -456,7 +456,7 @@ pub fn probe_pool<R: CommandRunner, F: Filesystem + ?Sized>(
             .to_owned();
 
         let status_raw = runner.run(&CmdRequest::CryptsetupStatus {
-            mapper: MapperName(name.clone()),
+            mapper: MapperName::from_basename(name.clone()),
         })?;
         // When a backing device is hot-unplugged, cryptsetup reports
         // device: (null). Record these as null-underlying — the mapper
@@ -472,7 +472,7 @@ pub fn probe_pool<R: CommandRunner, F: Filesystem + ?Sized>(
                 backing: BackingDevice::Null,
             } => {
                 null_underlying.push(NullUnderlyingDevice {
-                    mapper: MapperName(name),
+                    mapper: MapperName::from_basename(name),
                     devid: bdev.devid,
                 });
                 continue;
@@ -488,7 +488,7 @@ pub fn probe_pool<R: CommandRunner, F: Filesystem + ?Sized>(
         let uuid_out = parse_cryptsetup_luks_uuid(&uuid_raw)?;
 
         devices.push(PoolDevice {
-            mapper: MapperName(name),
+            mapper: MapperName::from_basename(name),
             luks_uuid: uuid_out.uuid,
             devid: bdev.devid,
             underlying,
@@ -650,7 +650,7 @@ mod tests {
     }
 
     fn mp() -> MountPoint {
-        MountPoint("/mnt/storage".into())
+        MountPoint::new("/mnt/storage".into())
     }
 
     // -- probe_config_disk tests --
@@ -846,7 +846,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-toshiba".into()),
+                    mapper: MapperName::from_basename("braid-toshiba".into()),
                 },
                 cryptsetup_status_inactive("braid-toshiba"),
             );
@@ -903,7 +903,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-toshiba".into()),
+                    mapper: MapperName::from_basename("braid-toshiba".into()),
                 },
                 cryptsetup_status_active("braid-toshiba", "/dev/vda"),
             )
@@ -967,7 +967,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-toshiba".into()),
+                    mapper: MapperName::from_basename("braid-toshiba".into()),
                 },
                 cryptsetup_status_active("braid-toshiba", "/dev/vdz"),
             )
@@ -1048,7 +1048,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-toshiba".into()),
+                    mapper: MapperName::from_basename("braid-toshiba".into()),
                 },
                 cryptsetup_status_active("braid-toshiba", "/dev/vda"),
             );
@@ -1103,7 +1103,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-toshiba".into()),
+                    mapper: MapperName::from_basename("braid-toshiba".into()),
                 },
                 cryptsetup_status_active("braid-toshiba", "/dev/vdz"),
             )
@@ -1174,7 +1174,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-toshiba".into()),
+                    mapper: MapperName::from_basename("braid-toshiba".into()),
                 },
                 cryptsetup_status_inactive("braid-toshiba"),
             );
@@ -1233,7 +1233,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-toshiba".into()),
+                    mapper: MapperName::from_basename("braid-toshiba".into()),
                 },
                 cryptsetup_status_active_null("braid-toshiba"),
             );
@@ -1510,13 +1510,13 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                    mount_point: MountPoint::new("/mnt/storage".to_owned()),
                 },
                 btrfs_show_2disk(),
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-toshiba".into()),
+                    mapper: MapperName::from_basename("braid-toshiba".into()),
                 },
                 cryptsetup_status_active("braid-toshiba", "/dev/vda"),
             )
@@ -1528,7 +1528,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-ironwolf".into()),
+                    mapper: MapperName::from_basename("braid-ironwolf".into()),
                 },
                 cryptsetup_status_active("braid-ironwolf", "/dev/vdb"),
             )
@@ -1544,7 +1544,7 @@ mod tests {
         assert_eq!(result.devices.len(), 2);
         assert_eq!(result.missing_count, 0);
         assert_eq!(result.total_devices, 2);
-        assert_eq!(result.devices[0].mapper, MapperName("braid-toshiba".into()));
+        assert_eq!(result.devices[0].mapper, MapperName::from_basename("braid-toshiba".into()));
         assert_eq!(
             result.devices[0].luks_uuid,
             LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap()
@@ -1552,7 +1552,7 @@ mod tests {
         assert_eq!(result.devices[0].devid, Devid::new(1));
         assert_eq!(
             result.devices[1].mapper,
-            MapperName("braid-ironwolf".into())
+            MapperName::from_basename("braid-ironwolf".into())
         );
         assert_eq!(
             result.fsid.as_ref().map(Fsid::as_str),
@@ -1567,13 +1567,13 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                    mount_point: MountPoint::new("/mnt/storage".to_owned()),
                 },
                 btrfs_show_3disk_1missing(),
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-toshiba".into()),
+                    mapper: MapperName::from_basename("braid-toshiba".into()),
                 },
                 cryptsetup_status_active("braid-toshiba", "/dev/vda"),
             )
@@ -1585,7 +1585,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-ironwolf".into()),
+                    mapper: MapperName::from_basename("braid-ironwolf".into()),
                 },
                 cryptsetup_status_active("braid-ironwolf", "/dev/vdb"),
             )
@@ -1609,7 +1609,7 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                    mount_point: MountPoint::new("/mnt/storage".to_owned()),
                 },
                 ok_raw(
                     "btrfs filesystem show /mnt/storage",
@@ -1622,7 +1622,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-toshiba".into()),
+                    mapper: MapperName::from_basename("braid-toshiba".into()),
                 },
                 cryptsetup_status_active("braid-toshiba", "/dev/vda"),
             )
@@ -1638,7 +1638,7 @@ mod tests {
         assert_eq!(result.devices.len(), 1, "MISSING device must be excluded");
         assert_eq!(result.missing_count, 1);
         assert_eq!(result.total_devices, 2);
-        assert_eq!(result.devices[0].mapper, MapperName("braid-toshiba".into()));
+        assert_eq!(result.devices[0].mapper, MapperName::from_basename("braid-toshiba".into()));
     }
 
     #[test]
@@ -1647,7 +1647,7 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                    mount_point: MountPoint::new("/mnt/storage".to_owned()),
                 },
                 ok_raw(
                     "btrfs filesystem show /mnt/storage",
@@ -1658,7 +1658,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-toshiba".into()),
+                    mapper: MapperName::from_basename("braid-toshiba".into()),
                 },
                 err_raw(
                     "cryptsetup status braid-toshiba",
@@ -1681,7 +1681,7 @@ mod tests {
         let fs = MockFs::with_mountinfo(&mountinfo_btrfs());
         let runner = MockRunner::default().with_output(
             CmdRequest::BtrfsFilesystemShow {
-                mount_point: MountPoint("/mnt/storage".to_owned()),
+                mount_point: MountPoint::new("/mnt/storage".to_owned()),
             },
             ok_raw(
                 "btrfs filesystem show /mnt/storage",
@@ -1711,7 +1711,7 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                    mount_point: MountPoint::new("/mnt/storage".to_owned()),
                 },
                 ok_raw(
                     "btrfs filesystem show /mnt/storage",
@@ -1723,7 +1723,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-toshiba".into()),
+                    mapper: MapperName::from_basename("braid-toshiba".into()),
                 },
                 cryptsetup_status_active("braid-toshiba", "/dev/vda"),
             )
@@ -1735,7 +1735,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-ironwolf".into()),
+                    mapper: MapperName::from_basename("braid-ironwolf".into()),
                 },
                 // cryptsetup reports device: (null) when backing device vanishes
                 ok_raw(
@@ -1755,7 +1755,7 @@ mod tests {
             1,
             "device with (null) underlying must be skipped"
         );
-        assert_eq!(result.devices[0].mapper, MapperName("braid-toshiba".into()));
+        assert_eq!(result.devices[0].mapper, MapperName::from_basename("braid-toshiba".into()));
         assert_eq!(result.missing_count, 1);
         assert_eq!(result.total_devices, 2);
 
@@ -1763,7 +1763,7 @@ mod tests {
         assert_eq!(result.null_underlying.len(), 1);
         assert_eq!(
             result.null_underlying[0].mapper,
-            MapperName("braid-ironwolf".into())
+            MapperName::from_basename("braid-ironwolf".into())
         );
         assert_eq!(result.null_underlying[0].devid, Devid::new(2));
 
@@ -1778,7 +1778,7 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                    mount_point: MountPoint::new("/mnt/storage".to_owned()),
                 },
                 ok_raw(
                     "btrfs filesystem show /mnt/storage",
@@ -1789,7 +1789,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-toshiba".into()),
+                    mapper: MapperName::from_basename("braid-toshiba".into()),
                 },
                 cryptsetup_status_active("braid-toshiba", "/dev/vda"),
             )
@@ -1816,7 +1816,7 @@ mod tests {
         let fs = MockFs::with_mountinfo(&mountinfo_btrfs());
         let runner = MockRunner::default().with_output(
             CmdRequest::BtrfsFilesystemShow {
-                mount_point: MountPoint("/mnt/storage".to_owned()),
+                mount_point: MountPoint::new("/mnt/storage".to_owned()),
             },
             ok_raw(
                 "btrfs filesystem show /mnt/storage",
@@ -1907,19 +1907,19 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                    mount_point: MountPoint::new("/mnt/storage".to_owned()),
                 },
                 btrfs_show_2disk(),
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-toshiba".into()),
+                    mapper: MapperName::from_basename("braid-toshiba".into()),
                 },
                 cryptsetup_status_active("braid-toshiba", "/dev/vda"),
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-ironwolf".into()),
+                    mapper: MapperName::from_basename("braid-ironwolf".into()),
                 },
                 cryptsetup_status_active("braid-ironwolf", "/dev/vdb"),
             );
@@ -1951,7 +1951,7 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                    mount_point: MountPoint::new("/mnt/storage".to_owned()),
                 },
                 ok_raw(
                     "btrfs filesystem show /mnt/storage",
@@ -1964,7 +1964,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-toshiba".into()),
+                    mapper: MapperName::from_basename("braid-toshiba".into()),
                 },
                 cryptsetup_status_active("braid-toshiba", "/dev/vda"),
             );
@@ -1989,19 +1989,19 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                    mount_point: MountPoint::new("/mnt/storage".to_owned()),
                 },
                 btrfs_show_2disk(),
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-toshiba".into()),
+                    mapper: MapperName::from_basename("braid-toshiba".into()),
                 },
                 cryptsetup_status_active("braid-toshiba", "/dev/vda"),
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-ironwolf".into()),
+                    mapper: MapperName::from_basename("braid-ironwolf".into()),
                 },
                 cryptsetup_status_active_null("braid-ironwolf"),
             );
@@ -2014,7 +2014,7 @@ mod tests {
         assert_eq!(
             result.null_underlying,
             vec![NullUnderlyingDevice {
-                mapper: MapperName("braid-ironwolf".into()),
+                mapper: MapperName::from_basename("braid-ironwolf".into()),
                 devid: Devid::new(2),
             }]
         );
@@ -2033,7 +2033,7 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                    mount_point: MountPoint::new("/mnt/storage".to_owned()),
                 },
                 ok_raw(
                     "btrfs filesystem show /mnt/storage",
@@ -2044,13 +2044,13 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-toshiba".into()),
+                    mapper: MapperName::from_basename("braid-toshiba".into()),
                 },
                 cryptsetup_status_active("braid-toshiba", "/dev/vda"),
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-ironwolf".into()),
+                    mapper: MapperName::from_basename("braid-ironwolf".into()),
                 },
                 cryptsetup_status_active("braid-ironwolf", "/dev/vdb"),
             );
@@ -2093,7 +2093,7 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                    mount_point: MountPoint::new("/mnt/storage".to_owned()),
                 },
                 ok_raw(
                     "btrfs filesystem show /mnt/storage",
@@ -2104,7 +2104,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-toshiba".into()),
+                    mapper: MapperName::from_basename("braid-toshiba".into()),
                 },
                 err_raw(
                     "cryptsetup status braid-toshiba",
@@ -2132,7 +2132,7 @@ mod tests {
         let fs = MockFs::with_mountinfo(&mountinfo_btrfs());
         let runner = MockRunner::default().with_output(
             CmdRequest::BtrfsFilesystemShow {
-                mount_point: MountPoint("/mnt/storage".to_owned()),
+                mount_point: MountPoint::new("/mnt/storage".to_owned()),
             },
             ok_raw(
                 "btrfs filesystem show /mnt/storage",
@@ -2186,11 +2186,11 @@ mod tests {
             missing_devids: vec![Devid::new(4), Devid::new(2)],
             null_underlying: vec![
                 NullUnderlyingDevice {
-                    mapper: MapperName("braid-two".into()),
+                    mapper: MapperName::from_basename("braid-two".into()),
                     devid: Devid::new(2),
                 },
                 NullUnderlyingDevice {
-                    mapper: MapperName("braid-three".into()),
+                    mapper: MapperName::from_basename("braid-three".into()),
                     devid: Devid::new(3),
                 },
             ],
@@ -2217,11 +2217,11 @@ mod tests {
             missing_devids: vec![Devid::new(4), Devid::new(2)],
             null_underlying: vec![
                 NullUnderlyingDevice {
-                    mapper: MapperName("braid-two".into()),
+                    mapper: MapperName::from_basename("braid-two".into()),
                     devid: Devid::new(2),
                 },
                 NullUnderlyingDevice {
-                    mapper: MapperName("braid-three".into()),
+                    mapper: MapperName::from_basename("braid-three".into()),
                     devid: Devid::new(3),
                 },
             ],
@@ -2259,7 +2259,7 @@ mod tests {
             present_devids: vec![Devid::new(1)],
             missing_devids: vec![Devid::new(2)],
             null_underlying: vec![NullUnderlyingDevice {
-                mapper: MapperName("braid-three".into()),
+                mapper: MapperName::from_basename("braid-three".into()),
                 devid: Devid::new(3),
             }],
         };
@@ -2386,7 +2386,7 @@ mod tests {
         let fs = MockFs::with_mountinfo(&mountinfo_btrfs());
         let runner = MockRunner::default().with_output(
             CmdRequest::BtrfsFilesystemShow {
-                mount_point: MountPoint("/mnt/storage".to_owned()),
+                mount_point: MountPoint::new("/mnt/storage".to_owned()),
             },
             btrfs_show_2disk(),
         );

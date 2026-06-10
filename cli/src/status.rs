@@ -1965,7 +1965,7 @@ mod tests {
     #[test]
     fn status_json_healthy_single() {
         let report = StatusReport {
-            mount_point: MountPoint("/mnt/storage".to_owned()),
+            mount_point: MountPoint::new("/mnt/storage".to_owned()),
             status: StatusCode::Intact,
             total_devices: Some(1),
             present_count: Some(1),
@@ -2003,7 +2003,7 @@ mod tests {
     #[test]
     fn status_json_healthy_raid1() {
         let report = StatusReport {
-            mount_point: MountPoint("/mnt/storage".to_owned()),
+            mount_point: MountPoint::new("/mnt/storage".to_owned()),
             status: StatusCode::Intact,
             total_devices: Some(3),
             present_count: Some(3),
@@ -2040,7 +2040,7 @@ mod tests {
     #[test]
     fn status_json_mixed_data_profile() {
         let report = StatusReport {
-            mount_point: MountPoint("/mnt/storage".to_owned()),
+            mount_point: MountPoint::new("/mnt/storage".to_owned()),
             status: StatusCode::Intact,
             total_devices: Some(2),
             present_count: Some(2),
@@ -2074,7 +2074,7 @@ mod tests {
     #[test]
     fn status_json_not_mounted_omits_profile() {
         let report = StatusReport {
-            mount_point: MountPoint("/mnt/storage".to_owned()),
+            mount_point: MountPoint::new("/mnt/storage".to_owned()),
             status: StatusCode::NotMounted,
             total_devices: None,
             present_count: None,
@@ -2105,7 +2105,7 @@ mod tests {
     #[test]
     fn status_json_no_classification_text() {
         let report = StatusReport {
-            mount_point: MountPoint("/mnt/storage".to_owned()),
+            mount_point: MountPoint::new("/mnt/storage".to_owned()),
             status: StatusCode::Intact,
             total_devices: Some(3),
             present_count: Some(3),
@@ -2134,7 +2134,7 @@ mod tests {
     fn status_json_degraded() {
         let code = StatusCode::Degraded;
         let report = StatusReport {
-            mount_point: MountPoint("/mnt/storage".to_owned()),
+            mount_point: MountPoint::new("/mnt/storage".to_owned()),
             status: code,
             total_devices: Some(3),
             present_count: Some(2),
@@ -2223,7 +2223,7 @@ mod tests {
         };
 
         let report = StatusReport {
-            mount_point: MountPoint("/mnt/storage".to_owned()),
+            mount_point: MountPoint::new("/mnt/storage".to_owned()),
             status: StatusCode::Degraded,
             total_devices: Some(2),
             present_count: Some(1),
@@ -2301,7 +2301,7 @@ mod tests {
     fn status_json_disks_always_array_not_mounted() {
         let code = StatusCode::NotMounted;
         let report = StatusReport {
-            mount_point: MountPoint("/mnt/storage".to_owned()),
+            mount_point: MountPoint::new("/mnt/storage".to_owned()),
             status: code,
             total_devices: None,
             present_count: None,
@@ -2328,7 +2328,7 @@ mod tests {
     fn status_json_disks_always_array_empty() {
         let code = StatusCode::Intact;
         let report = StatusReport {
-            mount_point: MountPoint("/mnt/storage".to_owned()),
+            mount_point: MountPoint::new("/mnt/storage".to_owned()),
             status: code,
             total_devices: Some(3),
             present_count: Some(3),
@@ -2358,7 +2358,7 @@ mod tests {
     #[test]
     fn status_json_disks_always_array_verbose() {
         let report = StatusReport {
-            mount_point: MountPoint("/mnt/storage".to_owned()),
+            mount_point: MountPoint::new("/mnt/storage".to_owned()),
             status: StatusCode::Intact,
             total_devices: Some(1),
             present_count: Some(1),
@@ -2409,7 +2409,7 @@ mod tests {
     fn status_human_not_mounted() {
         let code = StatusCode::NotMounted;
         let report = StatusReport {
-            mount_point: MountPoint("/mnt/storage".to_owned()),
+            mount_point: MountPoint::new("/mnt/storage".to_owned()),
             status: code,
             total_devices: None,
             present_count: None,
@@ -2443,7 +2443,7 @@ mod tests {
     fn status_human_healthy_single() {
         let code = StatusCode::Intact;
         let report = StatusReport {
-            mount_point: MountPoint("/mnt/storage".to_owned()),
+            mount_point: MountPoint::new("/mnt/storage".to_owned()),
             status: code,
             total_devices: Some(1),
             present_count: Some(1),
@@ -2525,7 +2525,7 @@ mod tests {
     fn status_human_healthy_raid1() {
         let code = StatusCode::Intact;
         let report = StatusReport {
-            mount_point: MountPoint("/mnt/storage".to_owned()),
+            mount_point: MountPoint::new("/mnt/storage".to_owned()),
             status: code,
             total_devices: Some(3),
             present_count: Some(3),
@@ -2616,7 +2616,7 @@ mod tests {
     #[test]
     fn status_human_mixed_data_profile() {
         let report = StatusReport {
-            mount_point: MountPoint("/mnt/storage".to_owned()),
+            mount_point: MountPoint::new("/mnt/storage".to_owned()),
             status: StatusCode::Intact,
             total_devices: Some(2),
             present_count: Some(2),
@@ -2675,7 +2675,7 @@ mod tests {
     #[test]
     fn status_human_unrecognized_profile_renders_verbatim() {
         let report = StatusReport {
-            mount_point: MountPoint("/mnt/storage".to_owned()),
+            mount_point: MountPoint::new("/mnt/storage".to_owned()),
             status: StatusCode::Intact,
             total_devices: Some(2),
             present_count: Some(2),
@@ -2733,7 +2733,7 @@ mod tests {
     #[test]
     fn status_human_missing_type_renders_unknown() {
         let report = StatusReport {
-            mount_point: MountPoint("/mnt/storage".to_owned()),
+            mount_point: MountPoint::new("/mnt/storage".to_owned()),
             status: StatusCode::Intact,
             total_devices: Some(2),
             present_count: Some(2),
@@ -2767,7 +2767,7 @@ mod tests {
     fn status_human_degraded() {
         let code = StatusCode::Degraded;
         let report = StatusReport {
-            mount_point: MountPoint("/mnt/storage".to_owned()),
+            mount_point: MountPoint::new("/mnt/storage".to_owned()),
             status: code,
             total_devices: Some(3),
             present_count: Some(2),
@@ -2821,7 +2821,7 @@ mod tests {
     fn status_human_degraded_plural() {
         let code = StatusCode::Degraded;
         let report = StatusReport {
-            mount_point: MountPoint("/mnt/storage".to_owned()),
+            mount_point: MountPoint::new("/mnt/storage".to_owned()),
             status: code,
             total_devices: Some(4),
             present_count: Some(2),
@@ -2880,7 +2880,7 @@ mod tests {
 
         let code = StatusCode::Intact;
         let report = StatusReport {
-            mount_point: MountPoint("/mnt/storage".to_owned()),
+            mount_point: MountPoint::new("/mnt/storage".to_owned()),
             status: code,
             total_devices: Some(1),
             present_count: Some(1),
@@ -2944,7 +2944,7 @@ mod tests {
         }];
 
         let report = StatusReport {
-            mount_point: MountPoint("/mnt/storage".to_owned()),
+            mount_point: MountPoint::new("/mnt/storage".to_owned()),
             status: StatusCode::Intact,
             total_devices: Some(1),
             present_count: Some(1),
@@ -2988,7 +2988,7 @@ mod tests {
 
         let code = StatusCode::Degraded;
         let report = StatusReport {
-            mount_point: MountPoint("/mnt/storage".to_owned()),
+            mount_point: MountPoint::new("/mnt/storage".to_owned()),
             status: code,
             total_devices: Some(2),
             present_count: Some(1),
@@ -3043,7 +3043,7 @@ mod tests {
         }];
 
         let report = StatusReport {
-            mount_point: MountPoint("/mnt/storage".to_owned()),
+            mount_point: MountPoint::new("/mnt/storage".to_owned()),
             status: StatusCode::Degraded,
             total_devices: Some(2),
             present_count: Some(1),
@@ -3109,7 +3109,7 @@ mod tests {
         }];
 
         let report = StatusReport {
-            mount_point: MountPoint("/mnt/storage".to_owned()),
+            mount_point: MountPoint::new("/mnt/storage".to_owned()),
             status: StatusCode::Degraded,
             total_devices: Some(2),
             present_count: Some(1),
@@ -3175,7 +3175,7 @@ mod tests {
 
         let code = StatusCode::Intact;
         let report = StatusReport {
-            mount_point: MountPoint("/mnt/storage".to_owned()),
+            mount_point: MountPoint::new("/mnt/storage".to_owned()),
             status: code,
             total_devices: Some(1),
             present_count: Some(1),
@@ -3227,7 +3227,7 @@ mod tests {
     fn status_scrub_finished() {
         let runner = MockRunner::default().with_output(
             CmdRequest::BtrfsScrubStatus {
-                mount_point: MountPoint("/mnt/storage".to_owned()),
+                mount_point: MountPoint::new("/mnt/storage".to_owned()),
             },
             status_btrfs_scrub_finished(),
         );
@@ -3259,7 +3259,7 @@ mod tests {
         // Scenario: btrfs scrub finishes with csum=50 — the report must carry that count.
         let runner = MockRunner::default().with_output(
             CmdRequest::BtrfsScrubStatus {
-                mount_point: MountPoint("/mnt/storage".to_owned()),
+                mount_point: MountPoint::new("/mnt/storage".to_owned()),
             },
             status_btrfs_scrub_finished_with_errors(),
         );
@@ -3290,7 +3290,7 @@ mod tests {
         // Scenario: braid status runs after a scrub was cancelled during lock.
         let runner = MockRunner::default().with_output(
             CmdRequest::BtrfsScrubStatus {
-                mount_point: MountPoint("/mnt/storage".to_owned()),
+                mount_point: MountPoint::new("/mnt/storage".to_owned()),
             },
             status_btrfs_scrub_aborted(),
         );
@@ -3321,7 +3321,7 @@ mod tests {
         // Scenario: braid status runs after a scrub userspace process was killed.
         let runner = MockRunner::default().with_output(
             CmdRequest::BtrfsScrubStatus {
-                mount_point: MountPoint("/mnt/storage".to_owned()),
+                mount_point: MountPoint::new("/mnt/storage".to_owned()),
             },
             status_btrfs_scrub_interrupted(),
         );
@@ -3349,7 +3349,7 @@ mod tests {
     fn status_scrub_failure_tolerant() {
         let runner = MockRunner::default().with_output(
             CmdRequest::BtrfsScrubStatus {
-                mount_point: MountPoint("/mnt/storage".to_owned()),
+                mount_point: MountPoint::new("/mnt/storage".to_owned()),
             },
             status_err_raw("btrfs scrub status", 1, "some error"),
         );
@@ -3626,7 +3626,7 @@ mod tests {
     fn balance_report_idle() {
         let runner = MockRunner::default().with_output(
             CmdRequest::BtrfsBalanceStatus {
-                mount_point: MountPoint("/mnt/storage".to_owned()),
+                mount_point: MountPoint::new("/mnt/storage".to_owned()),
             },
             mock_ok(
                 "btrfs balance status",
@@ -3643,7 +3643,7 @@ mod tests {
     fn balance_report_running() {
         let runner = MockRunner::default().with_output(
             CmdRequest::BtrfsBalanceStatus {
-                mount_point: MountPoint("/mnt/storage".to_owned()),
+                mount_point: MountPoint::new("/mnt/storage".to_owned()),
             },
             RawCommandOutput {
                 cmd: "btrfs balance status".into(),
@@ -3669,7 +3669,7 @@ mod tests {
     fn balance_report_paused() {
         let runner = MockRunner::default().with_output(
             CmdRequest::BtrfsBalanceStatus {
-                mount_point: MountPoint("/mnt/storage".to_owned()),
+                mount_point: MountPoint::new("/mnt/storage".to_owned()),
             },
             RawCommandOutput {
                 cmd: "btrfs balance status".into(),
@@ -3695,7 +3695,7 @@ mod tests {
     fn balance_report_unknown_on_cmd_error() {
         let runner = MockRunner::default().with_output(
             CmdRequest::BtrfsBalanceStatus {
-                mount_point: MountPoint("/mnt/storage".to_owned()),
+                mount_point: MountPoint::new("/mnt/storage".to_owned()),
             },
             status_err_raw("btrfs balance status", 2, "ERROR: not a btrfs filesystem"),
         );
@@ -3709,7 +3709,7 @@ mod tests {
     fn emit_paused_balance_warning_writes_to_buffer() {
         let runner = MockRunner::default().with_output(
             CmdRequest::BtrfsBalanceStatus {
-                mount_point: MountPoint("/mnt/storage".to_owned()),
+                mount_point: MountPoint::new("/mnt/storage".to_owned()),
             },
             RawCommandOutput {
                 cmd: "btrfs balance status".into(),
@@ -3737,7 +3737,7 @@ mod tests {
     fn emit_paused_balance_warning_silent_when_idle() {
         let runner = MockRunner::default().with_output(
             CmdRequest::BtrfsBalanceStatus {
-                mount_point: MountPoint("/mnt/storage".to_owned()),
+                mount_point: MountPoint::new("/mnt/storage".to_owned()),
             },
             mock_ok(
                 "btrfs balance status",
@@ -3754,7 +3754,7 @@ mod tests {
     fn balance_human_running() {
         let code = StatusCode::Intact;
         let report = StatusReport {
-            mount_point: MountPoint("/mnt/storage".to_owned()),
+            mount_point: MountPoint::new("/mnt/storage".to_owned()),
             status: code,
             total_devices: Some(2),
             present_count: Some(2),
@@ -3791,7 +3791,7 @@ mod tests {
     fn balance_human_unknown() {
         let code = StatusCode::Intact;
         let report = StatusReport {
-            mount_point: MountPoint("/mnt/storage".to_owned()),
+            mount_point: MountPoint::new("/mnt/storage".to_owned()),
             status: code,
             total_devices: Some(1),
             present_count: Some(1),
@@ -3820,7 +3820,7 @@ mod tests {
     fn balance_human_idle_no_line() {
         let code = StatusCode::Intact;
         let report = StatusReport {
-            mount_point: MountPoint("/mnt/storage".to_owned()),
+            mount_point: MountPoint::new("/mnt/storage".to_owned()),
             status: code,
             total_devices: Some(1),
             present_count: Some(1),
@@ -4854,13 +4854,13 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                    mount_point: MountPoint::new("/mnt/storage".to_owned()),
                 },
                 status_btrfs_show_3disk_1missing(),
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("disk1".into()),
+                    mapper: MapperName::from_basename("disk1".into()),
                 },
                 status_cryptsetup_status_active("disk1", "/dev/vda"),
             )
@@ -4872,7 +4872,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("disk2".into()),
+                    mapper: MapperName::from_basename("disk2".into()),
                 },
                 status_cryptsetup_status_active("disk2", "/dev/vdb"),
             )
@@ -4884,25 +4884,25 @@ mod tests {
             )
             .with_output(
                 CmdRequest::BtrfsFilesystemDfJson {
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                    mount_point: MountPoint::new("/mnt/storage".to_owned()),
                 },
                 status_btrfs_df_raid1(),
             )
             .with_output(
                 CmdRequest::BtrfsFilesystemUsageRaw {
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                    mount_point: MountPoint::new("/mnt/storage".to_owned()),
                 },
                 status_btrfs_usage_raw(),
             )
             .with_output(
                 CmdRequest::BtrfsScrubStatus {
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                    mount_point: MountPoint::new("/mnt/storage".to_owned()),
                 },
                 status_btrfs_scrub_never(),
             )
             .with_output(
                 CmdRequest::BtrfsDeviceStatsJson {
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                    mount_point: MountPoint::new("/mnt/storage".to_owned()),
                 },
                 status_btrfs_device_stats_3disk(),
             )
@@ -4984,13 +4984,13 @@ mod tests {
         let runner = status_runner_healthy_3disk_base()
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                    mount_point: MountPoint::new("/mnt/storage".to_owned()),
                 },
                 status_btrfs_show_3disk_1null_underlying_1missing(),
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("disk2".into()),
+                    mapper: MapperName::from_basename("disk2".into()),
                 },
                 status_cryptsetup_status_active("disk2", "(null)"),
             );
@@ -5214,13 +5214,13 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                    mount_point: MountPoint::new("/mnt/storage".to_owned()),
                 },
                 status_btrfs_show_1disk(),
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("disk1".into()),
+                    mapper: MapperName::from_basename("disk1".into()),
                 },
                 status_cryptsetup_status_active("disk1", "/dev/vda"),
             )
@@ -5232,31 +5232,31 @@ mod tests {
             )
             .with_output(
                 CmdRequest::BtrfsFilesystemDfJson {
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                    mount_point: MountPoint::new("/mnt/storage".to_owned()),
                 },
                 status_btrfs_df_single(),
             )
             .with_output(
                 CmdRequest::BtrfsFilesystemUsageRaw {
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                    mount_point: MountPoint::new("/mnt/storage".to_owned()),
                 },
                 status_btrfs_usage_raw(),
             )
             .with_output(
                 CmdRequest::BtrfsDeviceUsageRaw {
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                    mount_point: MountPoint::new("/mnt/storage".to_owned()),
                 },
                 status_btrfs_device_usage_raw_1disk(),
             )
             .with_output(
                 CmdRequest::BtrfsScrubStatus {
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                    mount_point: MountPoint::new("/mnt/storage".to_owned()),
                 },
                 status_btrfs_scrub_never(),
             )
             .with_output(
                 CmdRequest::BtrfsDeviceStatsJson {
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                    mount_point: MountPoint::new("/mnt/storage".to_owned()),
                 },
                 mock_ok(
                     "btrfs device stats",
@@ -5418,7 +5418,7 @@ mod tests {
         let pool = PoolState {
             mounted: true,
             devices: vec![PoolDevice {
-                mapper: MapperName("braid-disk1".to_owned()),
+                mapper: MapperName::from_basename("braid-disk1".to_owned()),
                 luks_uuid: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
                 devid: Devid::new(1),
                 underlying: "/dev/vda".to_owned(),
@@ -5443,7 +5443,7 @@ mod tests {
         assert_eq!(ctx.human_details[0].name, "disk1");
 
         let report = StatusReport {
-            mount_point: MountPoint("/mnt/storage".to_owned()),
+            mount_point: MountPoint::new("/mnt/storage".to_owned()),
             status: StatusCode::Intact,
             total_devices: Some(1),
             present_count: Some(1),
@@ -5493,7 +5493,7 @@ mod tests {
         let pool = PoolState {
             mounted: true,
             devices: vec![PoolDevice {
-                mapper: MapperName("braid-disk1".to_owned()),
+                mapper: MapperName::from_basename("braid-disk1".to_owned()),
                 luks_uuid: LuksUuid::parse("99999999-9999-9999-9999-999999999999").unwrap(),
                 devid: Devid::new(1),
                 underlying: "/dev/vdz".to_owned(),
@@ -5547,7 +5547,7 @@ mod tests {
         let pool = PoolState {
             mounted: true,
             devices: vec![PoolDevice {
-                mapper: MapperName("braid-disk1".to_owned()),
+                mapper: MapperName::from_basename("braid-disk1".to_owned()),
                 luks_uuid: foreign_uuid.clone(),
                 devid: Devid::new(1),
                 underlying: "/dev/vdz".to_owned(),
@@ -5651,7 +5651,7 @@ mod tests {
         let pool = PoolState {
             mounted: true,
             devices: vec![PoolDevice {
-                mapper: MapperName("disk1".to_owned()),
+                mapper: MapperName::from_basename("disk1".to_owned()),
                 luks_uuid: uuid,
                 devid: Devid::new(1),
                 underlying: "/dev/vda".to_owned(),
@@ -5771,13 +5771,13 @@ mod tests {
             mounted: true,
             devices: vec![
                 PoolDevice {
-                    mapper: MapperName("braid-bravo".to_owned()),
+                    mapper: MapperName::from_basename("braid-bravo".to_owned()),
                     luks_uuid: bravo_uuid,
                     devid: Devid::new(1),
                     underlying: "/dev/vdb".to_owned(),
                 },
                 PoolDevice {
-                    mapper: MapperName("braid-alpha".to_owned()),
+                    mapper: MapperName::from_basename("braid-alpha".to_owned()),
                     luks_uuid: alpha_uuid,
                     devid: Devid::new(2),
                     underlying: "/dev/vda".to_owned(),
@@ -5833,13 +5833,13 @@ mod tests {
             mounted: true,
             devices: vec![
                 PoolDevice {
-                    mapper: MapperName("braid-disk1".to_owned()),
+                    mapper: MapperName::from_basename("braid-disk1".to_owned()),
                     luks_uuid: foreign_uuid,
                     devid: Devid::new(1),
                     underlying: "/dev/vdz".to_owned(),
                 },
                 PoolDevice {
-                    mapper: MapperName("braid-member".to_owned()),
+                    mapper: MapperName::from_basename("braid-member".to_owned()),
                     luks_uuid: member_uuid.clone(),
                     devid: Devid::new(2),
                     underlying: "/dev/vda".to_owned(),
@@ -5902,7 +5902,7 @@ mod tests {
         );
 
         let report = StatusReport {
-            mount_point: MountPoint("/mnt/storage".to_owned()),
+            mount_point: MountPoint::new("/mnt/storage".to_owned()),
             status: StatusCode::Degraded,
             total_devices: Some(2),
             present_count: Some(2),
@@ -5978,7 +5978,7 @@ mod tests {
         );
 
         let report = StatusReport {
-            mount_point: MountPoint("/mnt/storage".to_owned()),
+            mount_point: MountPoint::new("/mnt/storage".to_owned()),
             status: StatusCode::Degraded,
             total_devices: Some(1),
             present_count: Some(0),
@@ -6053,7 +6053,7 @@ mod tests {
         let pool = PoolState {
             mounted: true,
             devices: vec![PoolDevice {
-                mapper: MapperName("braid-toshiba1".to_owned()),
+                mapper: MapperName::from_basename("braid-toshiba1".to_owned()),
                 luks_uuid: uuid1,
                 devid: Devid::new(1),
                 underlying: "/dev/vda".to_owned(),
@@ -6063,7 +6063,7 @@ mod tests {
             total_devices: 3,
             fsid: None,
             null_underlying: vec![NullUnderlyingDevice {
-                mapper: MapperName("braid-toshiba2".to_owned()),
+                mapper: MapperName::from_basename("braid-toshiba2".to_owned()),
                 devid: Devid::new(2),
             }],
         };
@@ -6095,7 +6095,7 @@ mod tests {
         let pool = PoolState {
             mounted: true,
             devices: vec![PoolDevice {
-                mapper: MapperName("foreign-live".to_owned()),
+                mapper: MapperName::from_basename("foreign-live".to_owned()),
                 luks_uuid: test_uuid(910),
                 devid: Devid::new(7),
                 underlying: "/dev/vdz".to_owned(),
@@ -6204,7 +6204,7 @@ mod tests {
         let pool = PoolState {
             mounted: true,
             devices: vec![PoolDevice {
-                mapper: MapperName("braid-disk1".to_owned()),
+                mapper: MapperName::from_basename("braid-disk1".to_owned()),
                 luks_uuid: LuksUuid::parse("99999999-9999-9999-9999-999999999999").unwrap(),
                 devid: Devid::new(1),
                 underlying: "/dev/vdz".to_owned(),
@@ -6280,13 +6280,13 @@ mod tests {
             mounted: true,
             devices: vec![
                 PoolDevice {
-                    mapper: MapperName("braid-bravo".to_owned()),
+                    mapper: MapperName::from_basename("braid-bravo".to_owned()),
                     luks_uuid: bravo_uuid,
                     devid: Devid::new(1),
                     underlying: "/dev/vdb".to_owned(),
                 },
                 PoolDevice {
-                    mapper: MapperName("braid-alpha".to_owned()),
+                    mapper: MapperName::from_basename("braid-alpha".to_owned()),
                     luks_uuid: alpha_uuid,
                     devid: Devid::new(2),
                     underlying: "/dev/vda".to_owned(),
@@ -6422,7 +6422,7 @@ mod tests {
 
         let code = StatusCode::Intact;
         let report = StatusReport {
-            mount_point: MountPoint("/mnt/storage".to_owned()),
+            mount_point: MountPoint::new("/mnt/storage".to_owned()),
             status: code,
             total_devices: Some(1),
             present_count: Some(1),
@@ -6486,7 +6486,7 @@ mod tests {
 
         let code = StatusCode::Intact;
         let report = StatusReport {
-            mount_point: MountPoint("/mnt/storage".to_owned()),
+            mount_point: MountPoint::new("/mnt/storage".to_owned()),
             status: code,
             total_devices: Some(1),
             present_count: Some(1),
@@ -6612,7 +6612,7 @@ mod tests {
         let pool = PoolState {
             mounted: true,
             devices: vec![PoolDevice {
-                mapper: MapperName("foreign-live".to_owned()),
+                mapper: MapperName::from_basename("foreign-live".to_owned()),
                 luks_uuid: test_uuid(950),
                 devid: Devid::new(1),
                 underlying: "/dev/vdz".to_owned(),
@@ -6800,13 +6800,13 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                    mount_point: MountPoint::new("/mnt/storage".to_owned()),
                 },
                 status_btrfs_show_1disk(),
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("disk1".into()),
+                    mapper: MapperName::from_basename("disk1".into()),
                 },
                 status_cryptsetup_status_active("disk1", "/dev/vda"),
             )
@@ -6818,31 +6818,31 @@ mod tests {
             )
             .with_output(
                 CmdRequest::BtrfsFilesystemDfJson {
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                    mount_point: MountPoint::new("/mnt/storage".to_owned()),
                 },
                 status_btrfs_df_single(),
             )
             .with_output(
                 CmdRequest::BtrfsFilesystemUsageRaw {
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                    mount_point: MountPoint::new("/mnt/storage".to_owned()),
                 },
                 status_btrfs_usage_raw(),
             )
             .with_output(
                 CmdRequest::BtrfsDeviceUsageRaw {
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                    mount_point: MountPoint::new("/mnt/storage".to_owned()),
                 },
                 status_btrfs_device_usage_raw_1disk(),
             )
             .with_output(
                 CmdRequest::BtrfsScrubStatus {
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                    mount_point: MountPoint::new("/mnt/storage".to_owned()),
                 },
                 status_btrfs_scrub_never(),
             )
             .with_output(
                 CmdRequest::BtrfsDeviceStatsJson {
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                    mount_point: MountPoint::new("/mnt/storage".to_owned()),
                 },
                 mock_ok(
                     "btrfs device stats",
@@ -6873,7 +6873,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 status_cryptsetup_status_active("braid-disk1", "/dev/vdz"),
             )
@@ -6986,7 +6986,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("disk1".into()),
+                    mapper: MapperName::from_basename("disk1".into()),
                 },
                 status_cryptsetup_status_active("disk1", "/dev/vda"),
             )
@@ -7249,7 +7249,7 @@ mod tests {
         let pool = PoolState {
             mounted: true,
             devices: vec![PoolDevice {
-                mapper: MapperName("braid-disk1".to_owned()),
+                mapper: MapperName::from_basename("braid-disk1".to_owned()),
                 luks_uuid: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
                 devid: Devid::new(1),
                 underlying: "/dev/vda".to_owned(),

@@ -4440,7 +4440,7 @@ mod tests {
     //   later runs `braid doctor` while the pool remains mounted.
     #[test]
     fn paused_balance_warns_with_resume_hint() {
-        let mp = MountPoint("/mnt/storage".to_owned());
+        let mp = MountPoint::new("/mnt/storage".to_owned());
         let (mp_req, mp_out) = mountpoint_ok();
         let (balance_req, balance_out) = unlock_btrfs_balance_status_paused(&mp);
         let runner = MockRunner::default()
@@ -4471,7 +4471,7 @@ mod tests {
     //   balance, then the operator checks doctor before resuming it.
     #[test]
     fn paused_balance_skip_balance_nan_warns_without_progress() {
-        let mp = MountPoint("/mnt/storage".to_owned());
+        let mp = MountPoint::new("/mnt/storage".to_owned());
         let (mp_req, mp_out) = mountpoint_ok();
         let (balance_req, balance_out) = unlock_btrfs_balance_status_paused_skip_balance(&mp);
         let runner = MockRunner::default()
@@ -4495,7 +4495,7 @@ mod tests {
     // Scenario: a healthy mounted pool has no active or paused balance.
     #[test]
     fn paused_balance_idle_ok() {
-        let mp = MountPoint("/mnt/storage".to_owned());
+        let mp = MountPoint::new("/mnt/storage".to_owned());
         let (mp_req, mp_out) = mountpoint_ok();
         let (balance_req, balance_out) = unlock_btrfs_balance_status_idle(&mp);
         let runner = MockRunner::default()
@@ -4571,7 +4571,7 @@ mod tests {
     // Scenario: a full doctor run observes a paused balance on a mounted pool.
     #[test]
     fn run_doctor_reports_paused_balance_with_human_label() {
-        let mp = MountPoint("/mnt/storage".to_owned());
+        let mp = MountPoint::new("/mnt/storage".to_owned());
         let (mp_req, mp_out) = mountpoint_ok();
         let (balance_req, balance_out) = unlock_btrfs_balance_status_paused(&mp);
         let runner = MockRunner::default()
@@ -6589,7 +6589,7 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::MountpointCheck {
-                    path: MountPoint("/mnt/storage".into()),
+                    path: MountPoint::new("/mnt/storage".into()),
                 },
                 RawCommandOutput {
                     cmd: "mountpoint".into(),
@@ -6628,7 +6628,7 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::MountpointCheck {
-                    path: MountPoint("/mnt/storage".into()),
+                    path: MountPoint::new("/mnt/storage".into()),
                 },
                 RawCommandOutput {
                     cmd: "mountpoint".into(),
@@ -6663,7 +6663,7 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::MountpointCheck {
-                    path: MountPoint("/mnt/storage".into()),
+                    path: MountPoint::new("/mnt/storage".into()),
                 },
                 RawCommandOutput {
                     cmd: "mountpoint".into(),
@@ -6697,7 +6697,7 @@ mod tests {
             let runner = MockRunner::default()
                 .with_output(
                     CmdRequest::MountpointCheck {
-                        path: MountPoint("/mnt/storage".into()),
+                        path: MountPoint::new("/mnt/storage".into()),
                     },
                     RawCommandOutput {
                         cmd: "mountpoint".into(),
@@ -6733,7 +6733,7 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::MountpointCheck {
-                    path: MountPoint("/mnt/storage".into()),
+                    path: MountPoint::new("/mnt/storage".into()),
                 },
                 RawCommandOutput {
                     cmd: "mountpoint".into(),
@@ -6781,7 +6781,7 @@ mod tests {
             let runner = MockRunner::default()
                 .with_output(
                     CmdRequest::MountpointCheck {
-                        path: MountPoint("/mnt/storage".into()),
+                        path: MountPoint::new("/mnt/storage".into()),
                     },
                     RawCommandOutput {
                         cmd: "mountpoint".into(),
@@ -6833,7 +6833,7 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::MountpointCheck {
-                    path: MountPoint("/mnt/storage".into()),
+                    path: MountPoint::new("/mnt/storage".into()),
                 },
                 RawCommandOutput {
                     cmd: "mountpoint".into(),
@@ -6884,7 +6884,7 @@ mod tests {
     fn braid_online_check_fails_on_mountpoint_probe_error() {
         let runner = MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
-                path: MountPoint("/mnt/storage".into()),
+                path: MountPoint::new("/mnt/storage".into()),
             },
             RawCommandOutput {
                 cmd: "mountpoint".into(),
@@ -6929,7 +6929,7 @@ mod tests {
     fn braid_online_check_skips_when_not_mounted() {
         let runner = MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
-                path: MountPoint("/mnt/storage".into()),
+                path: MountPoint::new("/mnt/storage".into()),
             },
             RawCommandOutput {
                 cmd: "mountpoint".into(),

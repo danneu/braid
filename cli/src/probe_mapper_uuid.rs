@@ -151,7 +151,7 @@ mod tests {
     //   path, but `cryptsetup status` cannot run.
     #[test]
     fn probe_returns_unverified_when_cryptsetup_status_runner_errs() {
-        let mapper = MapperName("braid-WRONG".into());
+        let mapper = MapperName::from_basename("braid-WRONG".into());
         let expected = test_uuid(710);
         let runner = MockRunner::default().with_handler(|req| match req {
             CmdRequest::CryptsetupStatus { .. } => {
@@ -185,7 +185,7 @@ mod tests {
     //   emits garbage instead of an active or inactive status shape.
     #[test]
     fn probe_returns_unverified_when_status_parse_fails() {
-        let mapper = MapperName("braid-WRONG".into());
+        let mapper = MapperName::from_basename("braid-WRONG".into());
         let expected = test_uuid(711);
         let runner = MockRunner::default().with_output(
             CmdRequest::CryptsetupStatus {
@@ -218,7 +218,7 @@ mod tests {
     //   active, but the backing device line is `(null)`.
     #[test]
     fn probe_returns_unverified_when_backing_device_is_null() {
-        let mapper = MapperName("braid-WRONG".into());
+        let mapper = MapperName::from_basename("braid-WRONG".into());
         let expected = test_uuid(712);
         let runner = MockRunner::default().with_output(
             CmdRequest::CryptsetupStatus {
@@ -255,7 +255,7 @@ mod tests {
     //   inactive in the post-commit close path.
     #[test]
     fn probe_returns_inactive_when_mapper_is_inactive() {
-        let mapper = MapperName("braid-WRONG".into());
+        let mapper = MapperName::from_basename("braid-WRONG".into());
         let expected = test_uuid(713);
         let runner = MockRunner::default().with_output(
             CmdRequest::CryptsetupStatus {
@@ -293,7 +293,7 @@ mod tests {
     //   `cryptsetup luksUUID /dev/vdc` fails.
     #[test]
     fn probe_returns_unverified_when_luks_uuid_runner_errs() {
-        let mapper = MapperName("braid-WRONG".into());
+        let mapper = MapperName::from_basename("braid-WRONG".into());
         let expected = test_uuid(714);
         let runner = MockRunner::default().with_handler(|req| match req {
             CmdRequest::CryptsetupStatus { mapper } if mapper.as_str() == "braid-WRONG" => {
@@ -339,7 +339,7 @@ mod tests {
     //   `cryptsetup luksUUID /dev/vdc` emits `not-a-uuid`.
     #[test]
     fn probe_returns_unverified_when_luks_uuid_parse_fails() {
-        let mapper = MapperName("braid-WRONG".into());
+        let mapper = MapperName::from_basename("braid-WRONG".into());
         let expected = test_uuid(715);
         let runner = MockRunner::default()
             .with_output(
@@ -390,7 +390,7 @@ mod tests {
     //   /dev/vdc` returns a valid foreign UUID != the expected UUID.
     #[test]
     fn probe_returns_unverified_when_uuid_value_differs() {
-        let mapper = MapperName("braid-WRONG".into());
+        let mapper = MapperName::from_basename("braid-WRONG".into());
         let expected = test_uuid(716);
         let foreign = test_uuid(799);
         let runner = MockRunner::default()

@@ -260,7 +260,7 @@ impl Filesystem for MonitorFs {
 
 /// Canonical monitor-test mount point shared by the promoted runners.
 pub(crate) fn monitor_mp() -> MountPoint {
-    MountPoint("/mnt/storage".to_owned())
+    MountPoint::new("/mnt/storage".to_owned())
 }
 
 /// Mounted btrfs filesystem surface that only allows the mountinfo read.

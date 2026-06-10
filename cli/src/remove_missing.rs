@@ -742,7 +742,7 @@ mod tests {
     use crate::types::{Fsid, NullUnderlyingDevice, PoolDevice};
 
     fn mp() -> MountPoint {
-        MountPoint("/mnt/storage".into())
+        MountPoint::new("/mnt/storage".into())
     }
 
     fn relocation_usage_live_device(
@@ -1638,7 +1638,7 @@ mod tests {
             Devid::new(3),
             1,
             2,
-            &MountPoint("/mnt/storage".into()),
+            &MountPoint::new("/mnt/storage".into()),
         )
         .render_steps();
         assert!(
@@ -1659,7 +1659,7 @@ mod tests {
             Devid::new(3),
             1,
             1,
-            &MountPoint("/mnt/storage".into()),
+            &MountPoint::new("/mnt/storage".into()),
         )
         .render_steps();
         assert!(
@@ -1680,7 +1680,7 @@ mod tests {
             Devid::new(3),
             2,
             2,
-            &MountPoint("/mnt/storage".into()),
+            &MountPoint::new("/mnt/storage".into()),
         )
         .render_steps();
         assert!(
@@ -2446,7 +2446,7 @@ mod tests {
     // Why: verifies CmdRequest integration for the targeted removal path.
     // Scenario: one missing device (devid 2), last missing, 2 present -> includes balance.
     fn dry_run_render_targeted_removal_with_balance() {
-        let mount_point = MountPoint("/mnt/storage".into());
+        let mount_point = MountPoint::new("/mnt/storage".into());
         let steps =
             remove_missing_work_plan_for_test(Devid::new(2), 1, 2, &mount_point).render_steps();
         let output = Step::render_dry_run(&steps);
@@ -2662,7 +2662,7 @@ mod tests {
             Devid::new(3),
             1,
             2,
-            &MountPoint("/mnt/storage".into()),
+            &MountPoint::new("/mnt/storage".into()),
         );
         let plan = RemoveMissingPlan {
             notes: vec![PreviewNote::Warn(

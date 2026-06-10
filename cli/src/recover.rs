@@ -3522,13 +3522,13 @@ fn relock_and_remount<R: CommandRunner, F: Filesystem + ?Sized>(
             .map_err(|e| {
                 RecoverError::Failed(format!(
                     "recover remount cycle: cryptsetup close {}: {e}",
-                    mn.0
+                    mn
                 ))
             })?;
         if close.exit_status != 0 {
             return Err(RecoverError::Failed(format!(
                 "recover remount cycle: cryptsetup close {} failed (exit {}): {}",
-                mn.0,
+                mn,
                 close.exit_status,
                 close.stderr.trim()
             )));
@@ -3984,7 +3984,7 @@ mod tests {
                 "Started on 27.Feb 10:30:00, finished on 27.Feb 10:35:00, 0 write errs, 0 uncorr. read errs\n",
             )),
         ]);
-        let mount_point = MountPoint("/mnt/storage".into());
+        let mount_point = MountPoint::new("/mnt/storage".into());
         let captured = crate::status_tag::testing::capture_with(|| {
             wait_for_kernel_replace_to_finish(&runner, &mount_point, &progress::NoopSleeper, false)
                 .unwrap();
@@ -4017,7 +4017,7 @@ mod tests {
                 "Started on 27.Feb 10:30:00, canceled on 27.Feb 10:35:00 at 0.0%, 0 write errs, 0 uncorr. read errs\n",
             )),
         ]);
-        let mount_point = MountPoint("/mnt/storage".into());
+        let mount_point = MountPoint::new("/mnt/storage".into());
         let mut result = None;
         let captured = crate::status_tag::testing::capture_with(|| {
             result = Some(wait_for_kernel_replace_to_finish(
@@ -4056,7 +4056,7 @@ mod tests {
                 "Started on 27.Feb 10:30:00, suspended on 27.Feb 10:35:00 at 12.5%, 0 write errs, 0 uncorr. read errs\n",
             )),
         ]);
-        let mount_point = MountPoint("/mnt/storage".into());
+        let mount_point = MountPoint::new("/mnt/storage".into());
         let mut result = None;
         let captured = crate::status_tag::testing::capture_with(|| {
             result = Some(wait_for_kernel_replace_to_finish(
@@ -4100,7 +4100,7 @@ mod tests {
             "btrfs replace status -1 /mnt/storage",
             "Started on 27.Feb 10:30:00, canceled on 27.Feb 10:35:00 at 0.0%, 0 write errs, 0 uncorr. read errs\n",
         ))]);
-        let mount_point = MountPoint("/mnt/storage".into());
+        let mount_point = MountPoint::new("/mnt/storage".into());
         let mut result = None;
         let captured = crate::status_tag::testing::capture_with(|| {
             result = Some(wait_for_kernel_replace_to_finish(
@@ -4133,7 +4133,7 @@ mod tests {
             )),
             ReplaceStatusItem::Error("status failed"),
         ]);
-        let mount_point = MountPoint("/mnt/storage".into());
+        let mount_point = MountPoint::new("/mnt/storage".into());
         let captured = crate::status_tag::testing::capture_with(|| {
             wait_for_kernel_replace_to_finish(&runner, &mount_point, &progress::NoopSleeper, false)
                 .unwrap();
@@ -4162,7 +4162,7 @@ mod tests {
     fn wait_for_kernel_replace_emits_warn_on_status_error_first_poll() {
         let runner =
             ReplaceStatusSequenceRunner::new(vec![ReplaceStatusItem::Error("status failed")]);
-        let mount_point = MountPoint("/mnt/storage".into());
+        let mount_point = MountPoint::new("/mnt/storage".into());
         let captured = crate::status_tag::testing::capture_with(|| {
             wait_for_kernel_replace_to_finish(&runner, &mount_point, &progress::NoopSleeper, false)
                 .unwrap();
@@ -4190,7 +4190,7 @@ mod tests {
             "btrfs replace status -1 /mnt/storage",
             "75.0% complete, 0 write errs, 0 uncorr. read errs\n",
         ))]);
-        let mount_point = MountPoint("/mnt/storage".into());
+        let mount_point = MountPoint::new("/mnt/storage".into());
         let mut result = None;
         let captured = crate::status_tag::testing::capture_with(|| {
             result = Some(wait_for_kernel_replace_to_finish(
@@ -4247,7 +4247,7 @@ mod tests {
                 "75.0% complete, 0 write errs, 0 uncorr. read errs\n",
             )),
         ]);
-        let mount_point = MountPoint("/mnt/storage".into());
+        let mount_point = MountPoint::new("/mnt/storage".into());
         let mut result = None;
         let captured = crate::status_tag::testing::capture_with(|| {
             result = Some(wait_for_kernel_replace_to_finish(
@@ -4308,7 +4308,7 @@ mod tests {
             "Started on 27.Feb 10:30:00, finished on 27.Feb 10:35:00, 0 write errs, 0 uncorr. read errs\n",
         )));
         let runner = ReplaceStatusSequenceRunner::new(items);
-        let mount_point = MountPoint("/mnt/storage".into());
+        let mount_point = MountPoint::new("/mnt/storage".into());
         let captured = crate::status_tag::testing::capture_with(|| {
             wait_for_kernel_replace_to_finish(&runner, &mount_point, &progress::NoopSleeper, false)
                 .unwrap();
@@ -4341,7 +4341,7 @@ mod tests {
             "Started on 27.Feb 10:30:00, finished on 27.Feb 10:35:00, 0 write errs, 0 uncorr. read errs\n",
         )));
         let runner = ReplaceStatusSequenceRunner::new(items);
-        let mount_point = MountPoint("/mnt/storage".into());
+        let mount_point = MountPoint::new("/mnt/storage".into());
         let captured = crate::status_tag::testing::capture_with(|| {
             wait_for_kernel_replace_to_finish(&runner, &mount_point, &progress::NoopSleeper, false)
                 .unwrap();
@@ -4373,7 +4373,7 @@ mod tests {
             "Started on 27.Feb 10:30:00, finished on 27.Feb 10:35:00, 0 write errs, 0 uncorr. read errs\n",
         )));
         let runner = ReplaceStatusSequenceRunner::new(items);
-        let mount_point = MountPoint("/mnt/storage".into());
+        let mount_point = MountPoint::new("/mnt/storage".into());
         let captured = crate::status_tag::testing::capture_with(|| {
             wait_for_kernel_replace_to_finish(&runner, &mount_point, &progress::NoopSleeper, false)
                 .unwrap();
@@ -4392,7 +4392,7 @@ mod tests {
     fn mountpoint_ok() -> (CmdRequest, RawCommandOutput) {
         (
             CmdRequest::MountpointCheck {
-                path: MountPoint("/mnt/storage".into()),
+                path: MountPoint::new("/mnt/storage".into()),
             },
             ok_raw_empty("mountpoint"),
         )
@@ -4401,7 +4401,7 @@ mod tests {
     fn mountpoint_fail() -> (CmdRequest, RawCommandOutput) {
         (
             CmdRequest::MountpointCheck {
-                path: MountPoint("/mnt/storage".into()),
+                path: MountPoint::new("/mnt/storage".into()),
             },
             err_raw("mountpoint", 1, ""),
         )
@@ -4523,13 +4523,13 @@ mod tests {
             .with_output(mp_req, mp_out)
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 btrfs_show_two_disks_and_foreign(),
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 cryptsetup_status_active("braid-disk1", "/dev/vda"),
             )
@@ -4541,7 +4541,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk2".into()),
+                    mapper: MapperName::from_basename("braid-disk2".into()),
                 },
                 cryptsetup_status_active("braid-disk2", "/dev/vdb"),
             )
@@ -4553,7 +4553,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("luks-foreign".into()),
+                    mapper: MapperName::from_basename("luks-foreign".into()),
                 },
                 cryptsetup_status_active("luks-foreign", "/dev/vdc"),
             )
@@ -4768,7 +4768,7 @@ mod tests {
             pre_resolved_credential: None,
             journal,
             admission_membership: union,
-            mount_point: MountPoint("/mnt/storage".into()),
+            mount_point: MountPoint::new("/mnt/storage".into()),
             pool_json_path: std::path::PathBuf::from("/var/lib/braid/pool.json"),
             pending_op_path: std::path::PathBuf::from("/var/lib/braid/pending-op.json"),
             luks_headers_dir: std::path::PathBuf::from("/var/lib/braid/luks-headers"),
@@ -4802,13 +4802,13 @@ mod tests {
             .with_output(mp_req, mp_out)
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 btrfs_show_one_disk(),
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 cryptsetup_status_active("braid-disk1", "/dev/vda"),
             )
@@ -5217,7 +5217,7 @@ mod tests {
         PoolState {
             mounted: true,
             devices: vec![PoolDevice {
-                mapper: MapperName("braid-disk1".into()),
+                mapper: MapperName::from_basename("braid-disk1".into()),
                 luks_uuid: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
                 devid: Devid::new(1),
                 underlying: "/dev/vda".into(),
@@ -5233,7 +5233,7 @@ mod tests {
     fn pool_state_disk1_and_foreign() -> PoolState {
         let mut pool = pool_state_one_disk();
         pool.devices.push(PoolDevice {
-            mapper: MapperName("luks-foreign".into()),
+            mapper: MapperName::from_basename("luks-foreign".into()),
             luks_uuid: LuksUuid::parse("99999999-9999-9999-9999-999999999999").unwrap(),
             devid: Devid::new(9),
             underlying: "/dev/vdz".into(),
@@ -5247,13 +5247,13 @@ mod tests {
             mounted: true,
             devices: vec![
                 PoolDevice {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                     luks_uuid: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
                     devid: Devid::new(1),
                     underlying: "/dev/vda".into(),
                 },
                 PoolDevice {
-                    mapper: MapperName("braid-disk2".into()),
+                    mapper: MapperName::from_basename("braid-disk2".into()),
                     luks_uuid: LuksUuid::parse("22222222-2222-2222-2222-222222222222").unwrap(),
                     devid: Devid::new(2),
                     underlying: "/dev/vdb".into(),
@@ -5272,13 +5272,13 @@ mod tests {
             mounted: true,
             devices: vec![
                 PoolDevice {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                     luks_uuid: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
                     devid: Devid::new(1),
                     underlying: "/dev/vda".into(),
                 },
                 PoolDevice {
-                    mapper: MapperName("braid-disk2".into()),
+                    mapper: MapperName::from_basename("braid-disk2".into()),
                     luks_uuid: LuksUuid::parse("22222222-2222-2222-2222-222222222222").unwrap(),
                     devid: Devid::new(4),
                     underlying: "/dev/vdb".into(),
@@ -5294,7 +5294,7 @@ mod tests {
 
     fn pool_state_disk1_and_drifted_disk2_devid4() -> PoolState {
         let mut pool = pool_state_disk1_and_disk2_devid4();
-        pool.devices[1].mapper = MapperName("braid-WRONG".into());
+        pool.devices[1].mapper = MapperName::from_basename("braid-WRONG".into());
         pool
     }
 
@@ -5302,7 +5302,7 @@ mod tests {
         let mut pool = pool_state_one_disk();
         pool.total_devices = 2;
         pool.null_underlying.push(NullUnderlyingDevice {
-            mapper: MapperName("braid-disk2".into()),
+            mapper: MapperName::from_basename("braid-disk2".into()),
             devid: Devid::new(2),
         });
         pool
@@ -5313,13 +5313,13 @@ mod tests {
             mounted: true,
             devices: vec![
                 PoolDevice {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                     luks_uuid: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
                     devid: Devid::new(1),
                     underlying: "/dev/vda".into(),
                 },
                 PoolDevice {
-                    mapper: MapperName("braid-old".into()),
+                    mapper: MapperName::from_basename("braid-old".into()),
                     luks_uuid: LuksUuid::parse("22222222-2222-2222-2222-222222222222").unwrap(),
                     devid: Devid::new(2),
                     underlying: "/dev/vdb".into(),
@@ -5338,13 +5338,13 @@ mod tests {
             mounted: true,
             devices: vec![
                 PoolDevice {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                     luks_uuid: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
                     devid: Devid::new(1),
                     underlying: "/dev/vda".into(),
                 },
                 PoolDevice {
-                    mapper: MapperName("braid-new".into()),
+                    mapper: MapperName::from_basename("braid-new".into()),
                     luks_uuid: LuksUuid::parse("33333333-3333-3333-3333-333333333333").unwrap(),
                     devid: Devid::new(2),
                     underlying: "/dev/vdc".into(),
@@ -5361,7 +5361,7 @@ mod tests {
     fn pool_state_disk1_old_and_new() -> PoolState {
         let mut pool = pool_state_disk1_and_old();
         pool.devices.push(PoolDevice {
-            mapper: MapperName("braid-new".into()),
+            mapper: MapperName::from_basename("braid-new".into()),
             luks_uuid: LuksUuid::parse("33333333-3333-3333-3333-333333333333").unwrap(),
             devid: Devid::new(3),
             underlying: "/dev/vdc".into(),
@@ -5374,7 +5374,7 @@ mod tests {
         PoolState {
             mounted: true,
             devices: vec![PoolDevice {
-                mapper: MapperName("braid-disk1".into()),
+                mapper: MapperName::from_basename("braid-disk1".into()),
                 luks_uuid: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
                 devid: Devid::new(1),
                 underlying: "/dev/vda".into(),
@@ -5392,19 +5392,19 @@ mod tests {
             mounted: true,
             devices: vec![
                 PoolDevice {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                     luks_uuid: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
                     devid: Devid::new(1),
                     underlying: "/dev/vda".into(),
                 },
                 PoolDevice {
-                    mapper: MapperName("braid-disk2".into()),
+                    mapper: MapperName::from_basename("braid-disk2".into()),
                     luks_uuid: LuksUuid::parse("22222222-2222-2222-2222-222222222222").unwrap(),
                     devid: Devid::new(2),
                     underlying: "/dev/vdb".into(),
                 },
                 PoolDevice {
-                    mapper: MapperName("braid-disk3".into()),
+                    mapper: MapperName::from_basename("braid-disk3".into()),
                     luks_uuid: LuksUuid::parse("33333333-3333-3333-3333-333333333333").unwrap(),
                     devid: Devid::new(3),
                     underlying: "/dev/vdc".into(),
@@ -5461,13 +5461,13 @@ mod tests {
         runner
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 btrfs_show_one_disk(),
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 cryptsetup_status_active("braid-disk1", "/dev/vda"),
             )
@@ -5483,13 +5483,13 @@ mod tests {
         runner
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 btrfs_show_two_disks(),
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 cryptsetup_status_active("braid-disk1", "/dev/vda"),
             )
@@ -5501,7 +5501,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk2".into()),
+                    mapper: MapperName::from_basename("braid-disk2".into()),
                 },
                 cryptsetup_status_active("braid-disk2", "/dev/vdb"),
             )
@@ -5517,13 +5517,13 @@ mod tests {
         runner
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 btrfs_show_disk1_and_disk2_devid4(),
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 cryptsetup_status_active("braid-disk1", "/dev/vda"),
             )
@@ -5535,7 +5535,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk2".into()),
+                    mapper: MapperName::from_basename("braid-disk2".into()),
                 },
                 cryptsetup_status_active("braid-disk2", "/dev/vdb"),
             )
@@ -5551,13 +5551,13 @@ mod tests {
         runner
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 btrfs_show_disk1_and_drifted_disk2_devid4(),
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 cryptsetup_status_active("braid-disk1", "/dev/vda"),
             )
@@ -5569,7 +5569,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-WRONG".into()),
+                    mapper: MapperName::from_basename("braid-WRONG".into()),
                 },
                 cryptsetup_status_active("braid-WRONG", "/dev/vdb"),
             )
@@ -5585,13 +5585,13 @@ mod tests {
         runner
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 btrfs_show_disk1_disk2_devid4_disk3_devid5(),
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 cryptsetup_status_active("braid-disk1", "/dev/vda"),
             )
@@ -5603,7 +5603,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk2".into()),
+                    mapper: MapperName::from_basename("braid-disk2".into()),
                 },
                 cryptsetup_status_active("braid-disk2", "/dev/vdb"),
             )
@@ -5615,7 +5615,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk3".into()),
+                    mapper: MapperName::from_basename("braid-disk3".into()),
                 },
                 cryptsetup_status_active("braid-disk3", "/dev/vdc"),
             )
@@ -5631,13 +5631,13 @@ mod tests {
         runner
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 btrfs_show_three_disks(),
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 cryptsetup_status_active("braid-disk1", "/dev/vda"),
             )
@@ -5649,7 +5649,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk2".into()),
+                    mapper: MapperName::from_basename("braid-disk2".into()),
                 },
                 cryptsetup_status_active("braid-disk2", "/dev/vdb"),
             )
@@ -5661,7 +5661,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk3".into()),
+                    mapper: MapperName::from_basename("braid-disk3".into()),
                 },
                 cryptsetup_status_active("braid-disk3", "/dev/vdc"),
             )
@@ -5676,7 +5676,7 @@ mod tests {
     fn with_idle_balance_status(runner: MockRunner) -> MockRunner {
         runner.with_output(
             CmdRequest::BtrfsBalanceStatus {
-                mount_point: MountPoint("/mnt/storage".into()),
+                mount_point: MountPoint::new("/mnt/storage".into()),
             },
             ok_raw(
                 "btrfs balance status",
@@ -5688,7 +5688,7 @@ mod tests {
     fn with_balance_replay(runner: MockRunner) -> MockRunner {
         with_idle_balance_status(runner).with_output(
             CmdRequest::BtrfsBalanceRaid1Soft {
-                mount_point: MountPoint("/mnt/storage".into()),
+                mount_point: MountPoint::new("/mnt/storage".into()),
             },
             ok_raw_empty("btrfs balance start"),
         )
@@ -5790,7 +5790,7 @@ mod tests {
             .with_output(
                 CmdRequest::BtrfsDeviceAdd {
                     device: "/dev/mapper/braid-disk2".into(),
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                     force: true,
                 },
                 ok_raw_empty("btrfs device add"),
@@ -5808,14 +5808,14 @@ mod tests {
         replay_returned_disk2_runner_for_devid4()
             .with_output_sequence(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk2".into()),
+                    mapper: MapperName::from_basename("braid-disk2".into()),
                 },
                 vec![inactive.clone(), inactive],
             )
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-disk2".into(),
-                    mapper: MapperName("braid-disk2".into()),
+                    mapper: MapperName::from_basename("braid-disk2".into()),
                 },
                 TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open"),
@@ -6223,7 +6223,7 @@ mod tests {
                 .with_output(
                     CmdRequest::BtrfsDeviceAdd {
                         device: "/dev/mapper/braid-disk3".into(),
-                        mount_point: MountPoint("/mnt/storage".into()),
+                        mount_point: MountPoint::new("/mnt/storage".into()),
                         force: true,
                     },
                     ok_raw_empty("btrfs device add"),
@@ -6744,7 +6744,7 @@ mod tests {
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-disk2".into(),
-                    mapper: MapperName("braid-disk2".into()),
+                    mapper: MapperName::from_basename("braid-disk2".into()),
                 },
                 TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open"),
@@ -6871,7 +6871,7 @@ mod tests {
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-disk2".into(),
-                    mapper: MapperName("braid-disk2".into()),
+                    mapper: MapperName::from_basename("braid-disk2".into()),
                 },
                 TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open"),
@@ -6986,7 +6986,7 @@ mod tests {
             .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk2")
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk2".into()),
+                    mapper: MapperName::from_basename("braid-disk2".into()),
                 },
                 inactive_mapper_status("braid-disk2"),
             )
@@ -7002,7 +7002,7 @@ mod tests {
             .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk1")
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 inactive_mapper_status("braid-disk1"),
             );
@@ -7088,7 +7088,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk2".into()),
+                    mapper: MapperName::from_basename("braid-disk2".into()),
                 },
                 inactive_mapper_status("braid-disk2"),
             )
@@ -7104,7 +7104,7 @@ mod tests {
             .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk1")
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 inactive_mapper_status("braid-disk1"),
             );
@@ -7185,7 +7185,7 @@ mod tests {
             .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk2")
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk2".into()),
+                    mapper: MapperName::from_basename("braid-disk2".into()),
                 },
                 inactive_mapper_status("braid-disk2"),
             )
@@ -7201,14 +7201,14 @@ mod tests {
             .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk3")
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk3".into()),
+                    mapper: MapperName::from_basename("braid-disk3".into()),
                 },
                 inactive_mapper_status("braid-disk3"),
             )
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-disk3".into(),
-                    mapper: MapperName("braid-disk3".into()),
+                    mapper: MapperName::from_basename("braid-disk3".into()),
                 },
                 TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open"),
@@ -7237,7 +7237,7 @@ mod tests {
             .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk1")
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 inactive_mapper_status("braid-disk1"),
             );
@@ -7298,7 +7298,7 @@ mod tests {
         let pool = PoolState {
             mounted: true,
             devices: vec![PoolDevice {
-                mapper: MapperName("braid-WRONG".into()),
+                mapper: MapperName::from_basename("braid-WRONG".into()),
                 luks_uuid: drifted_uuid.clone(),
                 devid: Devid::new(1),
                 underlying: "/dev/vda".into(),
@@ -7369,7 +7369,7 @@ mod tests {
         let pool = PoolState {
             mounted: true,
             devices: vec![PoolDevice {
-                mapper: MapperName("braid-WRONG".into()),
+                mapper: MapperName::from_basename("braid-WRONG".into()),
                 luks_uuid: drifted_uuid.clone(),
                 devid: Devid::new(1),
                 underlying: "/dev/vda".into(),
@@ -7465,13 +7465,13 @@ mod tests {
             )
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 btrfs_show_one_disk(),
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 cryptsetup_status_active("braid-disk1", "/dev/vda"),
             )
@@ -7561,7 +7561,7 @@ mod tests {
 
         let mut pool = pool_state_two_disks();
         pool.devices.push(PoolDevice {
-            mapper: MapperName("braid-mystery".into()),
+            mapper: MapperName::from_basename("braid-mystery".into()),
             luks_uuid: LuksUuid::parse("99999999-9999-9999-9999-999999999999").unwrap(),
             devid: Devid::new(3),
             underlying: "/dev/vdz".into(),
@@ -7703,7 +7703,7 @@ mod tests {
                 .with_output_stdin(
                     CmdRequest::CryptsetupLuksOpen {
                         device: "/dev/disk/by-id/virtio-disk2".into(),
-                        mapper: MapperName("braid-disk2".into()),
+                        mapper: MapperName::from_basename("braid-disk2".into()),
                     },
                     TEST_PASSPHRASE_BYTES.to_vec(),
                     ok_raw_empty("cryptsetup open"),
@@ -7740,7 +7740,7 @@ mod tests {
                 .with_output_stdin(
                     CmdRequest::CryptsetupLuksOpen {
                         device: "/dev/disk/by-id/virtio-disk1".into(),
-                        mapper: MapperName("braid-disk1".into()),
+                        mapper: MapperName::from_basename("braid-disk1".into()),
                     },
                     TEST_PASSPHRASE_BYTES.to_vec(),
                     ok_raw_empty("cryptsetup open"),
@@ -7752,7 +7752,7 @@ mod tests {
                 .with_output(
                     CmdRequest::Mount {
                         device: "/dev/mapper/braid-disk1".into(),
-                        mount_point: MountPoint("/mnt/storage".into()),
+                        mount_point: MountPoint::new("/mnt/storage".into()),
                     },
                     ok_raw_empty("mount"),
                 ),
@@ -7838,7 +7838,7 @@ mod tests {
                 .with_output_stdin(
                     CmdRequest::CryptsetupLuksOpen {
                         device: "/dev/disk/by-id/virtio-disk2".into(),
-                        mapper: MapperName("braid-disk2".into()),
+                        mapper: MapperName::from_basename("braid-disk2".into()),
                     },
                     TEST_PASSPHRASE_BYTES.to_vec(),
                     ok_raw_empty("cryptsetup open"),
@@ -8015,7 +8015,7 @@ mod tests {
                 .with_output(
                     CmdRequest::BtrfsDeviceAdd {
                         device: "/dev/mapper/braid-disk2".into(),
-                        mount_point: MountPoint("/mnt/storage".into()),
+                        mount_point: MountPoint::new("/mnt/storage".into()),
                         force: true,
                     },
                     ok_raw_empty("btrfs device add"),
@@ -8196,7 +8196,7 @@ mod tests {
                 .with_output(
                     CmdRequest::BtrfsDeviceAdd {
                         device: "/dev/mapper/braid-disk2".into(),
-                        mount_point: MountPoint("/mnt/storage".into()),
+                        mount_point: MountPoint::new("/mnt/storage".into()),
                         force: true,
                     },
                     ok_raw_empty("btrfs device add"),
@@ -8288,7 +8288,7 @@ mod tests {
             pre_resolved_credential: None,
             journal: recoverable_pool_mutation_add_journal(),
             admission_membership: PoolMembership::empty(),
-            mount_point: MountPoint("/mnt/storage".into()),
+            mount_point: MountPoint::new("/mnt/storage".into()),
             pool_json_path: std::path::PathBuf::from("/var/lib/braid/pool.json"),
             pending_op_path: std::path::PathBuf::from("/var/lib/braid/pending-op.json"),
             luks_headers_dir: std::path::PathBuf::from("/var/lib/braid/luks-headers"),
@@ -8363,7 +8363,7 @@ mod tests {
             pre_resolved_credential: None,
             journal: recoverable_pool_mutation_add_journal(),
             admission_membership: PoolMembership::empty(),
-            mount_point: MountPoint("/mnt/storage".into()),
+            mount_point: MountPoint::new("/mnt/storage".into()),
             pool_json_path: std::path::PathBuf::from("/var/lib/braid/pool.json"),
             pending_op_path: std::path::PathBuf::from("/var/lib/braid/pending-op.json"),
             luks_headers_dir: std::path::PathBuf::from("/var/lib/braid/luks-headers"),
@@ -8431,7 +8431,7 @@ mod tests {
             pre_resolved_credential: None,
             journal: recoverable_pool_mutation_add_journal(),
             admission_membership: PoolMembership::empty(),
-            mount_point: MountPoint("/mnt/storage".into()),
+            mount_point: MountPoint::new("/mnt/storage".into()),
             pool_json_path: std::path::PathBuf::from("/var/lib/braid/pool.json"),
             pending_op_path: std::path::PathBuf::from("/var/lib/braid/pending-op.json"),
             luks_headers_dir: std::path::PathBuf::from("/var/lib/braid/luks-headers"),
@@ -8760,7 +8760,7 @@ mod tests {
             .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk2")
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk2".into()),
+                    mapper: MapperName::from_basename("braid-disk2".into()),
                 },
                 inactive_mapper_status("braid-disk2"),
             )
@@ -8776,7 +8776,7 @@ mod tests {
             .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk1")
             .with_output_sequence(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 // Status probes for disk1, in order:
                 // 1. initial mount planning sees disk1 closed;
@@ -8804,7 +8804,7 @@ mod tests {
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-disk1".into(),
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open"),
@@ -8816,19 +8816,19 @@ mod tests {
             .with_output(
                 CmdRequest::Mount {
                     device: "/dev/mapper/braid-disk1".into(),
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 ok_raw_empty("mount"),
             )
             .with_output(
                 CmdRequest::Umount {
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 ok_raw_empty("umount"),
             )
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 btrfs_show_one_disk(),
             );
@@ -8920,7 +8920,7 @@ mod tests {
                 .with_output_stdin(
                     CmdRequest::CryptsetupLuksOpen {
                         device: "/dev/disk/by-id/virtio-disk2".into(),
-                        mapper: MapperName("braid-disk2".into()),
+                        mapper: MapperName::from_basename("braid-disk2".into()),
                     },
                     TEST_PASSPHRASE_BYTES.to_vec(),
                     ok_raw_empty("cryptsetup open"),
@@ -8928,7 +8928,7 @@ mod tests {
                 .with_output(
                     CmdRequest::BtrfsDeviceAdd {
                         device: "/dev/mapper/braid-disk2".into(),
-                        mount_point: MountPoint("/mnt/storage".into()),
+                        mount_point: MountPoint::new("/mnt/storage".into()),
                         force: false,
                     },
                     ok_raw_empty("btrfs device add"),
@@ -9023,7 +9023,7 @@ mod tests {
                 .with_output_stdin(
                     CmdRequest::CryptsetupLuksOpen {
                         device: "/dev/disk/by-id/virtio-disk2".into(),
-                        mapper: MapperName("braid-disk2".into()),
+                        mapper: MapperName::from_basename("braid-disk2".into()),
                     },
                     TEST_PASSPHRASE_BYTES.to_vec(),
                     ok_raw_empty("cryptsetup open"),
@@ -9031,7 +9031,7 @@ mod tests {
                 .with_output(
                     CmdRequest::BtrfsDeviceAdd {
                         device: "/dev/mapper/braid-disk2".into(),
-                        mount_point: MountPoint("/mnt/storage".into()),
+                        mount_point: MountPoint::new("/mnt/storage".into()),
                         force: false,
                     },
                     ok_raw_empty("btrfs device add"),
@@ -9769,14 +9769,14 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-old".into()),
+                    mapper: MapperName::from_basename("braid-old".into()),
                 },
                 ok_raw_empty("cryptsetup close braid-old"),
             )
             .with_output(
                 CmdRequest::BtrfsFilesystemResize {
                     devid: Devid::new(2),
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 ok_raw_empty("btrfs filesystem resize"),
             );
@@ -10834,7 +10834,7 @@ mod tests {
         let runner = MockRunner::default().with_output(
             CmdRequest::BtrfsFilesystemResize {
                 devid: Devid::new(2),
-                mount_point: MountPoint("/mnt/storage".into()),
+                mount_point: MountPoint::new("/mnt/storage".into()),
             },
             ok_raw_empty("btrfs filesystem resize"),
         );
@@ -10894,7 +10894,7 @@ mod tests {
             false,
             journal::ReplaceJournalSource::Live {
                 old_devid: Devid::new(2),
-                old_mapper: MapperName("braid-old".into()),
+                old_mapper: MapperName::from_basename("braid-old".into()),
             },
         );
         journal::write_journal(&f.paths, &journal).unwrap();
@@ -10920,7 +10920,7 @@ mod tests {
             })
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-old".into()),
+                    mapper: MapperName::from_basename("braid-old".into()),
                 },
                 cryptsetup_status_active("braid-old", "/dev/disk/by-id/virtio-old"),
             )
@@ -10936,7 +10936,7 @@ mod tests {
             .with_output(
                 CmdRequest::BtrfsFilesystemResize {
                     devid: Devid::new(2),
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 ok_raw_empty("btrfs filesystem resize"),
             );
@@ -10995,21 +10995,21 @@ mod tests {
             false,
             journal::ReplaceJournalSource::Live {
                 old_devid: Devid::new(2),
-                old_mapper: MapperName("braid-old".into()),
+                old_mapper: MapperName::from_basename("braid-old".into()),
             },
         );
         journal::write_journal(&f.paths, &journal).unwrap();
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-old".into()),
+                    mapper: MapperName::from_basename("braid-old".into()),
                 },
                 inactive_mapper_status("braid-old"),
             )
             .with_output(
                 CmdRequest::BtrfsFilesystemResize {
                     devid: Devid::new(2),
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 ok_raw_empty("btrfs filesystem resize"),
             );
@@ -11075,14 +11075,14 @@ mod tests {
             false,
             journal::ReplaceJournalSource::Live {
                 old_devid: Devid::new(2),
-                old_mapper: MapperName("braid-old".into()),
+                old_mapper: MapperName::from_basename("braid-old".into()),
             },
         );
         journal::write_journal(&f.paths, &journal).unwrap();
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-old".into()),
+                    mapper: MapperName::from_basename("braid-old".into()),
                 },
                 cryptsetup_status_active("braid-old", "/dev/vdf"),
             )
@@ -11095,7 +11095,7 @@ mod tests {
             .with_output(
                 CmdRequest::BtrfsFilesystemResize {
                     devid: Devid::new(2),
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 ok_raw_empty("btrfs filesystem resize"),
             );
@@ -11165,14 +11165,14 @@ mod tests {
             false,
             journal::ReplaceJournalSource::Live {
                 old_devid: Devid::new(2),
-                old_mapper: MapperName("braid-old".into()),
+                old_mapper: MapperName::from_basename("braid-old".into()),
             },
         );
         journal::write_journal(&f.paths, &journal).unwrap();
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-old".into()),
+                    mapper: MapperName::from_basename("braid-old".into()),
                 },
                 cryptsetup_status_active("braid-old", "/dev/disk/by-id/virtio-old"),
             )
@@ -11187,14 +11187,14 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-old".into()),
+                    mapper: MapperName::from_basename("braid-old".into()),
                 },
                 ok_raw_empty("cryptsetup close braid-old"),
             )
             .with_output(
                 CmdRequest::BtrfsFilesystemResize {
                     devid: Devid::new(2),
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 ok_raw_empty("btrfs filesystem resize"),
             );
@@ -11255,7 +11255,7 @@ mod tests {
         let runner = with_balance_replay(MockRunner::default()).with_output(
             CmdRequest::BtrfsFilesystemResize {
                 devid: Devid::new(2),
-                mount_point: MountPoint("/mnt/storage".into()),
+                mount_point: MountPoint::new("/mnt/storage".into()),
             },
             ok_raw_empty("btrfs filesystem resize"),
         );
@@ -11389,13 +11389,13 @@ mod tests {
             .with_output(mp_req, mp_out)
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 show,
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 cryptsetup_status_active("braid-disk1", "/dev/vda"),
             )
@@ -11407,7 +11407,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk-new".into()),
+                    mapper: MapperName::from_basename("braid-disk-new".into()),
                 },
                 cryptsetup_status_active("braid-disk-new", "/dev/vdb"),
             )
@@ -11419,14 +11419,14 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk3".into()),
+                    mapper: MapperName::from_basename("braid-disk3".into()),
                 },
                 cryptsetup_status_active("braid-disk3", "(null)"),
             )
             .with_output(
                 CmdRequest::BtrfsFilesystemResize {
                     devid: Devid::new(2),
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 ok_raw_empty("btrfs filesystem resize"),
             );
@@ -11557,13 +11557,13 @@ mod tests {
             .with_output(mp_req, mp_out)
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 show,
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 cryptsetup_status_active("braid-disk1", "/dev/vda"),
             )
@@ -11575,7 +11575,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk-new".into()),
+                    mapper: MapperName::from_basename("braid-disk-new".into()),
                 },
                 cryptsetup_status_active("braid-disk-new", "/dev/vdb"),
             )
@@ -11588,7 +11588,7 @@ mod tests {
             .with_output(
                 CmdRequest::BtrfsFilesystemResize {
                     devid: Devid::new(2),
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 ok_raw_empty("btrfs filesystem resize"),
             );
@@ -11634,7 +11634,7 @@ mod tests {
             true,
             journal::ReplaceJournalSource::Live {
                 old_devid: Devid::new(2),
-                old_mapper: MapperName("braid-old".into()),
+                old_mapper: MapperName::from_basename("braid-old".into()),
             },
         );
         journal::write_journal(&f.paths, &journal).unwrap();
@@ -11882,7 +11882,7 @@ mod tests {
         let mut pool = pool_state_two_disks();
         pool.total_devices = 3;
         pool.null_underlying.push(NullUnderlyingDevice {
-            mapper: MapperName("braid-disk3".into()),
+            mapper: MapperName::from_basename("braid-disk3".into()),
             devid: Devid::new(3),
         });
 
@@ -11957,7 +11957,7 @@ mod tests {
         pool.total_devices = 2;
         pool.missing_devids = vec![Devid::new(2)];
         pool.null_underlying.push(NullUnderlyingDevice {
-            mapper: MapperName("braid-disk2".into()),
+            mapper: MapperName::from_basename("braid-disk2".into()),
             devid: Devid::new(2),
         });
         let expected = membership_from(vec![
@@ -11995,7 +11995,7 @@ mod tests {
         let mut pool = pool_state_two_disks();
         pool.total_devices = 3;
         pool.null_underlying.push(NullUnderlyingDevice {
-            mapper: MapperName("braid-disk4".into()),
+            mapper: MapperName::from_basename("braid-disk4".into()),
             devid: Devid::new(2),
         });
         let expected = membership_from(vec![
@@ -12163,13 +12163,13 @@ mod tests {
             .with_output(mp_req, mp_out)
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 show,
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 cryptsetup_status_active("braid-disk1", "/dev/vda"),
             )
@@ -12181,7 +12181,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk-new".into()),
+                    mapper: MapperName::from_basename("braid-disk-new".into()),
                 },
                 cryptsetup_status_active("braid-disk-new", "/dev/vdb"),
             )
@@ -12194,7 +12194,7 @@ mod tests {
             .with_output(
                 CmdRequest::BtrfsFilesystemResize {
                     devid: Devid::new(2),
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 ok_raw_empty("btrfs filesystem resize"),
             );
@@ -12287,13 +12287,13 @@ mod tests {
             .with_output(mp_req, mp_out)
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 btrfs_show_toshiba_and_mystery(),
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-toshiba".into()),
+                    mapper: MapperName::from_basename("braid-toshiba".into()),
                 },
                 cryptsetup_status_active("braid-toshiba", "/dev/vda"),
             )
@@ -12305,7 +12305,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-mystery".into()),
+                    mapper: MapperName::from_basename("braid-mystery".into()),
                 },
                 cryptsetup_status_active("braid-mystery", "/dev/vdb"),
             )
@@ -12411,7 +12411,7 @@ mod tests {
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-disk1".into(),
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open"),
@@ -12420,7 +12420,7 @@ mod tests {
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-disk2".into(),
-                    mapper: MapperName("braid-disk2".into()),
+                    mapper: MapperName::from_basename("braid-disk2".into()),
                 },
                 TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open"),
@@ -12434,7 +12434,7 @@ mod tests {
             .with_output(
                 CmdRequest::MountWithOptions {
                     device: "/dev/mapper/braid-disk1".into(),
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                     options: vec!["degraded".to_owned()],
                 },
                 ok_raw_empty("mount"),
@@ -12442,14 +12442,14 @@ mod tests {
             .with_output(
                 CmdRequest::Mount {
                     device: "/dev/mapper/braid-disk1".into(),
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 ok_raw_empty("mount"),
             )
             // remount cycle: umount
             .with_output(
                 CmdRequest::Umount {
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 ok_raw_empty("umount"),
             )
@@ -12470,13 +12470,13 @@ mod tests {
             // flips status queries to inactive so the re-probe opens them).
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 ok_raw_empty("cryptsetup close braid-disk1"),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-disk2".into()),
+                    mapper: MapperName::from_basename("braid-disk2".into()),
                 },
                 ok_raw_empty("cryptsetup close braid-disk2"),
             )
@@ -12485,14 +12485,14 @@ mod tests {
             // probe_pool: btrfs filesystem show
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 btrfs_show_two_disks(),
             )
             // probe_pool: cryptsetup status for each device
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 cryptsetup_status_active("braid-disk1", "/dev/vda"),
             )
@@ -12504,7 +12504,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk2".into()),
+                    mapper: MapperName::from_basename("braid-disk2".into()),
                 },
                 cryptsetup_status_active("braid-disk2", "/dev/vdb"),
             )
@@ -12518,7 +12518,7 @@ mod tests {
             // before the owed soft RAID1 balance.
             .with_output(
                 CmdRequest::BtrfsBalanceStatus {
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 ok_raw(
                     "btrfs balance status",
@@ -12527,7 +12527,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::BtrfsBalanceRaid1Soft {
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 ok_raw_empty("btrfs balance start"),
             )
@@ -12630,7 +12630,7 @@ mod tests {
             .with_output(
                 CmdRequest::MountWithOptions {
                     device: "/dev/mapper/braid-disk1".into(),
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                     options: vec!["degraded".to_owned()],
                 },
                 ok_raw_empty("mount"),
@@ -12638,20 +12638,20 @@ mod tests {
             .with_output(
                 CmdRequest::Mount {
                     device: "/dev/mapper/braid-disk1".into(),
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 ok_raw_empty("mount"),
             )
             // Probe pool after the initial mount.
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 btrfs_show_two_disks(),
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 cryptsetup_status_active("braid-disk1", "/dev/vda"),
             )
@@ -12663,7 +12663,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk2".into()),
+                    mapper: MapperName::from_basename("braid-disk2".into()),
                 },
                 cryptsetup_status_active("braid-disk2", "/dev/vdb"),
             )
@@ -12677,7 +12677,7 @@ mod tests {
             // before the owed soft RAID1 balance.
             .with_output(
                 CmdRequest::BtrfsBalanceStatus {
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 ok_raw(
                     "btrfs balance status",
@@ -12686,7 +12686,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::BtrfsBalanceRaid1Soft {
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 ok_raw_empty("btrfs balance start"),
             )
@@ -12809,7 +12809,7 @@ mod tests {
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-disk1".into(),
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open"),
@@ -12817,7 +12817,7 @@ mod tests {
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-disk2".into(),
-                    mapper: MapperName("braid-disk2".into()),
+                    mapper: MapperName::from_basename("braid-disk2".into()),
                 },
                 TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open"),
@@ -12829,13 +12829,13 @@ mod tests {
             .with_output(
                 CmdRequest::Mount {
                     device: "/dev/mapper/braid-disk1".into(),
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 err_raw("mount", 32, "wrong fs type"),
             )
             .with_output_sequence(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 vec![
                     err_raw("cryptsetup close", 5, "busy"),
@@ -12845,7 +12845,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-disk2".into()),
+                    mapper: MapperName::from_basename("braid-disk2".into()),
                 },
                 ok_raw_empty("cryptsetup close"),
             );
@@ -12934,7 +12934,7 @@ mod tests {
             // (non-MISSING) devices.
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 cryptsetup_status_active("braid-disk1", "/dev/vda"),
             )
@@ -12946,7 +12946,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk2".into()),
+                    mapper: MapperName::from_basename("braid-disk2".into()),
                 },
                 cryptsetup_status_active("braid-disk2", "/dev/vdb"),
             )
@@ -12958,7 +12958,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk3".into()),
+                    mapper: MapperName::from_basename("braid-disk3".into()),
                 },
                 cryptsetup_status_active("braid-disk3", "/dev/vdc"),
             )
@@ -12980,7 +12980,7 @@ mod tests {
             .with_output(
                 CmdRequest::Mount {
                     device: "/dev/mapper/braid-disk1".into(),
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 ok_raw_empty("mount"),
             )
@@ -12991,7 +12991,7 @@ mod tests {
             // clear journal, no further commands).
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 ok_raw(
                     "btrfs filesystem show /mnt/storage",
@@ -13139,7 +13139,7 @@ mod tests {
             // committed members (disk1, new).
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 cryptsetup_status_active("braid-disk1", "/dev/vda"),
             )
@@ -13159,13 +13159,13 @@ mod tests {
             // configuring a custom backing-path resolver.
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-old".into()),
+                    mapper: MapperName::from_basename("braid-old".into()),
                 },
                 cryptsetup_status_active("braid-old", "/dev/disk/by-id/virtio-old"),
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-new".into()),
+                    mapper: MapperName::from_basename("braid-new".into()),
                 },
                 cryptsetup_status_active("braid-new", "/dev/disk/by-id/virtio-new"),
             )
@@ -13180,7 +13180,7 @@ mod tests {
             .with_output(
                 CmdRequest::Mount {
                     device: "/dev/mapper/braid-disk1".into(),
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 ok_raw_empty("mount"),
             )
@@ -13189,7 +13189,7 @@ mod tests {
             // immediately.
             .with_output(
                 CmdRequest::BtrfsReplaceStatus {
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 ok_raw(
                     "btrfs replace status",
@@ -13201,7 +13201,7 @@ mod tests {
             // 1. Umount.
             .with_output(
                 CmdRequest::Umount {
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 ok_raw_empty("umount"),
             )
@@ -13224,19 +13224,19 @@ mod tests {
             //    sees the mappers as inactive.
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 ok_raw_empty("cryptsetup close braid-disk1"),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-old".into()),
+                    mapper: MapperName::from_basename("braid-old".into()),
                 },
                 ok_raw_empty("cryptsetup close braid-old"),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-new".into()),
+                    mapper: MapperName::from_basename("braid-new".into()),
                 },
                 ok_raw_empty("cryptsetup close braid-new"),
             )
@@ -13271,7 +13271,7 @@ mod tests {
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-disk1".into(),
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open"),
@@ -13279,7 +13279,7 @@ mod tests {
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-new".into(),
-                    mapper: MapperName("braid-new".into()),
+                    mapper: MapperName::from_basename("braid-new".into()),
                 },
                 TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open"),
@@ -13287,7 +13287,7 @@ mod tests {
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-old".into(),
-                    mapper: MapperName("braid-old".into()),
+                    mapper: MapperName::from_basename("braid-old".into()),
                 },
                 TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open"),
@@ -13298,7 +13298,7 @@ mod tests {
             // per-device probes.
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 btrfs_show_disk1_and_new(),
             )
@@ -13307,7 +13307,7 @@ mod tests {
             .with_output(
                 CmdRequest::BtrfsFilesystemResize {
                     devid: Devid::new(2),
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 ok_raw_empty("btrfs filesystem resize"),
             )
@@ -13478,7 +13478,7 @@ mod tests {
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-disk1".into(),
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open"),
@@ -13486,7 +13486,7 @@ mod tests {
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-new".into(),
-                    mapper: MapperName("braid-new".into()),
+                    mapper: MapperName::from_basename("braid-new".into()),
                 },
                 TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open"),
@@ -13494,7 +13494,7 @@ mod tests {
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-old".into(),
-                    mapper: MapperName("braid-old".into()),
+                    mapper: MapperName::from_basename("braid-old".into()),
                 },
                 TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open"),
@@ -13506,13 +13506,13 @@ mod tests {
             .with_output(
                 CmdRequest::Mount {
                     device: "/dev/mapper/braid-disk1".into(),
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 ok_raw_empty("mount"),
             )
             .with_output(
                 CmdRequest::BtrfsReplaceStatus {
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 ok_raw(
                     "btrfs replace status",
@@ -13523,7 +13523,7 @@ mod tests {
             // Cycle umount fails with EBUSY.
             .with_output(
                 CmdRequest::Umount {
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 err_raw("umount", 32, "umount: target is busy"),
             )
@@ -13580,7 +13580,7 @@ mod tests {
     //   BtrfsDeviceScanForget argv must not contain /dev/mapper/braid-extra.
     #[test]
     fn recover_remount_cycle_honors_close_names_over_membership() {
-        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let config = Config::new(MountPoint::new("/mnt/storage".into())).unwrap();
         let fs = MockFs::new(&[
             "/dev/disk/by-id/virtio-disk1",
             "/dev/disk/by-id/virtio-disk2",
@@ -13601,7 +13601,7 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::Umount {
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 ok_raw_empty("umount"),
             )
@@ -13616,13 +13616,13 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 ok_raw_empty("cryptsetup close"),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-disk2".into()),
+                    mapper: MapperName::from_basename("braid-disk2".into()),
                 },
                 ok_raw_empty("cryptsetup close"),
             )
@@ -13682,7 +13682,7 @@ mod tests {
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-disk1".into(),
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 b"testpass".to_vec(),
                 ok_raw_empty("cryptsetup open"),
@@ -13690,7 +13690,7 @@ mod tests {
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-disk2".into(),
-                    mapper: MapperName("braid-disk2".into()),
+                    mapper: MapperName::from_basename("braid-disk2".into()),
                 },
                 b"testpass".to_vec(),
                 ok_raw_empty("cryptsetup open"),
@@ -13702,7 +13702,7 @@ mod tests {
             .with_output(
                 CmdRequest::Mount {
                     device: "/dev/mapper/braid-disk1".into(),
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 ok_raw_empty("mount"),
             );
@@ -13774,7 +13774,7 @@ mod tests {
     //   /dev/mapper/braid-disk1 and CryptsetupClose runs only for disk1.
     #[test]
     fn recover_remount_cycle_skips_disappeared_planned_mapper() {
-        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let config = Config::new(MountPoint::new("/mnt/storage".into())).unwrap();
         let fs = MockFs::new(&[
             "/dev/disk/by-id/virtio-disk1",
             "/dev/disk/by-id/virtio-disk2",
@@ -13788,7 +13788,7 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::Umount {
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 ok_raw_empty("umount"),
             )
@@ -13800,7 +13800,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 ok_raw_empty("cryptsetup close"),
             )
@@ -13845,7 +13845,7 @@ mod tests {
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-disk1".into(),
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 b"testpass".to_vec(),
                 ok_raw_empty("cryptsetup open"),
@@ -13853,7 +13853,7 @@ mod tests {
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-disk2".into(),
-                    mapper: MapperName("braid-disk2".into()),
+                    mapper: MapperName::from_basename("braid-disk2".into()),
                 },
                 b"testpass".to_vec(),
                 ok_raw_empty("cryptsetup open"),
@@ -13865,7 +13865,7 @@ mod tests {
             .with_output(
                 CmdRequest::Mount {
                     device: "/dev/mapper/braid-disk1".into(),
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 ok_raw_empty("mount"),
             );
@@ -13921,7 +13921,7 @@ mod tests {
     // then the final mount fails.
     #[test]
     fn recover_remount_cycle_mount_failure_closes_reopened_mappers() {
-        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let config = Config::new(MountPoint::new("/mnt/storage".into())).unwrap();
         let fs = MockFs::new(&[
             "/dev/disk/by-id/virtio-disk1",
             "/dev/disk/by-id/virtio-disk2",
@@ -13936,7 +13936,7 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::Umount {
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 ok_raw_empty("umount"),
             )
@@ -13951,13 +13951,13 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 ok_raw_empty("cryptsetup close"),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-disk2".into()),
+                    mapper: MapperName::from_basename("braid-disk2".into()),
                 },
                 ok_raw_empty("cryptsetup close"),
             )
@@ -14002,7 +14002,7 @@ mod tests {
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-disk1".into(),
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 b"testpass".to_vec(),
                 ok_raw_empty("cryptsetup open"),
@@ -14010,7 +14010,7 @@ mod tests {
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-disk2".into(),
-                    mapper: MapperName("braid-disk2".into()),
+                    mapper: MapperName::from_basename("braid-disk2".into()),
                 },
                 b"testpass".to_vec(),
                 ok_raw_empty("cryptsetup open"),
@@ -14022,7 +14022,7 @@ mod tests {
             .with_output(
                 CmdRequest::Mount {
                     device: "/dev/mapper/braid-disk1".into(),
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 err_raw("mount", 32, "mount failed"),
             );
@@ -14068,7 +14068,7 @@ mod tests {
     //   fails, and one cleanup close stays busy through all retry attempts.
     #[test]
     fn recover_remount_cycle_mount_failure_cleanup_honors_injected_sleeper() {
-        let config = Config::new(MountPoint("/mnt/storage".into())).unwrap();
+        let config = Config::new(MountPoint::new("/mnt/storage".into())).unwrap();
         let fs = MockFs::new(&[
             "/dev/disk/by-id/virtio-disk1",
             "/dev/disk/by-id/virtio-disk2",
@@ -14083,7 +14083,7 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::Umount {
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 ok_raw_empty("umount"),
             )
@@ -14098,7 +14098,7 @@ mod tests {
             )
             .with_output_sequence(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 vec![
                     ok_raw_empty("cryptsetup close"),
@@ -14109,7 +14109,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-disk2".into()),
+                    mapper: MapperName::from_basename("braid-disk2".into()),
                 },
                 ok_raw_empty("cryptsetup close"),
             )
@@ -14154,7 +14154,7 @@ mod tests {
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-disk1".into(),
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 b"testpass".to_vec(),
                 ok_raw_empty("cryptsetup open"),
@@ -14162,7 +14162,7 @@ mod tests {
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-disk2".into(),
-                    mapper: MapperName("braid-disk2".into()),
+                    mapper: MapperName::from_basename("braid-disk2".into()),
                 },
                 b"testpass".to_vec(),
                 ok_raw_empty("cryptsetup open"),
@@ -14174,7 +14174,7 @@ mod tests {
             .with_output(
                 CmdRequest::Mount {
                     device: "/dev/mapper/braid-disk1".into(),
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 err_raw("mount", 32, "mount failed"),
             );
@@ -14261,7 +14261,7 @@ mod tests {
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-disk1".into(),
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open"),
@@ -14269,7 +14269,7 @@ mod tests {
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-disk2".into(),
-                    mapper: MapperName("braid-disk2".into()),
+                    mapper: MapperName::from_basename("braid-disk2".into()),
                 },
                 TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open"),
@@ -14332,14 +14332,14 @@ mod tests {
             // probe_pool: btrfs filesystem show
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 btrfs_show_two_disks(),
             )
             // probe_pool: cryptsetup status for each device
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 cryptsetup_status_active("braid-disk1", "/dev/vda"),
             )
@@ -14351,7 +14351,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk2".into()),
+                    mapper: MapperName::from_basename("braid-disk2".into()),
                 },
                 cryptsetup_status_active("braid-disk2", "/dev/vdb"),
             )
@@ -14365,7 +14365,7 @@ mod tests {
             // before the owed soft RAID1 balance.
             .with_output(
                 CmdRequest::BtrfsBalanceStatus {
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 ok_raw(
                     "btrfs balance status",
@@ -14374,7 +14374,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::BtrfsBalanceRaid1Soft {
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 ok_raw_empty("btrfs balance start"),
             );
@@ -14624,13 +14624,13 @@ mod tests {
             .with_output(mp_req, mp_out)
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 btrfs_show_two_disks(),
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 cryptsetup_status_active("braid-disk1", "/dev/vda"),
             )
@@ -14642,7 +14642,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk2".into()),
+                    mapper: MapperName::from_basename("braid-disk2".into()),
                 },
                 cryptsetup_status_active("braid-disk2", "/dev/vdb"),
             )
@@ -14654,7 +14654,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::BtrfsBalanceStatus {
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 ok_raw(
                     "btrfs balance status",
@@ -14663,7 +14663,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::BtrfsBalanceRaid1Soft {
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 ok_raw_empty("btrfs balance start"),
             );
@@ -14767,7 +14767,7 @@ mod tests {
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-disk1".into(),
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open"),
@@ -14781,7 +14781,7 @@ mod tests {
             .with_output(
                 CmdRequest::Mount {
                     device: "/dev/mapper/braid-disk1".into(),
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 err_raw(
                     "mount",
@@ -14808,7 +14808,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 err_raw("cryptsetup close", 5, "busy"),
             )
@@ -15053,7 +15053,7 @@ mod tests {
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-disk1".into(),
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open"),
@@ -15067,7 +15067,7 @@ mod tests {
             .with_output(
                 CmdRequest::Mount {
                     device: "/dev/mapper/braid-disk1".into(),
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 err_raw(
                     "mount",
@@ -15095,7 +15095,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 ok_raw_empty("cryptsetup close"),
             )
@@ -15160,13 +15160,13 @@ mod tests {
             .with_output(mp_req, mp_out)
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 btrfs_show_two_disks(),
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 cryptsetup_status_active("braid-disk1", "/dev/vda"),
             )
@@ -15178,7 +15178,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk2".into()),
+                    mapper: MapperName::from_basename("braid-disk2".into()),
                 },
                 cryptsetup_status_active("braid-disk2", "/dev/vdb"),
             )
@@ -15192,7 +15192,7 @@ mod tests {
             // before the owed soft RAID1 balance.
             .with_output(
                 CmdRequest::BtrfsBalanceStatus {
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 ok_raw(
                     "btrfs balance status",
@@ -15201,7 +15201,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::BtrfsBalanceRaid1Soft {
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 ok_raw_empty("btrfs balance start"),
             );
@@ -15283,13 +15283,13 @@ mod tests {
             .with_output(mp_req, mp_out)
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 btrfs_show_two_disks(),
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 cryptsetup_status_active("braid-disk1", "/dev/vda"),
             )
@@ -15301,7 +15301,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk2".into()),
+                    mapper: MapperName::from_basename("braid-disk2".into()),
                 },
                 cryptsetup_status_active("braid-disk2", "/dev/vdb"),
             )
@@ -15528,7 +15528,7 @@ mod tests {
             },
             source: journal::ReplaceJournalSource::Live {
                 old_devid: Devid::new(2),
-                old_mapper: MapperName("braid-old".into()),
+                old_mapper: MapperName::from_basename("braid-old".into()),
             },
             restore_raid1_after_commit: false,
         };
@@ -15558,7 +15558,7 @@ mod tests {
             },
             source: journal::ReplaceJournalSource::Live {
                 old_devid: Devid::new(2),
-                old_mapper: MapperName("braid-old".into()),
+                old_mapper: MapperName::from_basename("braid-old".into()),
             },
             restore_raid1_after_commit: false,
         };
@@ -15637,7 +15637,7 @@ mod tests {
             },
             source: journal::ReplaceJournalSource::Live {
                 old_devid: Devid::new(2),
-                old_mapper: MapperName("braid-old".into()),
+                old_mapper: MapperName::from_basename("braid-old".into()),
             },
             restore_raid1_after_commit: false,
         };
@@ -15713,7 +15713,7 @@ mod tests {
                 },
                 source: journal::ReplaceJournalSource::Live {
                     old_devid: Devid::new(2),
-                    old_mapper: MapperName("braid-old".into()),
+                    old_mapper: MapperName::from_basename("braid-old".into()),
                 },
                 restore_raid1_after_commit: false,
             },
@@ -15911,7 +15911,7 @@ mod tests {
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-disk1".into(),
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open"),
@@ -15919,7 +15919,7 @@ mod tests {
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-new".into(),
-                    mapper: MapperName("braid-new".into()),
+                    mapper: MapperName::from_basename("braid-new".into()),
                 },
                 TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open"),
@@ -15927,7 +15927,7 @@ mod tests {
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-old".into(),
-                    mapper: MapperName("braid-old".into()),
+                    mapper: MapperName::from_basename("braid-old".into()),
                 },
                 TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open"),
@@ -15939,13 +15939,13 @@ mod tests {
             .with_output(
                 CmdRequest::Mount {
                     device: "/dev/mapper/braid-disk1".into(),
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 ok_raw_empty("mount"),
             )
             .with_output(
                 CmdRequest::BtrfsReplaceStatus {
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 ok_raw(
                     "btrfs replace status",
@@ -16101,7 +16101,7 @@ mod tests {
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-disk1".into(),
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open"),
@@ -16109,7 +16109,7 @@ mod tests {
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-new".into(),
-                    mapper: MapperName("braid-new".into()),
+                    mapper: MapperName::from_basename("braid-new".into()),
                 },
                 TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open"),
@@ -16117,7 +16117,7 @@ mod tests {
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-old".into(),
-                    mapper: MapperName("braid-old".into()),
+                    mapper: MapperName::from_basename("braid-old".into()),
                 },
                 TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open"),
@@ -16132,7 +16132,7 @@ mod tests {
             .with_output(
                 CmdRequest::Mount {
                     device: "/dev/mapper/braid-disk1".into(),
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 ok_raw_empty("mount"),
             )
@@ -16142,7 +16142,7 @@ mod tests {
             // returns immediately.
             .with_output(
                 CmdRequest::BtrfsReplaceStatus {
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 ok_raw(
                     "btrfs replace status",
@@ -16154,7 +16154,7 @@ mod tests {
             // 1. Umount.
             .with_output(
                 CmdRequest::Umount {
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 ok_raw_empty("umount"),
             )
@@ -16174,19 +16174,19 @@ mod tests {
             //    `closed` set after each successful close.
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 ok_raw_empty("cryptsetup close braid-disk1"),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-new".into()),
+                    mapper: MapperName::from_basename("braid-new".into()),
                 },
                 ok_raw_empty("cryptsetup close braid-new"),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-old".into()),
+                    mapper: MapperName::from_basename("braid-old".into()),
                 },
                 ok_raw_empty("cryptsetup close braid-old"),
             )
@@ -16200,13 +16200,13 @@ mod tests {
             // MISSING. This is what btrfs_show_disk1_and_new() returns.
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 btrfs_show_disk1_and_new(),
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 cryptsetup_status_active("braid-disk1", "/dev/vda"),
             )
@@ -16218,7 +16218,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-new".into()),
+                    mapper: MapperName::from_basename("braid-new".into()),
                 },
                 cryptsetup_status_active("braid-new", "/dev/vdc"),
             )
@@ -16230,7 +16230,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-old".into()),
+                    mapper: MapperName::from_basename("braid-old".into()),
                 },
                 cryptsetup_status_active("braid-old", "/dev/disk/by-id/virtio-old"),
             )
@@ -16241,7 +16241,7 @@ mod tests {
             .with_output(
                 CmdRequest::BtrfsFilesystemResize {
                     devid: Devid::new(2),
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 ok_raw_empty("btrfs filesystem resize"),
             )
@@ -16396,7 +16396,7 @@ mod tests {
 
         let runner = MockRunner::default().with_output_sequence(
             CmdRequest::BtrfsReplaceStatus {
-                mount_point: MountPoint("/mnt/storage".into()),
+                mount_point: MountPoint::new("/mnt/storage".into()),
             },
             vec![
                 ok_raw(
@@ -16480,13 +16480,13 @@ mod tests {
             .with_output(mp_req, mp_out)
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 btrfs_show_two_disks(),
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 cryptsetup_status_active("braid-disk1", "/dev/vda"),
             )
@@ -16498,7 +16498,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk2".into()),
+                    mapper: MapperName::from_basename("braid-disk2".into()),
                 },
                 cryptsetup_status_active("braid-disk2", "/dev/vdb"),
             )
@@ -16511,7 +16511,7 @@ mod tests {
         if let Some(output) = balance_status {
             runner.with_output(
                 CmdRequest::BtrfsBalanceStatus {
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 output,
             )
@@ -16675,13 +16675,13 @@ mod tests {
             // was never removed.
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 btrfs_show_two_disks(),
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 cryptsetup_status_active("braid-disk1", "/dev/vda"),
             )
@@ -16693,7 +16693,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk2".into()),
+                    mapper: MapperName::from_basename("braid-disk2".into()),
                 },
                 cryptsetup_status_active("braid-disk2", "/dev/vdb"),
             )
@@ -16771,13 +16771,13 @@ mod tests {
                 // but before pool.json/journal cleanup ran.
                 .with_output(
                     CmdRequest::BtrfsFilesystemShow {
-                        mount_point: MountPoint("/mnt/storage".into()),
+                        mount_point: MountPoint::new("/mnt/storage".into()),
                     },
                     btrfs_show_two_disks(),
                 )
                 .with_output(
                     CmdRequest::CryptsetupStatus {
-                        mapper: MapperName("braid-disk1".into()),
+                        mapper: MapperName::from_basename("braid-disk1".into()),
                     },
                     cryptsetup_status_active("braid-disk1", "/dev/vda"),
                 )
@@ -16789,7 +16789,7 @@ mod tests {
                 )
                 .with_output(
                     CmdRequest::CryptsetupStatus {
-                        mapper: MapperName("braid-disk2".into()),
+                        mapper: MapperName::from_basename("braid-disk2".into()),
                     },
                     cryptsetup_status_active("braid-disk2", "/dev/vdb"),
                 )
@@ -16967,7 +16967,7 @@ mod tests {
             .with_output(mp_req, mp_out)
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 btrfs_show_zero_devices(),
             );
@@ -17011,7 +17011,7 @@ mod tests {
             .with_output(mp_req, mp_out)
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 btrfs_show_zero_devices(),
             );
@@ -17063,7 +17063,7 @@ mod tests {
             .with_output(mp_req, mp_out)
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 btrfs_show_zero_devices(),
             );
@@ -17124,13 +17124,13 @@ mod tests {
             .with_output(mp_req, mp_out)
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 btrfs_show_two_disks(),
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 cryptsetup_status_active("braid-disk1", "/dev/vda"),
             )
@@ -17142,7 +17142,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk2".into()),
+                    mapper: MapperName::from_basename("braid-disk2".into()),
                 },
                 cryptsetup_status_active("braid-disk2", "(null)"),
             );
@@ -17195,13 +17195,13 @@ mod tests {
             .with_output(mp_req, mp_out)
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 btrfs_show_two_disks(),
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 cryptsetup_status_active("braid-disk1", "/dev/vda"),
             )
@@ -17213,7 +17213,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk2".into()),
+                    mapper: MapperName::from_basename("braid-disk2".into()),
                 },
                 cryptsetup_status_active("braid-disk2", "(null)"),
             );
@@ -17262,13 +17262,13 @@ mod tests {
             .with_output(mp_req, mp_out)
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 btrfs_show_disk1_and_disk2_missing(),
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 cryptsetup_status_active("braid-disk1", "/dev/vda"),
             )
@@ -17449,13 +17449,13 @@ mod tests {
             .with_output(mp_req, mp_out)
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 show,
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 cryptsetup_status_active("braid-disk1", "/dev/vda"),
             )
@@ -17467,7 +17467,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk2".into()),
+                    mapper: MapperName::from_basename("braid-disk2".into()),
                 },
                 cryptsetup_status_active("braid-disk2", "/dev/vdb"),
             )
@@ -17529,13 +17529,13 @@ mod tests {
             .with_output(mp_req, mp_out)
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 show,
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 cryptsetup_status_active("braid-disk1", "/dev/vda"),
             )
@@ -17592,13 +17592,13 @@ mod tests {
             .with_output(mp_req, mp_out)
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 show,
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 cryptsetup_status_active("braid-disk1", "/dev/vda"),
             )
@@ -17610,7 +17610,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk3".into()),
+                    mapper: MapperName::from_basename("braid-disk3".into()),
                 },
                 cryptsetup_status_active("braid-disk3", "(null)"),
             );
@@ -17667,13 +17667,13 @@ mod tests {
             .with_output(mp_req, mp_out)
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 show,
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 cryptsetup_status_active("braid-disk1", "/dev/vda"),
             )
@@ -17685,7 +17685,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk2".into()),
+                    mapper: MapperName::from_basename("braid-disk2".into()),
                 },
                 cryptsetup_status_active("braid-disk2", "/dev/vdb"),
             )
@@ -17697,7 +17697,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk3".into()),
+                    mapper: MapperName::from_basename("braid-disk3".into()),
                 },
                 cryptsetup_status_active("braid-disk3", "(null)"),
             );
@@ -17749,13 +17749,13 @@ mod tests {
             .with_output(mp_req, mp_out)
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 btrfs_show_two_disks(),
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 cryptsetup_status_active("braid-disk1", "/dev/vda"),
             )
@@ -17767,7 +17767,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk2".into()),
+                    mapper: MapperName::from_basename("braid-disk2".into()),
                 },
                 cryptsetup_status_active("braid-disk2", "/dev/vdb"),
             )
@@ -17975,13 +17975,13 @@ mod tests {
             // probe_pool (dry-run reconciliation) -- live pool has both disks.
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 btrfs_show_two_disks(),
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 cryptsetup_status_active("braid-disk1", "/dev/vda"),
             )
@@ -17993,7 +17993,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk2".into()),
+                    mapper: MapperName::from_basename("braid-disk2".into()),
                 },
                 cryptsetup_status_active("braid-disk2", "/dev/vdb"),
             )
@@ -18104,13 +18104,13 @@ mod tests {
             .with_output(mp_req, mp_out)
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 btrfs_show_disk1_and_new(),
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 cryptsetup_status_active("braid-disk1", "/dev/vda"),
             )
@@ -18122,7 +18122,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-new".into()),
+                    mapper: MapperName::from_basename("braid-new".into()),
                 },
                 cryptsetup_status_active("braid-new", "/dev/vdc"),
             )
@@ -18221,13 +18221,13 @@ mod tests {
             .with_output(mp_req, mp_out)
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 btrfs_show_disk1_and_old(),
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 cryptsetup_status_active("braid-disk1", "/dev/vda"),
             )
@@ -18239,7 +18239,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-old".into()),
+                    mapper: MapperName::from_basename("braid-old".into()),
                 },
                 cryptsetup_status_active("braid-old", "/dev/vdb"),
             )
@@ -18432,7 +18432,7 @@ mod tests {
             .with_output(mp_req, mp_out)
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 btrfs_show_zero_devices(),
             );
@@ -18853,13 +18853,13 @@ mod tests {
             .with_output(mp_req, mp_out)
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
-                    mount_point: MountPoint("/mnt/storage".into()),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 btrfs_show_two_disks(),
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 cryptsetup_status_active("braid-disk1", "/dev/vda"),
             )
@@ -18871,7 +18871,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk2".into()),
+                    mapper: MapperName::from_basename("braid-disk2".into()),
                 },
                 cryptsetup_status_active("braid-disk2", "/dev/vdb"),
             )

@@ -669,7 +669,7 @@ mod tests {
     }
 
     fn mp() -> MountPoint {
-        MountPoint("/mnt/storage".into())
+        MountPoint::new("/mnt/storage".into())
     }
 
     #[test]
@@ -1549,7 +1549,7 @@ mod tests {
             CmdRequest::BtrfsReplaceStart {
                 devid: Devid::new(2),
                 target_device: "/dev/mapper/braid-new".to_owned(),
-                mount_point: MountPoint("/mnt/storage".to_owned()),
+                mount_point: MountPoint::new("/mnt/storage".to_owned()),
             },
             ok_raw(),
         );
@@ -1577,7 +1577,7 @@ mod tests {
             CmdRequest::BtrfsReplaceStart {
                 devid: Devid::new(2),
                 target_device: "/dev/mapper/braid-new".to_owned(),
-                mount_point: MountPoint("/mnt/storage".to_owned()),
+                mount_point: MountPoint::new("/mnt/storage".to_owned()),
             },
             RawCommandOutput {
                 cmd: String::new(),
@@ -1621,7 +1621,7 @@ mod tests {
             CmdRequest::BtrfsReplaceStart {
                 devid: Devid::new(2),
                 target_device: "/dev/mapper/braid-new".to_owned(),
-                mount_point: MountPoint("/mnt/storage".to_owned()),
+                mount_point: MountPoint::new("/mnt/storage".to_owned()),
             },
             RawCommandOutput {
                 cmd: String::new(),
@@ -1662,7 +1662,7 @@ mod tests {
             CmdRequest::BtrfsReplaceStart {
                 devid: Devid::new(2),
                 target_device: "/dev/mapper/braid-new".to_owned(),
-                mount_point: MountPoint("/mnt/storage".to_owned()),
+                mount_point: MountPoint::new("/mnt/storage".to_owned()),
             },
             RawCommandOutput {
                 cmd: String::new(),

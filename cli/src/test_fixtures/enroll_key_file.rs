@@ -201,7 +201,7 @@ pub(crate) fn enroll_mountpoint_ok(dir: &Path) -> (CmdRequest, RawCommandOutput)
     let dir = dir.display().to_string();
     (
         CmdRequest::MountpointCheck {
-            path: MountPoint(dir.clone()),
+            path: MountPoint::new(dir.clone()),
         },
         shared::mock_ok(&format!("mountpoint -q {dir}"), ""),
     )
@@ -211,7 +211,7 @@ pub(crate) fn enroll_mountpoint_fail(dir: &Path) -> (CmdRequest, RawCommandOutpu
     let dir = dir.display().to_string();
     (
         CmdRequest::MountpointCheck {
-            path: MountPoint(dir.clone()),
+            path: MountPoint::new(dir.clone()),
         },
         err_raw(&format!("mountpoint -q {dir}"), 1, ""),
     )

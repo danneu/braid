@@ -2165,7 +2165,7 @@ mod tests {
     }
 
     fn mp() -> MountPoint {
-        MountPoint("/mnt/storage".into())
+        MountPoint::new("/mnt/storage".into())
     }
 
     fn test_config() -> Config {
@@ -2364,13 +2364,13 @@ mod tests {
             mounted: true,
             devices: vec![
                 PoolDevice {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                     luks_uuid: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
                     devid: Devid::new(1),
                     underlying: "/dev/vda".into(),
                 },
                 PoolDevice {
-                    mapper: MapperName("braid-disk2".into()),
+                    mapper: MapperName::from_basename("braid-disk2".into()),
                     luks_uuid: LuksUuid::parse("22222222-2222-2222-2222-222222222222").unwrap(),
                     devid: Devid::new(2),
                     underlying: "/dev/vdb".into(),
@@ -2509,7 +2509,7 @@ mod tests {
             state: PresentConfigDiskState::PresentNotLuks,
         };
         let source = ReplaceSource::Live {
-            mapper: MapperName("braid-disk2".into()),
+            mapper: MapperName::from_basename("braid-disk2".into()),
             devid: Devid::new(2),
         };
         let steps = replace_work_plan_for_test(&ReplaceWorkPlanTestInput {
@@ -2517,7 +2517,7 @@ mod tests {
             new_by_id: &ByIdPath::parse("/dev/disk/by-id/virtio-disk3").unwrap(),
             new_probed: &new_probed,
             replace_source: &source,
-            mount_point: &MountPoint("/mnt/storage".into()),
+            mount_point: &MountPoint::new("/mnt/storage".into()),
             will_clear_last_missing: false,
             total_devices: 2,
             paths: &test_paths().1,
@@ -2575,7 +2575,7 @@ mod tests {
             new_by_id: &ByIdPath::parse("/dev/disk/by-id/virtio-disk3").unwrap(),
             new_probed: &new_probed,
             replace_source: &source,
-            mount_point: &MountPoint("/mnt/storage".into()),
+            mount_point: &MountPoint::new("/mnt/storage".into()),
             will_clear_last_missing: true,
             total_devices: 2,
             paths: &test_paths().1,
@@ -2634,7 +2634,7 @@ mod tests {
                 name: "disk2",
                 hw: Some(&old_hw),
                 source: &ReplaceSource::Live {
-                    mapper: MapperName("braid-disk2".into()),
+                    mapper: MapperName::from_basename("braid-disk2".into()),
                     devid: Devid::new(2),
                 },
             },
@@ -3101,7 +3101,7 @@ mod tests {
     #[test]
     fn build_replace_journal_source_records_live_mapper() {
         let source = ReplaceSource::Live {
-            mapper: MapperName("braid-disk2".into()),
+            mapper: MapperName::from_basename("braid-disk2".into()),
             devid: Devid::new(2),
         };
 
@@ -3111,7 +3111,7 @@ mod tests {
             journal_source,
             journal::ReplaceJournalSource::Live {
                 old_devid: Devid::new(2),
-                old_mapper: MapperName("braid-disk2".into()),
+                old_mapper: MapperName::from_basename("braid-disk2".into()),
             }
         );
     }
@@ -3152,7 +3152,7 @@ mod tests {
             new_by_id: &ByIdPath::parse("/dev/disk/by-id/virtio-disk3").unwrap(),
             new_probed: &new_probed,
             replace_source: &source,
-            mount_point: &MountPoint("/mnt/storage".into()),
+            mount_point: &MountPoint::new("/mnt/storage".into()),
             will_clear_last_missing: false,
             total_devices: 3,
             paths: &test_paths().1,
@@ -3184,7 +3184,7 @@ mod tests {
             new_by_id: &ByIdPath::parse("/dev/disk/by-id/virtio-disk3").unwrap(),
             new_probed: &new_probed,
             replace_source: &source,
-            mount_point: &MountPoint("/mnt/storage".into()),
+            mount_point: &MountPoint::new("/mnt/storage".into()),
             will_clear_last_missing: true,
             total_devices: 1,
             paths: &test_paths().1,
@@ -3302,7 +3302,7 @@ mod tests {
             state: PresentConfigDiskState::PresentNotLuks,
         };
         let source = ReplaceSource::Live {
-            mapper: MapperName("braid-disk2".into()),
+            mapper: MapperName::from_basename("braid-disk2".into()),
             devid: Devid::new(2),
         };
         let plan = ReplacePlan {
@@ -3312,7 +3312,7 @@ mod tests {
                 new_by_id: &new_by_id,
                 new_probed: &new_probed,
                 replace_source: &source,
-                mount_point: &MountPoint("/mnt/storage".into()),
+                mount_point: &MountPoint::new("/mnt/storage".into()),
                 will_clear_last_missing: false,
                 total_devices: 1,
                 paths: &f.paths,
@@ -3389,13 +3389,13 @@ mod tests {
             mounted: true,
             devices: vec![
                 PoolDevice {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                     luks_uuid: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
                     devid: Devid::new(1),
                     underlying: "/dev/vdb".into(),
                 },
                 PoolDevice {
-                    mapper: MapperName("braid-disk2".into()),
+                    mapper: MapperName::from_basename("braid-disk2".into()),
                     luks_uuid: old_uuid.clone(),
                     devid: Devid::new(2),
                     underlying: "/dev/vdc".into(),
@@ -3409,7 +3409,7 @@ mod tests {
         };
 
         let replace_source = ReplaceSource::Live {
-            mapper: MapperName("braid-disk2".into()),
+            mapper: MapperName::from_basename("braid-disk2".into()),
             devid: Devid::new(2),
         };
         let member_verify_targets = build_member_verify_targets(
@@ -4432,7 +4432,7 @@ mod tests {
         let _config = make_replace_config();
         let new_probed = new_probed_not_luks();
         let source = ReplaceSource::Live {
-            mapper: MapperName("braid-disk2".into()),
+            mapper: MapperName::from_basename("braid-disk2".into()),
             devid: Devid::new(2),
         };
         let steps = replace_work_plan_for_test(&ReplaceWorkPlanTestInput {
@@ -4440,7 +4440,7 @@ mod tests {
             new_by_id: &ByIdPath::parse("/dev/disk/by-id/virtio-disk3").unwrap(),
             new_probed: &new_probed,
             replace_source: &source,
-            mount_point: &MountPoint("/mnt/storage".into()),
+            mount_point: &MountPoint::new("/mnt/storage".into()),
             will_clear_last_missing: false,
             total_devices: 2,
             paths: &test_paths().1,
@@ -4464,7 +4464,7 @@ mod tests {
     fn dry_run_render_fresh_disk_live_replace_with_keyfile() {
         let new_probed = new_probed_not_luks();
         let source = ReplaceSource::Live {
-            mapper: MapperName("braid-disk2".into()),
+            mapper: MapperName::from_basename("braid-disk2".into()),
             devid: Devid::new(2),
         };
         let kf = Path::new("/mnt/usb/braid.key");
@@ -4479,7 +4479,7 @@ mod tests {
             new_by_id: &ByIdPath::parse("/dev/disk/by-id/virtio-disk3").unwrap(),
             new_probed: &new_probed,
             replace_source: &source,
-            mount_point: &MountPoint("/mnt/storage".into()),
+            mount_point: &MountPoint::new("/mnt/storage".into()),
             will_clear_last_missing: false,
             total_devices: 2,
             paths: &test_paths().1,
@@ -4555,11 +4555,11 @@ mod tests {
     fn dry_run_render_fresh_replace_uuid_is_reproducible_across_invocations() {
         let new_probed = new_probed_not_luks();
         let source = ReplaceSource::Live {
-            mapper: MapperName("braid-disk2".into()),
+            mapper: MapperName::from_basename("braid-disk2".into()),
             devid: Devid::new(2),
         };
         let new_by_id = ByIdPath::parse("/dev/disk/by-id/virtio-disk3").unwrap();
-        let mount_point = MountPoint("/mnt/storage".into());
+        let mount_point = MountPoint::new("/mnt/storage".into());
         let extra_opts: Vec<String> = Vec::new();
         // Bind ONE StatePaths so the header-backup path is fixed across both
         // builder calls; the minted `new_uuid` is then the only variable.
@@ -4622,7 +4622,7 @@ mod tests {
             },
         };
         let source = ReplaceSource::Live {
-            mapper: MapperName("braid-disk2".into()),
+            mapper: MapperName::from_basename("braid-disk2".into()),
             devid: Devid::new(2),
         };
         let kf = Path::new("/mnt/usb/braid.key");
@@ -4632,7 +4632,7 @@ mod tests {
         // ExistingLuks: new_uuid carries the probed value from new_probed.
         let new_uuid_for_test = luks_uuid.clone();
         let work_plan = build_replace_work_plan(ReplaceWorkPlanInput {
-            config: Config::new(MountPoint("/mnt/storage".into())).unwrap(),
+            config: Config::new(MountPoint::new("/mnt/storage".into())).unwrap(),
             old_uuid: old_uuid.clone(),
             old_name: DiskName::parse("disk2").unwrap(),
             new_uuid: new_uuid_for_test,
@@ -4642,7 +4642,7 @@ mod tests {
             replace_source: source,
             pool: replace_work_plan_test_pool(
                 &ReplaceSource::Live {
-                    mapper: MapperName("braid-disk2".into()),
+                    mapper: MapperName::from_basename("braid-disk2".into()),
                     devid: Devid::new(2),
                 },
                 &old_uuid,
@@ -4728,7 +4728,7 @@ mod tests {
             new_by_id: &ByIdPath::parse("/dev/disk/by-id/virtio-disk3").unwrap(),
             new_probed: &new_probed,
             replace_source: &source,
-            mount_point: &MountPoint("/mnt/storage".into()),
+            mount_point: &MountPoint::new("/mnt/storage".into()),
             will_clear_last_missing: true,
             total_devices: 2,
             paths: &test_paths().1,
@@ -4849,13 +4849,13 @@ mod tests {
             mounted: true,
             devices: vec![
                 PoolDevice {
-                    mapper: MapperName("braid-WRONG".into()),
+                    mapper: MapperName::from_basename("braid-WRONG".into()),
                     luks_uuid: drifted_uuid.clone(),
                     devid: Devid::new(1),
                     underlying: "/dev/vdb".into(),
                 },
                 PoolDevice {
-                    mapper: MapperName("braid-disk2".into()),
+                    mapper: MapperName::from_basename("braid-disk2".into()),
                     luks_uuid: old_uuid.clone(),
                     devid: Devid::new(2),
                     underlying: "/dev/vdc".into(),
@@ -4880,7 +4880,7 @@ mod tests {
             )
             .unwrap();
         let replace_source = ReplaceSource::Live {
-            mapper: MapperName("braid-disk2".into()),
+            mapper: MapperName::from_basename("braid-disk2".into()),
             devid: Devid::new(2),
         };
         let member_verify_targets =
@@ -7470,7 +7470,7 @@ mod tests {
         let pool = PoolState {
             mounted: true,
             devices: vec![PoolDevice {
-                mapper: MapperName("braid-keeper".into()),
+                mapper: MapperName::from_basename("braid-keeper".into()),
                 luks_uuid: LuksUuid::parse("cccccccc-cccc-cccc-cccc-cccccccc0602").unwrap(),
                 devid: Devid::new(1),
                 underlying: "/dev/vda".into(),
@@ -7564,7 +7564,7 @@ mod tests {
         let pool = PoolState {
             mounted: true,
             devices: vec![PoolDevice {
-                mapper: MapperName("braid-WRONG".into()),
+                mapper: MapperName::from_basename("braid-WRONG".into()),
                 luks_uuid: u_old.clone(),
                 devid: Devid::new(7),
                 underlying: "/dev/vdz".into(),
@@ -7595,7 +7595,7 @@ mod tests {
             journal_source,
             journal::ReplaceJournalSource::Live {
                 old_devid: Devid::new(7),
-                old_mapper: MapperName("braid-WRONG".into()),
+                old_mapper: MapperName::from_basename("braid-WRONG".into()),
             }
         );
     }
@@ -7621,7 +7621,7 @@ mod tests {
         MockRunner::default()
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName(mapper.to_owned()),
+                    mapper: MapperName::from_basename(mapper.to_owned()),
                 },
                 mock_ok(
                     &format!("cryptsetup status {mapper}"),
@@ -7660,7 +7660,7 @@ mod tests {
             enroll_key_file: None,
             header_backup_path: luks_header_backup_path(
                 Path::new("/var/lib/braid/headers"),
-                &MapperName("braid-disk3".into()),
+                &MapperName::from_basename("braid-disk3".into()),
             ),
         };
         let resolver = MockBackingPathResolver::default();
@@ -7668,7 +7668,7 @@ mod tests {
             &runner,
             &target_prep,
             &disk_name("disk3"),
-            &MapperName("braid-disk3".into()),
+            &MapperName::from_basename("braid-disk3".into()),
             &ByIdPath::parse("/dev/disk/by-id/virtio-disk3").unwrap(),
             &LuksUuid::parse("33333333-3333-3333-3333-333333333333").unwrap(),
             &resolver,
@@ -7807,7 +7807,7 @@ mod tests {
         let err = verify_existing_luks_open_mapper_target(
             &runner,
             &disk_name("disk3"),
-            &MapperName("braid-disk3".into()),
+            &MapperName::from_basename("braid-disk3".into()),
             &by_id,
             &u_new,
             &resolver,
@@ -7869,7 +7869,7 @@ mod tests {
         verify_existing_luks_open_mapper_target(
             &runner,
             &disk_name("disk3"),
-            &MapperName("braid-disk3".into()),
+            &MapperName::from_basename("braid-disk3".into()),
             &by_id,
             &u_new,
             &resolver,
@@ -7892,7 +7892,7 @@ mod tests {
         let by_id = ByIdPath::parse("/dev/disk/by-id/Y").unwrap();
         let runner = MockRunner::default().with_output(
             CmdRequest::CryptsetupStatus {
-                mapper: MapperName("braid-disk3".into()),
+                mapper: MapperName::from_basename("braid-disk3".into()),
             },
             mock_ok(
                 "cryptsetup status braid-disk3",
@@ -7905,7 +7905,7 @@ mod tests {
         let err = verify_existing_luks_open_mapper_target(
             &runner,
             &disk_name("disk3"),
-            &MapperName("braid-disk3".into()),
+            &MapperName::from_basename("braid-disk3".into()),
             &by_id,
             &u_new,
             &resolver,
@@ -7977,7 +7977,7 @@ mod tests {
         let err = verify_existing_luks_open_mapper_target(
             &runner,
             &disk_name("disk3"),
-            &MapperName("braid-disk3".into()),
+            &MapperName::from_basename("braid-disk3".into()),
             &by_id,
             &u_new,
             &resolver,
@@ -8094,7 +8094,7 @@ mod tests {
         let pool = PoolState {
             mounted: true,
             devices: vec![PoolDevice {
-                mapper: MapperName("braid-foreign".into()),
+                mapper: MapperName::from_basename("braid-foreign".into()),
                 luks_uuid: colliding.clone(),
                 devid: Devid::new(22),
                 underlying: "/dev/foreign".into(),

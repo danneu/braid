@@ -851,7 +851,7 @@ fn main() {
             // filesystem dependencies beyond the binary itself — see
             // docs/design/decisions/018-systemd-lifecycle.md (thin-systemd-layer principle).
             let runner = RealRunner;
-            let mount_point = braid_cli::types::MountPoint(args.mount.clone());
+            let mount_point = braid_cli::types::MountPoint::new(args.mount.clone());
             match braid_cli::scrub_cancel::cmd_scrub_cancel(&runner, &mount_point) {
                 Ok(_) => std::process::exit(0),
                 Err(e) => {
@@ -862,7 +862,7 @@ fn main() {
         }
         Commands::ScrubNeedsResume(args) => {
             let runner = RealRunner;
-            let mount_point = braid_cli::types::MountPoint(args.mount.clone());
+            let mount_point = braid_cli::types::MountPoint::new(args.mount.clone());
             match braid_cli::scrub_needs_resume::cmd_scrub_needs_resume(&runner, &mount_point) {
                 Ok(braid_cli::scrub_needs_resume::ScrubNeedsResumeResult::Yes) => {
                     std::process::exit(0)
@@ -878,7 +878,7 @@ fn main() {
         }
         Commands::ScrubResumeOrStart(args) => {
             let runner = RealRunner;
-            let mount_point = braid_cli::types::MountPoint(args.mount.clone());
+            let mount_point = braid_cli::types::MountPoint::new(args.mount.clone());
             match braid_cli::scrub_resume_or_start::cmd_scrub_resume_or_start(&runner, &mount_point)
             {
                 Ok(braid_cli::scrub_resume_or_start::ScrubResumeOrStartResult::Resumed {

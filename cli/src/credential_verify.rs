@@ -622,7 +622,7 @@ mod tests {
             .insert(uuid.clone(), member("disk1", "/dev/disk/by-id/ata-K"))
             .unwrap();
         let device = PoolDevice {
-            mapper: MapperName("braid-WRONG".into()),
+            mapper: MapperName::from_basename("braid-WRONG".into()),
             luks_uuid: uuid,
             devid: Devid::new(1),
             underlying: "/dev/vdb".into(),
@@ -653,7 +653,7 @@ mod tests {
     fn existing_pool_member_foreign_uuid_falls_back_to_mapper_basename() {
         let membership = PoolMembership::empty();
         let foreign = PoolDevice {
-            mapper: MapperName("braid-WRONG".into()),
+            mapper: MapperName::from_basename("braid-WRONG".into()),
             luks_uuid: test_uuid(601),
             devid: Devid::new(2),
             underlying: "/dev/vdc".into(),

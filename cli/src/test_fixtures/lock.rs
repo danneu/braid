@@ -160,7 +160,7 @@ pub(crate) fn lock_test_membership() -> PoolMembership {
 pub(crate) fn lock_with_fsid_probe_mocks(runner: MockRunner) -> MockRunner {
     let runner = runner.with_output(
         CmdRequest::BtrfsFilesystemShow {
-            mount_point: MountPoint("/mnt/storage".to_owned()),
+            mount_point: MountPoint::new("/mnt/storage".to_owned()),
         },
         RawCommandOutput {
             cmd: "btrfs filesystem show /mnt/storage".into(),
@@ -194,13 +194,13 @@ pub(crate) fn lock_with_fsid_probe_mocks(runner: MockRunner) -> MockRunner {
 pub(crate) fn lock_mounted_runner() -> MockRunner {
     lock_with_fsid_probe_mocks(MockRunner::default().with_output(
         CmdRequest::MountpointCheck {
-            path: MountPoint("/mnt/storage".to_owned()),
+            path: MountPoint::new("/mnt/storage".to_owned()),
         },
         lock_ok_raw("mountpoint -q /mnt/storage"),
     ))
     .with_output(
         CmdRequest::Umount {
-            mount_point: MountPoint("/mnt/storage".to_owned()),
+            mount_point: MountPoint::new("/mnt/storage".to_owned()),
         },
         lock_ok_raw("umount /mnt/storage"),
     )
@@ -220,13 +220,13 @@ pub(crate) fn lock_mounted_runner() -> MockRunner {
 pub(crate) fn lock_umount_failed_runner() -> MockRunner {
     lock_with_fsid_probe_mocks(MockRunner::default().with_output(
         CmdRequest::MountpointCheck {
-            path: MountPoint("/mnt/storage".to_owned()),
+            path: MountPoint::new("/mnt/storage".to_owned()),
         },
         lock_ok_raw("mountpoint -q /mnt/storage"),
     ))
     .with_output(
         CmdRequest::Umount {
-            mount_point: MountPoint("/mnt/storage".to_owned()),
+            mount_point: MountPoint::new("/mnt/storage".to_owned()),
         },
         lock_err_raw("umount /mnt/storage", 32, "target is busy"),
     )

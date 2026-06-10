@@ -11,7 +11,7 @@ use crate::types::MountPoint;
 
 /// Canonical scrub-test mount point shared by cancel, status, resume, and start fixtures.
 pub(crate) fn scrub_mp() -> MountPoint {
-    MountPoint("/mnt/storage".into())
+    MountPoint::new("/mnt/storage".into())
 }
 
 /// Successful `btrfs scrub cancel` output for the running-scrub path.

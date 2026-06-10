@@ -165,7 +165,7 @@ impl Filesystem for IdleMockFs {
 
 /// Canonical idle-test mount point used by scrub requests and `cmd_idle` calls.
 pub(crate) fn idle_mp() -> MountPoint {
-    MountPoint("/mnt/storage".into())
+    MountPoint::new("/mnt/storage".into())
 }
 
 /// Completed scrub output that lets idle proceed to the sysfs exclop scan.

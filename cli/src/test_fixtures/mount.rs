@@ -178,7 +178,7 @@ pub(crate) fn luks_dump_text_fail(device: &str) -> (CmdRequest, RawCommandOutput
 pub(crate) const MOUNT_TEST_PASSPHRASE_BYTES: &[u8] = b"testpass";
 
 pub(crate) fn test_config() -> Config {
-    Config::new(MountPoint("/mnt/storage".to_owned())).unwrap()
+    Config::new(MountPoint::new("/mnt/storage".to_owned())).unwrap()
 }
 
 pub(crate) fn test_passphrase() -> OpenCredential {
@@ -284,7 +284,7 @@ pub(crate) fn base_two_disk_runner() -> MockRunner {
     MockRunner::default()
         .with_output(
             CmdRequest::MountpointCheck {
-                path: MountPoint("/mnt/storage".to_owned()),
+                path: MountPoint::new("/mnt/storage".to_owned()),
             },
             err_raw("mountpoint", 1, ""),
         )
@@ -371,7 +371,7 @@ pub(crate) fn direct_two_disk_open_runner() -> MockRunner {
         .with_output_stdin(
             CmdRequest::CryptsetupLuksOpen {
                 device: "/dev/disk/by-id/virtio-disk1".into(),
-                mapper: MapperName("braid-disk1".into()),
+                mapper: MapperName::from_basename("braid-disk1".into()),
             },
             MOUNT_TEST_PASSPHRASE_BYTES.to_vec(),
             ok_raw("cryptsetup open"),
@@ -379,7 +379,7 @@ pub(crate) fn direct_two_disk_open_runner() -> MockRunner {
         .with_output_stdin(
             CmdRequest::CryptsetupLuksOpen {
                 device: "/dev/disk/by-id/virtio-disk2".into(),
-                mapper: MapperName("braid-disk2".into()),
+                mapper: MapperName::from_basename("braid-disk2".into()),
             },
             MOUNT_TEST_PASSPHRASE_BYTES.to_vec(),
             ok_raw("cryptsetup open"),

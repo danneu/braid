@@ -1621,7 +1621,7 @@ impl MockRunner {
     pub fn with_mapper_closed(self, mapper: &str) -> Self {
         self.with_output(
             CmdRequest::CryptsetupStatus {
-                mapper: MapperName(mapper.into()),
+                mapper: MapperName::from_basename(mapper.into()),
             },
             RawCommandOutput {
                 cmd: format!("cryptsetup status {mapper}"),
@@ -1648,7 +1648,7 @@ impl MockRunner {
     pub fn with_mapper_open(self, mapper: &str, underlying: &str, uuid: &str) -> Self {
         self.with_output(
             CmdRequest::CryptsetupStatus {
-                mapper: MapperName(mapper.into()),
+                mapper: MapperName::from_basename(mapper.into()),
             },
             RawCommandOutput {
                 cmd: format!("cryptsetup status {mapper}"),
@@ -1759,7 +1759,7 @@ mod tests {
     #[test]
     fn btrfs_scrub_status_argv_uses_raw_for_parser_path() {
         let argv = CmdRequest::BtrfsScrubStatus {
-            mount_point: MountPoint("/mnt/storage".into()),
+            mount_point: MountPoint::new("/mnt/storage".into()),
         }
         .to_argv()
         .to_shell_string();
@@ -1770,7 +1770,7 @@ mod tests {
     #[test]
     fn btrfs_scrub_status_human_argv_omits_raw_for_browse_path() {
         let argv = CmdRequest::BtrfsScrubStatusHuman {
-            mount_point: MountPoint("/mnt/storage".into()),
+            mount_point: MountPoint::new("/mnt/storage".into()),
         }
         .to_argv()
         .to_shell_string();
@@ -1786,7 +1786,7 @@ mod tests {
     // footer command for a mounted pool named /mnt/storage.
     #[test]
     fn browse_read_only_command_variants_generate_expected_argv() {
-        let mp = MountPoint("/mnt/storage".into());
+        let mp = MountPoint::new("/mnt/storage".into());
         let cases: Vec<(CmdRequest, &str, Vec<&str>)> = vec![
             (
                 CmdRequest::BtrfsFilesystemCommitStats {
@@ -2468,7 +2468,7 @@ mod tests {
     fn luks_open_key_file_run_dispatches_directly() {
         let req = CmdRequest::CryptsetupLuksOpenKeyFile {
             device: "/dev/vda".to_owned(),
-            mapper: MapperName("braid-test".into()),
+            mapper: MapperName::from_basename("braid-test".into()),
             key_file_path: "/run/braid-key/braid.key".to_owned(),
         };
         let mock = MockRunner::default().with_output(
@@ -2585,7 +2585,7 @@ mod tests {
     // during degraded operation.
     fn btrfs_balance_raid1_soft_generates_correct_argv() {
         let cmd = CmdRequest::BtrfsBalanceRaid1Soft {
-            mount_point: MountPoint("/mnt/storage".to_owned()),
+            mount_point: MountPoint::new("/mnt/storage".to_owned()),
         }
         .to_argv();
         assert_eq!(cmd.program, "btrfs");
@@ -2611,7 +2611,7 @@ mod tests {
     // and lock asks the kernel to pause it before unmount.
     fn btrfs_balance_pause_generates_correct_argv() {
         let cmd = CmdRequest::BtrfsBalancePause {
-            mount_point: MountPoint("/mnt/storage".to_owned()),
+            mount_point: MountPoint::new("/mnt/storage".to_owned()),
         }
         .to_argv();
         assert_eq!(cmd.program, "btrfs");
@@ -2632,7 +2632,7 @@ mod tests {
         let cmd = CmdRequest::BtrfsReplaceStart {
             devid: Devid::new(2),
             target_device: "/dev/mapper/braid-new".to_owned(),
-            mount_point: MountPoint("/mnt/storage".to_owned()),
+            mount_point: MountPoint::new("/mnt/storage".to_owned()),
         }
         .to_argv();
         assert!(
@@ -2656,7 +2656,7 @@ mod tests {
     // adding a continuous-poll variant). This test fails immediately.
     fn btrfs_replace_status_includes_minus_one() {
         let cmd = CmdRequest::BtrfsReplaceStatus {
-            mount_point: MountPoint("/mnt/storage".to_owned()),
+            mount_point: MountPoint::new("/mnt/storage".to_owned()),
         }
         .to_argv();
         assert_eq!(cmd.program, "btrfs");
@@ -2868,7 +2868,7 @@ mod tests {
     fn mount_includes_skip_balance() {
         let cmd = CmdRequest::Mount {
             device: "/dev/mapper/braid-disk1".to_owned(),
-            mount_point: MountPoint("/mnt/storage".to_owned()),
+            mount_point: MountPoint::new("/mnt/storage".to_owned()),
         }
         .to_argv();
         assert_eq!(cmd.program, "mount");
@@ -2890,7 +2890,7 @@ mod tests {
     fn mount_with_options_includes_skip_balance() {
         let cmd = CmdRequest::MountWithOptions {
             device: "/dev/mapper/braid-disk1".to_owned(),
-            mount_point: MountPoint("/mnt/storage".to_owned()),
+            mount_point: MountPoint::new("/mnt/storage".to_owned()),
             options: vec!["degraded".to_owned()],
         }
         .to_argv();
@@ -2913,7 +2913,7 @@ mod tests {
     fn to_shell_string_simple_args() {
         let s = CmdRequest::BtrfsDeviceAdd {
             device: "/dev/mapper/braid-aaa".to_owned(),
-            mount_point: MountPoint("/mnt/storage".to_owned()),
+            mount_point: MountPoint::new("/mnt/storage".to_owned()),
             force: false,
         }
         .to_argv()
@@ -2928,7 +2928,7 @@ mod tests {
     fn btrfs_device_add_force_renders_f_flag() {
         let s = CmdRequest::BtrfsDeviceAdd {
             device: "/dev/mapper/braid-aaa".to_owned(),
-            mount_point: MountPoint("/mnt/storage".to_owned()),
+            mount_point: MountPoint::new("/mnt/storage".to_owned()),
             force: true,
         }
         .to_argv()
@@ -3021,7 +3021,7 @@ mod tests {
                 description: "LUKS open -> braid-aaa".into(),
                 commands: vec![CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/disk1".to_owned(),
-                    mapper: MapperName("braid-aaa".into()),
+                    mapper: MapperName::from_basename("braid-aaa".into()),
                 }],
             },
         ];
@@ -3167,7 +3167,7 @@ mod tests {
     fn cryptsetup_luks_open_omits_keyfile_size() {
         let cmd = CmdRequest::CryptsetupLuksOpen {
             device: "/dev/disk/by-id/disk1".to_owned(),
-            mapper: MapperName("braid-disk1".into()),
+            mapper: MapperName::from_basename("braid-disk1".into()),
         }
         .to_argv();
         assert_eq!(cmd.program, "cryptsetup");
@@ -3275,7 +3275,7 @@ mod tests {
     fn cryptsetup_luks_open_key_file_sets_keyfile_size_4096() {
         let cmd = CmdRequest::CryptsetupLuksOpenKeyFile {
             device: "/dev/disk/by-id/disk1".to_owned(),
-            mapper: MapperName("braid-disk1".into()),
+            mapper: MapperName::from_basename("braid-disk1".into()),
             key_file_path: "/var/lib/braid/keyfiles/braid-disk1.key".to_owned(),
         }
         .to_argv();

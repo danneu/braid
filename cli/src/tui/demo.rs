@@ -200,7 +200,7 @@ pub(crate) fn sample_pool() -> PoolState {
         ("samsung".to_owned(), "nvme".to_owned()),
     ]);
     PoolState {
-        mount_point: MountPoint("/mnt/storage".to_owned()),
+        mount_point: MountPoint::new("/mnt/storage".to_owned()),
         df_entries: vec![
             BtrfsDfEntry {
                 bg_type: BtrfsBgType::Data,

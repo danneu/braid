@@ -146,7 +146,7 @@ impl OnlineStateOps for RealOnlineStateOps<'_> {
     }
 
     fn is_mountpoint(&self, path: &Path) -> Result<bool, OnlineError> {
-        let mount_point = MountPoint(path.display().to_string());
+        let mount_point = MountPoint::new(path.display().to_string());
         let output = self
             .runner
             .run(&CmdRequest::MountpointCheck { path: mount_point })
@@ -568,7 +568,7 @@ mod tests {
     fn real_ops_mountpoint_exit_zero_is_mounted() {
         let runner = MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
-                path: MountPoint("/mnt/storage".into()),
+                path: MountPoint::new("/mnt/storage".into()),
             },
             mountpoint_out(0, ""),
         );
@@ -587,7 +587,7 @@ mod tests {
     fn real_ops_mountpoint_exit_32_is_not_mounted() {
         let runner = MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
-                path: MountPoint("/mnt/storage".into()),
+                path: MountPoint::new("/mnt/storage".into()),
             },
             mountpoint_out(32, "/mnt/storage is not a mountpoint\n"),
         );
@@ -605,7 +605,7 @@ mod tests {
     fn real_ops_mountpoint_exit_one_is_error() {
         let runner = MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
-                path: MountPoint("/mnt/storage".into()),
+                path: MountPoint::new("/mnt/storage".into()),
             },
             mountpoint_out(1, "bad usage\n"),
         );
@@ -630,7 +630,7 @@ mod tests {
     fn real_ops_mountpoint_other_exit_is_error() {
         let runner = MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
-                path: MountPoint("/mnt/storage".into()),
+                path: MountPoint::new("/mnt/storage".into()),
             },
             mountpoint_out(2, "unexpected failure\n"),
         );

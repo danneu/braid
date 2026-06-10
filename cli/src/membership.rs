@@ -1289,7 +1289,7 @@ mod tests {
         original.added_at = Some("2026-01-01T00:00:00Z".into());
         m.insert(u_k.clone(), original.clone()).unwrap();
         let pool = pool_state_with(vec![PoolDevice {
-            mapper: MapperName("braid-disk1".into()),
+            mapper: MapperName::from_basename("braid-disk1".into()),
             luks_uuid: u_k.clone(),
             devid: Devid::new(99),
             underlying: "/dev/vdb".into(),
@@ -1326,7 +1326,7 @@ mod tests {
         let original = member("disk1", "/dev/disk/by-id/ata-K");
         m.insert(u_k.clone(), original.clone()).unwrap();
         let pool = pool_state_with(vec![PoolDevice {
-            mapper: MapperName("braid-disk1".into()),
+            mapper: MapperName::from_basename("braid-disk1".into()),
             luks_uuid: u_k.clone(),
             devid: Devid::new(2),
             underlying: "/dev/vdb".into(),
@@ -1373,7 +1373,7 @@ mod tests {
         .unwrap();
         let before = m.clone();
         let u_foreign = test_uuid(152);
-        let foreign_mapper = MapperName("braid-foreign".into());
+        let foreign_mapper = MapperName::from_basename("braid-foreign".into());
         let pool = pool_state_with(vec![PoolDevice {
             mapper: foreign_mapper.clone(),
             luks_uuid: u_foreign.clone(),
@@ -1415,10 +1415,10 @@ mod tests {
         .unwrap();
         let before = m.clone();
         let u_foreign = test_uuid(155);
-        let foreign_mapper = MapperName("braid-foreign".into());
+        let foreign_mapper = MapperName::from_basename("braid-foreign".into());
         let pool = pool_state_with(vec![
             PoolDevice {
-                mapper: MapperName("braid-disk1".into()),
+                mapper: MapperName::from_basename("braid-disk1".into()),
                 luks_uuid: u_known.clone(),
                 devid: Devid::new(1),
                 underlying: "/dev/vdb".into(),
@@ -1459,12 +1459,12 @@ mod tests {
     fn present_display_name_uses_member_name_and_falls_back_to_full_mapper() {
         let m = member("disk1", "/dev/disk/by-id/ata-K");
         assert_eq!(
-            present_display_name(Some(&m), &MapperName("braid-WRONG".into())),
+            present_display_name(Some(&m), &MapperName::from_basename("braid-WRONG".into())),
             "disk1",
             "member present -> operator name regardless of mapper drift"
         );
         assert_eq!(
-            present_display_name(None, &MapperName("braid-WRONG".into())),
+            present_display_name(None, &MapperName::from_basename("braid-WRONG".into())),
             "braid-WRONG",
             "foreign device -> full mapper basename, NOT stripped to 'WRONG'"
         );
@@ -1484,7 +1484,7 @@ mod tests {
         m.insert(u.clone(), member("disk1", "/dev/disk/by-id/ata-K"))
             .unwrap();
         let device = PoolDevice {
-            mapper: MapperName("braid-WRONG".into()),
+            mapper: MapperName::from_basename("braid-WRONG".into()),
             luks_uuid: u.clone(),
             devid: Devid::new(1),
             underlying: "/dev/vdb".into(),
@@ -1496,7 +1496,7 @@ mod tests {
         );
 
         let foreign = PoolDevice {
-            mapper: MapperName("braid-WRONG".into()),
+            mapper: MapperName::from_basename("braid-WRONG".into()),
             luks_uuid: test_uuid(171),
             devid: Devid::new(2),
             underlying: "/dev/vdc".into(),

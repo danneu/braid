@@ -425,10 +425,10 @@ impl PoolFixture {
         let paths = StatePaths::custom(state_tmp.path().into());
         let config_tmp = tempfile::tempdir().expect("config tempdir");
         let config_path = config_tmp.path().join("config.json");
-        let mount_point = MountPoint("/mnt/storage".into());
+        let mount_point = MountPoint::new("/mnt/storage".into());
         std::fs::write(
             &config_path,
-            serde_json::to_vec(&serde_json::json!({ "mount_point": mount_point.0 })).unwrap(),
+            serde_json::to_vec(&serde_json::json!({ "mount_point": mount_point.as_str() })).unwrap(),
         )
         .expect("write config.json");
         let config = Config::new(mount_point).expect("config from canonical mount_point");

@@ -411,7 +411,7 @@ impl Model {
         advisories: Vec<String>,
         paths: StatePaths,
     ) -> (Self, Vec<Effect>) {
-        let mount_point = MountPoint(mount_point);
+        let mount_point = MountPoint::new(mount_point);
         let mut effects: Vec<Effect> = vec![Effect::ProbePool {
             mount_point: mount_point.clone(),
             disks: disks.clone(),
@@ -479,7 +479,7 @@ impl Model {
             },
             selected_disk: 0,
             pool,
-            mount_point: MountPoint(String::new()),
+            mount_point: MountPoint::new(String::new()),
             probe_duration: None,
             frame: 0,
             spinner_deadline: None,

@@ -108,7 +108,7 @@ pub(crate) fn status_fs_one_disk() -> impl Filesystem {
 
 /// Canonical status-test mount point used by all promoted command outputs.
 pub(crate) fn status_mp() -> MountPoint {
-    MountPoint("/mnt/storage".into())
+    MountPoint::new("/mnt/storage".into())
 }
 
 /// Canonical status-test config; status config currently carries only mount point.
@@ -457,7 +457,7 @@ pub(crate) fn status_runner_healthy_3disk_base() -> MockRunner {
         )
         .with_output(
             CmdRequest::CryptsetupStatus {
-                mapper: MapperName("disk1".into()),
+                mapper: MapperName::from_basename("disk1".into()),
             },
             status_cryptsetup_status_active("disk1", "/dev/vda"),
         )
@@ -469,7 +469,7 @@ pub(crate) fn status_runner_healthy_3disk_base() -> MockRunner {
         )
         .with_output(
             CmdRequest::CryptsetupStatus {
-                mapper: MapperName("disk2".into()),
+                mapper: MapperName::from_basename("disk2".into()),
             },
             status_cryptsetup_status_active("disk2", "/dev/vdb"),
         )
@@ -481,7 +481,7 @@ pub(crate) fn status_runner_healthy_3disk_base() -> MockRunner {
         )
         .with_output(
             CmdRequest::CryptsetupStatus {
-                mapper: MapperName("disk3".into()),
+                mapper: MapperName::from_basename("disk3".into()),
             },
             status_cryptsetup_status_active("disk3", "/dev/vdc"),
         )
@@ -691,7 +691,7 @@ pub(crate) fn status_disk_report_named(name: &str, devid: Devid) -> DiskReport {
     let disk_name = DiskName::parse(name).expect("valid fixture disk name");
     DiskReport {
         name: name.into(),
-        mapper: mapper_name(&disk_name).0,
+        mapper: mapper_name(&disk_name).as_str().to_owned(),
         by_id: format!("/dev/disk/by-id/{name}"),
         luks_uuid: "00000000-0000-0000-0000-000000000000".into(),
         devid: Some(devid),
@@ -707,7 +707,7 @@ pub(crate) fn status_disk_report_missing(name: &str) -> DiskReport {
     let disk_name = DiskName::parse(name).expect("valid fixture disk name");
     DiskReport {
         name: name.into(),
-        mapper: mapper_name(&disk_name).0,
+        mapper: mapper_name(&disk_name).as_str().to_owned(),
         by_id: format!("/dev/disk/by-id/{name}"),
         luks_uuid: String::new(),
         devid: None,

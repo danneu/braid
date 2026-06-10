@@ -1322,7 +1322,7 @@ mod tests {
     #[test]
     fn luks_header_backup_path_combines_dir_and_mapper_with_luksheader_ext() {
         let dir = Path::new("/var/lib/braid/luks-headers");
-        let mapper = MapperName("braid-disk1".to_owned());
+        let mapper = MapperName::from_basename("braid-disk1".to_owned());
 
         assert_eq!(
             luks_header_backup_path(dir, &mapper).as_path(),
@@ -1375,7 +1375,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let paths = StatePaths::custom(dir.path().into());
         let device = "/dev/disk/by-id/disk1";
-        let mapper = MapperName("braid-disk1".to_owned());
+        let mapper = MapperName::from_basename("braid-disk1".to_owned());
         let tmp_path = paths
             .luks_headers_dir()
             .join("braid-disk1.luksheader.tmp")
@@ -1420,7 +1420,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let paths = StatePaths::custom(dir.path().into());
         let device = "/dev/disk/by-id/disk1";
-        let mapper = MapperName("braid-disk1".to_owned());
+        let mapper = MapperName::from_basename("braid-disk1".to_owned());
         let tmp_path = paths
             .luks_headers_dir()
             .join("braid-disk1.luksheader.tmp")
@@ -1875,14 +1875,14 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-testdisk".into()),
+                    mapper: MapperName::from_basename("braid-testdisk".into()),
                 },
                 crypt_status_inactive("braid-testdisk"),
             )
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/test-disk".into(),
-                    mapper: MapperName("braid-testdisk".into()),
+                    mapper: MapperName::from_basename("braid-testdisk".into()),
                 },
                 b"wrong".to_vec(),
                 RawCommandOutput {
@@ -1925,14 +1925,14 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-vanished".into()),
+                    mapper: MapperName::from_basename("braid-vanished".into()),
                 },
                 crypt_status_inactive("braid-vanished"),
             )
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/vanished-disk".into(),
-                    mapper: MapperName("braid-vanished".into()),
+                    mapper: MapperName::from_basename("braid-vanished".into()),
                 },
                 b"pass".to_vec(),
                 RawCommandOutput {
@@ -1974,14 +1974,14 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-testdisk".into()),
+                    mapper: MapperName::from_basename("braid-testdisk".into()),
                 },
                 crypt_status_inactive("braid-testdisk"),
             )
             .with_output(
                 CmdRequest::CryptsetupLuksOpenKeyFile {
                     device: "/dev/disk/by-id/test-disk".into(),
-                    mapper: MapperName("braid-testdisk".into()),
+                    mapper: MapperName::from_basename("braid-testdisk".into()),
                     key_file_path: kf.path().display().to_string(),
                 },
                 RawCommandOutput {
@@ -2023,14 +2023,14 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-vanished".into()),
+                    mapper: MapperName::from_basename("braid-vanished".into()),
                 },
                 crypt_status_inactive("braid-vanished"),
             )
             .with_output(
                 CmdRequest::CryptsetupLuksOpenKeyFile {
                     device: "/dev/disk/by-id/vanished-disk".into(),
-                    mapper: MapperName("braid-vanished".into()),
+                    mapper: MapperName::from_basename("braid-vanished".into()),
                     key_file_path: kf.path().display().to_string(),
                 },
                 RawCommandOutput {
@@ -2071,14 +2071,14 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 crypt_status_inactive("braid-disk1"),
             )
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: by_id.as_str().to_owned(),
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 b"pass".to_vec(),
                 RawCommandOutput {
@@ -2102,11 +2102,11 @@ mod tests {
             runner.requests(),
             vec![
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 CmdRequest::CryptsetupLuksOpen {
                     device: by_id.as_str().to_owned(),
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
             ]
         );
@@ -2126,7 +2126,7 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 crypt_status_active("braid-disk1", "/dev/vdb"),
             )
@@ -2152,7 +2152,7 @@ mod tests {
             runner.requests(),
             vec![
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 CmdRequest::CryptsetupLuksUuid {
                     device: by_id.as_str().to_owned()
@@ -2178,7 +2178,7 @@ mod tests {
         let by_id = ByIdPath::parse("/dev/disk/by-id/disk1").unwrap();
         let runner = MockRunner::default().with_output(
             CmdRequest::CryptsetupStatus {
-                mapper: MapperName("braid-disk1".into()),
+                mapper: MapperName::from_basename("braid-disk1".into()),
             },
             crypt_status_active("braid-disk1", "/dev/vdz"),
         );
@@ -2188,7 +2188,7 @@ mod tests {
         let err = classify_mapper_ownership(
             &runner,
             &disk("disk1"),
-            &MapperName("braid-disk1".into()),
+            &MapperName::from_basename("braid-disk1".into()),
             &by_id,
             &resolver,
             || Ok(LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap()),
@@ -2231,7 +2231,7 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 crypt_status_active("braid-disk1", "/dev/vdb"),
             )
@@ -2247,7 +2247,7 @@ mod tests {
         let ownership = classify_mapper_ownership(
             &runner,
             &disk("disk1"),
-            &MapperName("braid-disk1".into()),
+            &MapperName::from_basename("braid-disk1".into()),
             &by_id,
             &resolver,
             || Ok(LuksUuid::parse(uuid).unwrap()),
@@ -2270,7 +2270,7 @@ mod tests {
         let by_id = ByIdPath::parse("/dev/disk/by-id/disk1").unwrap();
         let runner = MockRunner::default().with_output(
             CmdRequest::CryptsetupStatus {
-                mapper: MapperName("braid-disk1".into()),
+                mapper: MapperName::from_basename("braid-disk1".into()),
             },
             crypt_status_active("braid-disk1", "/dev/vdb"),
         );
@@ -2280,7 +2280,7 @@ mod tests {
         let err = classify_mapper_ownership(
             &runner,
             &disk("disk1"),
-            &MapperName("braid-disk1".into()),
+            &MapperName::from_basename("braid-disk1".into()),
             &by_id,
             &resolver,
             || Ok(LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap()),
@@ -2314,7 +2314,7 @@ mod tests {
         let by_id = ByIdPath::parse("/dev/disk/by-id/disk1").unwrap();
         let runner = MockRunner::default().with_output(
             CmdRequest::CryptsetupStatus {
-                mapper: MapperName("braid-disk1".into()),
+                mapper: MapperName::from_basename("braid-disk1".into()),
             },
             crypt_status_active("braid-disk1", "/dev/vdb"),
         );
@@ -2325,7 +2325,7 @@ mod tests {
         let err = classify_mapper_ownership(
             &runner,
             &disk("disk1"),
-            &MapperName("braid-disk1".into()),
+            &MapperName::from_basename("braid-disk1".into()),
             &by_id,
             &resolver,
             || Ok(LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap()),
@@ -2359,7 +2359,7 @@ mod tests {
         let by_id = ByIdPath::parse("/dev/disk/by-id/disk1").unwrap();
         let runner = MockRunner::default().with_output(
             CmdRequest::CryptsetupStatus {
-                mapper: MapperName("braid-disk1".into()),
+                mapper: MapperName::from_basename("braid-disk1".into()),
             },
             crypt_status_active("braid-disk1", "/dev/vdb"),
         );
@@ -2403,7 +2403,7 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 crypt_status_active("braid-disk1", "/dev/vdz"),
             )
@@ -2464,7 +2464,7 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 crypt_status_active("braid-disk1", "(null)"),
             )
@@ -2512,7 +2512,7 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 crypt_status_active("braid-disk1", "/dev/vdz"),
             )
@@ -2560,7 +2560,7 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 crypt_status_active("braid-disk1", "/dev/vdb"),
             )
@@ -2609,7 +2609,7 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 crypt_status_active("braid-disk1", "/dev/vdz"),
             )
@@ -2660,7 +2660,7 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 crypt_status_active("braid-disk1", "(null)"),
             )
@@ -2695,7 +2695,7 @@ mod tests {
         let by_id = ByIdPath::parse("/dev/disk/by-id/disk1").unwrap();
         let runner = MockRunner::default().with_output(
             CmdRequest::CryptsetupStatus {
-                mapper: MapperName("braid-disk1".into()),
+                mapper: MapperName::from_basename("braid-disk1".into()),
             },
             crypt_status_active_missing_device("braid-disk1"),
         );
@@ -2729,7 +2729,7 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-disk1".into()),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 crypt_status_active("braid-disk1", "/dev/vdb"),
             )

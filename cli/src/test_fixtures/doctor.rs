@@ -160,7 +160,7 @@ impl Filesystem for DoctorMockFs {
 pub(crate) fn mountpoint_ok() -> (CmdRequest, RawCommandOutput) {
     (
         CmdRequest::MountpointCheck {
-            path: MountPoint("/mnt/storage".to_owned()),
+            path: MountPoint::new("/mnt/storage".to_owned()),
         },
         RawCommandOutput {
             cmd: "mountpoint -q /mnt/storage".into(),
@@ -174,7 +174,7 @@ pub(crate) fn mountpoint_ok() -> (CmdRequest, RawCommandOutput) {
 pub(crate) fn mountpoint_fail() -> (CmdRequest, RawCommandOutput) {
     (
         CmdRequest::MountpointCheck {
-            path: MountPoint("/mnt/storage".to_owned()),
+            path: MountPoint::new("/mnt/storage".to_owned()),
         },
         RawCommandOutput {
             cmd: "mountpoint -q /mnt/storage".into(),
@@ -188,7 +188,7 @@ pub(crate) fn mountpoint_fail() -> (CmdRequest, RawCommandOutput) {
 pub(crate) fn df_json(json: &str) -> (CmdRequest, RawCommandOutput) {
     (
         CmdRequest::BtrfsFilesystemDfJson {
-            mount_point: MountPoint("/mnt/storage".to_owned()),
+            mount_point: MountPoint::new("/mnt/storage".to_owned()),
         },
         RawCommandOutput {
             cmd: "btrfs --format json filesystem df /mnt/storage".into(),
@@ -202,7 +202,7 @@ pub(crate) fn df_json(json: &str) -> (CmdRequest, RawCommandOutput) {
 pub(crate) fn df_json_fail() -> (CmdRequest, RawCommandOutput) {
     (
         CmdRequest::BtrfsFilesystemDfJson {
-            mount_point: MountPoint("/mnt/storage".to_owned()),
+            mount_point: MountPoint::new("/mnt/storage".to_owned()),
         },
         RawCommandOutput {
             cmd: "btrfs --format json filesystem df /mnt/storage".into(),
@@ -216,7 +216,7 @@ pub(crate) fn df_json_fail() -> (CmdRequest, RawCommandOutput) {
 pub(crate) fn device_usage_raw(stdout: &str) -> (CmdRequest, RawCommandOutput) {
     (
         CmdRequest::BtrfsDeviceUsageRaw {
-            mount_point: MountPoint("/mnt/storage".to_owned()),
+            mount_point: MountPoint::new("/mnt/storage".to_owned()),
         },
         RawCommandOutput {
             cmd: "btrfs device usage --raw /mnt/storage".into(),
@@ -303,7 +303,7 @@ pub(crate) fn pool_state_runner(
         .collect();
     runner = runner.with_output(
         CmdRequest::BtrfsFilesystemShow {
-            mount_point: MountPoint("/mnt/storage".to_owned()),
+            mount_point: MountPoint::new("/mnt/storage".to_owned()),
         },
         doctor_btrfs_show(&show_devices, missing_devids),
     );
@@ -312,7 +312,7 @@ pub(crate) fn pool_state_runner(
         runner = runner
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName(mapper.to_owned()),
+                    mapper: MapperName::from_basename(mapper.to_owned()),
                 },
                 doctor_cryptsetup_status_active(mapper, device),
             )
@@ -504,11 +504,11 @@ pub(crate) struct DfQueryFailureRunner;
 impl CommandRunner for DfQueryFailureRunner {
     fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
         match request {
-            CmdRequest::MountpointCheck { path } if path.0 == "/mnt/storage" => {
+            CmdRequest::MountpointCheck { path } if path.as_str() == "/mnt/storage" => {
                 Ok(mountpoint_ok().1)
             }
             CmdRequest::BtrfsFilesystemDfJson { mount_point }
-                if mount_point.0 == "/mnt/storage" =>
+                if mount_point.as_str() == "/mnt/storage" =>
             {
                 Err(CmdError::Failed("df query failed".into()))
             }
@@ -541,13 +541,13 @@ impl CommandRunner for PoolMissingDevicesRunner {
         self.calls.lock().unwrap().push(request.clone());
 
         match request {
-            CmdRequest::MountpointCheck { path } if path.0 == "/mnt/storage" => {
+            CmdRequest::MountpointCheck { path } if path.as_str() == "/mnt/storage" => {
                 Ok(mountpoint_ok().1)
             }
-            CmdRequest::BtrfsFilesystemShow { mount_point } if mount_point.0 == "/mnt/storage" => {
+            CmdRequest::BtrfsFilesystemShow { mount_point } if mount_point.as_str() == "/mnt/storage" => {
                 Ok(doctor_btrfs_show(&[("braid-disk1", 1)], &[]))
             }
-            CmdRequest::CryptsetupStatus { mapper } if mapper.0 == "braid-disk1" => {
+            CmdRequest::CryptsetupStatus { mapper } if mapper.as_str() == "braid-disk1" => {
                 Ok(doctor_cryptsetup_status_active("braid-disk1", "/dev/vdb"))
             }
             CmdRequest::CryptsetupLuksUuid { device } if device == "/dev/vdb" => Ok(

@@ -1416,7 +1416,7 @@ mod tests {
 
     fn umount_request() -> CmdRequest {
         CmdRequest::Umount {
-            mount_point: MountPoint("/mnt/storage".to_owned()),
+            mount_point: MountPoint::new("/mnt/storage".to_owned()),
         }
     }
 
@@ -1477,19 +1477,19 @@ mod tests {
         lock_mounted_runner()
             .with_output(
                 CmdRequest::BtrfsBalancePause {
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                    mount_point: MountPoint::new("/mnt/storage".to_owned()),
                 },
                 lock_ok_raw("btrfs balance pause /mnt/storage"),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-aaa".into()),
+                    mapper: MapperName::from_basename("braid-aaa".into()),
                 },
                 lock_ok_raw("cryptsetup close braid-aaa"),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-bbb".into()),
+                    mapper: MapperName::from_basename("braid-bbb".into()),
                 },
                 lock_ok_raw("cryptsetup close braid-bbb"),
             )
@@ -1622,13 +1622,13 @@ mod tests {
         MockRunner::default()
             .with_output(
                 CmdRequest::MountpointCheck {
-                    path: MountPoint("/mnt/storage".to_owned()),
+                    path: MountPoint::new("/mnt/storage".to_owned()),
                 },
                 lock_ok_raw("mountpoint -q /mnt/storage"),
             )
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                    mount_point: MountPoint::new("/mnt/storage".to_owned()),
                 },
                 btrfs_show_for_lock_mappers(mapper_aaa, mapper_bbb),
             )
@@ -1645,7 +1645,7 @@ mod tests {
     fn cmd_lock_skips_lifecycle_pre_steps_when_lifecycle_disabled() {
         let runner = MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
-                path: MountPoint("/mnt/storage".to_owned()),
+                path: MountPoint::new("/mnt/storage".to_owned()),
             },
             lock_err_raw("mountpoint -q /mnt/storage", 1, ""),
         );
@@ -1713,7 +1713,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::MountpointCheck {
-                    path: MountPoint("/mnt/storage".to_owned()),
+                    path: MountPoint::new("/mnt/storage".to_owned()),
                 },
                 lock_err_raw("mountpoint -q /mnt/storage", 1, ""),
             );
@@ -1983,7 +1983,7 @@ mod tests {
         membership.insert(test_uuid(701), alpha).unwrap();
         let runner = MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
-                path: MountPoint("/mnt/storage".to_owned()),
+                path: MountPoint::new("/mnt/storage".to_owned()),
             },
             lock_err_raw("mountpoint -q /mnt/storage", 1, ""),
         );
@@ -2001,13 +2001,13 @@ mod tests {
         let runner = lock_mounted_runner()
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-aaa".into()),
+                    mapper: MapperName::from_basename("braid-aaa".into()),
                 },
                 lock_ok_raw("cryptsetup close braid-aaa"),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-bbb".into()),
+                    mapper: MapperName::from_basename("braid-bbb".into()),
                 },
                 lock_ok_raw("cryptsetup close braid-bbb"),
             );
@@ -2033,7 +2033,7 @@ mod tests {
     fn execute_does_not_close_membership_mapper_absent_from_plan() {
         let runner = MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
-                path: MountPoint("/mnt/storage".into()),
+                path: MountPoint::new("/mnt/storage".into()),
             },
             lock_err_raw("mountpoint -q /mnt/storage", 1, ""),
         );
@@ -2069,7 +2069,7 @@ mod tests {
     fn lock_already_locked() {
         let runner = MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
-                path: MountPoint("/mnt/storage".to_owned()),
+                path: MountPoint::new("/mnt/storage".to_owned()),
             },
             lock_err_raw("mountpoint -q /mnt/storage", 1, ""),
         );
@@ -2087,14 +2087,14 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::MountpointCheck {
-                    path: MountPoint("/mnt/storage".to_owned()),
+                    path: MountPoint::new("/mnt/storage".to_owned()),
                 },
                 lock_err_raw("mountpoint -q /mnt/storage", 1, ""),
             )
             .with_mapper_open("braid-aaa", "/dev/disk/by-id/a", AAA_UUID)
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-aaa".into()),
+                    mapper: MapperName::from_basename("braid-aaa".into()),
                 },
                 lock_ok_raw("cryptsetup close braid-aaa"),
             );
@@ -2116,7 +2116,7 @@ mod tests {
     fn lock_umount_busy_fails() {
         let runner = lock_with_fsid_probe_mocks(MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
-                path: MountPoint("/mnt/storage".to_owned()),
+                path: MountPoint::new("/mnt/storage".to_owned()),
             },
             lock_ok_raw("mountpoint -q /mnt/storage"),
         ))
@@ -2130,7 +2130,7 @@ mod tests {
         )
         .with_output(
             CmdRequest::CryptsetupClose {
-                mapper: MapperName("braid-aaa".into()),
+                mapper: MapperName::from_basename("braid-aaa".into()),
             },
             lock_err_raw(
                 "cryptsetup close braid-aaa",
@@ -2140,7 +2140,7 @@ mod tests {
         )
         .with_output(
             CmdRequest::CryptsetupClose {
-                mapper: MapperName("braid-bbb".into()),
+                mapper: MapperName::from_basename("braid-bbb".into()),
             },
             lock_err_raw(
                 "cryptsetup close braid-bbb",
@@ -2174,7 +2174,7 @@ mod tests {
     fn lock_umount_failure_skips_forget() {
         let runner = lock_with_fsid_probe_mocks(MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
-                path: MountPoint("/mnt/storage".to_owned()),
+                path: MountPoint::new("/mnt/storage".to_owned()),
             },
             lock_ok_raw("mountpoint -q /mnt/storage"),
         ))
@@ -2188,13 +2188,13 @@ mod tests {
         )
         .with_output(
             CmdRequest::CryptsetupClose {
-                mapper: MapperName("braid-aaa".into()),
+                mapper: MapperName::from_basename("braid-aaa".into()),
             },
             lock_ok_raw("cryptsetup close braid-aaa"),
         )
         .with_output(
             CmdRequest::CryptsetupClose {
-                mapper: MapperName("braid-bbb".into()),
+                mapper: MapperName::from_basename("braid-bbb".into()),
             },
             lock_ok_raw("cryptsetup close braid-bbb"),
         );
@@ -2229,7 +2229,7 @@ mod tests {
     fn lock_umount_busy_includes_hint() {
         let runner = lock_with_fsid_probe_mocks(MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
-                path: MountPoint("/mnt/storage".to_owned()),
+                path: MountPoint::new("/mnt/storage".to_owned()),
             },
             lock_ok_raw("mountpoint -q /mnt/storage"),
         ))
@@ -2243,7 +2243,7 @@ mod tests {
         )
         .with_output(
             CmdRequest::CryptsetupClose {
-                mapper: MapperName("braid-aaa".into()),
+                mapper: MapperName::from_basename("braid-aaa".into()),
             },
             lock_err_raw(
                 "cryptsetup close braid-aaa",
@@ -2253,7 +2253,7 @@ mod tests {
         )
         .with_output(
             CmdRequest::CryptsetupClose {
-                mapper: MapperName("braid-bbb".into()),
+                mapper: MapperName::from_basename("braid-bbb".into()),
             },
             lock_err_raw(
                 "cryptsetup close braid-bbb",
@@ -2285,7 +2285,7 @@ mod tests {
     fn lock_umount_busy_retry_succeeds_on_second_attempt() {
         let runner = lock_with_fsid_probe_mocks(MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
-                path: MountPoint("/mnt/storage".to_owned()),
+                path: MountPoint::new("/mnt/storage".to_owned()),
             },
             lock_ok_raw("mountpoint -q /mnt/storage"),
         ))
@@ -2304,13 +2304,13 @@ mod tests {
         )
         .with_output(
             CmdRequest::CryptsetupClose {
-                mapper: MapperName("braid-aaa".into()),
+                mapper: MapperName::from_basename("braid-aaa".into()),
             },
             lock_ok_raw("cryptsetup close braid-aaa"),
         )
         .with_output(
             CmdRequest::CryptsetupClose {
-                mapper: MapperName("braid-bbb".into()),
+                mapper: MapperName::from_basename("braid-bbb".into()),
             },
             lock_ok_raw("cryptsetup close braid-bbb"),
         );
@@ -2360,7 +2360,7 @@ mod tests {
     fn lock_umount_non_busy_failure_does_not_retry() {
         let runner = lock_with_fsid_probe_mocks(MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
-                path: MountPoint("/mnt/storage".to_owned()),
+                path: MountPoint::new("/mnt/storage".to_owned()),
             },
             lock_ok_raw("mountpoint -q /mnt/storage"),
         ))
@@ -2374,13 +2374,13 @@ mod tests {
         )
         .with_output(
             CmdRequest::CryptsetupClose {
-                mapper: MapperName("braid-aaa".into()),
+                mapper: MapperName::from_basename("braid-aaa".into()),
             },
             lock_ok_raw("cryptsetup close braid-aaa"),
         )
         .with_output(
             CmdRequest::CryptsetupClose {
-                mapper: MapperName("braid-bbb".into()),
+                mapper: MapperName::from_basename("braid-bbb".into()),
             },
             lock_ok_raw("cryptsetup close braid-bbb"),
         );
@@ -2429,7 +2429,7 @@ mod tests {
     fn lock_umount_cmd_error_bubbles_immediately_without_mapper_close() {
         let runner = lock_with_fsid_probe_mocks(MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
-                path: MountPoint("/mnt/storage".to_owned()),
+                path: MountPoint::new("/mnt/storage".to_owned()),
             },
             lock_ok_raw("mountpoint -q /mnt/storage"),
         ));
@@ -2462,13 +2462,13 @@ mod tests {
     fn lock_umount_non_busy_omits_hint() {
         let runner = lock_with_fsid_probe_mocks(MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
-                path: MountPoint("/mnt/storage".to_owned()),
+                path: MountPoint::new("/mnt/storage".to_owned()),
             },
             lock_ok_raw("mountpoint -q /mnt/storage"),
         ))
         .with_output(
             CmdRequest::Umount {
-                mount_point: MountPoint("/mnt/storage".to_owned()),
+                mount_point: MountPoint::new("/mnt/storage".to_owned()),
             },
             lock_err_raw(
                 "umount /mnt/storage",
@@ -2478,13 +2478,13 @@ mod tests {
         )
         .with_output(
             CmdRequest::CryptsetupClose {
-                mapper: MapperName("braid-aaa".into()),
+                mapper: MapperName::from_basename("braid-aaa".into()),
             },
             lock_ok_raw("cryptsetup close braid-aaa"),
         )
         .with_output(
             CmdRequest::CryptsetupClose {
-                mapper: MapperName("braid-bbb".into()),
+                mapper: MapperName::from_basename("braid-bbb".into()),
             },
             lock_ok_raw("cryptsetup close braid-bbb"),
         );
@@ -2517,13 +2517,13 @@ mod tests {
     fn lock_umount_path_containing_busy_phrase_omits_hint() {
         let runner = lock_with_fsid_probe_mocks(MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
-                path: MountPoint("/mnt/storage".to_owned()),
+                path: MountPoint::new("/mnt/storage".to_owned()),
             },
             lock_ok_raw("mountpoint -q /mnt/storage"),
         ))
         .with_output(
             CmdRequest::Umount {
-                mount_point: MountPoint("/mnt/storage".to_owned()),
+                mount_point: MountPoint::new("/mnt/storage".to_owned()),
             },
             lock_err_raw(
                 "umount /mnt/storage",
@@ -2533,13 +2533,13 @@ mod tests {
         )
         .with_output(
             CmdRequest::CryptsetupClose {
-                mapper: MapperName("braid-aaa".into()),
+                mapper: MapperName::from_basename("braid-aaa".into()),
             },
             lock_ok_raw("cryptsetup close braid-aaa"),
         )
         .with_output(
             CmdRequest::CryptsetupClose {
-                mapper: MapperName("braid-bbb".into()),
+                mapper: MapperName::from_basename("braid-bbb".into()),
             },
             lock_ok_raw("cryptsetup close braid-bbb"),
         );
@@ -2561,13 +2561,13 @@ mod tests {
         let runner = lock_mounted_runner()
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-aaa".into()),
+                    mapper: MapperName::from_basename("braid-aaa".into()),
                 },
                 lock_ok_raw("cryptsetup close braid-aaa"),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-bbb".into()),
+                    mapper: MapperName::from_basename("braid-bbb".into()),
                 },
                 lock_ok_raw("cryptsetup close braid-bbb"),
             );
@@ -2593,13 +2593,13 @@ mod tests {
     fn lock_execute_forget_filters_disappeared_mapper() {
         let runner = lock_with_fsid_probe_mocks(MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
-                path: MountPoint("/mnt/storage".to_owned()),
+                path: MountPoint::new("/mnt/storage".to_owned()),
             },
             lock_ok_raw("mountpoint -q /mnt/storage"),
         ))
         .with_output(
             CmdRequest::Umount {
-                mount_point: MountPoint("/mnt/storage".to_owned()),
+                mount_point: MountPoint::new("/mnt/storage".to_owned()),
             },
             lock_ok_raw("umount /mnt/storage"),
         )
@@ -2611,7 +2611,7 @@ mod tests {
         )
         .with_output(
             CmdRequest::CryptsetupClose {
-                mapper: MapperName("braid-aaa".into()),
+                mapper: MapperName::from_basename("braid-aaa".into()),
             },
             lock_ok_raw("cryptsetup close braid-aaa"),
         );
@@ -2647,13 +2647,13 @@ mod tests {
     fn lock_forget_failure_is_nonfatal() {
         let runner = lock_with_fsid_probe_mocks(MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
-                path: MountPoint("/mnt/storage".to_owned()),
+                path: MountPoint::new("/mnt/storage".to_owned()),
             },
             lock_ok_raw("mountpoint -q /mnt/storage"),
         ))
         .with_output(
             CmdRequest::Umount {
-                mount_point: MountPoint("/mnt/storage".to_owned()),
+                mount_point: MountPoint::new("/mnt/storage".to_owned()),
             },
             lock_ok_raw("umount /mnt/storage"),
         )
@@ -2668,13 +2668,13 @@ mod tests {
         )
         .with_output(
             CmdRequest::CryptsetupClose {
-                mapper: MapperName("braid-aaa".into()),
+                mapper: MapperName::from_basename("braid-aaa".into()),
             },
             lock_ok_raw("cryptsetup close braid-aaa"),
         )
         .with_output(
             CmdRequest::CryptsetupClose {
-                mapper: MapperName("braid-bbb".into()),
+                mapper: MapperName::from_basename("braid-bbb".into()),
             },
             lock_ok_raw("cryptsetup close braid-bbb"),
         );
@@ -2710,19 +2710,19 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-aaa".into()),
+                    mapper: MapperName::from_basename("braid-aaa".into()),
                 },
                 lock_ok_raw("cryptsetup close braid-aaa"),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-bbb".into()),
+                    mapper: MapperName::from_basename("braid-bbb".into()),
                 },
                 lock_ok_raw("cryptsetup close braid-bbb"),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-ccc".into()),
+                    mapper: MapperName::from_basename("braid-ccc".into()),
                 },
                 lock_ok_raw("cryptsetup close braid-ccc"),
             );
@@ -2750,13 +2750,13 @@ mod tests {
         let runner = lock_mounted_runner()
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-aaa".into()),
+                    mapper: MapperName::from_basename("braid-aaa".into()),
                 },
                 lock_ok_raw("cryptsetup close braid-aaa"),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-bbb".into()),
+                    mapper: MapperName::from_basename("braid-bbb".into()),
                 },
                 lock_ok_raw("cryptsetup close braid-bbb"),
             );
@@ -2785,7 +2785,7 @@ mod tests {
         // Pool is not mounted -- mountpoint check returns non-zero.
         let runner = MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
-                path: MountPoint("/mnt/storage".to_owned()),
+                path: MountPoint::new("/mnt/storage".to_owned()),
             },
             lock_err_raw("mountpoint -q /mnt/storage", 1, ""),
         );
@@ -2841,7 +2841,7 @@ mod tests {
         let runner = with_orphan_mapper(
             lock_with_fsid_probe_mocks(MockRunner::default().with_output(
                 CmdRequest::MountpointCheck {
-                    path: MountPoint("/mnt/storage".to_owned()),
+                    path: MountPoint::new("/mnt/storage".to_owned()),
                 },
                 lock_ok_raw("mountpoint -q /mnt/storage"),
             )),
@@ -2894,7 +2894,7 @@ mod tests {
         let runner = with_orphan_mapper(
             lock_with_fsid_probe_mocks(MockRunner::default().with_output(
                 CmdRequest::MountpointCheck {
-                    path: MountPoint("/mnt/storage".to_owned()),
+                    path: MountPoint::new("/mnt/storage".to_owned()),
                 },
                 lock_ok_raw("mountpoint -q /mnt/storage"),
             )),
@@ -2968,7 +2968,7 @@ mod tests {
     fn dry_run_preview_nothing_to_do() {
         let runner = MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
-                path: MountPoint("/mnt/storage".to_owned()),
+                path: MountPoint::new("/mnt/storage".to_owned()),
             },
             lock_err_raw("mountpoint -q /mnt/storage", 1, ""),
         );
@@ -2998,13 +2998,13 @@ mod tests {
     fn mounted_probe_failure_fallback_closes_uuid_verified_member() {
         let runner = lock_with_fsid_probe_mocks(MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
-                path: MountPoint("/mnt/storage".to_owned()),
+                path: MountPoint::new("/mnt/storage".to_owned()),
             },
             lock_ok_raw("mountpoint -q /mnt/storage"),
         ))
         .with_output_sequence(
             CmdRequest::CryptsetupStatus {
-                mapper: MapperName("braid-aaa".into()),
+                mapper: MapperName::from_basename("braid-aaa".into()),
             },
             vec![
                 lock_err_raw("cryptsetup status braid-aaa", 5, "transient status failure"),
@@ -3045,7 +3045,7 @@ mod tests {
         let runner = with_orphan_mapper(
             MockRunner::default().with_output(
                 CmdRequest::MountpointCheck {
-                    path: MountPoint("/mnt/storage".to_owned()),
+                    path: MountPoint::new("/mnt/storage".to_owned()),
                 },
                 lock_err_raw("mountpoint -q /mnt/storage", 1, ""),
             ),
@@ -3078,7 +3078,7 @@ mod tests {
             with_orphan_mapper(
                 MockRunner::default().with_output(
                     CmdRequest::MountpointCheck {
-                        path: MountPoint("/mnt/storage".to_owned()),
+                        path: MountPoint::new("/mnt/storage".to_owned()),
                     },
                     lock_err_raw("mountpoint -q /mnt/storage", 1, ""),
                 ),
@@ -3088,13 +3088,13 @@ mod tests {
         )
         .with_output(
             CmdRequest::CryptsetupClose {
-                mapper: MapperName("braid-aaa".into()),
+                mapper: MapperName::from_basename("braid-aaa".into()),
             },
             lock_ok_raw("cryptsetup close braid-aaa"),
         )
         .with_output(
             CmdRequest::CryptsetupClose {
-                mapper: MapperName("braid-bbb".into()),
+                mapper: MapperName::from_basename("braid-bbb".into()),
             },
             lock_ok_raw("cryptsetup close braid-bbb"),
         );
@@ -3144,7 +3144,7 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::MountpointCheck {
-                    path: MountPoint("/mnt/storage".to_owned()),
+                    path: MountPoint::new("/mnt/storage".to_owned()),
                 },
                 lock_err_raw("mountpoint -q /mnt/storage", 1, ""),
             )
@@ -3177,7 +3177,7 @@ mod tests {
     fn unverified_fallback_candidate_is_warned_and_skipped() {
         let runner = MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
-                path: MountPoint("/mnt/storage".to_owned()),
+                path: MountPoint::new("/mnt/storage".to_owned()),
             },
             lock_err_raw("mountpoint -q /mnt/storage", 1, ""),
         );
@@ -3222,13 +3222,13 @@ mod tests {
         let runner = lock_umount_failed_runner()
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-aaa".into()),
+                    mapper: MapperName::from_basename("braid-aaa".into()),
                 },
                 lock_ok_raw("cryptsetup close braid-aaa"),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-bbb".into()),
+                    mapper: MapperName::from_basename("braid-bbb".into()),
                 },
                 lock_ok_raw("cryptsetup close braid-bbb"),
             );
@@ -3257,7 +3257,7 @@ mod tests {
         let runner = lock_umount_failed_runner()
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-aaa".into()),
+                    mapper: MapperName::from_basename("braid-aaa".into()),
                 },
                 lock_err_raw(
                     "cryptsetup close braid-aaa",
@@ -3267,7 +3267,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-bbb".into()),
+                    mapper: MapperName::from_basename("braid-bbb".into()),
                 },
                 lock_err_raw(
                     "cryptsetup close braid-bbb",
@@ -3302,13 +3302,13 @@ mod tests {
         let runner = lock_umount_failed_runner()
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-aaa".into()),
+                    mapper: MapperName::from_basename("braid-aaa".into()),
                 },
                 lock_err_raw("cryptsetup close braid-aaa", 4, "Device is not active."),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-bbb".into()),
+                    mapper: MapperName::from_basename("braid-bbb".into()),
                 },
                 lock_ok_raw("cryptsetup close braid-bbb"),
             );
@@ -3335,13 +3335,13 @@ mod tests {
         let runner = lock_mounted_runner()
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-aaa".into()),
+                    mapper: MapperName::from_basename("braid-aaa".into()),
                 },
                 lock_err_raw("cryptsetup close braid-aaa", 4, "Device is not active."),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-bbb".into()),
+                    mapper: MapperName::from_basename("braid-bbb".into()),
                 },
                 lock_ok_raw("cryptsetup close braid-bbb"),
             );
@@ -3371,19 +3371,19 @@ mod tests {
         let runner = with_orphan_mapper(lock_umount_failed_runner(), "braid-ccc")
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-aaa".into()),
+                    mapper: MapperName::from_basename("braid-aaa".into()),
                 },
                 lock_ok_raw("cryptsetup close braid-aaa"),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-bbb".into()),
+                    mapper: MapperName::from_basename("braid-bbb".into()),
                 },
                 lock_ok_raw("cryptsetup close braid-bbb"),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-ccc".into()),
+                    mapper: MapperName::from_basename("braid-ccc".into()),
                 },
                 lock_err_raw(
                     "cryptsetup close braid-ccc",
@@ -3421,19 +3421,19 @@ mod tests {
         let runner = with_orphan_mapper(lock_umount_failed_runner(), "braid-ccc")
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-aaa".into()),
+                    mapper: MapperName::from_basename("braid-aaa".into()),
                 },
                 lock_ok_raw("cryptsetup close braid-aaa"),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-bbb".into()),
+                    mapper: MapperName::from_basename("braid-bbb".into()),
                 },
                 lock_ok_raw("cryptsetup close braid-bbb"),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-ccc".into()),
+                    mapper: MapperName::from_basename("braid-ccc".into()),
                 },
                 lock_err_raw("cryptsetup close braid-ccc", 4, "Device is not active."),
             );
@@ -3475,19 +3475,19 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-aaa".into()),
+                    mapper: MapperName::from_basename("braid-aaa".into()),
                 },
                 lock_ok_raw("cryptsetup close braid-aaa"),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-bbb".into()),
+                    mapper: MapperName::from_basename("braid-bbb".into()),
                 },
                 lock_ok_raw("cryptsetup close braid-bbb"),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-orphan".into()),
+                    mapper: MapperName::from_basename("braid-orphan".into()),
                 },
                 lock_err_raw("cryptsetup close braid-orphan", 4, "Device is not active."),
             );
@@ -3519,13 +3519,13 @@ mod tests {
         let inner = lock_mounted_runner()
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-aaa".into()),
+                    mapper: MapperName::from_basename("braid-aaa".into()),
                 },
                 lock_err_raw("cryptsetup close braid-aaa", 4, "Device is not active."),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-bbb".into()),
+                    mapper: MapperName::from_basename("braid-bbb".into()),
                 },
                 lock_ok_raw("cryptsetup close braid-bbb"),
             );
@@ -3558,13 +3558,13 @@ mod tests {
         let inner = lock_mounted_runner()
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-aaa".into()),
+                    mapper: MapperName::from_basename("braid-aaa".into()),
                 },
                 lock_err_raw("cryptsetup close braid-aaa", 4, "Device is not active."),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-bbb".into()),
+                    mapper: MapperName::from_basename("braid-bbb".into()),
                 },
                 lock_err_raw("cryptsetup close braid-bbb", 1, "permission denied"),
             );
@@ -3610,7 +3610,7 @@ mod tests {
     fn lock_retries_busy_close_then_succeeds() {
         let inner = lock_mounted_runner().with_output(
             CmdRequest::CryptsetupClose {
-                mapper: MapperName("braid-bbb".into()),
+                mapper: MapperName::from_basename("braid-bbb".into()),
             },
             lock_ok_raw("cryptsetup close braid-bbb"),
         );
@@ -3664,7 +3664,7 @@ mod tests {
         let inner = lock_mounted_runner()
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-aaa".into()),
+                    mapper: MapperName::from_basename("braid-aaa".into()),
                 },
                 lock_err_raw(
                     "cryptsetup close braid-aaa",
@@ -3674,7 +3674,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-bbb".into()),
+                    mapper: MapperName::from_basename("braid-bbb".into()),
                 },
                 lock_ok_raw("cryptsetup close braid-bbb"),
             );
@@ -3720,13 +3720,13 @@ mod tests {
         let runner = lock_mounted_runner()
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-aaa".into()),
+                    mapper: MapperName::from_basename("braid-aaa".into()),
                 },
                 lock_err_raw("cryptsetup close braid-aaa", 5, busy_stderr),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-bbb".into()),
+                    mapper: MapperName::from_basename("braid-bbb".into()),
                 },
                 lock_ok_raw("cryptsetup close braid-bbb"),
             );
@@ -3844,13 +3844,13 @@ mod tests {
             .collect();
         let runner = lock_with_fsid_probe_mocks(MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
-                path: MountPoint("/mnt/storage".to_owned()),
+                path: MountPoint::new("/mnt/storage".to_owned()),
             },
             lock_ok_raw("mountpoint -q /mnt/storage"),
         ))
         .with_output(
             CmdRequest::BtrfsBalancePause {
-                mount_point: MountPoint("/mnt/storage".to_owned()),
+                mount_point: MountPoint::new("/mnt/storage".to_owned()),
             },
             lock_ok_raw("btrfs balance pause /mnt/storage"),
         )
@@ -3866,13 +3866,13 @@ mod tests {
         )
         .with_output(
             CmdRequest::CryptsetupClose {
-                mapper: MapperName("braid-aaa".into()),
+                mapper: MapperName::from_basename("braid-aaa".into()),
             },
             lock_ok_raw("cryptsetup close braid-aaa"),
         )
         .with_output(
             CmdRequest::CryptsetupClose {
-                mapper: MapperName("braid-bbb".into()),
+                mapper: MapperName::from_basename("braid-bbb".into()),
             },
             lock_ok_raw("cryptsetup close braid-bbb"),
         );
@@ -3941,7 +3941,7 @@ mod tests {
     fn lock_refuses_when_exclusive_op_active() {
         let runner = lock_with_fsid_probe_mocks(MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
-                path: MountPoint("/mnt/storage".to_owned()),
+                path: MountPoint::new("/mnt/storage".to_owned()),
             },
             lock_ok_raw("mountpoint -q /mnt/storage"),
         ));
@@ -3971,13 +3971,13 @@ mod tests {
     fn lock_probe_failed_refuses_when_exclusive_op_active() {
         let runner = lock_with_fsid_probe_mocks(MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
-                path: MountPoint("/mnt/storage".to_owned()),
+                path: MountPoint::new("/mnt/storage".to_owned()),
             },
             lock_ok_raw("mountpoint -q /mnt/storage"),
         ))
         .with_output_sequence(
             CmdRequest::CryptsetupStatus {
-                mapper: MapperName("braid-aaa".into()),
+                mapper: MapperName::from_basename("braid-aaa".into()),
             },
             vec![lock_err_raw(
                 "cryptsetup status braid-aaa",
@@ -4016,7 +4016,7 @@ mod tests {
     fn lock_refuses_when_balance_paused() {
         let runner = lock_with_fsid_probe_mocks(MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
-                path: MountPoint("/mnt/storage".to_owned()),
+                path: MountPoint::new("/mnt/storage".to_owned()),
             },
             lock_ok_raw("mountpoint -q /mnt/storage"),
         ));
@@ -4050,7 +4050,7 @@ mod tests {
     fn lock_rejects_mounted_but_not_btrfs() {
         let runner = MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
-                path: MountPoint("/mnt/storage".to_owned()),
+                path: MountPoint::new("/mnt/storage".to_owned()),
             },
             lock_ok_raw("mountpoint -q /mnt/storage"),
         );
@@ -4072,7 +4072,7 @@ mod tests {
     /// mapper basename and disk name for compile_lock_steps tests.
     fn member_close(mapper: &str, disk_name: &str) -> LockMapperClose {
         LockMapperClose {
-            mapper: MapperName(mapper.into()),
+            mapper: MapperName::from_basename(mapper.into()),
             kind: LockMapperCloseKind::MemberOwned {
                 display_name: DiskName::parse(disk_name).expect("valid test disk name"),
             },
@@ -4081,7 +4081,7 @@ mod tests {
 
     fn orphan_close(mapper: &str, disk_name: &str) -> LockMapperClose {
         LockMapperClose {
-            mapper: MapperName(mapper.into()),
+            mapper: MapperName::from_basename(mapper.into()),
             kind: LockMapperCloseKind::Orphan {
                 disk_name: disk_name.into(),
             },
@@ -4130,7 +4130,7 @@ mod tests {
     #[test]
     fn dry_run_render_lock_mounted_2_disks() {
         use crate::types::MountPoint;
-        let mount_point = MountPoint("/mnt/storage".into());
+        let mount_point = MountPoint::new("/mnt/storage".into());
         let close_set = test_close_set(
             vec![
                 member_close("braid-disk1", "disk1"),
@@ -4162,7 +4162,7 @@ mod tests {
     #[test]
     fn dry_run_lock_not_mounted_1_open() {
         use crate::types::MountPoint;
-        let mount_point = MountPoint("/mnt/storage".into());
+        let mount_point = MountPoint::new("/mnt/storage".into());
         let close_set = test_close_set(vec![member_close("braid-disk1", "disk1")], vec![]);
         let steps = compile_lock_steps(false, false, &close_set, &mount_point);
         let output = Step::render_dry_run(&steps);
@@ -4180,7 +4180,7 @@ mod tests {
     #[test]
     fn dry_run_lock_nothing_to_do() {
         use crate::types::MountPoint;
-        let mount_point = MountPoint("/mnt/storage".into());
+        let mount_point = MountPoint::new("/mnt/storage".into());
         let close_set = test_close_set(vec![], vec![]);
         let steps = compile_lock_steps(false, false, &close_set, &mount_point);
         assert!(steps.is_empty());
@@ -4197,7 +4197,7 @@ mod tests {
     #[test]
     fn dry_run_lock_forget_step_lists_scoped_devices() {
         use crate::types::MountPoint;
-        let mount_point = MountPoint("/mnt/storage".into());
+        let mount_point = MountPoint::new("/mnt/storage".into());
         let close_set = test_close_set(
             vec![
                 member_close("braid-aaa", "aaa"),
@@ -4227,7 +4227,7 @@ mod tests {
     #[test]
     fn dry_run_lock_forget_step_includes_orphans() {
         use crate::types::MountPoint;
-        let mount_point = MountPoint("/mnt/storage".into());
+        let mount_point = MountPoint::new("/mnt/storage".into());
         let close_set = test_close_set(
             vec![member_close("braid-aaa", "aaa")],
             vec![orphan_close("braid-orphan", "orphan")],
@@ -4252,7 +4252,7 @@ mod tests {
     #[test]
     fn dry_run_lock_forget_step_omitted_when_no_mappers() {
         use crate::types::MountPoint;
-        let mount_point = MountPoint("/mnt/storage".into());
+        let mount_point = MountPoint::new("/mnt/storage".into());
         let close_set = test_close_set(vec![], vec![]);
         let steps = compile_lock_steps(true, false, &close_set, &mount_point);
         assert_eq!(
@@ -4278,7 +4278,7 @@ mod tests {
     #[test]
     fn dry_run_lock_systemd_stop_pause_precedes_umount() {
         use crate::types::MountPoint;
-        let mount_point = MountPoint("/mnt/storage".into());
+        let mount_point = MountPoint::new("/mnt/storage".into());
         let close_set = test_close_set(vec![member_close("braid-aaa", "aaa")], vec![]);
         let steps = compile_lock_steps(true, true, &close_set, &mount_point);
 
@@ -4318,13 +4318,13 @@ mod tests {
         let inner = lock_mounted_runner()
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-aaa".into()),
+                    mapper: MapperName::from_basename("braid-aaa".into()),
                 },
                 lock_ok_raw("cryptsetup close braid-aaa"),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-bbb".into()),
+                    mapper: MapperName::from_basename("braid-bbb".into()),
                 },
                 lock_ok_raw("cryptsetup close braid-bbb"),
             );
@@ -4371,19 +4371,19 @@ mod tests {
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-aaa".into()),
+                    mapper: MapperName::from_basename("braid-aaa".into()),
                 },
                 lock_ok_raw("cryptsetup close braid-aaa"),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-bbb".into()),
+                    mapper: MapperName::from_basename("braid-bbb".into()),
                 },
                 lock_ok_raw("cryptsetup close braid-bbb"),
             )
             .with_output(
                 CmdRequest::CryptsetupClose {
-                    mapper: MapperName("braid-ccc".into()),
+                    mapper: MapperName::from_basename("braid-ccc".into()),
                 },
                 lock_ok_raw("cryptsetup close braid-ccc"),
             );
@@ -4437,7 +4437,7 @@ mod tests {
                 umount_busy_output(),
             ],
         );
-        let mount_point = MountPoint("/mnt/storage".into());
+        let mount_point = MountPoint::new("/mnt/storage".into());
 
         let err = umount_with_retry(
             &runner,
@@ -4504,7 +4504,7 @@ mod tests {
         let sleeper = RecordingSleeper(Mutex::new(Vec::new()));
         let runner = MockRunner::default().with_output(
             CmdRequest::CryptsetupClose {
-                mapper: MapperName("braid-aaa".into()),
+                mapper: MapperName::from_basename("braid-aaa".into()),
             },
             lock_err_raw(
                 "cryptsetup close braid-aaa",
@@ -4514,7 +4514,7 @@ mod tests {
         );
 
         let err =
-            close_mapper_with_retry(&runner, &sleeper, &MapperName("braid-aaa".into()), false)
+            close_mapper_with_retry(&runner, &sleeper, &MapperName::from_basename("braid-aaa".into()), false)
                 .expect_err("should exhaust retries and return DeviceBusy");
         assert!(
             matches!(err, CloseMapperError::DeviceBusy(_)),
@@ -4554,13 +4554,13 @@ mod tests {
             mounted: true,
             devices: vec![
                 PoolDevice {
-                    mapper: MapperName(mapper_aaa.into()),
+                    mapper: MapperName::from_basename(mapper_aaa.into()),
                     luks_uuid: LuksUuid::parse("00000000-0000-0000-0000-0000000002bc").unwrap(),
                     devid: Devid::new(1),
                     underlying: "/dev/disk/by-id/a".into(),
                 },
                 PoolDevice {
-                    mapper: MapperName(mapper_bbb.into()),
+                    mapper: MapperName::from_basename(mapper_bbb.into()),
                     luks_uuid: LuksUuid::parse("00000000-0000-0000-0000-0000000002bd").unwrap(),
                     devid: Devid::new(2),
                     underlying: "/dev/disk/by-id/b".into(),
@@ -4583,7 +4583,7 @@ mod tests {
         PoolState {
             mounted: true,
             devices: vec![PoolDevice {
-                mapper: MapperName(mapper_aaa.into()),
+                mapper: MapperName::from_basename(mapper_aaa.into()),
                 luks_uuid: LuksUuid::parse("00000000-0000-0000-0000-0000000002bc").unwrap(),
                 devid: Devid::new(1),
                 underlying: "/dev/disk/by-id/a".into(),
@@ -4593,7 +4593,7 @@ mod tests {
             fsid: Some(Fsid::parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").unwrap()),
             missing_devids: vec![null_devid],
             null_underlying: vec![NullUnderlyingDevice {
-                mapper: MapperName(null_mapper.into()),
+                mapper: MapperName::from_basename(null_mapper.into()),
                 devid: null_devid,
             }],
         }
@@ -4678,7 +4678,7 @@ mod tests {
         let runner = MockRunner::default();
         let mut acc = CloseSetAccumulator::default();
         let close_set = build_close_sets_full(&runner, &fs, &pool, &membership, &mut acc);
-        let mp = MountPoint("/mnt/storage".into());
+        let mp = MountPoint::new("/mnt/storage".into());
         let steps = super::compile_lock_steps(true, false, &close_set, &mp);
         assert_eq!(
             lock_forget_step_devices(&steps),
@@ -4706,7 +4706,7 @@ mod tests {
         let pool = PoolState {
             mounted: true,
             devices: vec![PoolDevice {
-                mapper: MapperName("braid-leftover".into()),
+                mapper: MapperName::from_basename("braid-leftover".into()),
                 luks_uuid: LuksUuid::parse(ORPHAN_UUID).unwrap(),
                 devid: Devid::new(99),
                 underlying: "/dev/disk/by-id/leftover".into(),
@@ -4864,13 +4864,13 @@ mod tests {
         let plan_runner = MockRunner::default()
             .with_output(
                 CmdRequest::MountpointCheck {
-                    path: MountPoint("/mnt/storage".to_owned()),
+                    path: MountPoint::new("/mnt/storage".to_owned()),
                 },
                 lock_ok_raw("mountpoint -q /mnt/storage"),
             )
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
-                    mount_point: MountPoint("/mnt/storage".to_owned()),
+                    mount_point: MountPoint::new("/mnt/storage".to_owned()),
                 },
                 RawCommandOutput {
                     cmd: "btrfs filesystem show /mnt/storage".to_owned(),
@@ -4886,7 +4886,7 @@ mod tests {
             .with_mapper_open("braid-aaa", "/dev/disk/by-id/a", AAA_UUID)
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-dup".into()),
+                    mapper: MapperName::from_basename("braid-dup".into()),
                 },
                 cryptsetup_status_active_null("braid-dup"),
             );
@@ -4925,7 +4925,7 @@ mod tests {
         );
         let mut acc = CloseSetAccumulator::default();
         let close_set = build_close_sets_uuid_scanned_fallback(&runner, &fs, &membership, &mut acc);
-        let mp = MountPoint("/mnt/storage".into());
+        let mp = MountPoint::new("/mnt/storage".into());
         let steps = super::compile_lock_steps(true, false, &close_set, &mp);
         let forget = lock_forget_step_devices(&steps);
         // Members first, orphan last -- mirroring LockCloseSet order.
@@ -5008,7 +5008,7 @@ mod tests {
         let membership = lock_test_membership();
         let runner = MockRunner::default().with_output(
             CmdRequest::CryptsetupStatus {
-                mapper: MapperName("braid-null".into()),
+                mapper: MapperName::from_basename("braid-null".into()),
             },
             cryptsetup_status_active_null("braid-null"),
         );
@@ -5060,7 +5060,7 @@ mod tests {
         let membership = lock_test_membership();
         let runner = MockRunner::default().with_output(
             CmdRequest::CryptsetupStatus {
-                mapper: MapperName("braid-gone".into()),
+                mapper: MapperName::from_basename("braid-gone".into()),
             },
             cryptsetup_status_inactive("braid-gone"),
         );
@@ -5214,7 +5214,7 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::CryptsetupStatus {
-                    mapper: MapperName("braid-stranded".into()),
+                    mapper: MapperName::from_basename("braid-stranded".into()),
                 },
                 cryptsetup_status_active("braid-stranded", "/dev/vdc"),
             )
@@ -5262,7 +5262,7 @@ mod tests {
     fn full_arm_notbtrfs_aborts_does_not_fall_back() {
         let runner = MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
-                path: MountPoint("/mnt/storage".to_owned()),
+                path: MountPoint::new("/mnt/storage".to_owned()),
             },
             lock_ok_raw("mountpoint -q /mnt/storage"),
         );

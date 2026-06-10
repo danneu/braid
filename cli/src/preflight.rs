@@ -1842,7 +1842,7 @@ mod tests {
     // --- require_mutation_preflight tests ---
 
     fn mp() -> MountPoint {
-        MountPoint("/mnt/storage".into())
+        MountPoint::new("/mnt/storage".into())
     }
 
     #[test]

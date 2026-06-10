@@ -465,7 +465,7 @@ impl fmt::Display for Devid {
 /// type is for presentation and command argv construction only.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct MapperName(pub String);
+pub struct MapperName(String);
 
 impl MapperName {
     /// Wrap a mapper basename observed from system output (btrfs show,
@@ -515,7 +515,7 @@ impl LuksLabel {
 /// confused with arbitrary user paths at call sites that mix the two.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct MountPoint(pub String);
+pub struct MountPoint(String);
 
 impl MountPoint {
     /// Sole construction door now that the inner mount path is sealed.
