@@ -338,7 +338,7 @@ pub fn probe_pool_alerts<R: CommandRunner, F: Filesystem + ?Sized>(
         }
         Some(fstype) if fstype != "btrfs" => {
             return Err(ProbeError::NotBtrfs {
-                mount_point: mount_point.0.clone(),
+                mount_point: mount_point.as_str().to_owned(),
                 fstype,
             });
         }
@@ -418,7 +418,7 @@ pub fn probe_pool<R: CommandRunner, F: Filesystem + ?Sized>(
         }
         Some(fstype) if fstype != "btrfs" => {
             return Err(ProbeError::NotBtrfs {
-                mount_point: mount_point.0.clone(),
+                mount_point: mount_point.as_str().to_owned(),
                 fstype,
             });
         }
@@ -434,7 +434,7 @@ pub fn probe_pool<R: CommandRunner, F: Filesystem + ?Sized>(
     // parser couldn't extract the uuid line — a broken invariant, not a
     // state we should silently propagate to consumers.
     let fsid = show.uuid.ok_or_else(|| ProbeError::PoolDevice {
-        mapper: mount_point.0.clone(),
+        mapper: mount_point.as_str().to_owned(),
         detail: "mounted pool has no FSID in btrfs filesystem show output".into(),
     })?;
 
@@ -530,13 +530,13 @@ pub fn probe_fsid<R: CommandRunner, F: Filesystem + ?Sized>(
     match crate::mount_check::fstype_at_mount_via_fs(fs, mount_point.as_str())? {
         None => {
             return Err(ProbeError::PoolDevice {
-                mapper: mount_point.0.clone(),
+                mapper: mount_point.as_str().to_owned(),
                 detail: "mount point not present in mountinfo".into(),
             });
         }
         Some(fstype) if fstype != "btrfs" => {
             return Err(ProbeError::NotBtrfs {
-                mount_point: mount_point.0.clone(),
+                mount_point: mount_point.as_str().to_owned(),
                 fstype,
             });
         }
@@ -548,7 +548,7 @@ pub fn probe_fsid<R: CommandRunner, F: Filesystem + ?Sized>(
     })?;
     let show = parse_btrfs_filesystem_show(&show_raw)?;
     show.uuid.ok_or_else(|| ProbeError::PoolDevice {
-        mapper: mount_point.0.clone(),
+        mapper: mount_point.as_str().to_owned(),
         detail: "mounted pool has no FSID in btrfs filesystem show output".into(),
     })
 }

@@ -363,7 +363,7 @@ impl RecoverWorkAction {
 
                 let forget_devs: Vec<String> = close_names
                     .iter()
-                    .map(|name| format!("/dev/mapper/{}", config::mapper_name(name).0))
+                    .map(|name| config::mapper_name(name).dev_path())
                     .collect();
                 if !forget_devs.is_empty() {
                     steps.push(Step {
@@ -413,8 +413,7 @@ impl RecoverWorkAction {
                 let first_reopen_name = reopen_names
                     .first()
                     .expect("remount-cycle mount target validated during planning");
-                let mount_device =
-                    format!("/dev/mapper/{}", config::mapper_name(first_reopen_name).0);
+                let mount_device = config::mapper_name(first_reopen_name).dev_path();
                 if *any_missing_member {
                     steps.push(Step {
                         risk: "safe",
@@ -766,7 +765,7 @@ fn render_add_pool_mutation_recovery_steps(
 
     for (uuid, target) in sorted {
         let mapper = config::mapper_name(&target.name);
-        let mapper_path = format!("/dev/mapper/{}", mapper.0);
+        let mapper_path = mapper.dev_path();
         if live_uuids.is_some_and(|live| live.contains(uuid)) {
             let (kind, label) = match &target.mode {
                 journal::AddJournalMode::RecoverableBraidLabeled { .. } => {
@@ -822,7 +821,7 @@ fn render_add_pool_mutation_recovery_steps(
                     mount_point: plan.mount_point.clone(),
                     force: true,
                 });
-                let mapper_path_for_description = format!("/dev/mapper/{}", mapper.0);
+                let mapper_path_for_description = mapper.dev_path();
                 steps.push(Step {
                     risk: "safe",
                     description: format!(
@@ -1021,7 +1020,7 @@ fn execute_recover_initial_open<R: CommandRunner + Sync, F: Filesystem + ?Sized>
                 && let journal::OpKind::Add { targets, .. } = &plan.journal.op
             {
                 let all_no_btrfs = targets.iter().all(|(_, target)| {
-                    let mapper = format!("/dev/mapper/{}", config::mapper_name(&target.name).0);
+                    let mapper = config::mapper_name(&target.name).dev_path();
                     match runner.run(&CmdRequest::BtrfsFilesystemShowTarget { target: mapper }) {
                         Ok(raw) => matches!(classify_btrfs_probe(&raw), DeviceBtrfsProbe::NoBtrfs),
                         Err(_) => false,
@@ -1424,7 +1423,7 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
                 if cycle_reopen_names.contains(name) {
                     return Some(name.clone());
                 }
-                let mapper_path = format!("/dev/mapper/{}", config::mapper_name(name).0);
+                let mapper_path = config::mapper_name(name).dev_path();
                 fs.exists(&mapper_path).then(|| name.clone())
             })
             .collect();
@@ -1669,7 +1668,7 @@ fn recover_membership_matching_expected(
             return Err(RecoverError::Failed(format!(
                 "device {} (LUKS UUID {}) is in the live pool but is not part of the expected \
                  committed membership.",
-                dev.mapper.0, dev.luks_uuid
+                dev.mapper, dev.luks_uuid
             )));
         };
         let by_id = resolve_by_id_for_underlying(by_id_resolver, &dev.underlying)?;
@@ -1889,7 +1888,7 @@ fn foreign_live_device_not_admitted(dev: &PoolDevice) -> RecoverError {
          binding in the recovery admission membership for this phase.\n\
          This must be resolved manually -- provide the correct \
          /dev/disk/by-id/ path and re-run recovery.",
-        dev.mapper.0, dev.luks_uuid
+        dev.mapper, dev.luks_uuid
     ))
 }
 
@@ -2079,7 +2078,7 @@ fn discover_add_targets_before_mount<R: CommandRunner, F: Filesystem + ?Sized>(
         }
 
         let mapper = config::mapper_name(&target.name);
-        scan_mapper_if_btrfs_visible(runner, &format!("/dev/mapper/{}", mapper.0))?;
+        scan_mapper_if_btrfs_visible(runner, &mapper.dev_path())?;
     }
 
     Ok(credential)
@@ -2254,7 +2253,7 @@ fn execute_add_post_balance_recovery<R: CommandRunner + Sync>(
         let live_devices = pool
             .devices
             .iter()
-            .map(|dev| format!("{} ({})", dev.mapper.0, dev.luks_uuid))
+            .map(|dev| format!("{} ({})", dev.mapper, dev.luks_uuid))
             .collect::<Vec<_>>()
             .join(", ");
         return Err(RecoverError::Failed(format!(
@@ -2385,7 +2384,7 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
                 )?;
             }
             let mapper = config::mapper_name(&target.name);
-            if scan_mapper_if_btrfs_visible(runner, &format!("/dev/mapper/{}", mapper.0))? {
+            if scan_mapper_if_btrfs_visible(runner, &mapper.dev_path())? {
                 opened_or_scanned = true;
             }
         }
@@ -2423,7 +2422,7 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
                 continue;
             }
             let mapper = config::mapper_name(&target.name);
-            let mapper_path = format!("/dev/mapper/{}", mapper.0);
+            let mapper_path = mapper.dev_path();
             match &target.mode {
                 journal::AddJournalMode::RecoverableBraidLabeled {
                     verified_pool_fsid,
@@ -3481,7 +3480,7 @@ fn relock_and_remount<R: CommandRunner, F: Filesystem + ?Sized>(
     //    needs to cover the mappers this cycle will close.
     let forget_devs: Vec<String> = close_names
         .iter()
-        .map(|name| format!("/dev/mapper/{}", config::mapper_name(name).0))
+        .map(|name| config::mapper_name(name).dev_path())
         .filter(|p| fs.exists(p))
         .collect();
     if !forget_devs.is_empty() {
@@ -3506,7 +3505,7 @@ fn relock_and_remount<R: CommandRunner, F: Filesystem + ?Sized>(
     //    stale fs_devices cache.
     for name in close_names {
         let mn = config::mapper_name(name);
-        let mapper_path = format!("/dev/mapper/{}", mn.0);
+        let mapper_path = mn.dev_path();
         if !fs.exists(&mapper_path) {
             continue;
         }

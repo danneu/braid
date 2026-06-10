@@ -350,9 +350,9 @@ impl ReplaceWorkPlan {
         steps.push(Step {
             risk: "long",
             description: format!(
-                "btrfs replace start {} /dev/mapper/{} {}",
+                "btrfs replace start {} {} {}",
                 devid,
-                self.new_mapper,
+                self.new_mapper.dev_path(),
                 self.config.mount_point()
             ),
             commands: vec![CmdRequest::BtrfsReplaceStart {
@@ -1725,7 +1725,7 @@ fn build_member_verify_targets(
 
 fn build_replace_work_plan(input: ReplaceWorkPlanInput<'_>) -> ReplaceWorkPlan {
     let new_mapper = mapper_name(&input.new_name);
-    let new_mapper_path = format!("/dev/mapper/{new_mapper}");
+    let new_mapper_path = new_mapper.dev_path();
     let journal_target = build_replace_journal_target(
         &input.new_by_id,
         &input.new_probed,

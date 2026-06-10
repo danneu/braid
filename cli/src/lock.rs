@@ -165,7 +165,7 @@ impl LockCloseSet {
     pub fn forget_paths(&self) -> Vec<String> {
         self.entries
             .iter()
-            .map(|entry| format!("/dev/mapper/{}", entry.mapper))
+            .map(|entry| entry.mapper.dev_path())
             .collect()
     }
 }
@@ -285,10 +285,11 @@ fn scan_braid_mapper_candidates<F: Filesystem + ?Sized>(
         if already_observed.contains(entry.as_str()) {
             continue;
         }
-        if !fs.exists(&format!("/dev/mapper/{entry}")) {
+        let mapper = MapperName::from_basename(entry);
+        if !fs.exists(&mapper.dev_path()) {
             continue;
         }
-        candidates.push(MapperName(entry));
+        candidates.push(mapper);
     }
     Ok(candidates)
 }
@@ -783,7 +784,7 @@ impl LockPlan {
             }
             // Planned closes, observed-mapper-first.
             for entry in self.close_set.entries() {
-                let mapper_path = format!("/dev/mapper/{}", entry.mapper);
+                let mapper_path = entry.mapper.dev_path();
                 if !fs.exists(&mapper_path) {
                     if entry.is_orphan() {
                         continue;

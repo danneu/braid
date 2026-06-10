@@ -61,7 +61,7 @@ pub struct Config {
 
 impl Config {
     pub fn new(mount_point: MountPoint) -> Result<Self, ConfigBuildError> {
-        if mount_point.0.is_empty() {
+        if mount_point.as_str().is_empty() {
             return Err(ConfigBuildError::EmptyMountPoint);
         }
         Ok(Config {

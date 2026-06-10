@@ -192,7 +192,7 @@ impl RemoveWorkPlan {
     }
 
     fn render_steps(&self) -> Vec<Step> {
-        let mapper_path = format!("/dev/mapper/{}", self.target_mapper);
+        let mapper_path = self.target_mapper.dev_path();
         let mut steps = Vec::new();
         if self.remaining == 1 {
             steps.push(Step {
@@ -207,8 +207,8 @@ impl RemoveWorkPlan {
         steps.push(Step {
             risk: "long",
             description: format!(
-                "btrfs device remove /dev/mapper/{} (data migrates off disk)",
-                self.target_mapper
+                "btrfs device remove {} (data migrates off disk)",
+                self.target_mapper.dev_path()
             ),
             commands: vec![CmdRequest::BtrfsDeviceRemove {
                 device: mapper_path,
@@ -436,7 +436,7 @@ impl RemovePlan {
                 )
             );
         }
-        let device_path = format!("/dev/mapper/{mapper_str}");
+        let device_path = work_plan.target_mapper.dev_path();
         eprint!(
             "{}",
             status_line(

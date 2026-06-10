@@ -207,7 +207,7 @@ fn classify_braid_disk_fsid<R: CommandRunner>(
     mapper: &MapperName,
     pool: &PoolState,
 ) -> Result<AddLuksBtrfsProbe, AddError> {
-    let mapper_path = format!("/dev/mapper/{}", mapper.0);
+    let mapper_path = mapper.dev_path();
     let show_raw = runner.run(&CmdRequest::BtrfsFilesystemShowTarget {
         target: mapper_path,
     })?;
@@ -2095,7 +2095,7 @@ fn build_add_work_plan<R: CommandRunner>(
         let name = &input.names[i];
         let by_id = input.by_ids[i];
         let mn = mapper_name(name);
-        let mapper_path = format!("/dev/mapper/{}", mn.0);
+        let mapper_path = mn.dev_path();
 
         match &p.state {
             PresentConfigDiskState::PresentNotLuks => {
@@ -2938,7 +2938,7 @@ mod tests {
     fn recoverable_target(name: &str, by_id: &str, uuid: &str) -> RecoverableBraidTarget {
         let name = DiskName::parse(name).unwrap();
         RecoverableBraidTarget {
-            mapper_path: format!("/dev/mapper/{}", mapper_name(&name)),
+            mapper_path: mapper_name(&name).dev_path(),
             header_backup_path: luks_header_backup_path(Path::new("/tmp"), &mapper_name(&name)),
             by_id: ByIdPath::parse(by_id).unwrap(),
             luks_uuid: LuksUuid::parse(uuid).unwrap(),
@@ -2952,7 +2952,7 @@ mod tests {
         let name = DiskName::parse(name).unwrap();
         FreshLuksTarget {
             mapper_name: mapper_name(&name),
-            mapper_path: format!("/dev/mapper/{}", mapper_name(&name)),
+            mapper_path: mapper_name(&name).dev_path(),
             header_backup_path: luks_header_backup_path(Path::new("/tmp"), &mapper_name(&name)),
             by_id: ByIdPath::parse(by_id).unwrap(),
             luks_uuid: LuksUuid::parse(uuid).unwrap(),

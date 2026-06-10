@@ -306,7 +306,7 @@ fn plan_open_pool_inner<R: CommandRunner, F: Filesystem + ?Sized>(
         .map(|(k, _)| k)
         .or(first_open_mapper.as_ref())
         .expect("post-check above guarantees to_unlock or first_open_mapper is non-empty");
-    let mount_device = format!("/dev/mapper/{}", mapper_name(mount_key).0);
+    let mount_device = mapper_name(mount_key).dev_path();
 
     Ok(Some(OpenPlan {
         to_unlock,
@@ -694,7 +694,7 @@ where
 
     let forget_devs: Vec<String> = opened
         .iter()
-        .map(|mapper| format!("/dev/mapper/{mapper}"))
+        .map(|mapper| mapper.dev_path())
         .filter(|path| fs.exists(path))
         .collect();
     if !forget_devs.is_empty() {

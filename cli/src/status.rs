@@ -1027,9 +1027,9 @@ fn build_disk_views<R: CommandRunner>(
         // `matched_member`; for foreign live devices, there is no member join.
         let by_id = matched_member
             .map(|member| member.by_id.as_str().to_owned())
-            .unwrap_or_else(|| format!("/dev/mapper/{}", pd.mapper.0));
+            .unwrap_or_else(|| pd.mapper.dev_path());
 
-        let mapper = pd.mapper.0.clone();
+        let mapper = pd.mapper.as_str().to_owned();
 
         // Present-device hardware comes from the live backing path; persisted
         // by-id paths are setup/repair handles and can drift.
@@ -1174,7 +1174,7 @@ fn build_disk_views<R: CommandRunner>(
                 (status, String::new())
             }
         };
-        let mapper = mapper_name(&cd.name).0;
+        let mapper = mapper_name(&cd.name).as_str().to_owned();
 
         // Unpooled/offline disks have no live backing path in btrfs, so there is
         // nothing to read btrfs error stats or SMART from -- both stay `None`.
@@ -1228,7 +1228,7 @@ fn build_disk_views<R: CommandRunner>(
         if membership_uuid_live {
             continue;
         }
-        let mapper = mapper_name(&failure.name).0;
+        let mapper = mapper_name(&failure.name).as_str().to_owned();
         unpooled.push((
             DiskReport {
                 name: failure.name.as_str().to_owned(),

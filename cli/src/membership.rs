@@ -732,7 +732,7 @@ pub fn enrich_from_pool_state(
 pub(crate) fn present_display_name(member: Option<&DiskMember>, mapper: &MapperName) -> String {
     member
         .map(|m| m.name.as_str().to_owned())
-        .unwrap_or_else(|| mapper.0.clone())
+        .unwrap_or_else(|| mapper.as_str().to_owned())
 }
 
 /// Common case of `present_display_name`: resolve a live `PoolDevice`'s
@@ -1301,7 +1301,11 @@ mod tests {
             report.foreign
         );
         let updated = m.by_uuid(&u_k).expect("known UUID still present");
-        assert_eq!(updated.devid, Some(Devid::new(99)), "live devid must overwrite stale");
+        assert_eq!(
+            updated.devid,
+            Some(Devid::new(99)),
+            "live devid must overwrite stale"
+        );
         assert_eq!(updated.name, original.name, "name must be preserved");
         assert_eq!(updated.by_id, original.by_id, "by_id must be preserved");
         assert_eq!(
@@ -1334,7 +1338,11 @@ mod tests {
             report.foreign
         );
         let updated = m.by_uuid(&u_k).expect("known UUID still present");
-        assert_eq!(updated.devid, Some(Devid::new(2)), "live devid must be recorded");
+        assert_eq!(
+            updated.devid,
+            Some(Devid::new(2)),
+            "live devid must be recorded"
+        );
         assert_eq!(updated.name, original.name, "name must be preserved");
         assert_eq!(updated.by_id, original.by_id, "by_id must be preserved");
         let added_at = updated

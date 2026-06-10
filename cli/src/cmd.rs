@@ -513,7 +513,11 @@ impl CmdRequest {
             },
             CmdRequest::BtrfsFilesystemShow { mount_point } => CmdArgs {
                 program: "btrfs".to_owned(),
-                args: vec!["filesystem".into(), "show".into(), mount_point.0.clone()],
+                args: vec![
+                    "filesystem".into(),
+                    "show".into(),
+                    mount_point.as_str().to_owned(),
+                ],
             },
             CmdRequest::BtrfsFilesystemShowTarget { target } => CmdArgs {
                 program: "btrfs".to_owned(),
@@ -534,7 +538,7 @@ impl CmdRequest {
                     "json".into(),
                     "filesystem".into(),
                     "df".into(),
-                    mount_point.0.clone(),
+                    mount_point.as_str().to_owned(),
                 ],
             },
             CmdRequest::BtrfsFilesystemUsageRaw { mount_point } => CmdArgs {
@@ -543,7 +547,7 @@ impl CmdRequest {
                     "filesystem".into(),
                     "usage".into(),
                     "--raw".into(),
-                    mount_point.0.clone(),
+                    mount_point.as_str().to_owned(),
                 ],
             },
             CmdRequest::BtrfsScrubStatus { mount_point } => CmdArgs {
@@ -552,7 +556,7 @@ impl CmdRequest {
                     "scrub".into(),
                     "status".into(),
                     "--raw".into(),
-                    mount_point.0.clone(),
+                    mount_point.as_str().to_owned(),
                 ],
             },
             CmdRequest::BtrfsScrubResume { mount_point } => CmdArgs {
@@ -561,7 +565,7 @@ impl CmdRequest {
                     "scrub".into(),
                     "resume".into(),
                     "-B".into(),
-                    mount_point.0.clone(),
+                    mount_point.as_str().to_owned(),
                 ],
             },
             CmdRequest::BtrfsScrubStart { mount_point } => CmdArgs {
@@ -570,12 +574,16 @@ impl CmdRequest {
                     "scrub".into(),
                     "start".into(),
                     "-B".into(),
-                    mount_point.0.clone(),
+                    mount_point.as_str().to_owned(),
                 ],
             },
             CmdRequest::BtrfsScrubCancel { mount_point } => CmdArgs {
                 program: "btrfs".to_owned(),
-                args: vec!["scrub".into(), "cancel".into(), mount_point.0.clone()],
+                args: vec![
+                    "scrub".into(),
+                    "cancel".into(),
+                    mount_point.as_str().to_owned(),
+                ],
             },
             CmdRequest::BtrfsScrubStatusPerDevice { mount_point } => CmdArgs {
                 program: "btrfs".to_owned(),
@@ -584,12 +592,16 @@ impl CmdRequest {
                     "status".into(),
                     "-d".into(),
                     "-R".into(),
-                    mount_point.0.clone(),
+                    mount_point.as_str().to_owned(),
                 ],
             },
             CmdRequest::BtrfsDeviceStats { mount_point } => CmdArgs {
                 program: "btrfs".to_owned(),
-                args: vec!["device".into(), "stats".into(), mount_point.0.clone()],
+                args: vec![
+                    "device".into(),
+                    "stats".into(),
+                    mount_point.as_str().to_owned(),
+                ],
             },
             CmdRequest::BtrfsDeviceStatsJson { mount_point } => CmdArgs {
                 program: "btrfs".to_owned(),
@@ -598,12 +610,16 @@ impl CmdRequest {
                     "json".into(),
                     "device".into(),
                     "stats".into(),
-                    mount_point.0.clone(),
+                    mount_point.as_str().to_owned(),
                 ],
             },
             CmdRequest::BtrfsBalanceStatus { mount_point } => CmdArgs {
                 program: "btrfs".to_owned(),
-                args: vec!["balance".into(), "status".into(), mount_point.0.clone()],
+                args: vec![
+                    "balance".into(),
+                    "status".into(),
+                    mount_point.as_str().to_owned(),
+                ],
             },
             CmdRequest::BtrfsDeviceUsageRaw { mount_point } => CmdArgs {
                 program: "btrfs".to_owned(),
@@ -611,7 +627,7 @@ impl CmdRequest {
                     "device".into(),
                     "usage".into(),
                     "--raw".into(),
-                    mount_point.0.clone(),
+                    mount_point.as_str().to_owned(),
                 ],
             },
             CmdRequest::LsblkField { device, field } => {
@@ -665,7 +681,7 @@ impl CmdRequest {
                     args.push("-f".into());
                 }
                 args.push(device.clone());
-                args.push(mount_point.0.clone());
+                args.push(mount_point.as_str().to_owned());
                 CmdArgs {
                     program: "btrfs".to_owned(),
                     args,
@@ -681,7 +697,7 @@ impl CmdRequest {
                     "remove".into(),
                     "--enqueue".into(),
                     device.clone(),
-                    mount_point.0.clone(),
+                    mount_point.as_str().to_owned(),
                 ],
             },
             CmdRequest::BtrfsDeviceScan { device } => CmdArgs {
@@ -717,7 +733,7 @@ impl CmdRequest {
                     "--enqueue".into(),
                     "-dconvert=raid1".into(),
                     "-mconvert=raid1".into(),
-                    mount_point.0.clone(),
+                    mount_point.as_str().to_owned(),
                 ],
             },
             CmdRequest::BtrfsBalanceRaid1Soft { mount_point } => CmdArgs {
@@ -728,7 +744,7 @@ impl CmdRequest {
                     "--enqueue".into(),
                     "-dconvert=raid1,soft".into(),
                     "-mconvert=raid1,soft".into(),
-                    mount_point.0.clone(),
+                    mount_point.as_str().to_owned(),
                 ],
             },
             CmdRequest::BtrfsBalanceSingle { mount_point } => CmdArgs {
@@ -741,12 +757,16 @@ impl CmdRequest {
                     // Important: use dup for metadata when converting to single
                     "-mconvert=dup".into(),
                     "-f".into(),
-                    mount_point.0.clone(),
+                    mount_point.as_str().to_owned(),
                 ],
             },
             CmdRequest::BtrfsBalancePause { mount_point } => CmdArgs {
                 program: "btrfs".to_owned(),
-                args: vec!["balance".into(), "pause".into(), mount_point.0.clone()],
+                args: vec![
+                    "balance".into(),
+                    "pause".into(),
+                    mount_point.as_str().to_owned(),
+                ],
             },
             CmdRequest::MkfsBtrfs { device } => CmdArgs {
                 program: "mkfs.btrfs".to_owned(),
@@ -783,7 +803,7 @@ impl CmdRequest {
                     "-o".into(),
                     base_mount_options().join(","),
                     device.clone(),
-                    mount_point.0.clone(),
+                    mount_point.as_str().to_owned(),
                 ];
                 CmdArgs {
                     program: "mount".to_owned(),
@@ -801,7 +821,7 @@ impl CmdRequest {
                     "-o".into(),
                     all_options.join(","),
                     device.clone(),
-                    mount_point.0.clone(),
+                    mount_point.as_str().to_owned(),
                 ];
                 CmdArgs {
                     program: "mount".to_owned(),
@@ -810,11 +830,11 @@ impl CmdRequest {
             }
             CmdRequest::Umount { mount_point } => CmdArgs {
                 program: "umount".to_owned(),
-                args: vec![mount_point.0.clone()],
+                args: vec![mount_point.as_str().to_owned()],
             },
             CmdRequest::MountpointCheck { path } => CmdArgs {
                 program: "mountpoint".to_owned(),
-                args: vec!["-q".into(), path.0.clone()],
+                args: vec!["-q".into(), path.as_str().to_owned()],
             },
             CmdRequest::BtrfsReplaceStart {
                 devid,
@@ -852,7 +872,7 @@ impl CmdRequest {
                     "-B".into(),
                     devid.to_string(),
                     target_device.clone(),
-                    mount_point.0.clone(),
+                    mount_point.as_str().to_owned(),
                 ],
             },
             CmdRequest::BtrfsReplaceStatus { mount_point } => CmdArgs {
@@ -868,7 +888,7 @@ impl CmdRequest {
                     "replace".into(),
                     "status".into(),
                     "-1".into(),
-                    mount_point.0.clone(),
+                    mount_point.as_str().to_owned(),
                 ],
             },
             CmdRequest::BtrfsFilesystemResize { devid, mount_point } => CmdArgs {
@@ -878,7 +898,7 @@ impl CmdRequest {
                     "resize".into(),
                     "--enqueue".into(),
                     format!("{devid}:max"),
-                    mount_point.0.clone(),
+                    mount_point.as_str().to_owned(),
                 ],
             },
             CmdRequest::CryptsetupLuksHeaderBackup {
@@ -981,35 +1001,59 @@ impl CmdRequest {
             },
             CmdRequest::BtrfsFilesystemUsage { mount_point } => CmdArgs {
                 program: "btrfs".to_owned(),
-                args: vec!["filesystem".into(), "usage".into(), mount_point.0.clone()],
+                args: vec![
+                    "filesystem".into(),
+                    "usage".into(),
+                    mount_point.as_str().to_owned(),
+                ],
             },
             CmdRequest::BtrfsFilesystemDf { mount_point } => CmdArgs {
                 program: "btrfs".to_owned(),
-                args: vec!["filesystem".into(), "df".into(), mount_point.0.clone()],
+                args: vec![
+                    "filesystem".into(),
+                    "df".into(),
+                    mount_point.as_str().to_owned(),
+                ],
             },
             CmdRequest::BtrfsFilesystemCommitStats { mount_point } => CmdArgs {
                 program: "btrfs".to_owned(),
                 args: vec![
                     "filesystem".into(),
                     "commit-stats".into(),
-                    mount_point.0.clone(),
+                    mount_point.as_str().to_owned(),
                 ],
             },
             CmdRequest::BtrfsDeviceUsage { mount_point } => CmdArgs {
                 program: "btrfs".to_owned(),
-                args: vec!["device".into(), "usage".into(), mount_point.0.clone()],
+                args: vec![
+                    "device".into(),
+                    "usage".into(),
+                    mount_point.as_str().to_owned(),
+                ],
             },
             CmdRequest::BtrfsScrubStatusHuman { mount_point } => CmdArgs {
                 program: "btrfs".to_owned(),
-                args: vec!["scrub".into(), "status".into(), mount_point.0.clone()],
+                args: vec![
+                    "scrub".into(),
+                    "status".into(),
+                    mount_point.as_str().to_owned(),
+                ],
             },
             CmdRequest::BtrfsScrubLimit { mount_point } => CmdArgs {
                 program: "btrfs".to_owned(),
-                args: vec!["scrub".into(), "limit".into(), mount_point.0.clone()],
+                args: vec![
+                    "scrub".into(),
+                    "limit".into(),
+                    mount_point.as_str().to_owned(),
+                ],
             },
             CmdRequest::BtrfsSubvolumeList { mount_point } => CmdArgs {
                 program: "btrfs".to_owned(),
-                args: vec!["subvolume".into(), "list".into(), mount_point.0.clone()],
+                args: vec![
+                    "subvolume".into(),
+                    "list".into(),
+                    mount_point.as_str().to_owned(),
+                ],
             },
             CmdRequest::BtrfsSubvolumeListFull { mount_point } => CmdArgs {
                 program: "btrfs".to_owned(),
@@ -1024,7 +1068,7 @@ impl CmdRequest {
                     "-R".into(),
                     "-t".into(),
                     "--sort=path".into(),
-                    mount_point.0.clone(),
+                    mount_point.as_str().to_owned(),
                 ],
             },
             CmdRequest::BtrfsSubvolumeListSnapshots { mount_point } => CmdArgs {
@@ -1039,7 +1083,7 @@ impl CmdRequest {
                     "-R".into(),
                     "-t".into(),
                     "--sort=path".into(),
-                    mount_point.0.clone(),
+                    mount_point.as_str().to_owned(),
                 ],
             },
             CmdRequest::BtrfsSubvolumeListDeleted { mount_point } => CmdArgs {
@@ -1048,7 +1092,7 @@ impl CmdRequest {
                     "subvolume".into(),
                     "list".into(),
                     "-d".into(),
-                    mount_point.0.clone(),
+                    mount_point.as_str().to_owned(),
                 ],
             },
             CmdRequest::BtrfsSubvolumeGetDefault { mount_point } => CmdArgs {
@@ -1056,7 +1100,7 @@ impl CmdRequest {
                 args: vec![
                     "subvolume".into(),
                     "get-default".into(),
-                    mount_point.0.clone(),
+                    mount_point.as_str().to_owned(),
                 ],
             },
             CmdRequest::BtrfsSubvolumeShow { path } => CmdArgs {
@@ -1065,7 +1109,11 @@ impl CmdRequest {
             },
             CmdRequest::BtrfsQuotaStatus { mount_point } => CmdArgs {
                 program: "btrfs".to_owned(),
-                args: vec!["quota".into(), "status".into(), mount_point.0.clone()],
+                args: vec![
+                    "quota".into(),
+                    "status".into(),
+                    mount_point.as_str().to_owned(),
+                ],
             },
             CmdRequest::BtrfsQgroupShow { mount_point } => CmdArgs {
                 program: "btrfs".to_owned(),
@@ -1076,7 +1124,7 @@ impl CmdRequest {
                     "-c".into(),
                     "-r".into(),
                     "-e".into(),
-                    mount_point.0.clone(),
+                    mount_point.as_str().to_owned(),
                 ],
             },
             CmdRequest::BtrfsInspectListChunks { mount_point } => CmdArgs {
@@ -1085,7 +1133,7 @@ impl CmdRequest {
                     "inspect-internal".into(),
                     "list-chunks".into(),
                     "--sort=devid,pstart".into(),
-                    mount_point.0.clone(),
+                    mount_point.as_str().to_owned(),
                 ],
             },
             CmdRequest::SystemctlListUnitsBraid => CmdArgs {

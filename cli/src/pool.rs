@@ -79,7 +79,7 @@ impl TopologyDrift {
             if expected_id != observed_id {
                 identity_changed.push(format!(
                     "{} (expected devid={} luks_uuid={}, observed devid={} luks_uuid={})",
-                    key.0,
+                    key,
                     expected_id.devid,
                     expected_id.luks_uuid,
                     observed_id.devid,
@@ -89,11 +89,11 @@ impl TopologyDrift {
         }
 
         if !missing.is_empty() {
-            let names: Vec<String> = missing.iter().map(|m| m.0.clone()).collect();
+            let names: Vec<String> = missing.iter().map(|m| m.as_str().to_owned()).collect();
             parts.push(format!("expected but absent: {}", names.join(", ")));
         }
         if !added.is_empty() {
-            let names: Vec<String> = added.iter().map(|m| m.0.clone()).collect();
+            let names: Vec<String> = added.iter().map(|m| m.as_str().to_owned()).collect();
             parts.push(format!("observed but unexpected: {}", names.join(", ")));
         }
         if !identity_changed.is_empty() {
@@ -181,11 +181,11 @@ pub fn validate_pool_topology<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         .collect();
     let target_present = observed_present_identities
         .keys()
-        .any(|m| m.0 == target_mapper);
+        .any(|m| m.as_str() == target_mapper);
     let target_null_underlying = pool
         .null_underlying
         .iter()
-        .any(|n| n.mapper.0 == target_mapper);
+        .any(|n| n.mapper.as_str() == target_mapper);
 
     let identities_match = observed_present_identities == *expected_present_identities;
     let no_missing = pool.missing_count == 0;

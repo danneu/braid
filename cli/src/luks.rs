@@ -502,7 +502,7 @@ impl std::fmt::Display for HeaderBackupPath {
 /// Returns the role type so the destination cannot be confused with the
 /// slot-1 keyfile at any render site.
 pub(crate) fn luks_header_backup_path(headers_dir: &Path, mapper: &MapperName) -> HeaderBackupPath {
-    HeaderBackupPath(headers_dir.join(format!("{}.luksheader", mapper.0)))
+    HeaderBackupPath(headers_dir.join(format!("{}.luksheader", mapper.as_str())))
 }
 
 /// Back up the LUKS header to `dir/<mapper>.luksheader`.

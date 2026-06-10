@@ -965,7 +965,8 @@ fn check_foreign_luks_uuid<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> 
         .iter()
         .map(|(uuid, mapper)| {
             format!(
-                "{uuid} at mapper {mapper} -- restore with 'btrfs device remove /dev/mapper/{mapper} {mp}' then 'cryptsetup close {mapper}'"
+                "{uuid} at mapper {mapper} -- restore with 'btrfs device remove {} {mp}' then 'cryptsetup close {mapper}'",
+                mapper.dev_path()
             )
         })
         .collect();

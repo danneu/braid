@@ -401,7 +401,7 @@ fn pool_info(pool: &PoolState) -> Paragraph<'_> {
     let dim = Style::default().fg(Color::DarkGray);
     let mut lines = vec![Line::from(vec![
         Span::styled("Path       ", dim),
-        Span::raw(pool.mount_point.0.clone()),
+        Span::raw(pool.mount_point.as_str().to_owned()),
     ])];
 
     let profile = profile_summary::from_df_entries(&pool.df_entries);
