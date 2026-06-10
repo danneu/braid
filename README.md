@@ -2,9 +2,11 @@
 
 [![Cachix Cache](https://img.shields.io/badge/cachix-braid-blue.svg)](https://braid.cachix.org)
 
-braid is a CLI + NixOS module for running an encrypted, redundant NAS, with
-goodies like USB-keyfile auto-unlock on boot, disk-failure alerts, scheduled
-scrubs, and UPS-safe poweroff.
+braid is a CLI + NixOS module for managing an encrypted RAID1 disk array for
+data storage. It packs extra goodies for the
+[NAS](https://en.wikipedia.org/wiki/Network-attached_storage) use case:
+USB-keyfile auto-unlock on boot, disk-failure alerts, scheduled scrubs, and
+UPS-safe poweroff.
 
 It wraps two standard Linux tools into a simple interface:
 
