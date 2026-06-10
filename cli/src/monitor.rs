@@ -307,6 +307,67 @@ mod tests {
         );
     }
 
+    // Intent: cmd_monitor durably persists a reconcile self-heal (missing_acked
+    //   true -> false) in the same cycle that folds a ComputationError from a
+    //   corrupt alert latch.
+    // Why it exists: the reconcile save (step 6) runs inside the classified
+    //   closure, before the latch load/quarantine and ComputationError fold
+    //   (steps 8-9). cmd_monitor_reconciles_acked_stats_across_pool_axes covers
+    //   only the clean-Ok path and save_acked_stats_failure_latches_computation_error
+    //   covers only the save failing. A refactor that skipped or gated the reconcile
+    //   save whenever the cycle also raises a ComputationError would compile and pass
+    //   every other monitor test while silently dropping the self-heal -- leaving the
+    //   acked baseline stale so the next cycle re-fires or mis-baselines the device.
+    // Scenario: present devid 1 was previously acknowledged missing
+    //   (missing_acked=true) and is back online, while alert-latch.json is corrupt
+    //   this cycle. monitor must self-heal devid 1 to missing_acked=false and persist
+    //   it to acked-stats.json, AND return exactly one ComputationError for the
+    //   quarantined latch.
+    #[test]
+    fn reconcile_self_heal_persists_when_cycle_also_folds_computation_error() {
+        let (_dir, paths) = isolated_paths();
+        // Devid 1 is a present, recognized pool member (BTRFS_SHOW_2DISK) carrying a
+        // stale missing ack; reconcile must self-heal it and save acked-stats.json.
+        save_acked_stats(
+            &alert::AckedStats(BTreeMap::from([("1".to_owned(), acked_disk(true, 1))])),
+            &paths,
+        )
+        .unwrap();
+        // Corrupt latch is the sole ComputationError source -- it is loaded AFTER the
+        // reconcile save, so a healthy save must already be on disk by then.
+        std::fs::write(paths.alert_latch_json(), b"not json").unwrap();
+
+        let result = cmd_monitor(
+            &MonitorTestRunner::with_stale_mapper_stats(),
+            &monitor_fs_btrfs(),
+            &monitor_mp(),
+            &paths,
+        );
+
+        // Fold half: exactly one ComputationError, and the latch is its SOLE source.
+        // The positive check alone is not enough -- folded_computation_error_detail
+        // concatenates a failure detail and the latch detail in the (Some, Some) case,
+        // so a co-folded "acked-stats unwritable" save failure would still contain the
+        // latch substring. The negative check pins that no acked-stats failure was
+        // folded, i.e. the reconcile save succeeded.
+        let detail = assert_monitor_single_computation_error(&result);
+        assert!(
+            detail.contains("previous alert latch was unreadable -- quarantined"),
+            "ComputationError must name the latch quarantine, got {detail}"
+        );
+        assert!(
+            !detail.contains("acked-stats"),
+            "no acked-stats failure may be folded in -- the reconcile save must have succeeded, got {detail}"
+        );
+        // Self-heal half: the reconcile write persisted despite the folded error.
+        let reloaded = alert::load_acked_stats(&paths);
+        assert_eq!(
+            reloaded.0.get("1"),
+            Some(&acked_disk(false, 1)),
+            "self-heal must persist to acked-stats.json even when the cycle folds a ComputationError"
+        );
+    }
+
     /*
      * Intent: a stats row whose path doesn't match any pool member and
      * whose devid is unknown to the pool no longer trips the fail-closed
