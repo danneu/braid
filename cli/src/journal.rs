@@ -2,7 +2,7 @@ use crate::membership::{LuksUuidMap, PoolMembership};
 use crate::state_io::atomic_write;
 use crate::state_paths::StatePaths;
 use crate::types::{
-    ByIdPath, DiskName, Fsid, KeyFilePath, LuksFormatExtraOpts, LuksUuid, MapperName,
+    ByIdPath, Devid, DiskName, Fsid, KeyFilePath, LuksFormatExtraOpts, LuksUuid, MapperName,
 };
 use crate::util::now_iso;
 use serde::{Deserialize, Serialize};
@@ -119,7 +119,7 @@ pub enum ReplacePhase {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ReplaceJournalSource {
     Live {
-        old_devid: u64,
+        old_devid: Devid,
         /// Pattern #1: the observed mapper for the post-commit
         /// `close_mapper_best_effort` call and the recovery mirror in
         /// `execute_replace_post_maintenance_recovery` /
@@ -132,7 +132,7 @@ pub enum ReplaceJournalSource {
         old_mapper: MapperName,
     },
     Missing {
-        old_devid: u64,
+        old_devid: Devid,
     },
 }
 
@@ -194,7 +194,7 @@ pub enum OpKind {
     Remove { luks_uuid: LuksUuid, name: DiskName },
     RemoveMissing {
         phase: RemoveMissingPhase,
-        devid: u64,
+        devid: Devid,
         restore_raid1_after_commit: bool,
     },
     /// Replace one member with another. `old_uuid` and `new_uuid` are the
@@ -500,7 +500,7 @@ mod tests {
             PoolMembership::empty(),
             OpKind::RemoveMissing {
                 phase: RemoveMissingPhase::PoolMutation,
-                devid: 3,
+                devid: Devid::new(3),
                 restore_raid1_after_commit: true,
             },
         );
@@ -533,7 +533,7 @@ mod tests {
                     },
                 },
                 source: ReplaceJournalSource::Live {
-                    old_devid: 1,
+                    old_devid: Devid::new(1),
                     old_mapper: MapperName("braid-disk1".into()),
                 },
                 restore_raid1_after_commit: false,
@@ -582,7 +582,9 @@ mod tests {
                         enroll_key_file: None,
                     },
                 },
-                source: ReplaceJournalSource::Missing { old_devid: 7 },
+                source: ReplaceJournalSource::Missing {
+                    old_devid: Devid::new(7),
+                },
                 restore_raid1_after_commit: true,
             },
         );
@@ -838,7 +840,7 @@ mod tests {
                 },
             },
             source: ReplaceJournalSource::Live {
-                old_devid: 1,
+                old_devid: Devid::new(1),
                 old_mapper: MapperName("braid-disk1".into()),
             },
             restore_raid1_after_commit: true,
@@ -875,7 +877,7 @@ mod tests {
             PoolMembership::empty(),
             OpKind::RemoveMissing {
                 phase: RemoveMissingPhase::PoolMutation,
-                devid: 2,
+                devid: Devid::new(2),
                 restore_raid1_after_commit: true,
             },
         );
@@ -886,7 +888,7 @@ mod tests {
             &journal,
             OpKind::RemoveMissing {
                 phase: RemoveMissingPhase::PostRemoveMissingMaintenance,
-                devid: 2,
+                devid: Devid::new(2),
                 restore_raid1_after_commit: true,
             },
             None,
@@ -1426,10 +1428,12 @@ mod tests {
         }
         for s_src in [
             ReplaceJournalSource::Live {
-                old_devid: 1,
+                old_devid: Devid::new(1),
                 old_mapper: MapperName("braid-x".into()),
             },
-            ReplaceJournalSource::Missing { old_devid: 9 },
+            ReplaceJournalSource::Missing {
+                old_devid: Devid::new(9),
+            },
         ] {
             let s = serde_json::to_string(&s_src).unwrap();
             let back: ReplaceJournalSource = serde_json::from_str(&s).unwrap();

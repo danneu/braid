@@ -10,7 +10,7 @@ use crate::membership::{self, DiskMember, PoolMembership};
 use crate::probe::Filesystem;
 use crate::progress::Sleeper;
 use crate::state_paths::StatePaths;
-use crate::types::{ByIdPath, DiskName, LuksUuid, MountPoint};
+use crate::types::{ByIdPath, Devid, DiskName, LuksUuid, MountPoint};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -85,7 +85,7 @@ pub(crate) fn disk_member_with(
     seed: u64,
     name: &str,
     by_id: &str,
-    devid: Option<u64>,
+    devid: Option<Devid>,
     added_at: Option<&str>,
 ) -> (LuksUuid, DiskMember) {
     let (uuid, mut m) = disk_member(seed, name, by_id);
@@ -477,8 +477,13 @@ impl PoolFixture {
         let (_, member) = disk_member(1, "disk1", "/dev/disk/by-id/virtio-disk1");
         m.insert(canonical_luks_uuid(1), member)
             .expect("insert disk1");
-        let (_, member) =
-            disk_member_with(2, "disk2", "/dev/disk/by-id/virtio-disk2", Some(2), None);
+        let (_, member) = disk_member_with(
+            2,
+            "disk2",
+            "/dev/disk/by-id/virtio-disk2",
+            Some(Devid::new(2)),
+            None,
+        );
         m.insert(canonical_luks_uuid(2), member)
             .expect("insert disk2");
         membership::save_membership(&m, &base.paths).expect("save_membership");

@@ -668,6 +668,7 @@ mod tests {
     use crate::test_fixtures::{
         DiscoverLabelMap, discover_create_by_id_symlink, discover_create_target,
     };
+    use crate::types::Devid;
 
     /// Test-local helper: resolve a disk name to its discovered by-id
     /// string via the post-migration PoolMembership API. Replaces the
@@ -2089,7 +2090,7 @@ mod tests {
             DiskName::parse("disk1").unwrap(),
             ByIdPath::parse("/dev/disk/by-id/ata-X").unwrap(),
         );
-        existing.devid = Some(7);
+        existing.devid = Some(Devid::new(7));
         existing_members
             .insert(
                 LuksUuid::parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").unwrap(),

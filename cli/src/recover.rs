@@ -23,8 +23,8 @@ use crate::state_paths::StatePaths;
 use crate::status::{BalanceReport, get_balance_report};
 use crate::status_tag::{StatusTag, color_enabled_for_stderr, emit_status, status_line};
 use crate::types::{
-    ByIdPath, ConfigDiskState, DiskName, Fsid, KeyFilePath, LuksUuid, MountPoint, PoolDevice,
-    PoolState, format_uuid_list,
+    ByIdPath, ConfigDiskState, Devid, DiskName, Fsid, KeyFilePath, LuksUuid, MountPoint,
+    PoolDevice, PoolState, format_uuid_list,
 };
 use std::path::PathBuf;
 use std::time::Duration;
@@ -61,14 +61,17 @@ pub enum RecoverError {
         "duplicate devid {devid} in journaled membership across UUIDs {}",
         format_uuid_list(.members)
     )]
-    DuplicateDevidDuringReplay { devid: u64, members: Vec<LuksUuid> },
+    DuplicateDevidDuringReplay {
+        devid: Devid,
+        members: Vec<LuksUuid>,
+    },
     /// Journaled-snapshot corruption: a devid that the live pool reports
     /// has no matching member in the relevant journal snapshot, so the
     /// pre-crash identity binding is unrecoverable from the journal alone.
     #[error(
         "no member in journaled membership has devid {devid}; the journal entry was written against a never-enriched member -- see docs/internals/luks-unlock.md and docs/guides/recovery-scenarios.md before removing /var/lib/braid/pending-op.json"
     )]
-    NoMemberForJournaledDevid { devid: u64 },
+    NoMemberForJournaledDevid { devid: Devid },
 }
 
 /// Recover-local snapshot-walk errors raised by `live_pool_matches_membership`
@@ -78,8 +81,13 @@ pub enum RecoverError {
 /// topology-mismatch wording stays distinct from corruption wording.
 #[derive(Debug)]
 enum JournaledSnapshotError {
-    DuplicateDevid { devid: u64, members: Vec<LuksUuid> },
-    NoMemberForDevid { devid: u64 },
+    DuplicateDevid {
+        devid: Devid,
+        members: Vec<LuksUuid>,
+    },
+    NoMemberForDevid {
+        devid: Devid,
+    },
 }
 
 /// Recovery-local passphrase holder that preserves zeroizing ownership.
@@ -257,11 +265,11 @@ enum RecoverCompletion {
     },
     AddPostBalance,
     RemoveMissingPoolMutation {
-        devid: u64,
+        devid: Devid,
         restore_raid1_after_commit: bool,
     },
     RemoveMissingPostMaintenance {
-        devid: u64,
+        devid: Devid,
         restore_raid1_after_commit: bool,
     },
     ReplacePoolMutation {
@@ -1605,7 +1613,7 @@ fn live_pool_matches_membership(
     membership: &PoolMembership,
 ) -> Result<bool, JournaledSnapshotError> {
     let live_uuids = live_member_uuids(pool);
-    let live_devids: std::collections::BTreeSet<u64> =
+    let live_devids: std::collections::BTreeSet<Devid> =
         pool.devices.iter().map(|d| d.devid).collect();
     let mut fallback_uuids = std::collections::BTreeSet::new();
     let mut fallback_devids = std::collections::BTreeSet::new();
@@ -2619,7 +2627,7 @@ fn sweep_recovered_add_acked_stats(
     pool: &PoolState,
     targets: &LuksUuidMap<journal::AddJournalTarget>,
 ) -> Result<(), RecoverError> {
-    let mut sweep_devids: Vec<u64> = Vec::with_capacity(targets.len());
+    let mut sweep_devids: Vec<Devid> = Vec::with_capacity(targets.len());
     for (uuid, target) in targets {
         let dev = find_added_device_by_uuid(pool, uuid).ok_or_else(|| {
             RecoverError::AckCleanupFailed {
@@ -2644,7 +2652,7 @@ fn execute_remove_missing_pool_mutation_recovery<R: CommandRunner + Sync>(
     params: &RecoverParams<'_>,
     journal: &Journal,
     pool: PoolState,
-    devid: u64,
+    devid: Devid,
     restore_raid1_after_commit: bool,
 ) -> Result<(), RecoverError> {
     if pool.missing_devids.contains(&devid) {
@@ -2720,7 +2728,7 @@ fn execute_remove_missing_pool_mutation_recovery<R: CommandRunner + Sync>(
 struct RemoveMissingPostCtx<'a> {
     journal: &'a Journal,
     pool: PoolState,
-    devid: u64,
+    devid: Devid,
     restore_raid1_after_commit: bool,
     inhibitor_already_held: bool,
 }
@@ -4596,7 +4604,7 @@ mod tests {
         name: &str,
         by_id: &str,
         added_at: Option<&str>,
-        devid: Option<u64>,
+        devid: Option<Devid>,
     ) -> DiskMember {
         DiskMember {
             name: disk_name(name),
@@ -4620,7 +4628,7 @@ mod tests {
         name: &str,
         by_id: &str,
         added_at: Option<&str>,
-        devid: Option<u64>,
+        devid: Option<Devid>,
     ) -> (LuksUuid, DiskMember) {
         (
             uuid_for_name(name),
@@ -4843,21 +4851,31 @@ mod tests {
 
     fn remove_missing_journal() -> journal::Journal {
         let pre = membership_from(vec![
-            membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, Some(1)),
-            membership_entry("disk2", "/dev/disk/by-id/virtio-disk2", None, Some(2)),
+            membership_entry(
+                "disk1",
+                "/dev/disk/by-id/virtio-disk1",
+                None,
+                Some(Devid::new(1)),
+            ),
+            membership_entry(
+                "disk2",
+                "/dev/disk/by-id/virtio-disk2",
+                None,
+                Some(Devid::new(2)),
+            ),
         ]);
         let target = membership_from(vec![membership_entry(
             "disk1",
             "/dev/disk/by-id/virtio-disk1",
             None,
-            Some(1),
+            Some(Devid::new(1)),
         )]);
 
         journal::Journal {
             started_at: "2026-01-01T00:00:00Z".into(),
             op: OpKind::RemoveMissing {
                 phase: journal::RemoveMissingPhase::PoolMutation,
-                devid: 2,
+                devid: Devid::new(2),
                 restore_raid1_after_commit: true,
             },
             pre_membership: pre,
@@ -4867,20 +4885,45 @@ mod tests {
 
     fn remove_missing_journal_two_survivors() -> journal::Journal {
         let pre = membership_from(vec![
-            membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, Some(1)),
-            membership_entry("disk2", "/dev/disk/by-id/virtio-disk2", None, Some(2)),
-            membership_entry("disk3", "/dev/disk/by-id/virtio-disk3", None, Some(3)),
+            membership_entry(
+                "disk1",
+                "/dev/disk/by-id/virtio-disk1",
+                None,
+                Some(Devid::new(1)),
+            ),
+            membership_entry(
+                "disk2",
+                "/dev/disk/by-id/virtio-disk2",
+                None,
+                Some(Devid::new(2)),
+            ),
+            membership_entry(
+                "disk3",
+                "/dev/disk/by-id/virtio-disk3",
+                None,
+                Some(Devid::new(3)),
+            ),
         ]);
         let target = membership_from(vec![
-            membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, Some(1)),
-            membership_entry("disk2", "/dev/disk/by-id/virtio-disk2", None, Some(2)),
+            membership_entry(
+                "disk1",
+                "/dev/disk/by-id/virtio-disk1",
+                None,
+                Some(Devid::new(1)),
+            ),
+            membership_entry(
+                "disk2",
+                "/dev/disk/by-id/virtio-disk2",
+                None,
+                Some(Devid::new(2)),
+            ),
         ]);
 
         journal::Journal {
             started_at: "2026-01-01T00:00:00Z".into(),
             op: OpKind::RemoveMissing {
                 phase: journal::RemoveMissingPhase::PoolMutation,
-                devid: 3,
+                devid: Devid::new(3),
                 restore_raid1_after_commit: true,
             },
             pre_membership: pre,
@@ -5177,7 +5220,7 @@ mod tests {
             devices: vec![PoolDevice {
                 mapper: MapperName("braid-disk1".into()),
                 luks_uuid: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
-                devid: 1,
+                devid: Devid::new(1),
                 underlying: "/dev/vda".into(),
             }],
             missing_count: 0,
@@ -5193,7 +5236,7 @@ mod tests {
         pool.devices.push(PoolDevice {
             mapper: MapperName("luks-foreign".into()),
             luks_uuid: LuksUuid::parse("99999999-9999-9999-9999-999999999999").unwrap(),
-            devid: 9,
+            devid: Devid::new(9),
             underlying: "/dev/vdz".into(),
         });
         pool.total_devices = 2;
@@ -5207,13 +5250,13 @@ mod tests {
                 PoolDevice {
                     mapper: MapperName("braid-disk1".into()),
                     luks_uuid: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
-                    devid: 1,
+                    devid: Devid::new(1),
                     underlying: "/dev/vda".into(),
                 },
                 PoolDevice {
                     mapper: MapperName("braid-disk2".into()),
                     luks_uuid: LuksUuid::parse("22222222-2222-2222-2222-222222222222").unwrap(),
-                    devid: 2,
+                    devid: Devid::new(2),
                     underlying: "/dev/vdb".into(),
                 },
             ],
@@ -5232,13 +5275,13 @@ mod tests {
                 PoolDevice {
                     mapper: MapperName("braid-disk1".into()),
                     luks_uuid: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
-                    devid: 1,
+                    devid: Devid::new(1),
                     underlying: "/dev/vda".into(),
                 },
                 PoolDevice {
                     mapper: MapperName("braid-disk2".into()),
                     luks_uuid: LuksUuid::parse("22222222-2222-2222-2222-222222222222").unwrap(),
-                    devid: 4,
+                    devid: Devid::new(4),
                     underlying: "/dev/vdb".into(),
                 },
             ],
@@ -5261,7 +5304,7 @@ mod tests {
         pool.total_devices = 2;
         pool.null_underlying.push(NullUnderlyingDevice {
             mapper: MapperName("braid-disk2".into()),
-            devid: 2,
+            devid: Devid::new(2),
         });
         pool
     }
@@ -5273,13 +5316,13 @@ mod tests {
                 PoolDevice {
                     mapper: MapperName("braid-disk1".into()),
                     luks_uuid: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
-                    devid: 1,
+                    devid: Devid::new(1),
                     underlying: "/dev/vda".into(),
                 },
                 PoolDevice {
                     mapper: MapperName("braid-old".into()),
                     luks_uuid: LuksUuid::parse("22222222-2222-2222-2222-222222222222").unwrap(),
-                    devid: 2,
+                    devid: Devid::new(2),
                     underlying: "/dev/vdb".into(),
                 },
             ],
@@ -5298,13 +5341,13 @@ mod tests {
                 PoolDevice {
                     mapper: MapperName("braid-disk1".into()),
                     luks_uuid: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
-                    devid: 1,
+                    devid: Devid::new(1),
                     underlying: "/dev/vda".into(),
                 },
                 PoolDevice {
                     mapper: MapperName("braid-new".into()),
                     luks_uuid: LuksUuid::parse("33333333-3333-3333-3333-333333333333").unwrap(),
-                    devid: 2,
+                    devid: Devid::new(2),
                     underlying: "/dev/vdc".into(),
                 },
             ],
@@ -5321,7 +5364,7 @@ mod tests {
         pool.devices.push(PoolDevice {
             mapper: MapperName("braid-new".into()),
             luks_uuid: LuksUuid::parse("33333333-3333-3333-3333-333333333333").unwrap(),
-            devid: 3,
+            devid: Devid::new(3),
             underlying: "/dev/vdc".into(),
         });
         pool.total_devices = 3;
@@ -5334,13 +5377,13 @@ mod tests {
             devices: vec![PoolDevice {
                 mapper: MapperName("braid-disk1".into()),
                 luks_uuid: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
-                devid: 1,
+                devid: Devid::new(1),
                 underlying: "/dev/vda".into(),
             }],
             missing_count: 1,
             total_devices: 2,
             fsid: Some(Fsid::parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").unwrap()),
-            missing_devids: vec![2],
+            missing_devids: vec![Devid::new(2)],
             null_underlying: vec![],
         }
     }
@@ -5352,19 +5395,19 @@ mod tests {
                 PoolDevice {
                     mapper: MapperName("braid-disk1".into()),
                     luks_uuid: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
-                    devid: 1,
+                    devid: Devid::new(1),
                     underlying: "/dev/vda".into(),
                 },
                 PoolDevice {
                     mapper: MapperName("braid-disk2".into()),
                     luks_uuid: LuksUuid::parse("22222222-2222-2222-2222-222222222222").unwrap(),
-                    devid: 2,
+                    devid: Devid::new(2),
                     underlying: "/dev/vdb".into(),
                 },
                 PoolDevice {
                     mapper: MapperName("braid-disk3".into()),
                     luks_uuid: LuksUuid::parse("33333333-3333-3333-3333-333333333333").unwrap(),
-                    devid: 3,
+                    devid: Devid::new(3),
                     underlying: "/dev/vdc".into(),
                 },
             ],
@@ -6389,7 +6432,7 @@ mod tests {
         let mut journal = remove_missing_journal();
         journal.op = OpKind::RemoveMissing {
             phase: journal::RemoveMissingPhase::PostRemoveMissingMaintenance,
-            devid: 2,
+            devid: Devid::new(2),
             restore_raid1_after_commit: false,
         };
         journal::write_journal(&f.paths, &journal).unwrap();
@@ -6408,7 +6451,7 @@ mod tests {
             RemoveMissingPostCtx {
                 journal: &journal,
                 pool: pool_state_one_disk(),
-                devid: 2,
+                devid: Devid::new(2),
                 restore_raid1_after_commit: false,
                 inhibitor_already_held: false,
             },
@@ -6437,7 +6480,7 @@ mod tests {
         let mut journal = remove_missing_journal();
         journal.op = OpKind::RemoveMissing {
             phase: journal::RemoveMissingPhase::PostRemoveMissingMaintenance,
-            devid: 2,
+            devid: Devid::new(2),
             restore_raid1_after_commit: false,
         };
         journal::write_journal(&f.paths, &journal).unwrap();
@@ -6452,7 +6495,7 @@ mod tests {
             RemoveMissingPostCtx {
                 journal: &journal,
                 pool: pool_state_one_disk(),
-                devid: 2,
+                devid: Devid::new(2),
                 restore_raid1_after_commit: false,
                 inhibitor_already_held: false,
             },
@@ -6573,9 +6616,24 @@ mod tests {
         let f = PoolFixture::empty();
         let mut journal = remove_missing_journal();
         journal.pre_membership = PoolMembership::for_corruption_tests(vec![
-            membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, Some(1)),
-            membership_entry("disk2", "/dev/disk/by-id/virtio-disk2", None, Some(2)),
-            membership_entry("disk4", "/dev/disk/by-id/virtio-disk4", None, Some(2)),
+            membership_entry(
+                "disk1",
+                "/dev/disk/by-id/virtio-disk1",
+                None,
+                Some(Devid::new(1)),
+            ),
+            membership_entry(
+                "disk2",
+                "/dev/disk/by-id/virtio-disk2",
+                None,
+                Some(Devid::new(2)),
+            ),
+            membership_entry(
+                "disk4",
+                "/dev/disk/by-id/virtio-disk4",
+                None,
+                Some(Devid::new(2)),
+            ),
         ]);
         journal::write_journal(&f.paths, &journal).unwrap();
         let params = f.recover_params().build();
@@ -6586,14 +6644,14 @@ mod tests {
             &params,
             &journal,
             pool_state_disk1_with_missing_devid2(),
-            2,
+            Devid::new(2),
             true,
         )
         .unwrap_err();
 
         match err {
             RecoverError::DuplicateDevidDuringReplay { devid, members } => {
-                assert_eq!(devid, 2);
+                assert_eq!(devid, Devid::new(2));
                 assert_eq!(members.len(), 2);
             }
             RecoverError::Failed(message) => {
@@ -6622,12 +6680,12 @@ mod tests {
         let mut journal = remove_missing_journal();
         journal.op = OpKind::RemoveMissing {
             phase: journal::RemoveMissingPhase::PoolMutation,
-            devid: 99,
+            devid: Devid::new(99),
             restore_raid1_after_commit: true,
         };
         journal::write_journal(&f.paths, &journal).unwrap();
         let mut pool = pool_state_disk1_with_missing_devid2();
-        pool.missing_devids = vec![99];
+        pool.missing_devids = vec![Devid::new(99)];
         let params = f.recover_params().build();
 
         let err = execute_remove_missing_pool_mutation_recovery(
@@ -6636,14 +6694,14 @@ mod tests {
             &params,
             &journal,
             pool,
-            99,
+            Devid::new(99),
             true,
         )
         .unwrap_err();
 
         match err {
             RecoverError::NoMemberForJournaledDevid { devid } => {
-                assert_eq!(devid, 99);
+                assert_eq!(devid, Devid::new(99));
             }
             RecoverError::Failed(message) => {
                 panic!("expected NoMemberForJournaledDevid, got Failed({message:?})");
@@ -7243,7 +7301,7 @@ mod tests {
             devices: vec![PoolDevice {
                 mapper: MapperName("braid-WRONG".into()),
                 luks_uuid: drifted_uuid.clone(),
-                devid: 1,
+                devid: Devid::new(1),
                 underlying: "/dev/vda".into(),
             }],
             missing_count: 0,
@@ -7256,7 +7314,12 @@ mod tests {
         membership
             .insert(
                 drifted_uuid,
-                disk_member_named("disk1", "/dev/disk/by-id/virtio-disk1", None, Some(1)),
+                disk_member_named(
+                    "disk1",
+                    "/dev/disk/by-id/virtio-disk1",
+                    None,
+                    Some(Devid::new(1)),
+                ),
             )
             .unwrap();
         // No journaled targets: the verify runs against the live (drifted)
@@ -7309,7 +7372,7 @@ mod tests {
             devices: vec![PoolDevice {
                 mapper: MapperName("braid-WRONG".into()),
                 luks_uuid: drifted_uuid.clone(),
-                devid: 1,
+                devid: Devid::new(1),
                 underlying: "/dev/vda".into(),
             }],
             missing_count: 0,
@@ -7322,7 +7385,12 @@ mod tests {
         membership
             .insert(
                 drifted_uuid,
-                disk_member_named("disk1", "/dev/disk/by-id/virtio-disk1", None, Some(1)),
+                disk_member_named(
+                    "disk1",
+                    "/dev/disk/by-id/virtio-disk1",
+                    None,
+                    Some(Devid::new(1)),
+                ),
             )
             .unwrap();
         // Existing member (/dev/vda) is verified before the new disk, so its
@@ -7496,7 +7564,7 @@ mod tests {
         pool.devices.push(PoolDevice {
             mapper: MapperName("braid-mystery".into()),
             luks_uuid: LuksUuid::parse("99999999-9999-9999-9999-999999999999").unwrap(),
-            devid: 3,
+            devid: Devid::new(3),
             underlying: "/dev/vdz".into(),
         });
         pool.total_devices = 3;
@@ -9497,7 +9565,7 @@ mod tests {
             &params,
             &journal,
             pool_state_two_disks(),
-            3,
+            Devid::new(3),
             true,
         )
         .expect("committed remove-missing should finish post maintenance");
@@ -9550,7 +9618,7 @@ mod tests {
             &params,
             &journal,
             pool_state_disk1_with_missing_devid2(),
-            2,
+            Devid::new(2),
             true,
         )
         .expect("uncommitted remove-missing should clear journal after restoring pre state");
@@ -9581,7 +9649,7 @@ mod tests {
             &params,
             &journal,
             pool_state_two_disks(),
-            2,
+            Devid::new(2),
             true,
         )
         .unwrap_err();
@@ -9608,7 +9676,7 @@ mod tests {
         let mut journal = remove_missing_journal();
         journal.op = OpKind::RemoveMissing {
             phase: journal::RemoveMissingPhase::PostRemoveMissingMaintenance,
-            devid: 2,
+            devid: Devid::new(2),
             restore_raid1_after_commit: false,
         };
         journal::write_journal(&f.paths, &journal).unwrap();
@@ -9627,7 +9695,7 @@ mod tests {
             RemoveMissingPostCtx {
                 journal: &journal,
                 pool: pool_state_one_disk(),
-                devid: 2,
+                devid: Devid::new(2),
                 restore_raid1_after_commit: false,
                 inhibitor_already_held: false,
             },
@@ -9651,7 +9719,7 @@ mod tests {
         let mut journal = remove_missing_journal();
         journal.op = OpKind::RemoveMissing {
             phase: journal::RemoveMissingPhase::PostRemoveMissingMaintenance,
-            devid: 2,
+            devid: Devid::new(2),
             restore_raid1_after_commit: true,
         };
         journal::write_journal(&f.paths, &journal).unwrap();
@@ -9671,7 +9739,7 @@ mod tests {
             RemoveMissingPostCtx {
                 journal: &journal,
                 pool: pool_state_one_disk(),
-                devid: 2,
+                devid: Devid::new(2),
                 restore_raid1_after_commit: true,
                 inhibitor_already_held: false,
             },
@@ -9708,7 +9776,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::BtrfsFilesystemResize {
-                    devid: 2,
+                    devid: Devid::new(2),
                     mount_point: MountPoint("/mnt/storage".into()),
                 },
                 ok_raw_empty("btrfs filesystem resize"),
@@ -9746,11 +9814,10 @@ mod tests {
 
         let requests = runner.requests();
         assert_eq!(f.inhibitor.acquire_count(), 1);
-        assert!(
-            requests
-                .iter()
-                .any(|r| matches!(r, CmdRequest::BtrfsFilesystemResize { devid: 2, .. }))
-        );
+        assert!(requests.iter().any(|r| matches!(
+            r,
+            CmdRequest::BtrfsFilesystemResize { devid, .. } if *devid == Devid::new(2)
+        )));
         assert!(
             !requests
                 .iter()
@@ -10760,12 +10827,14 @@ mod tests {
         let f = PoolFixture::empty();
         let journal = replace_post_maintenance_journal(
             false,
-            journal::ReplaceJournalSource::Missing { old_devid: 2 },
+            journal::ReplaceJournalSource::Missing {
+                old_devid: Devid::new(2),
+            },
         );
         journal::write_journal(&f.paths, &journal).unwrap();
         let runner = MockRunner::default().with_output(
             CmdRequest::BtrfsFilesystemResize {
-                devid: 2,
+                devid: Devid::new(2),
                 mount_point: MountPoint("/mnt/storage".into()),
             },
             ok_raw_empty("btrfs filesystem resize"),
@@ -10797,11 +10866,10 @@ mod tests {
 
         let requests = runner.requests();
         assert_eq!(f.inhibitor.acquire_count(), 1);
-        assert!(
-            requests
-                .iter()
-                .any(|r| matches!(r, CmdRequest::BtrfsFilesystemResize { devid: 2, .. }))
-        );
+        assert!(requests.iter().any(|r| matches!(
+            r,
+            CmdRequest::BtrfsFilesystemResize { devid, .. } if *devid == Devid::new(2)
+        )));
         assert!(
             !requests.iter().any(|r| matches!(
                 r,
@@ -10826,7 +10894,7 @@ mod tests {
         let journal = replace_post_maintenance_journal(
             false,
             journal::ReplaceJournalSource::Live {
-                old_devid: 2,
+                old_devid: Devid::new(2),
                 old_mapper: MapperName("braid-old".into()),
             },
         );
@@ -10868,7 +10936,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::BtrfsFilesystemResize {
-                    devid: 2,
+                    devid: Devid::new(2),
                     mount_point: MountPoint("/mnt/storage".into()),
                 },
                 ok_raw_empty("btrfs filesystem resize"),
@@ -10927,7 +10995,7 @@ mod tests {
         let journal = replace_post_maintenance_journal(
             false,
             journal::ReplaceJournalSource::Live {
-                old_devid: 2,
+                old_devid: Devid::new(2),
                 old_mapper: MapperName("braid-old".into()),
             },
         );
@@ -10941,7 +11009,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::BtrfsFilesystemResize {
-                    devid: 2,
+                    devid: Devid::new(2),
                     mount_point: MountPoint("/mnt/storage".into()),
                 },
                 ok_raw_empty("btrfs filesystem resize"),
@@ -10982,9 +11050,10 @@ mod tests {
             "already-closed old mapper must not be closed again: {requests:?}"
         );
         assert!(
-            requests
-                .iter()
-                .any(|r| matches!(r, CmdRequest::BtrfsFilesystemResize { devid: 2, .. })),
+            requests.iter().any(|r| matches!(
+                r,
+                CmdRequest::BtrfsFilesystemResize { devid, .. } if *devid == Devid::new(2)
+            )),
             "resize must still replay after inactive close skip: {requests:?}"
         );
         assert!(
@@ -11006,7 +11075,7 @@ mod tests {
         let journal = replace_post_maintenance_journal(
             false,
             journal::ReplaceJournalSource::Live {
-                old_devid: 2,
+                old_devid: Devid::new(2),
                 old_mapper: MapperName("braid-old".into()),
             },
         );
@@ -11026,7 +11095,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::BtrfsFilesystemResize {
-                    devid: 2,
+                    devid: Devid::new(2),
                     mount_point: MountPoint("/mnt/storage".into()),
                 },
                 ok_raw_empty("btrfs filesystem resize"),
@@ -11067,9 +11136,10 @@ mod tests {
             "foreign old mapper must not be closed: {requests:?}"
         );
         assert!(
-            requests
-                .iter()
-                .any(|r| matches!(r, CmdRequest::BtrfsFilesystemResize { devid: 2, .. })),
+            requests.iter().any(|r| matches!(
+                r,
+                CmdRequest::BtrfsFilesystemResize { devid, .. } if *devid == Devid::new(2)
+            )),
             "resize must still replay after foreign close skip: {requests:?}"
         );
         assert!(
@@ -11095,7 +11165,7 @@ mod tests {
         let journal = replace_post_maintenance_journal(
             false,
             journal::ReplaceJournalSource::Live {
-                old_devid: 2,
+                old_devid: Devid::new(2),
                 old_mapper: MapperName("braid-old".into()),
             },
         );
@@ -11124,7 +11194,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::BtrfsFilesystemResize {
-                    devid: 2,
+                    devid: Devid::new(2),
                     mount_point: MountPoint("/mnt/storage".into()),
                 },
                 ok_raw_empty("btrfs filesystem resize"),
@@ -11178,12 +11248,14 @@ mod tests {
         let f = PoolFixture::empty();
         let journal = replace_post_maintenance_journal(
             true,
-            journal::ReplaceJournalSource::Missing { old_devid: 2 },
+            journal::ReplaceJournalSource::Missing {
+                old_devid: Devid::new(2),
+            },
         );
         journal::write_journal(&f.paths, &journal).unwrap();
         let runner = with_balance_replay(MockRunner::default()).with_output(
             CmdRequest::BtrfsFilesystemResize {
-                devid: 2,
+                devid: Devid::new(2),
                 mount_point: MountPoint("/mnt/storage".into()),
             },
             ok_raw_empty("btrfs filesystem resize"),
@@ -11239,17 +11311,47 @@ mod tests {
         let new_uuid = uuid_for_name("disk-new");
         let new_uuid_text = new_uuid.to_string();
         let pre = membership_from(vec![
-            membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, Some(1)),
-            membership_entry("old", "/dev/disk/by-id/virtio-old", None, Some(2)),
-            membership_entry("disk3", "/dev/disk/by-id/virtio-disk3", None, Some(3)),
+            membership_entry(
+                "disk1",
+                "/dev/disk/by-id/virtio-disk1",
+                None,
+                Some(Devid::new(1)),
+            ),
+            membership_entry(
+                "old",
+                "/dev/disk/by-id/virtio-old",
+                None,
+                Some(Devid::new(2)),
+            ),
+            membership_entry(
+                "disk3",
+                "/dev/disk/by-id/virtio-disk3",
+                None,
+                Some(Devid::new(3)),
+            ),
         ]);
         let target = membership_from(vec![
-            membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, Some(1)),
+            membership_entry(
+                "disk1",
+                "/dev/disk/by-id/virtio-disk1",
+                None,
+                Some(Devid::new(1)),
+            ),
             (
                 new_uuid.clone(),
-                disk_member_named("disk-new", "/dev/disk/by-id/virtio-disk-new", None, Some(2)),
+                disk_member_named(
+                    "disk-new",
+                    "/dev/disk/by-id/virtio-disk-new",
+                    None,
+                    Some(Devid::new(2)),
+                ),
             ),
-            membership_entry("disk3", "/dev/disk/by-id/virtio-disk3", None, Some(3)),
+            membership_entry(
+                "disk3",
+                "/dev/disk/by-id/virtio-disk3",
+                None,
+                Some(Devid::new(3)),
+            ),
         ]);
         let journal = journal::Journal {
             started_at: "2026-01-01T00:00:00Z".into(),
@@ -11265,7 +11367,9 @@ mod tests {
                         enroll_key_file: None,
                     },
                 },
-                source: journal::ReplaceJournalSource::Missing { old_devid: 2 },
+                source: journal::ReplaceJournalSource::Missing {
+                    old_devid: Devid::new(2),
+                },
                 restore_raid1_after_commit: false,
             },
             pre_membership: pre,
@@ -11322,7 +11426,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::BtrfsFilesystemResize {
-                    devid: 2,
+                    devid: Devid::new(2),
                     mount_point: MountPoint("/mnt/storage".into()),
                 },
                 ok_raw_empty("btrfs filesystem resize"),
@@ -11347,7 +11451,10 @@ mod tests {
         let requests = runner.requests();
         assert!(
             requests.iter().any(|request| {
-                matches!(request, CmdRequest::BtrfsFilesystemResize { devid: 2, .. })
+                matches!(
+                    request,
+                    CmdRequest::BtrfsFilesystemResize { devid, .. } if *devid == Devid::new(2)
+                )
             }),
             "post-replace recovery must resize disk-new's live devid: {requests:?}"
         );
@@ -11372,17 +11479,47 @@ mod tests {
         let new_uuid = uuid_for_name("disk-new");
         let new_uuid_text = new_uuid.to_string();
         let pre = membership_from(vec![
-            membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, Some(1)),
-            membership_entry("old", "/dev/disk/by-id/virtio-old", None, Some(2)),
-            membership_entry("disk3", "/dev/disk/by-id/virtio-disk3", None, Some(3)),
+            membership_entry(
+                "disk1",
+                "/dev/disk/by-id/virtio-disk1",
+                None,
+                Some(Devid::new(1)),
+            ),
+            membership_entry(
+                "old",
+                "/dev/disk/by-id/virtio-old",
+                None,
+                Some(Devid::new(2)),
+            ),
+            membership_entry(
+                "disk3",
+                "/dev/disk/by-id/virtio-disk3",
+                None,
+                Some(Devid::new(3)),
+            ),
         ]);
         let target = membership_from(vec![
-            membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, Some(1)),
+            membership_entry(
+                "disk1",
+                "/dev/disk/by-id/virtio-disk1",
+                None,
+                Some(Devid::new(1)),
+            ),
             (
                 new_uuid.clone(),
-                disk_member_named("disk-new", "/dev/disk/by-id/virtio-disk-new", None, Some(2)),
+                disk_member_named(
+                    "disk-new",
+                    "/dev/disk/by-id/virtio-disk-new",
+                    None,
+                    Some(Devid::new(2)),
+                ),
             ),
-            membership_entry("disk3", "/dev/disk/by-id/virtio-disk3", None, Some(3)),
+            membership_entry(
+                "disk3",
+                "/dev/disk/by-id/virtio-disk3",
+                None,
+                Some(Devid::new(3)),
+            ),
         ]);
         let journal = journal::Journal {
             started_at: "2026-01-01T00:00:00Z".into(),
@@ -11398,7 +11535,9 @@ mod tests {
                         enroll_key_file: None,
                     },
                 },
-                source: journal::ReplaceJournalSource::Missing { old_devid: 2 },
+                source: journal::ReplaceJournalSource::Missing {
+                    old_devid: Devid::new(2),
+                },
                 restore_raid1_after_commit: false,
             },
             pre_membership: pre,
@@ -11449,7 +11588,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::BtrfsFilesystemResize {
-                    devid: 2,
+                    devid: Devid::new(2),
                     mount_point: MountPoint("/mnt/storage".into()),
                 },
                 ok_raw_empty("btrfs filesystem resize"),
@@ -11474,7 +11613,10 @@ mod tests {
         let requests = runner.requests();
         assert!(
             requests.iter().any(|request| {
-                matches!(request, CmdRequest::BtrfsFilesystemResize { devid: 2, .. })
+                matches!(
+                    request,
+                    CmdRequest::BtrfsFilesystemResize { devid, .. } if *devid == Devid::new(2)
+                )
             }),
             "post-replace recovery must resize disk-new's live devid: {requests:?}"
         );
@@ -11492,7 +11634,7 @@ mod tests {
         let journal = replace_post_maintenance_journal(
             true,
             journal::ReplaceJournalSource::Live {
-                old_devid: 2,
+                old_devid: Devid::new(2),
                 old_mapper: MapperName("braid-old".into()),
             },
         );
@@ -11601,28 +11743,48 @@ mod tests {
         let mut pool = pool_state_two_disks();
         pool.missing_count = 1;
         pool.total_devices = 3;
-        pool.missing_devids = vec![3];
+        pool.missing_devids = vec![Devid::new(3)];
 
         let expected_added_at = "2026-04-01T00:00:00Z";
         let prior_added_at = "2026-01-01T00:00:00Z";
         let expected = membership_from(vec![
-            membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, Some(1)),
-            membership_entry("disk2", "/dev/disk/by-id/virtio-disk2", None, Some(2)),
+            membership_entry(
+                "disk1",
+                "/dev/disk/by-id/virtio-disk1",
+                None,
+                Some(Devid::new(1)),
+            ),
+            membership_entry(
+                "disk2",
+                "/dev/disk/by-id/virtio-disk2",
+                None,
+                Some(Devid::new(2)),
+            ),
             membership_entry(
                 "disk3",
                 "/dev/disk/by-id/virtio-disk3",
                 Some(expected_added_at),
-                Some(3),
+                Some(Devid::new(3)),
             ),
         ]);
         let prior = membership_from(vec![
-            membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, Some(1)),
-            membership_entry("disk2", "/dev/disk/by-id/virtio-disk2", None, Some(2)),
+            membership_entry(
+                "disk1",
+                "/dev/disk/by-id/virtio-disk1",
+                None,
+                Some(Devid::new(1)),
+            ),
+            membership_entry(
+                "disk2",
+                "/dev/disk/by-id/virtio-disk2",
+                None,
+                Some(Devid::new(2)),
+            ),
             membership_entry(
                 "disk3",
                 "/dev/disk/by-id/virtio-disk3",
                 Some(prior_added_at),
-                Some(3),
+                Some(Devid::new(3)),
             ),
         ]);
         let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
@@ -11638,7 +11800,7 @@ mod tests {
             .expect("missing disk3 must remain in recovered membership");
         assert_eq!(disk3.name, disk_name("disk3"));
         assert_eq!(disk3.by_id.as_str(), "/dev/disk/by-id/virtio-disk3");
-        assert_eq!(disk3.devid, Some(3));
+        assert_eq!(disk3.devid, Some(Devid::new(3)));
         assert_eq!(disk3.added_at.as_deref(), Some(prior_added_at));
     }
 
@@ -11653,8 +11815,18 @@ mod tests {
     fn live_pool_matches_membership_accepts_null_underlying_devid() {
         let pool = pool_state_disk1_with_null_underlying_disk2();
         let expected = membership_from(vec![
-            membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, Some(1)),
-            membership_entry("disk2", "/dev/disk/by-id/virtio-disk2", None, Some(2)),
+            membership_entry(
+                "disk1",
+                "/dev/disk/by-id/virtio-disk1",
+                None,
+                Some(Devid::new(1)),
+            ),
+            membership_entry(
+                "disk2",
+                "/dev/disk/by-id/virtio-disk2",
+                None,
+                Some(Devid::new(2)),
+            ),
         ]);
 
         let matches = live_pool_matches_membership(&pool, &expected)
@@ -11673,15 +11845,25 @@ mod tests {
     #[test]
     fn live_pool_matches_membership_rejects_null_underlying_without_expected_devid() {
         let mut pool = pool_state_disk1_with_null_underlying_disk2();
-        pool.null_underlying[0].devid = 99;
+        pool.null_underlying[0].devid = Devid::new(99);
         let expected = membership_from(vec![
-            membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, Some(1)),
-            membership_entry("disk2", "/dev/disk/by-id/virtio-disk2", None, Some(2)),
+            membership_entry(
+                "disk1",
+                "/dev/disk/by-id/virtio-disk1",
+                None,
+                Some(Devid::new(1)),
+            ),
+            membership_entry(
+                "disk2",
+                "/dev/disk/by-id/virtio-disk2",
+                None,
+                Some(Devid::new(2)),
+            ),
         ]);
 
         match live_pool_matches_membership(&pool, &expected) {
             Err(JournaledSnapshotError::NoMemberForDevid { devid }) => {
-                assert_eq!(devid, 99);
+                assert_eq!(devid, Devid::new(99));
             }
             other => panic!("expected NoMemberForDevid for devid 99, got {other:?}"),
         }
@@ -11702,29 +11884,49 @@ mod tests {
         pool.total_devices = 3;
         pool.null_underlying.push(NullUnderlyingDevice {
             mapper: MapperName("braid-disk3".into()),
-            devid: 3,
+            devid: Devid::new(3),
         });
 
         let expected_added_at = "2026-04-01T00:00:00Z";
         let prior_added_at = "2026-01-01T00:00:00Z";
         let expected = membership_from(vec![
-            membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, Some(1)),
-            membership_entry("disk2", "/dev/disk/by-id/virtio-disk2", None, Some(2)),
+            membership_entry(
+                "disk1",
+                "/dev/disk/by-id/virtio-disk1",
+                None,
+                Some(Devid::new(1)),
+            ),
+            membership_entry(
+                "disk2",
+                "/dev/disk/by-id/virtio-disk2",
+                None,
+                Some(Devid::new(2)),
+            ),
             membership_entry(
                 "disk3",
                 "/dev/disk/by-id/virtio-disk3",
                 Some(expected_added_at),
-                Some(3),
+                Some(Devid::new(3)),
             ),
         ]);
         let prior = membership_from(vec![
-            membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, Some(1)),
-            membership_entry("disk2", "/dev/disk/by-id/virtio-disk2", None, Some(2)),
+            membership_entry(
+                "disk1",
+                "/dev/disk/by-id/virtio-disk1",
+                None,
+                Some(Devid::new(1)),
+            ),
+            membership_entry(
+                "disk2",
+                "/dev/disk/by-id/virtio-disk2",
+                None,
+                Some(Devid::new(2)),
+            ),
             membership_entry(
                 "disk3",
                 "/dev/disk/by-id/virtio-disk3",
                 Some(prior_added_at),
-                Some(3),
+                Some(Devid::new(3)),
             ),
         ]);
         let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
@@ -11738,7 +11940,7 @@ mod tests {
             .expect("null-underlying disk3 must remain in recovered membership");
         assert_eq!(disk3.name, disk_name("disk3"));
         assert_eq!(disk3.by_id.as_str(), "/dev/disk/by-id/virtio-disk3");
-        assert_eq!(disk3.devid, Some(3));
+        assert_eq!(disk3.devid, Some(Devid::new(3)));
         assert_eq!(disk3.added_at.as_deref(), Some(prior_added_at));
     }
 
@@ -11754,14 +11956,24 @@ mod tests {
         let mut pool = pool_state_one_disk();
         pool.missing_count = 1;
         pool.total_devices = 2;
-        pool.missing_devids = vec![2];
+        pool.missing_devids = vec![Devid::new(2)];
         pool.null_underlying.push(NullUnderlyingDevice {
             mapper: MapperName("braid-disk2".into()),
-            devid: 2,
+            devid: Devid::new(2),
         });
         let expected = membership_from(vec![
-            membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, Some(1)),
-            membership_entry("disk2", "/dev/disk/by-id/virtio-disk2", None, Some(2)),
+            membership_entry(
+                "disk1",
+                "/dev/disk/by-id/virtio-disk1",
+                None,
+                Some(Devid::new(1)),
+            ),
+            membership_entry(
+                "disk2",
+                "/dev/disk/by-id/virtio-disk2",
+                None,
+                Some(Devid::new(2)),
+            ),
         ]);
         let resolver = resolver_for(&[("/dev/vda", "virtio-disk1")]);
 
@@ -11785,12 +11997,27 @@ mod tests {
         pool.total_devices = 3;
         pool.null_underlying.push(NullUnderlyingDevice {
             mapper: MapperName("braid-disk4".into()),
-            devid: 2,
+            devid: Devid::new(2),
         });
         let expected = membership_from(vec![
-            membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, Some(1)),
-            membership_entry("disk2", "/dev/disk/by-id/virtio-disk2", None, Some(22)),
-            membership_entry("disk4", "/dev/disk/by-id/virtio-disk4", None, Some(2)),
+            membership_entry(
+                "disk1",
+                "/dev/disk/by-id/virtio-disk1",
+                None,
+                Some(Devid::new(1)),
+            ),
+            membership_entry(
+                "disk2",
+                "/dev/disk/by-id/virtio-disk2",
+                None,
+                Some(Devid::new(22)),
+            ),
+            membership_entry(
+                "disk4",
+                "/dev/disk/by-id/virtio-disk4",
+                None,
+                Some(Devid::new(2)),
+            ),
         ]);
 
         let matches = live_pool_matches_membership(&pool, &expected)
@@ -11810,14 +12037,29 @@ mod tests {
     fn live_pool_matches_membership_propagates_duplicate_devid_from_null_underlying() {
         let pool = pool_state_disk1_with_null_underlying_disk2();
         let expected = PoolMembership::for_corruption_tests(vec![
-            membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, Some(1)),
-            membership_entry("disk2", "/dev/disk/by-id/virtio-disk2", None, Some(2)),
-            membership_entry("disk4", "/dev/disk/by-id/virtio-disk4", None, Some(2)),
+            membership_entry(
+                "disk1",
+                "/dev/disk/by-id/virtio-disk1",
+                None,
+                Some(Devid::new(1)),
+            ),
+            membership_entry(
+                "disk2",
+                "/dev/disk/by-id/virtio-disk2",
+                None,
+                Some(Devid::new(2)),
+            ),
+            membership_entry(
+                "disk4",
+                "/dev/disk/by-id/virtio-disk4",
+                None,
+                Some(Devid::new(2)),
+            ),
         ]);
 
         match live_pool_matches_membership(&pool, &expected) {
             Err(JournaledSnapshotError::DuplicateDevid { devid, members }) => {
-                assert_eq!(devid, 2);
+                assert_eq!(devid, Devid::new(2));
                 assert_eq!(members.len(), 2);
             }
             other => panic!("expected DuplicateDevid for devid 2, got {other:?}"),
@@ -11843,17 +12085,47 @@ mod tests {
         let new_uuid = uuid_for_name("disk-new");
         let new_uuid_text = new_uuid.to_string();
         let pre = membership_from(vec![
-            membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, Some(1)),
-            membership_entry("old", "/dev/disk/by-id/virtio-old", None, Some(2)),
-            membership_entry("disk3", "/dev/disk/by-id/virtio-disk3", None, Some(3)),
+            membership_entry(
+                "disk1",
+                "/dev/disk/by-id/virtio-disk1",
+                None,
+                Some(Devid::new(1)),
+            ),
+            membership_entry(
+                "old",
+                "/dev/disk/by-id/virtio-old",
+                None,
+                Some(Devid::new(2)),
+            ),
+            membership_entry(
+                "disk3",
+                "/dev/disk/by-id/virtio-disk3",
+                None,
+                Some(Devid::new(3)),
+            ),
         ]);
         let target = membership_from(vec![
-            membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, Some(1)),
+            membership_entry(
+                "disk1",
+                "/dev/disk/by-id/virtio-disk1",
+                None,
+                Some(Devid::new(1)),
+            ),
             (
                 new_uuid.clone(),
-                disk_member_named("disk-new", "/dev/disk/by-id/virtio-disk-new", None, Some(2)),
+                disk_member_named(
+                    "disk-new",
+                    "/dev/disk/by-id/virtio-disk-new",
+                    None,
+                    Some(Devid::new(2)),
+                ),
             ),
-            membership_entry("disk3", "/dev/disk/by-id/virtio-disk3", None, Some(3)),
+            membership_entry(
+                "disk3",
+                "/dev/disk/by-id/virtio-disk3",
+                None,
+                Some(Devid::new(3)),
+            ),
         ]);
         let journal = journal::Journal {
             started_at: "2026-01-01T00:00:00Z".into(),
@@ -11869,7 +12141,9 @@ mod tests {
                         enroll_key_file: None,
                     },
                 },
-                source: journal::ReplaceJournalSource::Missing { old_devid: 2 },
+                source: journal::ReplaceJournalSource::Missing {
+                    old_devid: Devid::new(2),
+                },
                 restore_raid1_after_commit: false,
             },
             pre_membership: pre,
@@ -11920,7 +12194,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::BtrfsFilesystemResize {
-                    devid: 2,
+                    devid: Devid::new(2),
                     mount_point: MountPoint("/mnt/storage".into()),
                 },
                 ok_raw_empty("btrfs filesystem resize"),
@@ -13033,7 +13307,7 @@ mod tests {
             // Resize-to-max on the new device's devid (2).
             .with_output(
                 CmdRequest::BtrfsFilesystemResize {
-                    devid: 2,
+                    devid: Devid::new(2),
                     mount_point: MountPoint("/mnt/storage".into()),
                 },
                 ok_raw_empty("btrfs filesystem resize"),
@@ -15209,7 +15483,7 @@ mod tests {
         let recovered = set_of(&["disk1"]);
         let op = OpKind::RemoveMissing {
             phase: journal::RemoveMissingPhase::PoolMutation,
-            devid: 2,
+            devid: Devid::new(2),
             restore_raid1_after_commit: true,
         };
 
@@ -15226,7 +15500,7 @@ mod tests {
         let recovered = set_of(&["disk1", "disk2"]);
         let op = OpKind::RemoveMissing {
             phase: journal::RemoveMissingPhase::PoolMutation,
-            devid: 2,
+            devid: Devid::new(2),
             restore_raid1_after_commit: true,
         };
 
@@ -15254,7 +15528,7 @@ mod tests {
                 },
             },
             source: journal::ReplaceJournalSource::Live {
-                old_devid: 2,
+                old_devid: Devid::new(2),
                 old_mapper: MapperName("braid-old".into()),
             },
             restore_raid1_after_commit: false,
@@ -15284,7 +15558,7 @@ mod tests {
                 },
             },
             source: journal::ReplaceJournalSource::Live {
-                old_devid: 2,
+                old_devid: Devid::new(2),
                 old_mapper: MapperName("braid-old".into()),
             },
             restore_raid1_after_commit: false,
@@ -15346,7 +15620,7 @@ mod tests {
 
         let remove_missing_op = OpKind::RemoveMissing {
             phase: journal::RemoveMissingPhase::PoolMutation,
-            devid: 2,
+            devid: Devid::new(2),
             restore_raid1_after_commit: true,
         };
 
@@ -15363,7 +15637,7 @@ mod tests {
                 },
             },
             source: journal::ReplaceJournalSource::Live {
-                old_devid: 2,
+                old_devid: Devid::new(2),
                 old_mapper: MapperName("braid-old".into()),
             },
             restore_raid1_after_commit: false,
@@ -15401,11 +15675,26 @@ mod tests {
     /// before braid could re-issue `pool_resize_device`.
     fn replace_journal() -> journal::Journal {
         let pre = membership_from(vec![
-            membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, Some(1)),
-            membership_entry("old", "/dev/disk/by-id/virtio-old", None, Some(2)),
+            membership_entry(
+                "disk1",
+                "/dev/disk/by-id/virtio-disk1",
+                None,
+                Some(Devid::new(1)),
+            ),
+            membership_entry(
+                "old",
+                "/dev/disk/by-id/virtio-old",
+                None,
+                Some(Devid::new(2)),
+            ),
         ]);
         let target = membership_from(vec![
-            membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, Some(1)),
+            membership_entry(
+                "disk1",
+                "/dev/disk/by-id/virtio-disk1",
+                None,
+                Some(Devid::new(1)),
+            ),
             membership_entry("new", "/dev/disk/by-id/virtio-new", None, None),
         ]);
 
@@ -15424,7 +15713,7 @@ mod tests {
                     },
                 },
                 source: journal::ReplaceJournalSource::Live {
-                    old_devid: 2,
+                    old_devid: Devid::new(2),
                     old_mapper: MapperName("braid-old".into()),
                 },
                 restore_raid1_after_commit: false,
@@ -15479,7 +15768,7 @@ mod tests {
             .insert(
                 new_uuid,
                 DiskMember {
-                    devid: Some(2),
+                    devid: Some(Devid::new(2)),
                     ..new_member
                 },
             )
@@ -15952,7 +16241,7 @@ mod tests {
             // proving recover actually issued the resize.
             .with_output(
                 CmdRequest::BtrfsFilesystemResize {
-                    devid: 2,
+                    devid: Devid::new(2),
                     mount_point: MountPoint("/mnt/storage".into()),
                 },
                 ok_raw_empty("btrfs filesystem resize"),
@@ -16543,14 +16832,24 @@ mod tests {
     /// `pre_membership.disks[name].devid`) has the value it needs.
     fn remove_2to1_journal_with_target_devid() -> journal::Journal {
         let pre = membership_from(vec![
-            membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, Some(1)),
-            membership_entry("disk2", "/dev/disk/by-id/virtio-disk2", None, Some(2)),
+            membership_entry(
+                "disk1",
+                "/dev/disk/by-id/virtio-disk1",
+                None,
+                Some(Devid::new(1)),
+            ),
+            membership_entry(
+                "disk2",
+                "/dev/disk/by-id/virtio-disk2",
+                None,
+                Some(Devid::new(2)),
+            ),
         ]);
         let target = membership_from(vec![membership_entry(
             "disk1",
             "/dev/disk/by-id/virtio-disk1",
             None,
-            Some(1),
+            Some(Devid::new(1)),
         )]);
 
         journal::Journal {
@@ -16569,14 +16868,19 @@ mod tests {
     /// because live LUKS UUID is unobservable in that state.
     fn remove_2to1_journal_without_target_devid() -> journal::Journal {
         let pre = membership_from(vec![
-            membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, Some(1)),
+            membership_entry(
+                "disk1",
+                "/dev/disk/by-id/virtio-disk1",
+                None,
+                Some(Devid::new(1)),
+            ),
             membership_entry("disk2", "/dev/disk/by-id/virtio-disk2", None, None),
         ]);
         let target = membership_from(vec![membership_entry(
             "disk1",
             "/dev/disk/by-id/virtio-disk1",
             None,
-            Some(1),
+            Some(Devid::new(1)),
         )]);
 
         journal::Journal {
@@ -17017,13 +17321,38 @@ mod tests {
     /// pre_membership disk that btrfs still owns -- not just the target.
     fn remove_3to2_journal_with_devids() -> journal::Journal {
         let pre = membership_from(vec![
-            membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, Some(1)),
-            membership_entry("disk2", "/dev/disk/by-id/virtio-disk2", None, Some(2)),
-            membership_entry("disk3", "/dev/disk/by-id/virtio-disk3", None, Some(3)),
+            membership_entry(
+                "disk1",
+                "/dev/disk/by-id/virtio-disk1",
+                None,
+                Some(Devid::new(1)),
+            ),
+            membership_entry(
+                "disk2",
+                "/dev/disk/by-id/virtio-disk2",
+                None,
+                Some(Devid::new(2)),
+            ),
+            membership_entry(
+                "disk3",
+                "/dev/disk/by-id/virtio-disk3",
+                None,
+                Some(Devid::new(3)),
+            ),
         ]);
         let target = membership_from(vec![
-            membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, Some(1)),
-            membership_entry("disk3", "/dev/disk/by-id/virtio-disk3", None, Some(3)),
+            membership_entry(
+                "disk1",
+                "/dev/disk/by-id/virtio-disk1",
+                None,
+                Some(Devid::new(1)),
+            ),
+            membership_entry(
+                "disk3",
+                "/dev/disk/by-id/virtio-disk3",
+                None,
+                Some(Devid::new(3)),
+            ),
         ]);
 
         journal::Journal {
@@ -17039,20 +17368,45 @@ mod tests {
 
     fn remove_missing_3to2_journal_pool_mutation_with_devids() -> journal::Journal {
         let pre = membership_from(vec![
-            membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, Some(1)),
-            membership_entry("disk2", "/dev/disk/by-id/virtio-disk2", None, Some(2)),
-            membership_entry("disk3", "/dev/disk/by-id/virtio-disk3", None, Some(3)),
+            membership_entry(
+                "disk1",
+                "/dev/disk/by-id/virtio-disk1",
+                None,
+                Some(Devid::new(1)),
+            ),
+            membership_entry(
+                "disk2",
+                "/dev/disk/by-id/virtio-disk2",
+                None,
+                Some(Devid::new(2)),
+            ),
+            membership_entry(
+                "disk3",
+                "/dev/disk/by-id/virtio-disk3",
+                None,
+                Some(Devid::new(3)),
+            ),
         ]);
         let target = membership_from(vec![
-            membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, Some(1)),
-            membership_entry("disk3", "/dev/disk/by-id/virtio-disk3", None, Some(3)),
+            membership_entry(
+                "disk1",
+                "/dev/disk/by-id/virtio-disk1",
+                None,
+                Some(Devid::new(1)),
+            ),
+            membership_entry(
+                "disk3",
+                "/dev/disk/by-id/virtio-disk3",
+                None,
+                Some(Devid::new(3)),
+            ),
         ]);
 
         journal::Journal {
             started_at: "2026-01-01T00:00:00Z".into(),
             op: OpKind::RemoveMissing {
                 phase: journal::RemoveMissingPhase::PoolMutation,
-                devid: 2,
+                devid: Devid::new(2),
                 restore_raid1_after_commit: true,
             },
             pre_membership: pre,
@@ -17740,7 +18094,9 @@ mod tests {
 
         let journal = replace_post_maintenance_journal(
             false,
-            journal::ReplaceJournalSource::Missing { old_devid: 2 },
+            journal::ReplaceJournalSource::Missing {
+                old_devid: Devid::new(2),
+            },
         );
         journal::write_journal(&f.paths, &journal).unwrap();
 
@@ -17855,7 +18211,9 @@ mod tests {
 
         let journal = replace_post_maintenance_journal(
             false,
-            journal::ReplaceJournalSource::Missing { old_devid: 2 },
+            journal::ReplaceJournalSource::Missing {
+                old_devid: Devid::new(2),
+            },
         );
         journal::write_journal(&f.paths, &journal).unwrap();
 

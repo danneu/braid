@@ -5,7 +5,7 @@ use nom::{
 };
 
 use crate::cmd::RawCommandOutput;
-use crate::types::Fsid;
+use crate::types::{Devid, Fsid};
 
 use super::ParseError;
 use super::types::{BtrfsFilesystemShowOutput, BtrfsShowDevice};
@@ -111,14 +111,14 @@ pub fn parse_btrfs_filesystem_show(
     // are included; non-mapper real paths (e.g. /dev/sda1) are kept so
     // probe_pool can hard-fail on the invariant violation.
     let mut devices: Vec<BtrfsShowDevice> = Vec::new();
-    let mut missing_devids: Vec<u64> = Vec::new();
+    let mut missing_devids: Vec<Devid> = Vec::new();
     for line in stdout.lines() {
         if let Ok((_, (devid, path))) = parse_devid_line(line) {
             if path == "MISSING" || path.ends_with(" MISSING") {
-                missing_devids.push(devid);
+                missing_devids.push(Devid::new(devid));
             } else {
                 devices.push(BtrfsShowDevice {
-                    devid,
+                    devid: Devid::new(devid),
                     path: path.to_owned(),
                 });
             }
@@ -184,7 +184,7 @@ mod tests {
         let out = parse_btrfs_filesystem_show(&raw).unwrap();
         assert_eq!(out.total_devices, 2);
         assert_eq!(out.devices.len(), 2);
-        assert_eq!(out.devices[0].devid, 1);
+        assert_eq!(out.devices[0].devid, Devid::new(1));
         assert!(
             is_dm_or_mapper_path(&out.devices[0].path),
             "devid 1 path should be dm or mapper, got: {}",
@@ -198,7 +198,7 @@ mod tests {
             uuid::Uuid::parse_str(uuid.as_str()).is_ok(),
             "FSID should be a valid UUID, got: {uuid}"
         );
-        assert_eq!(out.devices[1].devid, 2);
+        assert_eq!(out.devices[1].devid, Devid::new(2));
         assert!(
             is_dm_or_mapper_path(&out.devices[1].path),
             "devid 2 path should be dm or mapper, got: {}",
@@ -249,7 +249,7 @@ mod tests {
             1,
             "MISSING sentinel device must be excluded"
         );
-        assert_eq!(out.devices[0].devid, 1);
+        assert_eq!(out.devices[0].devid, Devid::new(1));
         assert_eq!(out.devices[0].path, "/dev/mapper/braid-vda");
         assert!(out.has_missing);
     }
@@ -273,7 +273,7 @@ mod tests {
         let out = parse_btrfs_filesystem_show(&raw).unwrap();
         assert_eq!(out.total_devices, 2);
         assert_eq!(out.devices.len(), 1, "bare MISSING path must be excluded");
-        assert_eq!(out.devices[0].devid, 1);
+        assert_eq!(out.devices[0].devid, Devid::new(1));
         assert!(out.has_missing);
     }
 

@@ -10,7 +10,7 @@
 use crate::state_io;
 use crate::state_paths::StatePaths;
 use crate::types::{
-    ByIdPath, DiskName, LuksUuid, MapperName, PoolDevice, PoolState, format_uuid_list,
+    ByIdPath, Devid, DiskName, LuksUuid, MapperName, PoolDevice, PoolState, format_uuid_list,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -46,7 +46,10 @@ pub enum MembershipError {
     /// carry the same persisted devid. Display enumerates every colliding
     /// UUID in canonical lexicographic order.
     #[error("duplicate devid {devid} in pool membership across UUIDs {}", format_uuid_list(.members))]
-    DuplicateDevid { devid: u64, members: Vec<LuksUuid> },
+    DuplicateDevid {
+        devid: Devid,
+        members: Vec<LuksUuid>,
+    },
 
     /// Read-side I/O failure that is NOT a parse error (file missing
     /// where required, EACCES, EIO).
@@ -242,7 +245,7 @@ pub struct DiskMember {
     /// Last observed btrfs devid, when the member has been seen in a mounted
     /// pool.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub devid: Option<u64>,
+    pub devid: Option<Devid>,
     /// First-add timestamp carried forward by membership rewrites.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub added_at: Option<String>,
@@ -284,7 +287,7 @@ impl PoolMembership {
     /// diagnostics name all of them rather than only two.
     pub fn by_devid(
         &self,
-        devid: u64,
+        devid: Devid,
     ) -> Result<Option<(&LuksUuid, &DiskMember)>, MembershipError> {
         let mut matches: Vec<(&LuksUuid, &DiskMember)> = Vec::new();
         for (uuid, m) in self.disks.iter() {
@@ -451,7 +454,7 @@ pub fn load_membership_from(path: &Path) -> Result<PoolMembership, MembershipErr
     // by-id, devid) is the load-path's job.
     let mut seen_names: BTreeMap<&DiskName, &LuksUuid> = BTreeMap::new();
     let mut seen_byid: BTreeMap<&ByIdPath, &LuksUuid> = BTreeMap::new();
-    let mut seen_devid: BTreeMap<u64, Vec<&LuksUuid>> = BTreeMap::new();
+    let mut seen_devid: BTreeMap<Devid, Vec<&LuksUuid>> = BTreeMap::new();
     for (uuid, m) in parsed.disks.iter() {
         if let Some(other) = seen_names.insert(&m.name, uuid) {
             let mut pair = [other, uuid];
@@ -956,9 +959,9 @@ mod tests {
         let u1 = test_uuid(115);
         let u2 = test_uuid(116);
         let mut d1 = member("d1", "/dev/disk/by-id/ata-X1");
-        d1.devid = Some(7);
+        d1.devid = Some(Devid::new(7));
         let mut d2 = member("d2", "/dev/disk/by-id/ata-X2");
-        d2.devid = Some(7);
+        d2.devid = Some(Devid::new(7));
         m.insert(u1.clone(), d1).unwrap();
         let err = m.insert(u2.clone(), d2).unwrap_err();
         let s = err.to_string();
@@ -1006,16 +1009,16 @@ mod tests {
             (&u3, "d3", "/dev/disk/by-id/ata-X3"),
         ] {
             let mut dm = member(name, by_id_s);
-            dm.devid = Some(7);
+            dm.devid = Some(Devid::new(7));
             raw_members.insert(u.clone(), dm);
         }
         let m = PoolMembership {
             disks: LuksUuidMap(raw_members),
         };
-        let err = m.by_devid(7).unwrap_err();
+        let err = m.by_devid(Devid::new(7)).unwrap_err();
         match &err {
             MembershipError::DuplicateDevid { devid, members } => {
-                assert_eq!(*devid, 7);
+                assert_eq!(*devid, Devid::new(7));
                 // canonical-lex order
                 let mut want = vec![u1.clone(), u2.clone(), u3.clone()];
                 want.sort();
@@ -1282,13 +1285,13 @@ mod tests {
         let mut m = PoolMembership::empty();
         let u_k = test_uuid(150);
         let mut original = member("disk1", "/dev/disk/by-id/ata-K");
-        original.devid = Some(1);
+        original.devid = Some(Devid::new(1));
         original.added_at = Some("2026-01-01T00:00:00Z".into());
         m.insert(u_k.clone(), original.clone()).unwrap();
         let pool = pool_state_with(vec![PoolDevice {
             mapper: MapperName("braid-disk1".into()),
             luks_uuid: u_k.clone(),
-            devid: 99,
+            devid: Devid::new(99),
             underlying: "/dev/vdb".into(),
         }]);
         let report = enrich_from_pool_state(&mut m, &pool).expect("enrichment succeeds");
@@ -1298,7 +1301,7 @@ mod tests {
             report.foreign
         );
         let updated = m.by_uuid(&u_k).expect("known UUID still present");
-        assert_eq!(updated.devid, Some(99), "live devid must overwrite stale");
+        assert_eq!(updated.devid, Some(Devid::new(99)), "live devid must overwrite stale");
         assert_eq!(updated.name, original.name, "name must be preserved");
         assert_eq!(updated.by_id, original.by_id, "by_id must be preserved");
         assert_eq!(
@@ -1321,7 +1324,7 @@ mod tests {
         let pool = pool_state_with(vec![PoolDevice {
             mapper: MapperName("braid-disk1".into()),
             luks_uuid: u_k.clone(),
-            devid: 2,
+            devid: Devid::new(2),
             underlying: "/dev/vdb".into(),
         }]);
         let report = enrich_from_pool_state(&mut m, &pool).expect("enrichment succeeds");
@@ -1331,7 +1334,7 @@ mod tests {
             report.foreign
         );
         let updated = m.by_uuid(&u_k).expect("known UUID still present");
-        assert_eq!(updated.devid, Some(2), "live devid must be recorded");
+        assert_eq!(updated.devid, Some(Devid::new(2)), "live devid must be recorded");
         assert_eq!(updated.name, original.name, "name must be preserved");
         assert_eq!(updated.by_id, original.by_id, "by_id must be preserved");
         let added_at = updated
@@ -1366,7 +1369,7 @@ mod tests {
         let pool = pool_state_with(vec![PoolDevice {
             mapper: foreign_mapper.clone(),
             luks_uuid: u_foreign.clone(),
-            devid: 7,
+            devid: Devid::new(7),
             underlying: "/dev/vdz".into(),
         }]);
         let report = enrich_from_pool_state(&mut m, &pool).expect("enrichment succeeds");
@@ -1409,13 +1412,13 @@ mod tests {
             PoolDevice {
                 mapper: MapperName("braid-disk1".into()),
                 luks_uuid: u_known.clone(),
-                devid: 1,
+                devid: Devid::new(1),
                 underlying: "/dev/vdb".into(),
             },
             PoolDevice {
                 mapper: foreign_mapper.clone(),
                 luks_uuid: u_foreign.clone(),
-                devid: 2,
+                devid: Devid::new(2),
                 underlying: "/dev/vdc".into(),
             },
         ]);
@@ -1475,7 +1478,7 @@ mod tests {
         let device = PoolDevice {
             mapper: MapperName("braid-WRONG".into()),
             luks_uuid: u.clone(),
-            devid: 1,
+            devid: Devid::new(1),
             underlying: "/dev/vdb".into(),
         };
         assert_eq!(
@@ -1487,7 +1490,7 @@ mod tests {
         let foreign = PoolDevice {
             mapper: MapperName("braid-WRONG".into()),
             luks_uuid: test_uuid(171),
-            devid: 2,
+            devid: Devid::new(2),
             underlying: "/dev/vdc".into(),
         };
         assert_eq!(

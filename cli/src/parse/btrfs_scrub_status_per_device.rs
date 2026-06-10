@@ -5,6 +5,7 @@ use nom::{
 };
 
 use crate::cmd::RawCommandOutput;
+use crate::types::Devid;
 
 use super::ParseError;
 use super::helpers::{parse_ctime, parse_duration_hms};
@@ -104,7 +105,7 @@ impl PartialDevice {
 
     fn finalize(self) -> DeviceScrubEntry {
         DeviceScrubEntry {
-            devid: self.devid,
+            devid: Devid::new(self.devid),
             path: self.path,
             state: self.state,
             started_at: self.started_at,
@@ -246,7 +247,7 @@ mod tests {
         );
         assert!(out.devices.len() >= 2, "expected at least 2 devices");
         for dev in &out.devices {
-            assert!(dev.devid > 0, "devid should be positive");
+            assert!(dev.devid > Devid::new(0), "devid should be positive");
             assert_eq!(dev.state, DeviceScrubState::Running);
             assert!(
                 dev.data_bytes_scrubbed > 0 || dev.duration_secs == 0,
@@ -274,7 +275,7 @@ mod tests {
         );
         assert!(out.devices.len() >= 2, "expected at least 2 devices");
         for dev in &out.devices {
-            assert!(dev.devid > 0, "devid should be positive");
+            assert!(dev.devid > Devid::new(0), "devid should be positive");
             assert!(
                 matches!(
                     dev.state,
@@ -324,7 +325,7 @@ Duration:         0:01:00
         let out = parse_btrfs_scrub_status_per_device(&raw).unwrap();
         assert_eq!(out.uuid, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
         assert_eq!(out.devices.len(), 1);
-        assert_eq!(out.devices[0].devid, 1);
+        assert_eq!(out.devices[0].devid, Devid::new(1));
         assert_eq!(out.devices[0].path.as_deref(), Some("/dev/sda"));
         assert_eq!(out.devices[0].state, DeviceScrubState::Finished);
         assert_eq!(out.devices[0].duration_secs, 60);

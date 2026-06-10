@@ -102,14 +102,15 @@ pub fn enospc_risk_advisory(devices: &[BtrfsDeviceUsageEntry], missing_count: u6
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::Devid;
 
     const MIB: u64 = 1 << 20;
     const GIB: u64 = 1 << 30;
     const TIB: u64 = 1 << 40;
 
-    fn device(devid: u64, device_size: u64, unallocated: u64) -> BtrfsDeviceUsageEntry {
+    fn device(devid: Devid, device_size: u64, unallocated: u64) -> BtrfsDeviceUsageEntry {
         BtrfsDeviceUsageEntry {
-            path: format!("/dev/mapper/braid-disk{devid}"),
+            path: format!("/dev/mapper/braid-disk{}", devid.get()),
             devid,
             device_size,
             device_slack: 0,
@@ -209,7 +210,7 @@ mod tests {
     // Scenario: an imported single-profile pool is mounted under braid.
     #[test]
     fn enospc_risk_advisory_silent_on_single_disk() {
-        let devices = vec![device(1, 100 * GIB, 0)];
+        let devices = vec![device(Devid::new(1), 100 * GIB, 0)];
         assert!(enospc_risk_advisory(&devices, 0).is_empty());
     }
 
@@ -218,7 +219,10 @@ mod tests {
     // Scenario: a two-device pool has one missing member.
     #[test]
     fn enospc_risk_advisory_silent_on_degraded() {
-        let devices = vec![device(1, 100 * GIB, 0), device(2, 100 * GIB, 0)];
+        let devices = vec![
+            device(Devid::new(1), 100 * GIB, 0),
+            device(Devid::new(2), 100 * GIB, 0),
+        ];
         assert!(enospc_risk_advisory(&devices, 1).is_empty());
     }
 
@@ -229,8 +233,8 @@ mod tests {
     #[test]
     fn enospc_risk_advisory_silent_on_healthy_tiny_raid1() {
         let devices = vec![
-            device(1, 256 * MIB, 200 * MIB),
-            device(2, 256 * MIB, 200 * MIB),
+            device(Devid::new(1), 256 * MIB, 200 * MIB),
+            device(Devid::new(2), 256 * MIB, 200 * MIB),
         ];
         assert!(enospc_risk_advisory(&devices, 0).is_empty());
     }
@@ -242,9 +246,9 @@ mod tests {
     #[test]
     fn enospc_risk_advisory_silent_on_healthy_large_raid1() {
         let devices = vec![
-            device(1, 12 * TIB, 5 * TIB),
-            device(2, 12 * TIB, 5 * TIB),
-            device(3, 12 * TIB, 5 * TIB),
+            device(Devid::new(1), 12 * TIB, 5 * TIB),
+            device(Devid::new(2), 12 * TIB, 5 * TIB),
+            device(Devid::new(3), 12 * TIB, 5 * TIB),
         ];
         assert!(enospc_risk_advisory(&devices, 0).is_empty());
     }
@@ -257,8 +261,8 @@ mod tests {
     #[test]
     fn enospc_risk_advisory_fires_on_2_disk_pool_with_one_low() {
         let devices = vec![
-            device(1, 100 * GIB, 10 * MIB),
-            device(2, 100 * GIB, 10 * GIB),
+            device(Devid::new(1), 100 * GIB, 10 * MIB),
+            device(Devid::new(2), 100 * GIB, 10 * GIB),
         ];
         let advisories = enospc_risk_advisory(&devices, 0);
 
@@ -278,9 +282,9 @@ mod tests {
     #[test]
     fn enospc_risk_advisory_fires_on_3_disk_loss_simulation() {
         let devices = vec![
-            device(1, 4 * GIB, 3 * GIB),
-            device(2, 4 * GIB, 3 * GIB),
-            device(3, 4 * GIB, 700 * MIB),
+            device(Devid::new(1), 4 * GIB, 3 * GIB),
+            device(Devid::new(2), 4 * GIB, 3 * GIB),
+            device(Devid::new(3), 4 * GIB, 700 * MIB),
         ];
         let advisories = enospc_risk_advisory(&devices, 0);
 
@@ -298,10 +302,10 @@ mod tests {
     #[test]
     fn enospc_risk_advisory_silent_on_4_disk_with_one_low() {
         let devices = vec![
-            device(1, 100 * GIB, 10 * GIB),
-            device(2, 100 * GIB, 10 * GIB),
-            device(3, 100 * GIB, 10 * GIB),
-            device(4, 100 * GIB, 50 * MIB),
+            device(Devid::new(1), 100 * GIB, 10 * GIB),
+            device(Devid::new(2), 100 * GIB, 10 * GIB),
+            device(Devid::new(3), 100 * GIB, 10 * GIB),
+            device(Devid::new(4), 100 * GIB, 50 * MIB),
         ];
         assert!(enospc_risk_advisory(&devices, 0).is_empty());
     }
@@ -314,9 +318,9 @@ mod tests {
     #[test]
     fn enospc_risk_advisory_uses_survivor_threshold_not_pre_loss() {
         let devices = vec![
-            device(1, 4 * GIB, 3 * GIB),
-            device(2, 4 * GIB, 3 * GIB),
-            device(3, 4 * GIB, 900 * MIB),
+            device(Devid::new(1), 4 * GIB, 3 * GIB),
+            device(Devid::new(2), 4 * GIB, 3 * GIB),
+            device(Devid::new(3), 4 * GIB, 900 * MIB),
         ];
         assert!(enospc_risk_advisory(&devices, 0).is_empty());
     }

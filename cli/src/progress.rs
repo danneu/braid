@@ -405,6 +405,7 @@ pub fn run_replace_with_progress<R: CommandRunner + Sync>(
 mod tests {
     use super::*;
     use crate::cmd::{MockRunner, RawCommandOutput};
+    use crate::types::Devid;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Condvar, Mutex};
 
@@ -982,7 +983,7 @@ mod tests {
     fn replace_progress_fast_finish_before_first_poll() {
         let runner = MockRunner::default().with_output(
             CmdRequest::BtrfsReplaceStart {
-                devid: 2,
+                devid: Devid::new(2),
                 target_device: "/dev/mapper/new".to_owned(),
                 mount_point: MountPoint("/mnt/storage".to_owned()),
             },
@@ -992,7 +993,7 @@ mod tests {
         let result = run_replace_with_progress(
             &runner,
             &CmdRequest::BtrfsReplaceStart {
-                devid: 2,
+                devid: Devid::new(2),
                 target_device: "/dev/mapper/new".to_owned(),
                 mount_point: MountPoint("/mnt/storage".to_owned()),
             },
@@ -1007,7 +1008,7 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::BtrfsReplaceStart {
-                    devid: 2,
+                    devid: Devid::new(2),
                     target_device: "/dev/mapper/new".to_owned(),
                     mount_point: MountPoint("/mnt/storage".to_owned()),
                 },
@@ -1023,7 +1024,7 @@ mod tests {
         let result = run_replace_with_progress(
             &runner,
             &CmdRequest::BtrfsReplaceStart {
-                devid: 2,
+                devid: Devid::new(2),
                 target_device: "/dev/mapper/new".to_owned(),
                 mount_point: MountPoint("/mnt/storage".to_owned()),
             },
@@ -1037,7 +1038,7 @@ mod tests {
     fn replace_progress_action_failure_propagation() {
         let runner = MockRunner::default().with_output(
             CmdRequest::BtrfsReplaceStart {
-                devid: 2,
+                devid: Devid::new(2),
                 target_device: "/dev/mapper/new".to_owned(),
                 mount_point: MountPoint("/mnt/storage".to_owned()),
             },
@@ -1047,7 +1048,7 @@ mod tests {
         let result = run_replace_with_progress(
             &runner,
             &CmdRequest::BtrfsReplaceStart {
-                devid: 2,
+                devid: Devid::new(2),
                 target_device: "/dev/mapper/new".to_owned(),
                 mount_point: MountPoint("/mnt/storage".to_owned()),
             },

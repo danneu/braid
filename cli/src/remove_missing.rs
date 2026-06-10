@@ -15,7 +15,7 @@ use crate::progress::{self, ProgressOutput};
 use crate::repair_hint;
 use crate::state_paths::StatePaths;
 use crate::status_tag::{StatusTag, color_enabled_for_stderr, status_line};
-use crate::types::{DiskName, LuksUuid, MountPoint, PoolState};
+use crate::types::{Devid, DiskName, LuksUuid, MountPoint, PoolState};
 
 #[derive(Debug, thiserror::Error)]
 pub enum RemoveMissingError {
@@ -30,7 +30,7 @@ pub enum RemoveMissingError {
     #[error(
         "no member in membership has devid {devid} -- pool.json membership may need manual repair (run `braid status` to inspect)"
     )]
-    NoMemberForDevid { devid: u64 },
+    NoMemberForDevid { devid: Devid },
     /// Defense-in-depth refusal for `pool.json` membership corruption (two
     /// or more members carry the same persisted devid). `by_devid` returns
     /// `MembershipError::DuplicateDevid` only on such a corrupt snapshot, but
@@ -64,7 +64,7 @@ pub enum RemoveMissingError {
 /// resolution for `remove-missing` -- callers thread the returned UUID straight
 /// into the journal and the persisted-member removal.
 fn resolve_removal_target(
-    devid: u64,
+    devid: Devid,
     membership: &membership::PoolMembership,
 ) -> Result<(LuksUuid, DiskName), RemoveMissingError> {
     match membership.by_devid(devid)? {
@@ -75,7 +75,7 @@ fn resolve_removal_target(
 
 pub struct RemoveMissingParams<'a> {
     pub config: &'a Config,
-    pub missing_id: u64,
+    pub missing_id: Devid,
     pub dry_run: bool,
     pub yes: bool,
     pub progress: ProgressOutput,
@@ -108,7 +108,7 @@ pub struct RemoveMissingPlan {
 
 #[derive(Debug, Clone)]
 struct RemoveMissingWorkPlan {
-    missing_id: u64,
+    missing_id: Devid,
     target_name: DiskName,
     remaining_present: usize,
     missing_count: u64,
@@ -304,7 +304,7 @@ impl RemoveMissingPlan {
 
 /// Shared `--missing-id` classifier so dry-run, execute planning, and
 /// overlap regression tests use the same btrfs-authoritative target order.
-fn validate_missing_id_target(pool: &PoolState, missing_id: u64) -> Result<(), String> {
+fn validate_missing_id_target(pool: &PoolState, missing_id: Devid) -> Result<(), String> {
     if pool.devices.iter().any(|d| d.devid == missing_id) {
         return Err(format!(
             "devid {missing_id} is a live device, not a missing one. \
@@ -542,7 +542,7 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
 fn check_relocation_space<R: CommandRunner>(
     runner: &R,
     mount_point: &MountPoint,
-    missing_id: u64,
+    missing_id: Devid,
 ) -> Result<(), RemoveMissingError> {
     let raw = match runner.run(&CmdRequest::BtrfsDeviceUsageRaw {
         mount_point: mount_point.clone(),
@@ -609,7 +609,7 @@ fn check_relocation_space<R: CommandRunner>(
 fn validate_missing_target_usage_shape(
     target: &[&BtrfsDeviceUsageEntry],
     mount_point: &MountPoint,
-    missing_id: u64,
+    missing_id: Devid,
 ) -> Result<(), RemoveMissingError> {
     const SUPPORTED_ALLOC_TYPES: &[&str] = &["Data", "Metadata", "System"];
 
@@ -657,7 +657,7 @@ fn validate_missing_target_usage_shape(
 
 #[cfg(test)]
 fn remove_missing_work_plan_for_test(
-    missing_id: u64,
+    missing_id: Devid,
     missing_count: u64,
     remaining_present: usize,
     mount_point: &MountPoint,
@@ -681,7 +681,7 @@ fn remove_missing_work_plan_for_test(
 
 fn format_remove_missing_confirm(
     name: &str,
-    devid: u64,
+    devid: Devid,
     remaining_present: usize,
     missing_count: u64,
 ) -> String {
@@ -766,18 +766,19 @@ mod tests {
         }
     }
 
-    fn target_validation_device(devid: u64) -> PoolDevice {
+    fn target_validation_device(devid: Devid) -> PoolDevice {
         let name = DiskName::parse(&format!("disk{devid}")).expect("valid synthetic disk name");
+        let raw = devid.get();
         PoolDevice {
             mapper: mapper_name(&name),
-            luks_uuid: LuksUuid::parse(&format!("00000000-0000-0000-0000-{devid:012x}"))
+            luks_uuid: LuksUuid::parse(&format!("00000000-0000-0000-0000-{raw:012x}"))
                 .expect("valid synthetic UUID"),
             devid,
             underlying: format!("/dev/vd{devid}"),
         }
     }
 
-    fn target_validation_null_underlying(devid: u64) -> NullUnderlyingDevice {
+    fn target_validation_null_underlying(devid: Devid) -> NullUnderlyingDevice {
         let name = DiskName::parse(&format!("disk{devid}")).expect("valid synthetic disk name");
         NullUnderlyingDevice {
             mapper: mapper_name(&name),
@@ -951,7 +952,10 @@ mod tests {
         cmd_remove_missing(&runner, &fs, &f.remove_missing_params().yes(false).build())
             .expect("accepted confirm should proceed");
 
-        let expected = format!("{}\n", format_remove_missing_confirm("disk3", 3, 2, 1));
+        let expected = format!(
+            "{}\n",
+            format_remove_missing_confirm("disk3", Devid::new(3), 2, 1)
+        );
         assert_eq!(f.confirm.prompts(), vec![expected]);
     }
 
@@ -1001,7 +1005,7 @@ mod tests {
         let f = PoolFixture::two_disk_devids_pinned();
         let (runner, _remove_done) =
             RemoveMissingPool::two_disk_one_missing().install(MockRunner::default());
-        let params = f.remove_missing_params().missing_id(2).build();
+        let params = f.remove_missing_params().missing_id(Devid::new(2)).build();
         let result = cmd_remove_missing(&runner, &MockFs::storage(vec![]), &params);
 
         let err = result.expect_err("remove-missing must reject 2-disk RAID1 + 1 missing");
@@ -1068,7 +1072,7 @@ mod tests {
             RemoveMissingPool::two_disk_one_missing().install(MockRunner::default());
         let params = f
             .remove_missing_params()
-            .missing_id(2)
+            .missing_id(Devid::new(2))
             .dry_run(true)
             .build();
         let result = cmd_remove_missing(&runner, &MockFs::storage(vec![]), &params);
@@ -1152,7 +1156,7 @@ mod tests {
             device_usage_stdout: fixture,
         };
 
-        let result = check_relocation_space(&runner, &mp(), 3);
+        let result = check_relocation_space(&runner, &mp(), Devid::new(3));
         let err = result.expect_err("should reject insufficient space");
         let msg = err.to_string();
         assert!(
@@ -1192,7 +1196,7 @@ mod tests {
             device_usage_stdout: fixture,
         };
 
-        let result = check_relocation_space(&runner, &mp(), 3);
+        let result = check_relocation_space(&runner, &mp(), Devid::new(3));
         assert!(result.is_ok(), "should pass: {result:?}");
     }
 
@@ -1240,7 +1244,7 @@ mod tests {
             device_usage_stdout: fixture,
         };
 
-        let result = check_relocation_space(&runner, &mp(), 3);
+        let result = check_relocation_space(&runner, &mp(), Devid::new(3));
         assert!(result.is_ok(), "should pass: {result:?}");
     }
 
@@ -1278,11 +1282,11 @@ mod tests {
         };
 
         // Targeting devid 2 (50 MB Data) -- should pass: RAID1 capacity = 200 MB >= 50 MB
-        let result = check_relocation_space(&runner, &mp(), 2);
+        let result = check_relocation_space(&runner, &mp(), Devid::new(2));
         assert!(result.is_ok(), "targeting devid 2 should pass: {result:?}");
 
         // Targeting devid 3 (5 GB Data) -- should fail: RAID1 capacity = 200 MB < 5 GB
-        let result = check_relocation_space(&runner, &mp(), 3);
+        let result = check_relocation_space(&runner, &mp(), Devid::new(3));
         assert!(result.is_err(), "targeting devid 3 should fail");
     }
 
@@ -1309,7 +1313,7 @@ mod tests {
             }
         }
 
-        let result = check_relocation_space(&FailingRunner, &mp(), 3);
+        let result = check_relocation_space(&FailingRunner, &mp(), Devid::new(3));
         let err = result.expect_err("preflight must fail closed on spawn error");
         match err {
             RemoveMissingError::Validation(msg) => {
@@ -1354,7 +1358,7 @@ mod tests {
             }
         }
 
-        let err = check_relocation_space(&FailingExitRunner, &mp(), 3)
+        let err = check_relocation_space(&FailingExitRunner, &mp(), Devid::new(3))
             .expect_err("nonzero btrfs exit must fail closed");
         match err {
             RemoveMissingError::Validation(msg) => {
@@ -1385,7 +1389,7 @@ mod tests {
                 .to_owned(),
         };
 
-        let err = check_relocation_space(&runner, &mp(), 3)
+        let err = check_relocation_space(&runner, &mp(), Devid::new(3))
             .expect_err("parse uncertainty must fail closed");
         match err {
             RemoveMissingError::Validation(msg) => {
@@ -1428,7 +1432,7 @@ mod tests {
             device_usage_stdout: fixture,
         };
 
-        let err = check_relocation_space(&runner, &mp(), 3)
+        let err = check_relocation_space(&runner, &mp(), Devid::new(3))
             .expect_err("absent missing target must fail closed");
         match err {
             RemoveMissingError::Validation(msg) => {
@@ -1471,7 +1475,7 @@ mod tests {
             device_usage_stdout: fixture,
         };
 
-        let err = check_relocation_space(&runner, &mp(), 3)
+        let err = check_relocation_space(&runner, &mp(), Devid::new(3))
             .expect_err("present zero-allocation missing target must fail closed");
         let msg = err.to_string();
         assert!(
@@ -1526,7 +1530,7 @@ mod tests {
             device_usage_stdout: fixture,
         };
 
-        let err = check_relocation_space(&runner, &mp(), 3)
+        let err = check_relocation_space(&runner, &mp(), Devid::new(3))
             .expect_err("all-zero supported rows must fail closed");
         let msg = err.to_string();
         assert!(
@@ -1566,7 +1570,7 @@ mod tests {
             device_usage_stdout: fixture,
         };
 
-        let err = check_relocation_space(&runner, &mp(), 3)
+        let err = check_relocation_space(&runner, &mp(), Devid::new(3))
             .expect_err("unsupported target profile must fail closed");
         let msg = err.to_string();
         assert!(
@@ -1610,7 +1614,7 @@ mod tests {
             device_usage_stdout: fixture,
         };
 
-        let err = check_relocation_space(&runner, &mp(), 3)
+        let err = check_relocation_space(&runner, &mp(), Devid::new(3))
             .expect_err("duplicate target stanzas must fail closed");
         let msg = err.to_string();
         assert!(
@@ -1630,8 +1634,13 @@ mod tests {
     // Why: operator should see the soft balance step in the plan.
     // Scenario: 3-disk pool, 1 disk failed. Dry run should show the balance.
     fn work_plan_steps_show_rebalance_when_clearing_last_missing() {
-        let steps = remove_missing_work_plan_for_test(3, 1, 2, &MountPoint("/mnt/storage".into()))
-            .render_steps();
+        let steps = remove_missing_work_plan_for_test(
+            Devid::new(3),
+            1,
+            2,
+            &MountPoint("/mnt/storage".into()),
+        )
+        .render_steps();
         assert!(
             steps
                 .iter()
@@ -1646,8 +1655,13 @@ mod tests {
     // Why: can't have RAID1 with only 1 device.
     // Scenario: 2-disk pool, 1 died. Only 1 survivor -- no balance.
     fn work_plan_steps_omit_rebalance_with_single_survivor() {
-        let steps = remove_missing_work_plan_for_test(3, 1, 1, &MountPoint("/mnt/storage".into()))
-            .render_steps();
+        let steps = remove_missing_work_plan_for_test(
+            Devid::new(3),
+            1,
+            1,
+            &MountPoint("/mnt/storage".into()),
+        )
+        .render_steps();
         assert!(
             !steps
                 .iter()
@@ -1662,8 +1676,13 @@ mod tests {
     // Why: if more missing devices remain, balance would be premature.
     // Scenario: 4-disk pool, 2 missing, removing 1 of them.
     fn work_plan_steps_omit_rebalance_when_not_last_missing() {
-        let steps = remove_missing_work_plan_for_test(3, 2, 2, &MountPoint("/mnt/storage".into()))
-            .render_steps();
+        let steps = remove_missing_work_plan_for_test(
+            Devid::new(3),
+            2,
+            2,
+            &MountPoint("/mnt/storage".into()),
+        )
+        .render_steps();
         assert!(
             !steps
                 .iter()
@@ -1787,7 +1806,7 @@ mod tests {
             &runner,
             &MockFs::storage(vec![]),
             &f.remove_missing_params()
-                .missing_id(99)
+                .missing_id(Devid::new(99))
                 .dry_run(true)
                 .build(),
         ) {
@@ -2410,9 +2429,9 @@ mod tests {
             None,
         );
         m.insert(uuid, member).expect("fixture insert");
-        let err = resolve_removal_target(99, &m).unwrap_err();
+        let err = resolve_removal_target(Devid::new(99), &m).unwrap_err();
         match &err {
-            RemoveMissingError::NoMemberForDevid { devid } => assert_eq!(*devid, 99),
+            RemoveMissingError::NoMemberForDevid { devid } => assert_eq!(*devid, Devid::new(99)),
             other => panic!("expected NoMemberForDevid, got: {other:?}"),
         }
         let msg = err.to_string();
@@ -2428,7 +2447,8 @@ mod tests {
     // Scenario: one missing device (devid 2), last missing, 2 present -> includes balance.
     fn dry_run_render_targeted_removal_with_balance() {
         let mount_point = MountPoint("/mnt/storage".into());
-        let steps = remove_missing_work_plan_for_test(2, 1, 2, &mount_point).render_steps();
+        let steps =
+            remove_missing_work_plan_for_test(Devid::new(2), 1, 2, &mount_point).render_steps();
         let output = Step::render_dry_run(&steps);
         let lines: Vec<&str> = output.lines().collect();
 
@@ -2447,7 +2467,7 @@ mod tests {
 
     #[test]
     fn remove_missing_confirm_with_rebalance() {
-        let msg = format_remove_missing_confirm("toshiba", 2, 2, 1);
+        let msg = format_remove_missing_confirm("toshiba", Devid::new(2), 2, 1);
         assert!(msg.contains("Remove missing device from pool:"));
         assert!(msg.contains("toshiba (devid 2)"));
         assert!(msg.contains("missing"));
@@ -2458,7 +2478,7 @@ mod tests {
 
     #[test]
     fn remove_missing_confirm_single_survivor() {
-        let msg = format_remove_missing_confirm("toshiba", 2, 1, 1);
+        let msg = format_remove_missing_confirm("toshiba", Devid::new(2), 1, 1);
         assert!(msg.contains("Surviving disk already has all data"));
         assert!(msg.contains("1 present + 1 missing -> 1 disk"));
     }
@@ -2496,7 +2516,7 @@ mod tests {
         ];
 
         for (rp, mc, expected_shape, forbidden_shape) in cases {
-            let msg = format_remove_missing_confirm("toshiba", 2, *rp, *mc);
+            let msg = format_remove_missing_confirm("toshiba", Devid::new(2), *rp, *mc);
             assert!(
                 msg.contains(expected_shape),
                 "case ({rp}, {mc}): expected post-op shape {expected_shape:?} in:\n{msg}"
@@ -2638,8 +2658,12 @@ mod tests {
      */
     #[test]
     fn plan_preview_renders_warn_above_steps() {
-        let work_plan =
-            remove_missing_work_plan_for_test(3, 1, 2, &MountPoint("/mnt/storage".into()));
+        let work_plan = remove_missing_work_plan_for_test(
+            Devid::new(3),
+            1,
+            2,
+            &MountPoint("/mnt/storage".into()),
+        );
         let plan = RemoveMissingPlan {
             notes: vec![PreviewNote::Warn(
                 "read-only pre-flight failed: mountinfo probe failed; proceeding anyway".into(),
@@ -2770,7 +2794,7 @@ mod tests {
             &runner,
             &MockFs::storage(vec![]).with_excl_op("device add\n"),
             &f.remove_missing_params()
-                .missing_id(999)
+                .missing_id(Devid::new(999))
                 .dry_run(true)
                 .build(),
         ) {
@@ -2822,7 +2846,7 @@ mod tests {
             &HealthyPoolRunner,
             &MockFs::storage(vec![]),
             &f.remove_missing_params()
-                .missing_id(1)
+                .missing_id(Devid::new(1))
                 .dry_run(true)
                 .build(),
         ) {
@@ -2866,7 +2890,7 @@ mod tests {
             &NullUnderlyingPoolRunner,
             &MockFs::storage(vec![]),
             &f.remove_missing_params()
-                .missing_id(2)
+                .missing_id(Devid::new(2))
                 .dry_run(true)
                 .build(),
         ) {
@@ -2902,12 +2926,12 @@ mod tests {
     #[test]
     fn validate_missing_id_target_live_rejected() {
         let mut pool = target_validation_pool();
-        pool.devices.push(target_validation_device(2));
-        pool.missing_devids.push(2);
+        pool.devices.push(target_validation_device(Devid::new(2)));
+        pool.missing_devids.push(Devid::new(2));
         pool.null_underlying
-            .push(target_validation_null_underlying(2));
+            .push(target_validation_null_underlying(Devid::new(2)));
 
-        let msg = validate_missing_id_target(&pool, 2).unwrap_err();
+        let msg = validate_missing_id_target(&pool, Devid::new(2)).unwrap_err();
         assert_eq!(
             msg,
             "devid 2 is a live device, not a missing one. Use 'braid remove' to remove live devices."
@@ -2922,9 +2946,10 @@ mod tests {
     #[test]
     fn validate_missing_id_target_authoritative_missing_accepted() {
         let mut pool = target_validation_pool();
-        pool.missing_devids.push(2);
+        pool.missing_devids.push(Devid::new(2));
 
-        validate_missing_id_target(&pool, 2).expect("authoritative missing devid should pass");
+        validate_missing_id_target(&pool, Devid::new(2))
+            .expect("authoritative missing devid should pass");
     }
 
     // Intent: null-underlying-only devids get the hot-unplug diagnostic.
@@ -2936,9 +2961,9 @@ mod tests {
     fn validate_missing_id_target_null_underlying_only_rejected() {
         let mut pool = target_validation_pool();
         pool.null_underlying
-            .push(target_validation_null_underlying(2));
+            .push(target_validation_null_underlying(Devid::new(2)));
 
-        let msg = validate_missing_id_target(&pool, 2).unwrap_err();
+        let msg = validate_missing_id_target(&pool, Devid::new(2)).unwrap_err();
         assert_eq!(
             msg,
             "devid 2 is hot-unplugged but btrfs has not yet promoted it to MISSING \
@@ -2958,11 +2983,11 @@ mod tests {
     #[test]
     fn validate_missing_id_target_missing_and_null_underlying_accepted() {
         let mut pool = target_validation_pool();
-        pool.missing_devids.push(2);
+        pool.missing_devids.push(Devid::new(2));
         pool.null_underlying
-            .push(target_validation_null_underlying(2));
+            .push(target_validation_null_underlying(Devid::new(2)));
 
-        validate_missing_id_target(&pool, 2)
+        validate_missing_id_target(&pool, Devid::new(2))
             .expect("authoritative missing devid should win over null-underlying");
     }
 
@@ -2998,7 +3023,7 @@ mod tests {
         // Snapshot membership so we can verify which UUID got removed.
         let pre = membership::load_membership(&f.paths).unwrap();
         let (target_uuid, _target_member) = pre
-            .by_devid(3)
+            .by_devid(Devid::new(3))
             .unwrap()
             .expect("devid 3 must resolve in the fixture");
         let target_uuid = target_uuid.clone();
@@ -3071,7 +3096,7 @@ mod tests {
             DiskMember {
                 name: DiskName::parse("disk1").unwrap(),
                 by_id: ByIdPath::parse("/dev/disk/by-id/virtio-disk1").unwrap(),
-                devid: Some(1),
+                devid: Some(Devid::new(1)),
                 added_at: None,
             },
         )
@@ -3082,7 +3107,7 @@ mod tests {
             DiskMember {
                 name: DiskName::parse("disk2").unwrap(),
                 by_id: ByIdPath::parse("/dev/disk/by-id/virtio-disk2").unwrap(),
-                devid: Some(2),
+                devid: Some(Devid::new(2)),
                 added_at: None,
             },
         )
@@ -3094,7 +3119,7 @@ mod tests {
             DiskMember {
                 name: DiskName::parse("misleading-label").unwrap(),
                 by_id: ByIdPath::parse("/dev/disk/by-id/virtio-right").unwrap(),
-                devid: Some(3),
+                devid: Some(Devid::new(3)),
                 added_at: None,
             },
         )
@@ -3107,7 +3132,7 @@ mod tests {
             DiskMember {
                 name: DiskName::parse("decoy").unwrap(),
                 by_id: ByIdPath::parse("/dev/disk/by-id/virtio-misleading-label").unwrap(),
-                devid: Some(99),
+                devid: Some(Devid::new(99)),
                 added_at: None,
             },
         )
@@ -3119,7 +3144,7 @@ mod tests {
         cmd_remove_missing(
             &runner,
             &MockFs::storage(vec![]),
-            &f.remove_missing_params().missing_id(3).build(),
+            &f.remove_missing_params().missing_id(Devid::new(3)).build(),
         )
         .expect("remove-missing should succeed");
 
@@ -3133,7 +3158,7 @@ mod tests {
             .expect("U_D decoy must remain untouched");
         assert_eq!(
             decoy_after.devid,
-            Some(99),
+            Some(Devid::new(99)),
             "U_D's persisted devid must not be perturbed by the remove-missing"
         );
         let calls = runner.requests();
@@ -3194,11 +3219,11 @@ mod tests {
         let err = cmd_remove_missing(
             &runner,
             &MockFs::storage(vec![]),
-            &f.remove_missing_params().missing_id(3).build(),
+            &f.remove_missing_params().missing_id(Devid::new(3)).build(),
         )
         .unwrap_err();
         match &err {
-            RemoveMissingError::NoMemberForDevid { devid } => assert_eq!(*devid, 3),
+            RemoveMissingError::NoMemberForDevid { devid } => assert_eq!(*devid, Devid::new(3)),
             other => panic!("expected NoMemberForDevid, got: {other:?}"),
         }
         let msg = err.to_string();
@@ -3275,13 +3300,13 @@ mod tests {
             &runner,
             &MockFs::storage(vec![]),
             &f.remove_missing_params()
-                .missing_id(3)
+                .missing_id(Devid::new(3))
                 .dry_run(true)
                 .build(),
         )
         .unwrap_err();
         match &err {
-            RemoveMissingError::NoMemberForDevid { devid } => assert_eq!(*devid, 3),
+            RemoveMissingError::NoMemberForDevid { devid } => assert_eq!(*devid, Devid::new(3)),
             other => panic!("expected NoMemberForDevid, got: {other:?}"),
         }
         let msg = err.to_string();
@@ -3347,7 +3372,7 @@ mod tests {
                 DiskMember {
                     name: DiskName::parse("dupe-a").unwrap(),
                     by_id: ByIdPath::parse("/dev/disk/by-id/virtio-dupe-a").unwrap(),
-                    devid: Some(3),
+                    devid: Some(Devid::new(3)),
                     added_at: None,
                 },
             ),
@@ -3356,7 +3381,7 @@ mod tests {
                 DiskMember {
                     name: DiskName::parse("dupe-b").unwrap(),
                     by_id: ByIdPath::parse("/dev/disk/by-id/virtio-dupe-b").unwrap(),
-                    devid: Some(3),
+                    devid: Some(Devid::new(3)),
                     added_at: None,
                 },
             ),
@@ -3369,7 +3394,7 @@ mod tests {
         let err = cmd_remove_missing(
             &runner,
             &MockFs::storage(vec![]),
-            &f.remove_missing_params().missing_id(3).build(),
+            &f.remove_missing_params().missing_id(Devid::new(3)).build(),
         )
         .unwrap_err();
 

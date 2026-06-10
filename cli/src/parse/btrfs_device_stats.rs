@@ -1,6 +1,7 @@
 use serde::Deserialize;
 
 use crate::cmd::RawCommandOutput;
+use crate::types::Devid;
 
 use super::ParseError;
 use super::types::{BtrfsDeviceStatsOutput, DeviceErrorStats};
@@ -50,7 +51,7 @@ pub fn parse_btrfs_device_stats(
         .device_stats
         .into_iter()
         .map(|e| DeviceErrorStats {
-            devid: e.devid,
+            devid: Devid::new(e.devid),
             read_io_errs: e.read_io_errs,
             write_io_errs: e.write_io_errs,
             flush_io_errs: e.flush_io_errs,
@@ -86,9 +87,9 @@ mod tests {
         };
         let out = parse_btrfs_device_stats(&raw).unwrap();
         assert_eq!(out.devices.len(), 2);
-        assert_eq!(out.devices[0].devid, 1);
+        assert_eq!(out.devices[0].devid, Devid::new(1));
         assert_eq!(out.devices[0].read_io_errs, 0);
-        assert_eq!(out.devices[1].devid, 2);
+        assert_eq!(out.devices[1].devid, Devid::new(2));
     }
 
     // --- Synthetic tests (inline) ---

@@ -1,4 +1,4 @@
-use crate::types::DiskName;
+use crate::types::{Devid, DiskName};
 
 const MISSING_NAME_PLACEHOLDER: &str = "<missing-name>";
 const NEW_NAME_PLACEHOLDER: &str = "<new-name>=/dev/disk/by-id/<...>";
@@ -20,7 +20,7 @@ pub(crate) fn missing_replace_command_with_devid_placeholder(old: Option<&DiskNa
 
 /// Concrete cross-check form for hints that have already named the actual
 /// btrfs missing devid and want to keep `--missing-id` after required args.
-pub(crate) fn missing_replace_command_with_devid(old: Option<&DiskName>, devid: u64) -> String {
+pub(crate) fn missing_replace_command_with_devid(old: Option<&DiskName>, devid: Devid) -> String {
     format!("{} --missing-id {devid}", missing_replace_command(old))
 }
 
@@ -89,7 +89,7 @@ mod tests {
     #[test]
     fn missing_replace_command_with_devid_appends_actual_id_after_required_args() {
         assert_eq!(
-            missing_replace_command_with_devid(None, 3),
+            missing_replace_command_with_devid(None, Devid::new(3)),
             "braid replace --old <missing-name> --new <new-name>=/dev/disk/by-id/<...> --missing-id 3"
         );
     }

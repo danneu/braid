@@ -426,6 +426,37 @@ fn is_managed_format_flag(token: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// Devid -- opaque btrfs device id
+// ---------------------------------------------------------------------------
+
+/// btrfs device id (devid). Opaque u64 wrapper: devids are identity, never
+/// arithmetic, and must not be confused with device counts (missing_count,
+/// total_devices) or other u64s on the same structs. Constructed only at the
+/// parser/CLI-arg boundary; rendered via Display at argv and JSON-key seams.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Devid(u64);
+
+impl Devid {
+    /// Wrap a raw devid at a trust boundary (parser output, --missing-id arg,
+    /// JSON-key parse-back). No validation: btrfs devids are arbitrary u64.
+    pub fn new(raw: u64) -> Self {
+        Devid(raw)
+    }
+
+    /// Unwrap to the raw u64 only at FFI/kernel-ABI seams that require it.
+    pub fn get(self) -> u64 {
+        self.0
+    }
+}
+
+impl fmt::Display for Devid {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // MapperName / MountPoint
 // ---------------------------------------------------------------------------
 
@@ -550,7 +581,7 @@ pub struct PoolState {
     /// Authoritative to btrfs — does NOT include null-underlying devices.
     /// `remove-missing` uses this to resolve destructive removal targets, so
     /// only devices that btrfs has confirmed as MISSING belong here.
-    pub missing_devids: Vec<u64>,
+    pub missing_devids: Vec<Devid>,
     /// Devices whose LUKS mapper is open but underlying block device is gone
     /// (hot-unplugged). Kept separate from `missing_devids` because
     /// `missing_devids` is used by `remove-missing` to pick destructive
@@ -581,12 +612,12 @@ impl PoolState {
     /// hot-unplugged device to MISSING while its LUKS mapper still reports
     /// `(null)` -- without it, the same devid would produce two
     /// `MissingDevice` causes.
-    pub fn alert_missing_devids(&self) -> Vec<u64> {
+    pub fn alert_missing_devids(&self) -> Vec<Devid> {
         self.missing_devids
             .iter()
             .copied()
             .chain(self.null_underlying.iter().map(|d| d.devid))
-            .collect::<BTreeSet<u64>>()
+            .collect::<BTreeSet<Devid>>()
             .into_iter()
             .collect()
     }
@@ -602,7 +633,7 @@ pub struct PoolDevice {
     /// Persistent LUKS UUID for this live device.
     pub luks_uuid: LuksUuid,
     /// Live btrfs devid for topology and missing-device correlation.
-    pub devid: u64,
+    pub devid: Devid,
     /// Backing block device path reported by `cryptsetup status`.
     pub underlying: String,
 }
@@ -615,7 +646,7 @@ pub struct NullUnderlyingDevice {
     /// Observed mapper basename whose backing device is currently `(null)`.
     pub mapper: MapperName,
     /// Btrfs devid still associated with the open mapper.
-    pub devid: u64,
+    pub devid: Devid,
 }
 
 /// Pre-probed state of each config disk (produced by probe, consumed by commands).

@@ -5,6 +5,8 @@ use nix::fcntl::{OFlag, open};
 use nix::sys::stat::Mode;
 use std::os::fd::AsRawFd;
 
+use crate::types::Devid;
+
 /// Mirrors `struct btrfs_ioctl_dev_info_args`, the kernel ABI behind
 /// `BTRFS_IOC_DEV_INFO`, so replace preflight can read btrfs's own
 /// per-device `total_bytes` authority.
@@ -20,9 +22,9 @@ pub struct BtrfsIoctlDevInfoArgs {
 }
 
 impl BtrfsIoctlDevInfoArgs {
-    fn for_devid(devid: u64) -> Self {
+    fn for_devid(devid: Devid) -> Self {
         Self {
-            devid,
+            devid: devid.get(),
             uuid: [0; 16],
             bytes_used: 0,
             total_bytes: 0,
@@ -44,15 +46,15 @@ pub enum BtrfsIoctlError {
     #[error("open {mount}: {errno}")]
     OpenFailed { mount: String, errno: Errno },
     #[error("devid {devid} was not found in the mounted btrfs filesystem")]
-    DevidNotFound { devid: u64 },
+    DevidNotFound { devid: Devid },
     #[error("BTRFS_IOC_DEV_INFO failed for devid {devid}: {errno}")]
-    IoctlFailed { devid: u64, errno: Errno },
+    IoctlFailed { devid: Devid, errno: Errno },
 }
 
 /// Abstracts the btrfs device-info syscall so replace planning and unit tests
 /// share the same source-size contract without shelling out.
 pub trait BtrfsDevInfo {
-    fn total_bytes(&self, mount: &Path, devid: u64) -> Result<u64, BtrfsIoctlError>;
+    fn total_bytes(&self, mount: &Path, devid: Devid) -> Result<u64, BtrfsIoctlError>;
 }
 
 /// Production btrfs device-info reader backed by `BTRFS_IOC_DEV_INFO` on the
@@ -60,7 +62,7 @@ pub trait BtrfsDevInfo {
 pub struct LinuxBtrfsDevInfo;
 
 impl BtrfsDevInfo for LinuxBtrfsDevInfo {
-    fn total_bytes(&self, mount: &Path, devid: u64) -> Result<u64, BtrfsIoctlError> {
+    fn total_bytes(&self, mount: &Path, devid: Devid) -> Result<u64, BtrfsIoctlError> {
         let fd = open(mount, OFlag::O_RDONLY, Mode::empty()).map_err(|errno| {
             BtrfsIoctlError::OpenFailed {
                 mount: mount.display().to_string(),
@@ -87,14 +89,14 @@ pub(crate) mod tests_support {
 
     #[derive(Debug, Clone, Default)]
     pub(crate) struct MockBtrfsDevInfo {
-        map: HashMap<(PathBuf, u64), u64>,
+        map: HashMap<(PathBuf, Devid), u64>,
     }
 
     impl MockBtrfsDevInfo {
         pub(crate) fn with_total_bytes(
             mut self,
             mount: impl Into<PathBuf>,
-            devid: u64,
+            devid: Devid,
             total_bytes: u64,
         ) -> Self {
             self.map.insert((mount.into(), devid), total_bytes);
@@ -103,7 +105,7 @@ pub(crate) mod tests_support {
     }
 
     impl BtrfsDevInfo for MockBtrfsDevInfo {
-        fn total_bytes(&self, mount: &Path, devid: u64) -> Result<u64, BtrfsIoctlError> {
+        fn total_bytes(&self, mount: &Path, devid: Devid) -> Result<u64, BtrfsIoctlError> {
             self.map
                 .get(&(mount.to_path_buf(), devid))
                 .copied()
@@ -115,7 +117,7 @@ pub(crate) mod tests_support {
     pub(crate) struct PanicBtrfsDevInfo;
 
     impl BtrfsDevInfo for PanicBtrfsDevInfo {
-        fn total_bytes(&self, mount: &Path, devid: u64) -> Result<u64, BtrfsIoctlError> {
+        fn total_bytes(&self, mount: &Path, devid: Devid) -> Result<u64, BtrfsIoctlError> {
             panic!(
                 "planner-boundary test: BtrfsDevInfo must not be invoked; got mount={} devid={devid}",
                 mount.display()
@@ -147,11 +149,11 @@ mod tests {
     fn mock_btrfs_dev_info_returns_configured_total_bytes() {
         let dev_info = tests_support::MockBtrfsDevInfo::default().with_total_bytes(
             "/mnt/storage",
-            2,
+            Devid::new(2),
             520_093_696,
         );
         let got = dev_info
-            .total_bytes(Path::new("/mnt/storage"), 2)
+            .total_bytes(Path::new("/mnt/storage"), Devid::new(2))
             .expect("configured devid should resolve");
         assert_eq!(got, 520_093_696);
     }
@@ -165,9 +167,9 @@ mod tests {
     fn mock_btrfs_dev_info_reports_unconfigured_devid_not_found() {
         let dev_info = tests_support::MockBtrfsDevInfo::default();
         let err = dev_info
-            .total_bytes(Path::new("/mnt/storage"), 99)
+            .total_bytes(Path::new("/mnt/storage"), Devid::new(99))
             .expect_err("unconfigured devid should fail");
-        assert!(matches!(err, BtrfsIoctlError::DevidNotFound { devid: 99 }));
+        assert!(matches!(err, BtrfsIoctlError::DevidNotFound { devid: d } if d == Devid::new(99)));
     }
 
     #[ignore = "requires BRAID_BTRFS_IOCTL_SMOKE_MOUNT and BRAID_BTRFS_IOCTL_SMOKE_DEVID"]
@@ -185,7 +187,7 @@ mod tests {
             .parse()
             .expect("BRAID_BTRFS_IOCTL_SMOKE_DEVID must be a u64");
         let total = LinuxBtrfsDevInfo
-            .total_bytes(Path::new(&mount), devid)
+            .total_bytes(Path::new(&mount), Devid::new(devid))
             .expect("BTRFS_IOC_DEV_INFO should succeed");
         assert!(total > 0, "total_bytes should be positive");
     }

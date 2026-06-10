@@ -630,7 +630,7 @@ fn main() {
                 &fs,
                 &braid_cli::remove_missing::RemoveMissingParams {
                     config: &config,
-                    missing_id: args.missing_id,
+                    missing_id: braid_cli::types::Devid::new(args.missing_id),
                     dry_run: args.common.dry_run,
                     yes: args.common.yes,
                     progress,
@@ -671,7 +671,7 @@ fn main() {
                     config: &config,
                     old_name: &args.old,
                     new_name: &args.new,
-                    missing_id: args.missing_id,
+                    missing_id: args.missing_id.map(braid_cli::types::Devid::new),
                     dry_run: args.common.dry_run,
                     yes: args.common.yes,
                     passphrase_stdin: args.passphrase.passphrase_stdin,

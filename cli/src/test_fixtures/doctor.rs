@@ -15,7 +15,7 @@ use crate::cmd::{CmdError, CmdRequest, CommandRunner, MockRunner, RawCommandOutp
 use crate::doctor::{DiskState, DoctorContext, DoctorOptions};
 use crate::probe::Filesystem;
 use crate::state_paths::StatePaths;
-use crate::types::{LuksUuid, MapperName, MountPoint};
+use crate::types::{Devid, LuksUuid, MapperName, MountPoint};
 use std::io::Write;
 use std::sync::Mutex;
 use tempfile::{NamedTempFile, TempDir};
@@ -232,7 +232,7 @@ pub(crate) fn device_usage_raw(stdout: &str) -> (CmdRequest, RawCommandOutput) {
 /// expected layout so doctor's `pool_state.missing_devids` is populated end-to-end.
 pub(crate) fn doctor_btrfs_show(
     devices: &[(&str, u64)],
-    missing_devids: &[u64],
+    missing_devids: &[Devid],
 ) -> RawCommandOutput {
     let total = devices.len() + missing_devids.len();
     let mut body = format!(
@@ -245,7 +245,8 @@ pub(crate) fn doctor_btrfs_show(
         ));
     }
     for devid in missing_devids {
-        body.push_str(&format!("\tdevid {devid:>4} size 0 used 0 path MISSING\n"));
+        let raw = devid.get();
+        body.push_str(&format!("\tdevid {raw:>4} size 0 used 0 path MISSING\n"));
     }
     RawCommandOutput {
         cmd: "btrfs filesystem show /mnt/storage".into(),
@@ -290,7 +291,7 @@ pub(crate) fn doctor_cryptsetup_uuid_ok(device: &str, uuid: &LuksUuid) -> RawCom
 /// across every doctor check that reads `ctx.pool_state.missing_devids`.
 pub(crate) fn pool_state_runner(
     pool_devices: Vec<(&'static str, u64, &'static str, LuksUuid)>,
-    missing_devids: &[u64],
+    missing_devids: &[Devid],
 ) -> MockRunner {
     let mut runner = MockRunner::default();
     let (mp_req, mp_out) = mountpoint_ok();

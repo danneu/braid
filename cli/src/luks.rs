@@ -3326,13 +3326,13 @@ mod tests {
 
     // -- probe_pool_keyfile_enrollment tests --
 
-    use crate::types::{LuksUuid, PoolDevice};
+    use crate::types::{Devid, LuksUuid, PoolDevice};
 
     fn make_pool_device(name: &str, underlying: &str) -> PoolDevice {
         PoolDevice {
             mapper: mapper_name(&disk(name)),
             luks_uuid: LuksUuid::parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").unwrap(),
-            devid: 1,
+            devid: Devid::new(1),
             underlying: underlying.into(),
         }
     }

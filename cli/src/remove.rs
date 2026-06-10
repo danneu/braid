@@ -130,7 +130,7 @@ struct RemoveWorkPlan {
     /// Persistent LUKS identity for the target, resolved once at the
     /// planning boundary and threaded through executor + journal.
     target_uuid: LuksUuid,
-    target_devid: u64,
+    target_devid: Devid,
     /// Observed mapper from `PoolDevice.mapper` at planning time. NEVER
     /// reconstructed via `mapper_name(&name)` -- the close-time
     /// `CryptsetupClose` consumes this byte-identically so operator
@@ -770,7 +770,7 @@ pub(crate) fn check_eviction_space<R: CommandRunner>(
 
 /// Shared single-survivor (2->1) capacity helper, invoked at both the
 /// planning preflight (`check_eviction_space`) and the pre-journal execute
-/// gate (`RemovePlan::execute`). Takes `target_devid: u64` rather than a
+/// gate (`RemovePlan::execute`). Takes `target_devid: Devid` rather than a
 /// live `PoolDevice` so the executor -- which holds only
 /// `work_plan.target_devid`, not a probed device -- can re-run the exact same
 /// check across the plan/execute gap. Fail-closed on every input uncertainty;
@@ -778,7 +778,7 @@ pub(crate) fn check_eviction_space<R: CommandRunner>(
 fn check_single_survivor<R: CommandRunner>(
     runner: &R,
     mount_point: &MountPoint,
-    target_devid: u64,
+    target_devid: Devid,
 ) -> Result<(), RemoveError> {
     let usage_raw = runner
         .run(&CmdRequest::BtrfsDeviceUsageRaw {
@@ -868,7 +868,7 @@ fn remove_present_work_plan_for_test(
 struct RemoveConfirmDisk<'a> {
     name: &'a str,
     hw: Option<&'a confirm::DiskHwInfo>,
-    devid: u64,
+    devid: Devid,
 }
 
 fn format_remove_confirm(disk: &RemoveConfirmDisk, remaining: usize, total: usize) -> String {
@@ -1246,7 +1246,7 @@ mod tests {
             .expect("pre_membership must still carry disk1's UUID");
         assert_eq!(
             disk1.devid,
-            Some(1),
+            Some(Devid::new(1)),
             "journaled pre_membership must pin disk1's live devid"
         );
 
@@ -1257,7 +1257,7 @@ mod tests {
             .expect("pre_membership must still carry disk2's UUID");
         assert_eq!(
             disk2.devid,
-            Some(2),
+            Some(Devid::new(2)),
             "journaled pre_membership must pin disk2's live devid"
         );
         assert!(
@@ -1547,19 +1547,19 @@ mod tests {
             mounted: true,
             devices: vec![
                 PoolDevice {
-                    devid: 1,
+                    devid: Devid::new(1),
                     mapper: MapperName("braid-disk1".into()),
                     luks_uuid: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
                     underlying: "/dev/vda".into(),
                 },
                 PoolDevice {
-                    devid: 2,
+                    devid: Devid::new(2),
                     mapper: MapperName("braid-disk2".into()),
                     luks_uuid: target_uuid.clone(),
                     underlying: "/dev/vdb".into(),
                 },
                 PoolDevice {
-                    devid: 3,
+                    devid: Devid::new(3),
                     mapper: MapperName("braid-disk3".into()),
                     luks_uuid: LuksUuid::parse("33333333-3333-3333-3333-333333333333").unwrap(),
                     underlying: "/dev/vdc".into(),
@@ -1602,13 +1602,13 @@ mod tests {
             mounted: true,
             devices: vec![
                 PoolDevice {
-                    devid: 1,
+                    devid: Devid::new(1),
                     mapper: MapperName("braid-disk1".into()),
                     luks_uuid: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
                     underlying: "/dev/vda".into(),
                 },
                 PoolDevice {
-                    devid: 2,
+                    devid: Devid::new(2),
                     mapper: MapperName("braid-disk2".into()),
                     luks_uuid: target_uuid.clone(),
                     underlying: "/dev/vdb".into(),
@@ -1699,13 +1699,13 @@ mod tests {
             mounted: true,
             devices: vec![
                 PoolDevice {
-                    devid: 1,
+                    devid: Devid::new(1),
                     mapper: MapperName("braid-decoy".into()),
                     luks_uuid: decoy_uuid,
                     underlying: "/dev/vda".into(),
                 },
                 PoolDevice {
-                    devid: 2,
+                    devid: Devid::new(2),
                     mapper: MapperName("braid-renamed".into()),
                     luks_uuid: target_uuid.clone(),
                     underlying: "/dev/vdb".into(),
@@ -1804,7 +1804,7 @@ mod tests {
             &RemoveConfirmDisk {
                 name: "toshiba",
                 hw: Some(&hw),
-                devid: 2,
+                devid: Devid::new(2),
             },
             2,
             3,
@@ -1829,7 +1829,7 @@ mod tests {
             &RemoveConfirmDisk {
                 name: "toshiba",
                 hw: Some(&hw),
-                devid: 2,
+                devid: Devid::new(2),
             },
             1,
             2,
@@ -1847,7 +1847,7 @@ mod tests {
             &RemoveConfirmDisk {
                 name: "toshiba",
                 hw: None,
-                devid: 2,
+                devid: Devid::new(2),
             },
             2,
             3,
@@ -2995,7 +2995,7 @@ mod tests {
             membership::DiskMember {
                 name: DiskName::parse("disk1").unwrap(),
                 by_id: ByIdPath::parse("/dev/disk/by-id/virtio-disk1").unwrap(),
-                devid: Some(1),
+                devid: Some(Devid::new(1)),
                 added_at: None,
             },
         )
@@ -3007,7 +3007,7 @@ mod tests {
             membership::DiskMember {
                 name: DiskName::parse("disk2").unwrap(),
                 by_id: ByIdPath::parse("/dev/disk/by-id/virtio-disk2").unwrap(),
-                devid: Some(2),
+                devid: Some(Devid::new(2)),
                 added_at: None,
             },
         )
@@ -3018,7 +3018,7 @@ mod tests {
             membership::DiskMember {
                 name: DiskName::parse("disk3").unwrap(),
                 by_id: ByIdPath::parse("/dev/disk/by-id/virtio-disk3").unwrap(),
-                devid: Some(3),
+                devid: Some(Devid::new(3)),
                 added_at: None,
             },
         )
@@ -3120,19 +3120,31 @@ mod tests {
         let f = PoolFixture::empty();
         let u_r = test_uuid(401);
         let mut m = PoolMembership::empty();
-        let (_, m1) = disk_member_with(410, "disk1", "/dev/disk/by-id/virtio-disk1", Some(1), None);
+        let (_, m1) = disk_member_with(
+            410,
+            "disk1",
+            "/dev/disk/by-id/virtio-disk1",
+            Some(Devid::new(1)),
+            None,
+        );
         m.insert(canonical_luks_uuid(1), m1).unwrap();
         m.insert(
             u_r.clone(),
             membership::DiskMember {
                 name: DiskName::parse("right").unwrap(),
                 by_id: ByIdPath::parse("/dev/disk/by-id/virtio-right").unwrap(),
-                devid: Some(2),
+                devid: Some(Devid::new(2)),
                 added_at: None,
             },
         )
         .unwrap();
-        let (_, m3) = disk_member_with(411, "disk3", "/dev/disk/by-id/virtio-disk3", Some(3), None);
+        let (_, m3) = disk_member_with(
+            411,
+            "disk3",
+            "/dev/disk/by-id/virtio-disk3",
+            Some(Devid::new(3)),
+            None,
+        );
         m.insert(canonical_luks_uuid(3), m3).unwrap();
         membership::save_membership(&m, &f.paths).unwrap();
 
@@ -3252,19 +3264,31 @@ mod tests {
         let u_r = test_uuid(402);
         let u_foreign = test_uuid(403);
         let mut m = PoolMembership::empty();
-        let (_, m1) = disk_member_with(420, "disk1", "/dev/disk/by-id/virtio-disk1", Some(1), None);
+        let (_, m1) = disk_member_with(
+            420,
+            "disk1",
+            "/dev/disk/by-id/virtio-disk1",
+            Some(Devid::new(1)),
+            None,
+        );
         m.insert(canonical_luks_uuid(1), m1).unwrap();
         m.insert(
             u_r.clone(),
             membership::DiskMember {
                 name: DiskName::parse("right").unwrap(),
                 by_id: ByIdPath::parse("/dev/disk/by-id/virtio-right").unwrap(),
-                devid: Some(2),
+                devid: Some(Devid::new(2)),
                 added_at: None,
             },
         )
         .unwrap();
-        let (_, m3) = disk_member_with(421, "disk3", "/dev/disk/by-id/virtio-disk3", Some(3), None);
+        let (_, m3) = disk_member_with(
+            421,
+            "disk3",
+            "/dev/disk/by-id/virtio-disk3",
+            Some(Devid::new(3)),
+            None,
+        );
         m.insert(canonical_luks_uuid(3), m3).unwrap();
         membership::save_membership(&m, &f.paths).unwrap();
 

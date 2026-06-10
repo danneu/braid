@@ -13,7 +13,7 @@ use crate::membership::{self, PoolMembership};
 use crate::progress::{self, ProgressOutput};
 use crate::remove::RemoveParams;
 use crate::state_paths::StatePaths;
-use crate::types::{DiskName, LuksUuid, PoolDevice};
+use crate::types::{Devid, DiskName, LuksUuid, PoolDevice};
 
 const TWO_DISK_SHOW: &str = "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\
      \tTotal devices 2 FS bytes used 16.17MiB\n\
@@ -231,14 +231,14 @@ impl<'a> RemoveParamsBuilder<'a> {
 /// Canonical target device used by direct `check_eviction_space` tests.
 pub(crate) fn target_device(name: &str) -> PoolDevice {
     let disk = name.strip_prefix("disk").unwrap_or(name);
-    let devid = disk.parse().unwrap_or(1);
+    let raw_devid: u64 = disk.parse().unwrap_or(1);
     let luks_uuid = luks_uuid_for_disk_name(name).unwrap_or_else(|| {
         LuksUuid::parse("00000000-0000-0000-0000-000000000000").expect("valid fixture UUID")
     });
     let disk_name = DiskName::parse(name).expect("valid fixture disk name");
     let mapper = mapper_name(&disk_name);
     PoolDevice {
-        devid,
+        devid: Devid::new(raw_devid),
         mapper: mapper.clone(),
         luks_uuid,
         underlying: mapper_underlying(mapper.as_str())

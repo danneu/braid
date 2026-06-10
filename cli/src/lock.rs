@@ -11,7 +11,9 @@ use crate::preview::{Preview, PreviewCompleteness, PreviewNote};
 use crate::probe::{Filesystem, ProbeError, probe_fsid, probe_pool};
 use crate::progress::{RealSleeper, Sleeper};
 use crate::status_tag::{StatusTag, color_enabled_for_stderr, emit_status, status_line};
-use crate::types::{DiskName, Fsid, LuksUuid, MapperName, MountPoint, PoolState, format_uuid_list};
+use crate::types::{
+    Devid, DiskName, Fsid, LuksUuid, MapperName, MountPoint, PoolState, format_uuid_list,
+};
 use std::collections::HashSet;
 use std::io::{self, Write};
 
@@ -318,7 +320,7 @@ fn skipped_mapper_warn_body(entry: &MapperName, detail: &CmdError) -> String {
 /// Operator-facing body for the Pass 2 skip when persisted devid
 /// resolution surfaces corrupt membership. Centralizing the format keeps
 /// the mapper name, colliding devid, and offending UUID set together.
-fn duplicate_devid_warn_body(entry: &MapperName, devid: u64, members: &[LuksUuid]) -> String {
+fn duplicate_devid_warn_body(entry: &MapperName, devid: Devid, members: &[LuksUuid]) -> String {
     format!(
         "skipping mapper {entry}: pool.json corrupt -- devid {devid} \
          claimed by multiple members [{}] (resolve before locking)",
@@ -4553,13 +4555,13 @@ mod tests {
                 PoolDevice {
                     mapper: MapperName(mapper_aaa.into()),
                     luks_uuid: LuksUuid::parse("00000000-0000-0000-0000-0000000002bc").unwrap(),
-                    devid: 1,
+                    devid: Devid::new(1),
                     underlying: "/dev/disk/by-id/a".into(),
                 },
                 PoolDevice {
                     mapper: MapperName(mapper_bbb.into()),
                     luks_uuid: LuksUuid::parse("00000000-0000-0000-0000-0000000002bd").unwrap(),
-                    devid: 2,
+                    devid: Devid::new(2),
                     underlying: "/dev/disk/by-id/b".into(),
                 },
             ],
@@ -4574,7 +4576,7 @@ mod tests {
     fn synthetic_pool_state_with_null_underlying(
         mapper_aaa: &str,
         null_mapper: &str,
-        null_devid: u64,
+        null_devid: Devid,
     ) -> crate::types::PoolState {
         use crate::types::{LuksUuid, MapperName, NullUnderlyingDevice, PoolDevice, PoolState};
         PoolState {
@@ -4582,7 +4584,7 @@ mod tests {
             devices: vec![PoolDevice {
                 mapper: MapperName(mapper_aaa.into()),
                 luks_uuid: LuksUuid::parse("00000000-0000-0000-0000-0000000002bc").unwrap(),
-                devid: 1,
+                devid: Devid::new(1),
                 underlying: "/dev/disk/by-id/a".into(),
             }],
             missing_count: 1,
@@ -4705,7 +4707,7 @@ mod tests {
             devices: vec![PoolDevice {
                 mapper: MapperName("braid-leftover".into()),
                 luks_uuid: LuksUuid::parse(ORPHAN_UUID).unwrap(),
-                devid: 99,
+                devid: Devid::new(99),
                 underlying: "/dev/disk/by-id/leftover".into(),
             }],
             missing_count: 0,
@@ -4746,7 +4748,8 @@ mod tests {
     fn full_arm_pass2_null_underlying_unknown_devid_classifies_as_orphan_and_warns() {
         let fs = lock_fs(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-ghost"]);
         let membership = lock_test_membership();
-        let pool = synthetic_pool_state_with_null_underlying("braid-aaa", "braid-ghost", 99);
+        let pool =
+            synthetic_pool_state_with_null_underlying("braid-aaa", "braid-ghost", Devid::new(99));
         let runner = MockRunner::default();
         let mut acc = CloseSetAccumulator::default();
 
@@ -4789,14 +4792,15 @@ mod tests {
         let (ccc_uuid, ccc) = disk_member(702, "ccc", "/dev/disk/by-id/c");
         let (_, mut aaa) = disk_member(703, "aaa", "/dev/disk/by-id/a");
         let (_, mut bbb) = disk_member(704, "bbb", "/dev/disk/by-id/b");
-        aaa.devid = Some(7);
-        bbb.devid = Some(7);
+        aaa.devid = Some(Devid::new(7));
+        bbb.devid = Some(Devid::new(7));
         let membership = PoolMembership::for_corruption_tests(vec![
             (aaa_uuid.clone(), aaa),
             (bbb_uuid.clone(), bbb),
             (ccc_uuid, ccc),
         ]);
-        let pool = synthetic_pool_state_with_null_underlying("braid-aaa", "braid-dup", 7);
+        let pool =
+            synthetic_pool_state_with_null_underlying("braid-aaa", "braid-dup", Devid::new(7));
         let fs = lock_fs(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-dup"]);
         let runner = MockRunner::default();
         let mut acc = CloseSetAccumulator::default();

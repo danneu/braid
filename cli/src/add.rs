@@ -2643,7 +2643,7 @@ mod tests {
             devices: vec![PoolDevice {
                 mapper: MapperName("braid-existing".into()),
                 luks_uuid: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
-                devid: 1,
+                devid: Devid::new(1),
                 underlying: "/dev/vda".into(),
             }],
             missing_count: 0,
@@ -2722,7 +2722,7 @@ mod tests {
             devices: vec![PoolDevice {
                 mapper: MapperName("braid-disk1".into()),
                 luks_uuid: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
-                devid: 1,
+                devid: Devid::new(1),
                 underlying: "/dev/vda".into(),
             }],
             missing_count: 0,
@@ -2785,7 +2785,7 @@ mod tests {
         PoolDevice {
             mapper: MapperName(mapper.to_owned()),
             luks_uuid: uuid.clone(),
-            devid: 1,
+            devid: Devid::new(1),
             underlying: underlying.to_owned(),
         }
     }
@@ -3571,7 +3571,7 @@ mod tests {
             devices: vec![PoolDevice {
                 mapper: MapperName("braid-WRONG".into()),
                 luks_uuid: LuksUuid::parse("22222222-2222-2222-2222-222222222222").unwrap(),
-                devid: 4,
+                devid: Devid::new(4),
                 underlying: "/dev/vdc".into(),
             }],
             missing_count: 0,
@@ -3584,7 +3584,7 @@ mod tests {
         let missing = LuksUuid::parse("99999999-9999-9999-9999-999999999999").unwrap();
 
         let dev = find_added_device_by_uuid(&pool, &uuid).expect("uuid should match");
-        assert_eq!(dev.devid, 4);
+        assert_eq!(dev.devid, Devid::new(4));
         assert_eq!(dev.mapper, MapperName("braid-WRONG".into()));
         assert!(find_added_device_by_uuid(&pool, &missing).is_none());
     }
@@ -3825,7 +3825,7 @@ mod tests {
             devices: vec![PoolDevice {
                 mapper: MapperName("braid-disk1".into()),
                 luks_uuid: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
-                devid: 1,
+                devid: Devid::new(1),
                 underlying: "/dev/vdb".into(),
             }],
             missing_count: 0,
@@ -4597,7 +4597,7 @@ mod tests {
             devices: vec![PoolDevice {
                 mapper: MapperName("braid-disk1".into()),
                 luks_uuid: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
-                devid: 1,
+                devid: Devid::new(1),
                 underlying: "/dev/vdb".into(),
             }],
             missing_count: 0,
@@ -4707,7 +4707,7 @@ mod tests {
             devices: vec![PoolDevice {
                 mapper: MapperName("braid-disk1".into()),
                 luks_uuid: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
-                devid: 1,
+                devid: Devid::new(1),
                 underlying: "/dev/vdb".into(),
             }],
             missing_count: 0,
@@ -4788,11 +4788,11 @@ mod tests {
             devices: vec![PoolDevice {
                 mapper: MapperName("braid-disk1".into()),
                 luks_uuid: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
-                devid: 1,
+                devid: Devid::new(1),
                 underlying: "/dev/vdb".into(),
             }],
             missing_count: 1,
-            missing_devids: vec![2],
+            missing_devids: vec![Devid::new(2)],
             total_devices: 2,
             fsid: Some(Fsid::parse(POOL_FSID).unwrap()),
             null_underlying: vec![],
@@ -4856,7 +4856,7 @@ mod tests {
             devices: vec![PoolDevice {
                 mapper: MapperName("braid-disk1".into()),
                 luks_uuid: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
-                devid: 1,
+                devid: Devid::new(1),
                 underlying: "/dev/vdb".into(),
             }],
             missing_count: 0,
@@ -5814,7 +5814,7 @@ mod tests {
         let (_, disk2) = membership
             .by_name(&disk2_name)
             .expect("disk2 membership should be saved");
-        assert_eq!(disk2.devid, Some(2));
+        assert_eq!(disk2.devid, Some(Devid::new(2)));
         assert!(
             journal::load_journal(&paths).unwrap().is_none(),
             "pending-op.json should be cleared after successful add"
@@ -7366,7 +7366,7 @@ mod tests {
             devices: vec![PoolDevice {
                 mapper: MapperName("braid-WRONG".into()),
                 luks_uuid: drifted_uuid.clone(),
-                devid: 1,
+                devid: Devid::new(1),
                 underlying: "/dev/vda".into(),
             }],
             missing_count: 0,
@@ -11063,7 +11063,7 @@ mod tests {
                 DiskMember {
                     name: DiskName::parse("existing").unwrap(),
                     by_id: ByIdPath::parse("/dev/disk/by-id/ata-EXISTING").unwrap(),
-                    devid: Some(1),
+                    devid: Some(Devid::new(1)),
                     added_at: None,
                 },
             )
@@ -11148,7 +11148,7 @@ mod tests {
             devices: vec![PoolDevice {
                 mapper: MapperName("braid-foreign".into()),
                 luks_uuid: LuksUuid::parse(collision_uuid).unwrap(),
-                devid: 1,
+                devid: Devid::new(1),
                 underlying: "/dev/vdb".into(),
             }],
             missing_count: 0,

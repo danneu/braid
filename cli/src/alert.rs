@@ -4,8 +4,10 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::parse::types::{BtrfsDeviceStatsOutput, DeviceErrorStats};
+use crate::probe::AlertDevids;
 use crate::state_io::atomic_write;
 use crate::state_paths::StatePaths;
+use crate::types::Devid;
 
 // ---------------------------------------------------------------------------
 // Alert model
@@ -25,8 +27,8 @@ impl AlertState {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AlertCause {
-    BtrfsDeviceErrors { devid: u64 },
-    MissingDevice { devid: u64 },
+    BtrfsDeviceErrors { devid: Devid },
+    MissingDevice { devid: Devid },
     SmartdAlert,
     ComputationError { detail: String },
 }
@@ -93,22 +95,21 @@ pub fn save_acked_stats_at(path: &Path, stats: &AckedStats) -> Result<(), std::i
 // ---------------------------------------------------------------------------
 
 /// Compute alert state from current btrfs stats, acked baselines, and the
-/// alert-local recognized and missing devid sets.
+/// named alert-devid carrier.
 ///
 /// Identity is `dev.devid` (btrfs supplies it on every stats row). The
 /// alert-local missing set is skipped for `BtrfsDeviceErrors` because those
-/// devids alert through `MissingDevice`, and rows outside `recognized_devids`
+/// devids alert through `MissingDevice`, and rows outside `devids.recognized`
 /// are ignored as stale identities.
 pub fn compute_alert_state(
     current_stats: &BtrfsDeviceStatsOutput,
     acked: &AckedStats,
-    recognized_devids: &[u64],
-    missing_devids: &[u64],
+    devids: &AlertDevids,
     smartd_alert_active: bool,
 ) -> AlertState {
     let mut causes = Vec::new();
-    let recognized: BTreeSet<u64> = recognized_devids.iter().copied().collect();
-    let missing: BTreeSet<u64> = missing_devids.iter().copied().collect();
+    let recognized: BTreeSet<Devid> = devids.recognized.iter().copied().collect();
+    let missing: BTreeSet<Devid> = devids.missing.iter().copied().collect();
 
     for dev in &current_stats.devices {
         if missing.contains(&dev.devid) {
@@ -127,7 +128,7 @@ pub fn compute_alert_state(
         }
     }
 
-    for &devid in missing_devids {
+    for &devid in &devids.missing {
         let key = devid.to_string();
         let missing_acked = acked.0.get(&key).map(|d| d.missing_acked).unwrap_or(false);
         if !missing_acked {
@@ -172,11 +173,10 @@ fn has_new_errors(current: &DeviceErrorStats, acked: Option<&AckedDeviceCounters
 
 pub fn snapshot_current(
     current_stats: &BtrfsDeviceStatsOutput,
-    recognized_devids: &[u64],
-    missing_devids: &[u64],
+    devids: &AlertDevids,
 ) -> AckedStats {
     let mut map = BTreeMap::new();
-    let recognized: BTreeSet<u64> = recognized_devids.iter().copied().collect();
+    let recognized: BTreeSet<Devid> = devids.recognized.iter().copied().collect();
 
     for dev in &current_stats.devices {
         if !recognized.contains(&dev.devid) {
@@ -201,7 +201,7 @@ pub fn snapshot_current(
     // Missing devices get missing_acked = true. Preserve any existing
     // device_stats snapshot for null-underlying devices that also appeared
     // in stats above.
-    for &devid in missing_devids {
+    for &devid in &devids.missing {
         map.entry(devid.to_string()).or_default().missing_acked = true;
     }
 
@@ -209,7 +209,7 @@ pub fn snapshot_current(
 }
 
 /// Drop the acked entry for `devid`. Returns true if an entry was removed.
-pub fn drop_acked_devid(acked: &mut AckedStats, devid: u64) -> bool {
+pub fn drop_acked_devid(acked: &mut AckedStats, devid: Devid) -> bool {
     acked.0.remove(&devid.to_string()).is_some()
 }
 
@@ -231,7 +231,7 @@ pub fn load_acked_stats_fallible(paths: &StatePaths) -> Result<AckedStats, std::
 /// when ack state may be stale.
 pub fn drop_ghost_acked_for_devids(
     paths: &StatePaths,
-    devids: &[u64],
+    devids: &[Devid],
 ) -> Result<bool, std::io::Error> {
     if devids.is_empty() {
         return Ok(false);
@@ -263,12 +263,12 @@ pub fn remove_acked_stats(paths: &StatePaths) -> Result<(), std::io::Error> {
 /// operator data silently.
 pub fn reconcile_acked_stats(
     acked: &mut AckedStats,
-    still_relevant: &BTreeSet<u64>,
-    present: &BTreeSet<u64>,
+    still_relevant: &BTreeSet<Devid>,
+    present: &BTreeSet<Devid>,
 ) -> bool {
     let mut changed = false;
     acked.0.retain(|key, disk| {
-        let Ok(devid) = key.parse::<u64>() else {
+        let Ok(devid) = key.parse::<u64>().map(Devid::new) else {
             return true;
         };
         if !still_relevant.contains(&devid) {
@@ -503,7 +503,7 @@ mod tests {
         BtrfsDeviceStatsOutput { devices }
     }
 
-    fn zero_device(devid: u64) -> DeviceErrorStats {
+    fn zero_device(devid: Devid) -> DeviceErrorStats {
         DeviceErrorStats {
             devid,
             read_io_errs: 0,
@@ -647,7 +647,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("good.json");
         let original = AlertState {
-            causes: vec![AlertCause::MissingDevice { devid: 7 }],
+            causes: vec![AlertCause::MissingDevice {
+                devid: Devid::new(7),
+            }],
         };
         std::fs::write(&path, serde_json::to_string(&original).unwrap()).unwrap();
         let result = load_alert_latch_at(&path).unwrap();
@@ -685,7 +687,9 @@ mod tests {
             .expect("legacy latch must parse");
         assert_eq!(
             state.causes,
-            vec![AlertCause::MissingDevice { devid: 7 }],
+            vec![AlertCause::MissingDevice {
+                devid: Devid::new(7)
+            }],
             "causes must round-trip from legacy JSON"
         );
         assert!(
@@ -1013,41 +1017,83 @@ mod tests {
 
     #[test]
     fn no_alert_when_all_zero() {
-        let stats = make_stats(vec![zero_device(1)]);
+        let stats = make_stats(vec![zero_device(Devid::new(1))]);
         let acked = AckedStats::default();
-        let alert = compute_alert_state(&stats, &acked, &[1], &[], false);
+        let alert = compute_alert_state(
+            &stats,
+            &acked,
+            &AlertDevids {
+                recognized: vec![Devid::new(1)],
+                missing: vec![],
+            },
+            false,
+        );
         assert!(!alert.active());
         assert!(alert.causes.is_empty());
     }
 
     #[test]
     fn alert_on_btrfs_device_errors() {
-        let mut dev = zero_device(1);
+        let mut dev = zero_device(Devid::new(1));
         dev.read_io_errs = 3;
         dev.corruption_errs = 1;
         let stats = make_stats(vec![dev]);
         let acked = AckedStats::default();
-        let alert = compute_alert_state(&stats, &acked, &[1], &[], false);
+        let alert = compute_alert_state(
+            &stats,
+            &acked,
+            &AlertDevids {
+                recognized: vec![Devid::new(1)],
+                missing: vec![],
+            },
+            false,
+        );
         assert!(alert.active());
         assert_eq!(alert.causes.len(), 1);
-        assert_eq!(alert.causes[0], AlertCause::BtrfsDeviceErrors { devid: 1 });
+        assert_eq!(
+            alert.causes[0],
+            AlertCause::BtrfsDeviceErrors {
+                devid: Devid::new(1)
+            }
+        );
     }
 
     #[test]
     fn alert_on_missing_device() {
-        let stats = make_stats(vec![zero_device(1)]);
+        let stats = make_stats(vec![zero_device(Devid::new(1))]);
         let acked = AckedStats::default();
-        let alert = compute_alert_state(&stats, &acked, &[1, 2], &[2], false);
+        let alert = compute_alert_state(
+            &stats,
+            &acked,
+            &AlertDevids {
+                recognized: vec![Devid::new(1), Devid::new(2)],
+                missing: vec![Devid::new(2)],
+            },
+            false,
+        );
         assert!(alert.active());
         assert_eq!(alert.causes.len(), 1);
-        assert_eq!(alert.causes[0], AlertCause::MissingDevice { devid: 2 });
+        assert_eq!(
+            alert.causes[0],
+            AlertCause::MissingDevice {
+                devid: Devid::new(2)
+            }
+        );
     }
 
     #[test]
     fn alert_on_smartd() {
-        let stats = make_stats(vec![zero_device(1)]);
+        let stats = make_stats(vec![zero_device(Devid::new(1))]);
         let acked = AckedStats::default();
-        let alert = compute_alert_state(&stats, &acked, &[1], &[], true);
+        let alert = compute_alert_state(
+            &stats,
+            &acked,
+            &AlertDevids {
+                recognized: vec![Devid::new(1)],
+                missing: vec![],
+            },
+            true,
+        );
         assert!(alert.active());
         assert_eq!(alert.causes.len(), 1);
         assert_eq!(alert.causes[0], AlertCause::SmartdAlert);
@@ -1055,7 +1101,7 @@ mod tests {
 
     #[test]
     fn no_alert_after_ack() {
-        let mut dev = zero_device(1);
+        let mut dev = zero_device(Devid::new(1));
         dev.read_io_errs = 3;
         let stats = make_stats(vec![dev]);
 
@@ -1071,7 +1117,15 @@ mod tests {
             },
         );
         let acked = AckedStats(acked_map);
-        let alert = compute_alert_state(&stats, &acked, &[1], &[], false);
+        let alert = compute_alert_state(
+            &stats,
+            &acked,
+            &AlertDevids {
+                recognized: vec![Devid::new(1)],
+                missing: vec![],
+            },
+            false,
+        );
         assert!(!alert.active());
     }
 
@@ -1091,7 +1145,7 @@ mod tests {
     //   recover sweeps it, and the fresh disk has already logged 1 read error.
     #[test]
     fn stale_high_baseline_does_not_suppress_alert() {
-        let mut dev = zero_device(1);
+        let mut dev = zero_device(Devid::new(1));
         dev.read_io_errs = 1;
         let stats = make_stats(vec![dev]);
 
@@ -1107,13 +1161,21 @@ mod tests {
             },
         );
         let acked = AckedStats(acked_map);
-        let alert = compute_alert_state(&stats, &acked, &[1], &[], false);
+        let alert = compute_alert_state(
+            &stats,
+            &acked,
+            &AlertDevids {
+                recognized: vec![Devid::new(1)],
+                missing: vec![],
+            },
+            false,
+        );
         assert!(alert.active(), "stale-high baseline should trigger alert");
     }
 
     #[test]
     fn missing_acked_suppresses_alert() {
-        let stats = make_stats(vec![zero_device(1)]);
+        let stats = make_stats(vec![zero_device(Devid::new(1))]);
         let mut acked_map = BTreeMap::new();
         acked_map.insert(
             "2".to_owned(),
@@ -1123,28 +1185,50 @@ mod tests {
             },
         );
         let acked = AckedStats(acked_map);
-        let alert = compute_alert_state(&stats, &acked, &[1, 2], &[2], false);
+        let alert = compute_alert_state(
+            &stats,
+            &acked,
+            &AlertDevids {
+                recognized: vec![Devid::new(1), Devid::new(2)],
+                missing: vec![Devid::new(2)],
+            },
+            false,
+        );
         assert!(!alert.active(), "acked missing should not trigger alert");
     }
 
     #[test]
     fn multiple_causes() {
-        let mut dev = zero_device(1);
+        let mut dev = zero_device(Devid::new(1));
         dev.write_io_errs = 1;
         let stats = make_stats(vec![dev]);
         let acked = AckedStats::default();
-        let alert = compute_alert_state(&stats, &acked, &[1, 2], &[2], true);
+        let alert = compute_alert_state(
+            &stats,
+            &acked,
+            &AlertDevids {
+                recognized: vec![Devid::new(1), Devid::new(2)],
+                missing: vec![Devid::new(2)],
+            },
+            true,
+        );
         assert!(alert.active());
         assert_eq!(alert.causes.len(), 3);
     }
 
     #[test]
     fn snapshot_current_captures_stats() {
-        let mut dev = zero_device(1);
+        let mut dev = zero_device(Devid::new(1));
         dev.read_io_errs = 3;
         dev.corruption_errs = 1;
         let stats = make_stats(vec![dev]);
-        let snapshot = snapshot_current(&stats, &[1, 2], &[2]);
+        let snapshot = snapshot_current(
+            &stats,
+            &AlertDevids {
+                recognized: vec![Devid::new(1), Devid::new(2)],
+                missing: vec![Devid::new(2)],
+            },
+        );
 
         let disk1 = snapshot.0.get("1").unwrap();
         assert!(!disk1.missing_acked);
@@ -1163,7 +1247,7 @@ mod tests {
     // while probe also classifies devid 2 as alert-local missing.
     #[test]
     fn snapshot_current_preserves_null_underlying_stats() {
-        let mut dev = zero_device(2);
+        let mut dev = zero_device(Devid::new(2));
         dev.read_io_errs = 3;
         dev.write_io_errs = 4;
         dev.flush_io_errs = 5;
@@ -1171,7 +1255,13 @@ mod tests {
         dev.generation_errs = 7;
         let stats = make_stats(vec![dev]);
 
-        let snapshot = snapshot_current(&stats, &[2], &[2]);
+        let snapshot = snapshot_current(
+            &stats,
+            &AlertDevids {
+                recognized: vec![Devid::new(2)],
+                missing: vec![Devid::new(2)],
+            },
+        );
 
         let disk2 = snapshot.0.get("2").unwrap();
         assert!(disk2.missing_acked);
@@ -1184,7 +1274,7 @@ mod tests {
 
     #[test]
     fn new_errors_after_ack_trigger_alert() {
-        let mut dev = zero_device(1);
+        let mut dev = zero_device(Devid::new(1));
         dev.read_io_errs = 5;
         let stats = make_stats(vec![dev]);
 
@@ -1200,7 +1290,15 @@ mod tests {
             },
         );
         let acked = AckedStats(acked_map);
-        let alert = compute_alert_state(&stats, &acked, &[1], &[], false);
+        let alert = compute_alert_state(
+            &stats,
+            &acked,
+            &AlertDevids {
+                recognized: vec![Devid::new(1)],
+                missing: vec![],
+            },
+            false,
+        );
         assert!(
             alert.active(),
             "new errors above acked baseline should trigger alert"
@@ -1220,9 +1318,17 @@ mod tests {
      */
     #[test]
     fn unknown_devid_zero_counters_does_not_alert() {
-        let stats = make_stats(vec![zero_device(99)]);
+        let stats = make_stats(vec![zero_device(Devid::new(99))]);
         let acked = AckedStats::default();
-        let alert = compute_alert_state(&stats, &acked, &[99], &[], false);
+        let alert = compute_alert_state(
+            &stats,
+            &acked,
+            &AlertDevids {
+                recognized: vec![Devid::new(99)],
+                missing: vec![],
+            },
+            false,
+        );
         assert!(!alert.active());
         assert!(alert.causes.is_empty());
     }
@@ -1235,12 +1341,20 @@ mod tests {
     //   while the current probe recognizes no such devid.
     #[test]
     fn unrecognized_devid_with_errors_does_not_alert() {
-        let mut dev = zero_device(99);
+        let mut dev = zero_device(Devid::new(99));
         dev.read_io_errs = 3;
         dev.corruption_errs = 1;
         let stats = make_stats(vec![dev]);
         let acked = AckedStats::default();
-        let alert = compute_alert_state(&stats, &acked, &[], &[], false);
+        let alert = compute_alert_state(
+            &stats,
+            &acked,
+            &AlertDevids {
+                recognized: vec![],
+                missing: vec![],
+            },
+            false,
+        );
         assert!(!alert.active());
         assert!(alert.causes.is_empty());
     }
@@ -1254,15 +1368,28 @@ mod tests {
     //   persisted read and corruption counters as non-zero on its stats row.
     #[test]
     fn missing_devid_with_errors_alerts_only_as_missing_device() {
-        let mut dev = zero_device(2);
+        let mut dev = zero_device(Devid::new(2));
         dev.read_io_errs = 3;
         dev.corruption_errs = 1;
-        let stats = make_stats(vec![zero_device(1), dev]);
+        let stats = make_stats(vec![zero_device(Devid::new(1)), dev]);
         let acked = AckedStats::default();
 
-        let alert = compute_alert_state(&stats, &acked, &[1, 2], &[2], false);
+        let alert = compute_alert_state(
+            &stats,
+            &acked,
+            &AlertDevids {
+                recognized: vec![Devid::new(1), Devid::new(2)],
+                missing: vec![Devid::new(2)],
+            },
+            false,
+        );
 
-        assert_eq!(alert.causes, vec![AlertCause::MissingDevice { devid: 2 }]);
+        assert_eq!(
+            alert.causes,
+            vec![AlertCause::MissingDevice {
+                devid: Devid::new(2)
+            }]
+        );
     }
 
     // Intent: a missing devid's stats row never produces
@@ -1273,12 +1400,25 @@ mod tests {
     //   row for devid 2.
     #[test]
     fn missing_devid_row_skipped_in_alert() {
-        let stats = make_stats(vec![zero_device(1), zero_device(2)]);
+        let stats = make_stats(vec![zero_device(Devid::new(1)), zero_device(Devid::new(2))]);
         let acked = AckedStats::default();
-        let alert = compute_alert_state(&stats, &acked, &[1, 2], &[2], false);
+        let alert = compute_alert_state(
+            &stats,
+            &acked,
+            &AlertDevids {
+                recognized: vec![Devid::new(1), Devid::new(2)],
+                missing: vec![Devid::new(2)],
+            },
+            false,
+        );
         assert!(alert.active());
         assert_eq!(alert.causes.len(), 1);
-        assert_eq!(alert.causes[0], AlertCause::MissingDevice { devid: 2 });
+        assert_eq!(
+            alert.causes[0],
+            AlertCause::MissingDevice {
+                devid: Devid::new(2)
+            }
+        );
     }
 
     // Intent: a missing devid's stats row is still snapshotted by devid while
@@ -1290,10 +1430,16 @@ mod tests {
     //   counters for devid 2 in its stats row.
     #[test]
     fn missing_devid_row_snapshotted_and_marked_missing_acked() {
-        let mut dev = zero_device(2);
+        let mut dev = zero_device(Devid::new(2));
         dev.read_io_errs = 3;
-        let stats = make_stats(vec![zero_device(1), dev]);
-        let snapshot = snapshot_current(&stats, &[1, 2], &[2]);
+        let stats = make_stats(vec![zero_device(Devid::new(1)), dev]);
+        let snapshot = snapshot_current(
+            &stats,
+            &AlertDevids {
+                recognized: vec![Devid::new(1), Devid::new(2)],
+                missing: vec![Devid::new(2)],
+            },
+        );
         assert!(snapshot.0.contains_key("1"));
         let disk2 = snapshot.0.get("2").unwrap();
         assert!(disk2.missing_acked);
@@ -1304,7 +1450,9 @@ mod tests {
 
     #[test]
     fn merge_live_causes_appended() {
-        let live = vec![AlertCause::BtrfsDeviceErrors { devid: 1 }];
+        let live = vec![AlertCause::BtrfsDeviceErrors {
+            devid: Devid::new(1),
+        }];
         let merged = merge_into_latch(None, &live);
         assert!(merged.active());
         assert_eq!(merged.causes.len(), 1);
@@ -1313,7 +1461,9 @@ mod tests {
     #[test]
     fn merge_no_new_causes_carries_forward_latched() {
         let existing = AlertState {
-            causes: vec![AlertCause::BtrfsDeviceErrors { devid: 1 }],
+            causes: vec![AlertCause::BtrfsDeviceErrors {
+                devid: Devid::new(1),
+            }],
         };
         let merged = merge_into_latch(Some(&existing), &[]);
         assert!(merged.active());
@@ -1323,9 +1473,13 @@ mod tests {
     #[test]
     fn merge_live_same_devid_replaces_latched() {
         let existing = AlertState {
-            causes: vec![AlertCause::BtrfsDeviceErrors { devid: 1 }],
+            causes: vec![AlertCause::BtrfsDeviceErrors {
+                devid: Devid::new(1),
+            }],
         };
-        let live = vec![AlertCause::BtrfsDeviceErrors { devid: 1 }];
+        let live = vec![AlertCause::BtrfsDeviceErrors {
+            devid: Devid::new(1),
+        }];
         let merged = merge_into_latch(Some(&existing), &live);
         assert_eq!(merged.causes.len(), 1);
     }
@@ -1336,12 +1490,18 @@ mod tests {
         // even when live causes no longer include devid 1.
         let existing = AlertState {
             causes: vec![
-                AlertCause::BtrfsDeviceErrors { devid: 1 },
-                AlertCause::MissingDevice { devid: 2 },
+                AlertCause::BtrfsDeviceErrors {
+                    devid: Devid::new(1),
+                },
+                AlertCause::MissingDevice {
+                    devid: Devid::new(2),
+                },
             ],
         };
         // Live sources only detect devid 2 this cycle (devid 1 resolved)
-        let live = vec![AlertCause::MissingDevice { devid: 2 }];
+        let live = vec![AlertCause::MissingDevice {
+            devid: Devid::new(2),
+        }];
         let merged = merge_into_latch(Some(&existing), &live);
         assert_eq!(merged.causes.len(), 2);
         assert!(merged.active());
@@ -1350,24 +1510,40 @@ mod tests {
     #[test]
     fn same_cause_key_btrfs_device_errors() {
         assert!(same_cause_key(
-            &AlertCause::BtrfsDeviceErrors { devid: 1 },
-            &AlertCause::BtrfsDeviceErrors { devid: 1 },
+            &AlertCause::BtrfsDeviceErrors {
+                devid: Devid::new(1)
+            },
+            &AlertCause::BtrfsDeviceErrors {
+                devid: Devid::new(1)
+            },
         ));
         assert!(!same_cause_key(
-            &AlertCause::BtrfsDeviceErrors { devid: 1 },
-            &AlertCause::BtrfsDeviceErrors { devid: 2 },
+            &AlertCause::BtrfsDeviceErrors {
+                devid: Devid::new(1)
+            },
+            &AlertCause::BtrfsDeviceErrors {
+                devid: Devid::new(2)
+            },
         ));
     }
 
     #[test]
     fn same_cause_key_missing_device() {
         assert!(same_cause_key(
-            &AlertCause::MissingDevice { devid: 1 },
-            &AlertCause::MissingDevice { devid: 1 },
+            &AlertCause::MissingDevice {
+                devid: Devid::new(1)
+            },
+            &AlertCause::MissingDevice {
+                devid: Devid::new(1)
+            },
         ));
         assert!(!same_cause_key(
-            &AlertCause::MissingDevice { devid: 1 },
-            &AlertCause::MissingDevice { devid: 2 },
+            &AlertCause::MissingDevice {
+                devid: Devid::new(1)
+            },
+            &AlertCause::MissingDevice {
+                devid: Devid::new(2)
+            },
         ));
     }
 
@@ -1390,12 +1566,18 @@ mod tests {
     #[test]
     fn same_cause_key_cross_variant_never_matches() {
         assert!(!same_cause_key(
-            &AlertCause::BtrfsDeviceErrors { devid: 1 },
-            &AlertCause::MissingDevice { devid: 1 },
+            &AlertCause::BtrfsDeviceErrors {
+                devid: Devid::new(1)
+            },
+            &AlertCause::MissingDevice {
+                devid: Devid::new(1)
+            },
         ));
         assert!(!same_cause_key(
             &AlertCause::SmartdAlert,
-            &AlertCause::BtrfsDeviceErrors { devid: 1 },
+            &AlertCause::BtrfsDeviceErrors {
+                devid: Devid::new(1)
+            },
         ));
     }
 
@@ -1452,7 +1634,7 @@ mod tests {
         map.insert("3".to_owned(), acked_disk(false, 11));
         save_acked_stats(&AckedStats(map), &paths).unwrap();
 
-        let changed = drop_ghost_acked_for_devids(&paths, &[2]).unwrap();
+        let changed = drop_ghost_acked_for_devids(&paths, &[Devid::new(2)]).unwrap();
 
         assert!(changed, "targeted cleanup must report a change");
         let reloaded = load_acked_stats(&paths);
@@ -1513,7 +1695,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let paths = StatePaths::custom(dir.path().into());
 
-        let changed = drop_ghost_acked_for_devids(&paths, &[2]).unwrap();
+        let changed = drop_ghost_acked_for_devids(&paths, &[Devid::new(2)]).unwrap();
 
         assert!(!changed, "missing file means no ack entry was dropped");
         assert!(
@@ -1553,7 +1735,7 @@ mod tests {
         .to_vec();
         std::fs::write(paths.acked_stats_json(), &original).unwrap();
 
-        let changed = drop_ghost_acked_for_devids(&paths, &[9]).unwrap();
+        let changed = drop_ghost_acked_for_devids(&paths, &[Devid::new(9)]).unwrap();
 
         assert!(!changed, "no matching key means no persisted change");
         let after = std::fs::read(paths.acked_stats_json()).unwrap();
@@ -1579,7 +1761,7 @@ mod tests {
         let paths = StatePaths::custom(dir.path().into());
         std::fs::write(paths.acked_stats_json(), "not json").unwrap();
 
-        let err = drop_ghost_acked_for_devids(&paths, &[2]).unwrap_err();
+        let err = drop_ghost_acked_for_devids(&paths, &[Devid::new(2)]).unwrap_err();
 
         assert_eq!(err.kind(), std::io::ErrorKind::Other);
     }
@@ -1628,8 +1810,8 @@ mod tests {
         map.insert("3".to_owned(), acked_disk(false, 3));
         map.insert("legacy".to_owned(), acked_disk(true, 4));
         let mut acked = AckedStats(map);
-        let still_relevant = BTreeSet::from([1, 2]);
-        let present = BTreeSet::from([1]);
+        let still_relevant = BTreeSet::from([Devid::new(1), Devid::new(2)]);
+        let present = BTreeSet::from([Devid::new(1)]);
 
         let changed = reconcile_acked_stats(&mut acked, &still_relevant, &present);
 
@@ -1643,6 +1825,47 @@ mod tests {
         );
     }
 
+    // Intent: AlertState serializes AlertCause variants with bare-integer devid
+    //   values, and round-trips back to the original value.
+    // Why it exists: Devid is #[serde(transparent)], so its JSON representation
+    //   must be a bare number ("devid":7, not "devid":{"0":7} or similar).
+    //   An exact-substring assertion pins this invariant so a future serde
+    //   attribute change that switches to a wrapped form would fail here instead
+    //   of silently making alert-latch.json unreadable by older binaries or
+    //   braid-status parsing. The legacy-key test (load_alert_latch_accepts_
+    //   legacy_active_key) already asserts {"type":"missing_device","devid":7}
+    //   parses; this test asserts what the serializer emits.
+    // Scenario: monitor writes a latch with two causes; the on-disk bytes must
+    //   contain the exact shape the format contract specifies.
+    #[test]
+    fn alert_state_json_shape_bare_integer_devid() {
+        let state = AlertState {
+            causes: vec![
+                AlertCause::MissingDevice {
+                    devid: Devid::new(7),
+                },
+                AlertCause::BtrfsDeviceErrors {
+                    devid: Devid::new(2),
+                },
+            ],
+        };
+
+        let json = serde_json::to_string(&state).expect("serialization must succeed");
+
+        assert!(
+            json.contains(r#"{"type":"missing_device","devid":7}"#),
+            "MissingDevice cause must serialize devid as a bare integer; got: {json}"
+        );
+        assert!(
+            json.contains(r#"{"type":"btrfs_device_errors","devid":2}"#),
+            "BtrfsDeviceErrors cause must serialize devid as a bare integer; got: {json}"
+        );
+
+        let back: AlertState =
+            serde_json::from_str(&json).expect("deserialization must round-trip");
+        assert_eq!(back, state, "round-tripped AlertState must equal original");
+    }
+
     /// Null-underlying device: btrfs device stats reports the mapper path
     /// for a hot-unplugged device whose LUKS mapper is still open. The
     /// row carries its devid directly, and that devid must also appear in
@@ -1651,14 +1874,27 @@ mod tests {
     fn null_underlying_device_triggers_missing_alert() {
         // Device stats include both a healthy device and the null-underlying
         // device (btrfs still reports its mapper path)
-        let stats = make_stats(vec![zero_device(1), zero_device(2)]);
+        let stats = make_stats(vec![zero_device(Devid::new(1)), zero_device(Devid::new(2))]);
         let acked = AckedStats::default();
         // Alert-local missing devids includes the null-underlying device's devid
-        let alert_missing = vec![2u64];
-        let recognized = vec![1u64, 2];
-        let alert = compute_alert_state(&stats, &acked, &recognized, &alert_missing, false);
+        let alert_missing = vec![Devid::new(2)];
+        let recognized = vec![Devid::new(1), Devid::new(2)];
+        let alert = compute_alert_state(
+            &stats,
+            &acked,
+            &AlertDevids {
+                recognized: recognized.clone(),
+                missing: alert_missing.clone(),
+            },
+            false,
+        );
         assert!(alert.active());
         assert_eq!(alert.causes.len(), 1);
-        assert_eq!(alert.causes[0], AlertCause::MissingDevice { devid: 2 });
+        assert_eq!(
+            alert.causes[0],
+            AlertCause::MissingDevice {
+                devid: Devid::new(2)
+            }
+        );
     }
 }

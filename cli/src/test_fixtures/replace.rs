@@ -14,6 +14,7 @@ use crate::membership::{self, PoolMembership};
 use crate::progress::{self, ProgressOutput};
 use crate::replace::ReplaceParams;
 use crate::state_paths::StatePaths;
+use crate::types::Devid;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
@@ -40,8 +41,8 @@ const REPLACE_FIXTURE_RAW_SIZE: u64 = 536_870_912;
 
 pub(crate) fn replace_dev_info_sufficient() -> MockBtrfsDevInfo {
     MockBtrfsDevInfo::default()
-        .with_total_bytes("/mnt/storage", 1, REPLACE_FIXTURE_MAPPER_SIZE)
-        .with_total_bytes("/mnt/storage", 2, REPLACE_FIXTURE_MAPPER_SIZE)
+        .with_total_bytes("/mnt/storage", Devid::new(1), REPLACE_FIXTURE_MAPPER_SIZE)
+        .with_total_bytes("/mnt/storage", Devid::new(2), REPLACE_FIXTURE_MAPPER_SIZE)
 }
 
 fn pre_usage_raw_two_healthy() -> String {
@@ -321,7 +322,7 @@ impl PoolFixture {
             name: crate::types::DiskName::parse("disk1").expect("valid disk name"),
             by_id: crate::types::ByIdPath::parse("/dev/disk/by-id/virtio-disk1")
                 .expect("valid by-id"),
-            devid: Some(1),
+            devid: Some(Devid::new(1)),
             added_at: None,
         };
         m.insert(canonical_uuid, member)
@@ -371,7 +372,7 @@ impl PoolFixture {
 pub(crate) struct ReplaceParamsBuilder<'a> {
     old_name: &'a str,
     new_name: &'a str,
-    missing_id: Option<u64>,
+    missing_id: Option<Devid>,
     dry_run: bool,
     yes: bool,
     passphrase_stdin: bool,
@@ -395,7 +396,7 @@ impl<'a> ReplaceParamsBuilder<'a> {
         self.new_name = spec;
         self
     }
-    pub(crate) fn missing_id(mut self, id: Option<u64>) -> Self {
+    pub(crate) fn missing_id(mut self, id: Option<Devid>) -> Self {
         self.missing_id = id;
         self
     }

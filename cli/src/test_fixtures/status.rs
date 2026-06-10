@@ -140,21 +140,21 @@ pub(crate) fn status_membership_3disk() -> PoolMembership {
             1,
             "toshiba1",
             "/dev/disk/by-id/disk1",
-            1u64,
+            Devid::new(1),
             "11111111-1111-1111-1111-111111111111",
         ),
         (
             2,
             "toshiba2",
             "/dev/disk/by-id/disk2",
-            2,
+            Devid::new(2),
             "22222222-2222-2222-2222-222222222222",
         ),
         (
             3,
             "toshiba3",
             "/dev/disk/by-id/disk3",
-            3,
+            Devid::new(3),
             "33333333-3333-3333-3333-333333333333",
         ),
     ] {
@@ -687,7 +687,7 @@ pub(crate) fn status_report_with_alerts(
 }
 
 /// Present disk report keyed by name/devid for alert-name lookup tests.
-pub(crate) fn status_disk_report_named(name: &str, devid: u64) -> DiskReport {
+pub(crate) fn status_disk_report_named(name: &str, devid: Devid) -> DiskReport {
     let disk_name = DiskName::parse(name).expect("valid fixture disk name");
     DiskReport {
         name: name.into(),

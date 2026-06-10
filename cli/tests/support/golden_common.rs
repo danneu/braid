@@ -8,6 +8,8 @@
 // When REQUIRE_FIXTURES is true, missing fixtures panic (unstable lane).
 // When false, missing fixtures skip the test (stable lane).
 
+use braid_cli::types::Devid;
+
 /// btrfs-progs resolves device paths via path_canonicalize(), which reads
 /// /sys/block/dm-N/dm/name to map kernel dm-N names to /dev/mapper/<name>.
 /// This sysfs lookup succeeds on the macOS aarch64 linux-builder VM but fails
@@ -162,9 +164,13 @@ golden_test!(
     "btrfs device stats",
     parse::btrfs_device_stats::parse_btrfs_device_stats,
     |out: parse::types::BtrfsDeviceStatsOutput| {
-        let mut devids: Vec<u64> = out.devices.iter().map(|d| d.devid).collect();
+        let mut devids: Vec<Devid> = out.devices.iter().map(|d| d.devid).collect();
         devids.sort_unstable();
-        assert_eq!(devids, vec![1, 2], "expected present and missing devids");
+        assert_eq!(
+            devids,
+            vec![Devid::new(1), Devid::new(2)],
+            "expected present and missing devids"
+        );
         for dev in &out.devices {
             assert_eq!(dev.read_io_errs, 0);
             assert_eq!(dev.write_io_errs, 0);
@@ -325,13 +331,13 @@ golden_test!(
     |out: parse::types::BtrfsDeviceUsageOutput| {
         assert_eq!(out.devices.len(), 2, "expected 2 devices");
         // Exact devid/path mapping
-        assert_eq!(out.devices[0].devid, 1);
+        assert_eq!(out.devices[0].devid, Devid::new(1));
         assert!(
             is_dm_or_mapper_path(&out.devices[0].path),
             "devid 1 path should be dm or mapper, got: {}",
             out.devices[0].path
         );
-        assert_eq!(out.devices[1].devid, 2);
+        assert_eq!(out.devices[1].devid, Devid::new(2));
         assert!(
             is_dm_or_mapper_path(&out.devices[1].path),
             "devid 2 path should be dm or mapper, got: {}",
@@ -535,7 +541,7 @@ golden_test!(
         assert_eq!(out.devices.len(), 2, "expected 2 devices");
 
         // devid 1 -- the surviving live member.
-        assert_eq!(out.devices[0].devid, 1);
+        assert_eq!(out.devices[0].devid, Devid::new(1));
         assert!(
             is_dm_or_mapper_path(&out.devices[0].path),
             "devid 1 path should be dm or mapper, got: {}",
@@ -550,7 +556,7 @@ golden_test!(
         // check_relocation_space and DeviceUsageSpec::missing
         // both depend on.
         let missing = &out.devices[1];
-        assert_eq!(missing.devid, 2);
+        assert_eq!(missing.devid, Devid::new(2));
         assert_eq!(
             missing.path, "<missing disk>",
             "missing-device path token must be the literal `<missing disk>` \

@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize, Serializer};
 
-use crate::types::{Fsid, LuksUuid};
+use crate::types::{Devid, Fsid, LuksUuid};
 
 // --- JSON command output structs ---
 
@@ -118,7 +118,7 @@ impl BtrfsDfOutput {
 /// Size field from show output is intentionally not parsed — it's human-formatted and unused by domain code.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BtrfsShowDevice {
-    pub devid: u64,
+    pub devid: Devid,
     pub path: String,
 }
 
@@ -129,7 +129,7 @@ pub struct BtrfsFilesystemShowOutput {
     pub devices: Vec<BtrfsShowDevice>,
     pub has_missing: bool,
     /// Devids of missing devices (extracted from MISSING sentinel lines).
-    pub missing_devids: Vec<u64>,
+    pub missing_devids: Vec<Devid>,
 }
 
 /// Result of `cryptsetup status <mapper>`. The active-vs-inactive split is
@@ -285,7 +285,7 @@ pub enum DeviceScrubState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceScrubEntry {
-    pub devid: u64,
+    pub devid: Devid,
     pub path: Option<String>,
     pub state: DeviceScrubState,
     pub started_at: Option<ScrubTimestamp>,
@@ -326,7 +326,7 @@ pub struct BtrfsScrubStatusPerDeviceOutput {
 /// parser output; LUKS UUID remains braid's persistent member identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceErrorStats {
-    pub devid: u64,
+    pub devid: Devid,
     pub read_io_errs: u64,
     pub write_io_errs: u64,
     pub corruption_errs: u64,
@@ -589,7 +589,7 @@ pub struct DeviceAllocation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BtrfsDeviceUsageEntry {
     pub path: String,
-    pub devid: u64,
+    pub devid: Devid,
     pub device_size: u64,
     pub device_slack: u64,
     pub allocations: Vec<DeviceAllocation>,

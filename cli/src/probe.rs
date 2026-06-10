@@ -11,7 +11,7 @@ use crate::parse::{
     ParseError, parse_btrfs_filesystem_show, parse_cryptsetup_luks_label,
     parse_cryptsetup_luks_uuid, parse_cryptsetup_luks_version, parse_cryptsetup_status,
 };
-use crate::types::*;
+use crate::types::{Devid, *};
 
 // ---------------------------------------------------------------------------
 // Filesystem trait — abstracts Path::exists() for testability
@@ -269,35 +269,52 @@ fn probe_mapper_open<R: CommandRunner>(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlertPoolState {
     pub mounted: bool,
-    pub present_devids: Vec<u64>,
-    pub missing_devids: Vec<u64>,
+    pub present_devids: Vec<Devid>,
+    pub missing_devids: Vec<Devid>,
     pub null_underlying: Vec<NullUnderlyingDevice>,
 }
 
-impl AlertPoolState {
-    /// Same alert semantics as `PoolState::alert_missing_devids`, without
-    /// carrying the full identity-correlated pool state.
-    pub fn alert_missing_devids(&self) -> Vec<u64> {
-        self.missing_devids
-            .iter()
-            .copied()
-            .chain(self.null_underlying.iter().map(|d| d.devid))
-            .collect::<BTreeSet<u64>>()
-            .into_iter()
-            .collect()
-    }
+/// Named carrier for the two devid sets `compute_alert_state` and
+/// `snapshot_current` require. Grouping the two sets into one named struct
+/// makes the positional `recognized`/`missing` swap an unwritable mistake --
+/// a caller cannot pass `missing` where `recognized` is expected.
+pub struct AlertDevids {
+    /// All devids the alert pipeline recognizes as pool members (present +
+    /// null-underlying + btrfs-MISSING). Stats rows outside this set are stale
+    /// identities and are skipped.
+    pub recognized: Vec<Devid>,
+    /// Devids that must fire `MissingDevice` alerts: btrfs-MISSING union
+    /// null-underlying, deduplicated. These skip `BtrfsDeviceErrors` because
+    /// they are already alerted as missing.
+    pub missing: Vec<Devid>,
+}
 
-    /// Devids the alert pipeline treats as known pool members for one probe:
-    /// present, null-underlying, or btrfs-MISSING.
-    pub fn recognized_devids(&self) -> Vec<u64> {
-        self.present_devids
+impl AlertPoolState {
+    /// Build the named `AlertDevids` carrier for one probe snapshot.
+    /// The two fields have distinct semantics; grouping them prevents a
+    /// positional swap at every call site.
+    pub fn alert_devids(&self) -> AlertDevids {
+        let recognized = self
+            .present_devids
             .iter()
             .copied()
             .chain(self.null_underlying.iter().map(|d| d.devid))
             .chain(self.missing_devids.iter().copied())
-            .collect::<BTreeSet<u64>>()
+            .collect::<BTreeSet<Devid>>()
             .into_iter()
-            .collect()
+            .collect();
+        let missing = self
+            .missing_devids
+            .iter()
+            .copied()
+            .chain(self.null_underlying.iter().map(|d| d.devid))
+            .collect::<BTreeSet<Devid>>()
+            .into_iter()
+            .collect();
+        AlertDevids {
+            recognized,
+            missing,
+        }
     }
 }
 
@@ -1532,7 +1549,7 @@ mod tests {
             result.devices[0].luks_uuid,
             LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap()
         );
-        assert_eq!(result.devices[0].devid, 1);
+        assert_eq!(result.devices[0].devid, Devid::new(1));
         assert_eq!(
             result.devices[1].mapper,
             MapperName("braid-ironwolf".into())
@@ -1748,7 +1765,7 @@ mod tests {
             result.null_underlying[0].mapper,
             MapperName("braid-ironwolf".into())
         );
-        assert_eq!(result.null_underlying[0].devid, 2);
+        assert_eq!(result.null_underlying[0].devid, Devid::new(2));
 
         // missing_devids stays btrfs-authoritative — null-underlying devids
         // are NOT injected (remove-missing uses this for destructive targets)
@@ -1910,7 +1927,7 @@ mod tests {
         let result = probe_pool_alerts(&runner, &fs, &mp()).unwrap();
 
         assert!(result.mounted);
-        assert_eq!(result.present_devids, vec![1, 2]);
+        assert_eq!(result.present_devids, vec![Devid::new(1), Devid::new(2)]);
         assert!(result.missing_devids.is_empty());
         assert!(result.null_underlying.is_empty());
         assert!(
@@ -1955,8 +1972,8 @@ mod tests {
         let result = probe_pool_alerts(&runner, &fs, &mp()).unwrap();
 
         assert!(result.mounted);
-        assert_eq!(result.present_devids, vec![1]);
-        assert_eq!(result.missing_devids, vec![2]);
+        assert_eq!(result.present_devids, vec![Devid::new(1)]);
+        assert_eq!(result.missing_devids, vec![Devid::new(2)]);
         assert!(result.null_underlying.is_empty());
     }
 
@@ -1992,13 +2009,13 @@ mod tests {
         let result = probe_pool_alerts(&runner, &fs, &mp()).unwrap();
 
         assert!(result.mounted);
-        assert_eq!(result.present_devids, vec![1]);
+        assert_eq!(result.present_devids, vec![Devid::new(1)]);
         assert!(result.missing_devids.is_empty());
         assert_eq!(
             result.null_underlying,
             vec![NullUnderlyingDevice {
                 mapper: MapperName("braid-ironwolf".into()),
-                devid: 2,
+                devid: Devid::new(2),
             }]
         );
     }
@@ -2041,7 +2058,7 @@ mod tests {
         let result = probe_pool_alerts(&runner, &fs, &mp()).unwrap();
 
         assert!(result.mounted);
-        assert_eq!(result.present_devids, vec![1, 2]);
+        assert_eq!(result.present_devids, vec![Devid::new(1), Devid::new(2)]);
         assert!(result.missing_devids.is_empty());
         assert!(result.null_underlying.is_empty());
     }
@@ -2155,58 +2172,201 @@ mod tests {
         ));
     }
 
-    // Intent: AlertPoolState::alert_missing_devids returns the alert-local
-    // union of btrfs MISSING devids and null-underlying devids.
+    // Intent: AlertPoolState::alert_devids() populates AlertDevids::missing with
+    // the alert-local union of btrfs MISSING devids and null-underlying devids.
     // Why it exists: deduplication and sorting are part of the alert cause
     // contract, not a property callers should reimplement.
     // Scenario: btrfs has promoted one devid to MISSING while another mapper
     // still reports a null underlying, with one devid present in both inputs.
     #[test]
-    fn probe_pool_alerts_alert_missing_devids_method() {
+    fn probe_pool_alerts_alert_devids_missing() {
         let state = AlertPoolState {
             mounted: true,
-            present_devids: vec![1],
-            missing_devids: vec![4, 2],
+            present_devids: vec![Devid::new(1)],
+            missing_devids: vec![Devid::new(4), Devid::new(2)],
             null_underlying: vec![
                 NullUnderlyingDevice {
                     mapper: MapperName("braid-two".into()),
-                    devid: 2,
+                    devid: Devid::new(2),
                 },
                 NullUnderlyingDevice {
                     mapper: MapperName("braid-three".into()),
-                    devid: 3,
+                    devid: Devid::new(3),
                 },
             ],
         };
 
-        assert_eq!(state.alert_missing_devids(), vec![2, 3, 4]);
+        assert_eq!(
+            state.alert_devids().missing,
+            vec![Devid::new(2), Devid::new(3), Devid::new(4)]
+        );
     }
 
-    // Intent: AlertPoolState::recognized_devids returns the alert-pipeline
-    //   union of present, btrfs-MISSING, and null-underlying devids.
+    // Intent: AlertPoolState::alert_devids() populates AlertDevids::recognized
+    //   with the alert-pipeline union of present, btrfs-MISSING, and
+    //   null-underlying devids.
     // Why it exists: monitor and ack must filter stats rows against the same
     //   sorted, deduped membership set instead of rebuilding it separately.
     // Scenario: one devid is present, one is both MISSING and null-backed, and
     //   another exists only as null-backed.
     #[test]
-    fn probe_pool_alerts_recognized_devids_method() {
+    fn probe_pool_alerts_recognized_devids() {
         let state = AlertPoolState {
             mounted: true,
-            present_devids: vec![4, 1],
-            missing_devids: vec![4, 2],
+            present_devids: vec![Devid::new(4), Devid::new(1)],
+            missing_devids: vec![Devid::new(4), Devid::new(2)],
             null_underlying: vec![
                 NullUnderlyingDevice {
                     mapper: MapperName("braid-two".into()),
-                    devid: 2,
+                    devid: Devid::new(2),
                 },
                 NullUnderlyingDevice {
                     mapper: MapperName("braid-three".into()),
-                    devid: 3,
+                    devid: Devid::new(3),
                 },
             ],
         };
 
-        assert_eq!(state.recognized_devids(), vec![1, 2, 3, 4]);
+        assert_eq!(
+            state.alert_devids().recognized,
+            vec![Devid::new(1), Devid::new(2), Devid::new(3), Devid::new(4)]
+        );
+    }
+
+    // Intent: AlertPoolState::alert_devids() groups the three devid origins
+    //   (present, btrfs-MISSING, null-underlying) into a carrier whose
+    //   `recognized` and `missing` fields have distinct semantics; feeding that
+    //   carrier through both compute_alert_state and snapshot_current routes
+    //   each devid to its correct alert outcome. A backwards builder that swaps
+    //   `recognized` and `missing` would flip every assertion below.
+    // Why it exists: the positional two-slice API was replaced by a single
+    //   named carrier to make a recognized/missing swap unwritable at the call
+    //   site. This test proves alert_devids() fills the fields in the right
+    //   order -- a builder that swapped them would still compile, so a pure
+    //   compile check is insufficient.
+    // Scenario: a three-disk pool where disk 1 is present, disk 2 has
+    //   disappeared (btrfs MISSING sentinel), and disk 3 is a hot-unplugged
+    //   null-underlying mapper. All three devid origins are distinct.
+    #[test]
+    fn alert_devids_carrier_routes_each_origin_correctly() {
+        use crate::alert::{AckedStats, AlertCause, compute_alert_state, snapshot_current};
+
+        // devid 1: present (normal, healthy member)
+        // devid 2: btrfs-MISSING (kernel lost sight of the disk entirely)
+        // devid 3: null-underlying (mapper open, backing block device gone)
+        let state = AlertPoolState {
+            mounted: true,
+            present_devids: vec![Devid::new(1)],
+            missing_devids: vec![Devid::new(2)],
+            null_underlying: vec![NullUnderlyingDevice {
+                mapper: MapperName("braid-three".into()),
+                devid: Devid::new(3),
+            }],
+        };
+
+        let devids = state.alert_devids();
+
+        // recognized must contain all three origins; missing must exclude present.
+        assert_eq!(
+            devids.recognized,
+            vec![Devid::new(1), Devid::new(2), Devid::new(3)],
+            "recognized must be present union null-underlying union btrfs-MISSING"
+        );
+        assert_eq!(
+            devids.missing,
+            vec![Devid::new(2), Devid::new(3)],
+            "missing must be btrfs-MISSING union null-underlying"
+        );
+
+        // Btrfs device stats rows for all three devids (all zero counters).
+        use crate::parse::types::{BtrfsDeviceStatsOutput, DeviceErrorStats};
+        let stats = BtrfsDeviceStatsOutput {
+            devices: vec![
+                DeviceErrorStats {
+                    devid: Devid::new(1),
+                    read_io_errs: 0,
+                    write_io_errs: 0,
+                    flush_io_errs: 0,
+                    corruption_errs: 0,
+                    generation_errs: 0,
+                },
+                DeviceErrorStats {
+                    devid: Devid::new(2),
+                    read_io_errs: 0,
+                    write_io_errs: 0,
+                    flush_io_errs: 0,
+                    corruption_errs: 0,
+                    generation_errs: 0,
+                },
+                DeviceErrorStats {
+                    devid: Devid::new(3),
+                    read_io_errs: 0,
+                    write_io_errs: 0,
+                    flush_io_errs: 0,
+                    corruption_errs: 0,
+                    generation_errs: 0,
+                },
+            ],
+        };
+        let acked = AckedStats::default();
+
+        // compute_alert_state must produce MissingDevice for devid 2 and 3
+        // (the missing set) and no BtrfsDeviceErrors for devid 1.
+        let alert = compute_alert_state(&stats, &acked, &devids, false);
+        assert!(
+            alert.causes.contains(&AlertCause::MissingDevice {
+                devid: Devid::new(2)
+            }),
+            "btrfs-MISSING devid must latch MissingDevice"
+        );
+        assert!(
+            alert.causes.contains(&AlertCause::MissingDevice {
+                devid: Devid::new(3)
+            }),
+            "null-underlying devid must latch MissingDevice"
+        );
+        assert!(
+            !alert.causes.iter().any(|c| matches!(
+                c,
+                AlertCause::BtrfsDeviceErrors { devid } if *devid == Devid::new(1)
+            )),
+            "present devid must not produce BtrfsDeviceErrors"
+        );
+        assert!(
+            !alert.causes.iter().any(|c| matches!(
+                c,
+                AlertCause::MissingDevice { devid } if *devid == Devid::new(1)
+            )),
+            "present devid must not produce MissingDevice"
+        );
+
+        // snapshot_current must mark devids 2 and 3 missing_acked and include
+        // devid 1 without the missing flag.
+        let snapshot = snapshot_current(&stats, &devids);
+        let disk1 = snapshot
+            .0
+            .get("1")
+            .expect("present devid must be snapshotted");
+        assert!(
+            !disk1.missing_acked,
+            "present devid must not be missing_acked in snapshot"
+        );
+        let disk2 = snapshot
+            .0
+            .get("2")
+            .expect("btrfs-MISSING devid must be snapshotted");
+        assert!(
+            disk2.missing_acked,
+            "btrfs-MISSING devid must be missing_acked in snapshot"
+        );
+        let disk3 = snapshot
+            .0
+            .get("3")
+            .expect("null-underlying devid must be snapshotted");
+        assert!(
+            disk3.missing_acked,
+            "null-underlying devid must be missing_acked in snapshot"
+        );
     }
 
     // -- probe_fsid tests --

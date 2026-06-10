@@ -83,7 +83,7 @@ pub struct StatusReport {
     /// `remove-missing` and `replace --missing-id` use the btrfs-only subset
     /// and can reject a null-underlying devid reported here.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub missing_devids: Vec<u64>,
+    pub missing_devids: Vec<Devid>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -206,7 +206,7 @@ pub struct DiskReport {
     pub mapper: String,
     pub by_id: String,
     pub luks_uuid: String,
-    pub devid: Option<u64>,
+    pub devid: Option<Devid>,
     pub underlying: Option<String>,
     pub status: DiskStatus,
     /// btrfs device-error counters (read/write/flush/corruption/generation) --
@@ -254,7 +254,7 @@ impl DiskErrors {
 struct CompactDrive {
     name: String,
     device_short: String,
-    devid: Option<u64>,
+    devid: Option<Devid>,
     status: DiskStatus,
 }
 
@@ -267,7 +267,7 @@ struct CompactDrive {
 /// read-only display must not abort, and `load_membership` owns the refusal.
 /// The TUI has parallel input-specific logic that can collapse into this once
 /// both paths expose the same membership-shaped inputs.
-fn build_devid_names(pool: &PoolState, membership: &PoolMembership) -> HashMap<u64, String> {
+fn build_devid_names(pool: &PoolState, membership: &PoolMembership) -> HashMap<Devid, String> {
     let mut names = HashMap::new();
 
     for pd in &pool.devices {
@@ -336,7 +336,7 @@ struct HumanDisk {
     member_name: Option<DiskName>,
     by_id: String,
     luks_uuid: String,
-    devid: Option<u64>,
+    devid: Option<Devid>,
     status: DiskStatus,
     model: Option<String>,
     serial: Option<String>,
@@ -361,7 +361,7 @@ struct BuiltStatus {
 struct MountedExtras {
     compact_drives: Vec<CompactDrive>,
     human_details: Vec<HumanDisk>,
-    devid_names: HashMap<u64, String>,
+    devid_names: HashMap<Devid, String>,
 }
 
 fn not_mounted_status(config: &Config, paths: &StatePaths, advisories: Vec<String>) -> BuiltStatus {
@@ -1000,7 +1000,7 @@ fn build_disk_views<R: CommandRunner>(
     // Alert-confirmed missing devids gate the compact row's persisted devid:
     // membership devids are a display fallback, shown only when live btrfs
     // currently reports the devid missing (decision 024 display-join rule).
-    let alert_devids: HashSet<u64> = pool.alert_missing_devids().into_iter().collect();
+    let alert_devids: HashSet<Devid> = pool.alert_missing_devids().into_iter().collect();
 
     let mut disk_reports = Vec::new();
     let mut human_details = Vec::new();
@@ -1286,7 +1286,7 @@ fn build_disk_views<R: CommandRunner>(
 // Human output formatting
 // ---------------------------------------------------------------------------
 
-fn devid_to_name(devid_names: Option<&HashMap<u64, String>>, devid: u64) -> String {
+fn devid_to_name(devid_names: Option<&HashMap<Devid, String>>, devid: Devid) -> String {
     devid_names
         .and_then(|names| names.get(&devid))
         .map(|name| format!("{name} (devid {devid})"))
@@ -1352,7 +1352,7 @@ fn format_status_human(
     report: &StatusReport,
     compact_drives: Option<&[CompactDrive]>,
     human_disks: Option<&[HumanDisk]>,
-    devid_names: Option<&HashMap<u64, String>>,
+    devid_names: Option<&HashMap<Devid, String>>,
 ) -> String {
     let mut out = String::new();
 
@@ -2153,7 +2153,7 @@ mod tests {
             advisories: vec![],
             alert_active: false,
             alert_causes: vec![],
-            missing_devids: vec![3],
+            missing_devids: vec![Devid::new(3)],
         };
 
         let json_str = serde_json::to_string_pretty(&report).unwrap();
@@ -2171,7 +2171,7 @@ mod tests {
             mapper: "disk1".to_owned(),
             by_id: "/dev/disk/by-id/disk1".to_owned(),
             luks_uuid: "11111111-1111-1111-1111-111111111111".to_owned(),
-            devid: Some(1),
+            devid: Some(Devid::new(1)),
             underlying: Some("/dev/vda".to_owned()),
             status: DiskStatus::Present,
             btrfs_errors: Some(DiskErrors {
@@ -2378,7 +2378,7 @@ mod tests {
                 mapper: "disk1".to_owned(),
                 by_id: "/dev/disk/by-id/disk1".to_owned(),
                 luks_uuid: "11111111-1111-1111-1111-111111111111".to_owned(),
-                devid: Some(1),
+                devid: Some(Devid::new(1)),
                 underlying: Some("/dev/vda".to_owned()),
                 status: DiskStatus::Present,
                 btrfs_errors: Some(DiskErrors {
@@ -2486,7 +2486,7 @@ mod tests {
         let compact = vec![CompactDrive {
             name: "disk1".to_owned(),
             device_short: "vda".to_owned(),
-            devid: Some(1),
+            devid: Some(Devid::new(1)),
             status: DiskStatus::Present,
         }];
         let human = format_status_human(&report, Some(&compact), None, None);
@@ -2569,19 +2569,19 @@ mod tests {
             CompactDrive {
                 name: "disk1".into(),
                 device_short: "vda".into(),
-                devid: Some(1),
+                devid: Some(Devid::new(1)),
                 status: DiskStatus::Present,
             },
             CompactDrive {
                 name: "disk2".into(),
                 device_short: "vdb".into(),
-                devid: Some(2),
+                devid: Some(Devid::new(2)),
                 status: DiskStatus::Present,
             },
             CompactDrive {
                 name: "disk3".into(),
                 device_short: "vdc".into(),
-                devid: Some(3),
+                devid: Some(Devid::new(3)),
                 status: DiskStatus::Present,
             },
         ];
@@ -2792,13 +2792,13 @@ mod tests {
             CompactDrive {
                 name: "disk1".into(),
                 device_short: "vda".into(),
-                devid: Some(1),
+                devid: Some(Devid::new(1)),
                 status: DiskStatus::Present,
             },
             CompactDrive {
                 name: "disk2".into(),
                 device_short: "vdb".into(),
-                devid: Some(2),
+                devid: Some(Devid::new(2)),
                 status: DiskStatus::Present,
             },
             CompactDrive {
@@ -2860,7 +2860,7 @@ mod tests {
             member_name: Some(DiskName::parse("disk1").unwrap()),
             by_id: "/dev/disk/by-id/disk1".to_owned(),
             luks_uuid: "11111111-1111-1111-1111-111111111111".to_owned(),
-            devid: Some(1),
+            devid: Some(Devid::new(1)),
             status: DiskStatus::Present,
             model: Some("VBOX HARDDISK".to_owned()),
             serial: Some("disk1".to_owned()),
@@ -2925,7 +2925,7 @@ mod tests {
             member_name: Some(DiskName::parse("disk1").unwrap()),
             by_id: "/dev/disk/by-id/disk1".to_owned(),
             luks_uuid: "11111111-1111-1111-1111-111111111111".to_owned(),
-            devid: Some(1),
+            devid: Some(Devid::new(1)),
             status: DiskStatus::Present,
             model: Some("VBOX HARDDISK".to_owned()),
             serial: Some("disk1".to_owned()),
@@ -3155,7 +3155,7 @@ mod tests {
             member_name: Some(DiskName::parse("disk1").unwrap()),
             by_id: "/dev/disk/by-id/disk1".to_owned(),
             luks_uuid: "11111111-1111-1111-1111-111111111111".to_owned(),
-            devid: Some(1),
+            devid: Some(Devid::new(1)),
             status: DiskStatus::Present,
             model: None,
             serial: None,
@@ -4001,7 +4001,7 @@ mod tests {
             member_name: Some(DiskName::parse("disk1").unwrap()),
             by_id: "/dev/disk/by-id/disk1".to_owned(),
             luks_uuid: "11111111-1111-1111-1111-111111111111".to_owned(),
-            devid: Some(1),
+            devid: Some(Devid::new(1)),
             status: DiskStatus::Present,
             model: Some("VBOX HARDDISK".to_owned()),
             serial: Some("disk1".to_owned()),
@@ -5010,7 +5010,10 @@ mod tests {
         .unwrap();
 
         assert_eq!(built.report.missing_count, Some(2));
-        assert_eq!(built.report.missing_devids, vec![2, 3]);
+        assert_eq!(
+            built.report.missing_devids,
+            vec![Devid::new(2), Devid::new(3)]
+        );
         assert_eq!(
             built.report.missing_devids.len(),
             built.report.missing_count.unwrap() as usize
@@ -5075,9 +5078,27 @@ mod tests {
         // output still showed bare `devid 3` or `-`.
         // Scenario: disk3 is absent, btrfs reports devid 3 as MISSING, and the
         // alert latch contains `MissingDevice { devid: 3 }`.
-        let (_, member1) = disk_member_with(1, "toshiba1", "/dev/disk/by-id/disk1", Some(1), None);
-        let (_, member2) = disk_member_with(2, "toshiba2", "/dev/disk/by-id/disk2", Some(2), None);
-        let (_, member3) = disk_member_with(3, "toshiba3", "/dev/disk/by-id/disk3", Some(3), None);
+        let (_, member1) = disk_member_with(
+            1,
+            "toshiba1",
+            "/dev/disk/by-id/disk1",
+            Some(Devid::new(1)),
+            None,
+        );
+        let (_, member2) = disk_member_with(
+            2,
+            "toshiba2",
+            "/dev/disk/by-id/disk2",
+            Some(Devid::new(2)),
+            None,
+        );
+        let (_, member3) = disk_member_with(
+            3,
+            "toshiba3",
+            "/dev/disk/by-id/disk3",
+            Some(Devid::new(3)),
+            None,
+        );
         let membership = membership_from(vec![
             (
                 LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
@@ -5125,7 +5146,9 @@ mod tests {
         membership::save_membership(&membership, &paths).unwrap();
         alert::save_alert_latch(
             &AlertState {
-                causes: vec![AlertCause::MissingDevice { devid: 3 }],
+                causes: vec![AlertCause::MissingDevice {
+                    devid: Devid::new(3),
+                }],
             },
             &paths,
         )
@@ -5397,7 +5420,7 @@ mod tests {
             devices: vec![PoolDevice {
                 mapper: MapperName("braid-disk1".to_owned()),
                 luks_uuid: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
-                devid: 1,
+                devid: Devid::new(1),
                 underlying: "/dev/vda".to_owned(),
             }],
             missing_count: 0,
@@ -5472,7 +5495,7 @@ mod tests {
             devices: vec![PoolDevice {
                 mapper: MapperName("braid-disk1".to_owned()),
                 luks_uuid: LuksUuid::parse("99999999-9999-9999-9999-999999999999").unwrap(),
-                devid: 1,
+                devid: Devid::new(1),
                 underlying: "/dev/vdz".to_owned(),
             }],
             missing_count: 0,
@@ -5526,7 +5549,7 @@ mod tests {
             devices: vec![PoolDevice {
                 mapper: MapperName("braid-disk1".to_owned()),
                 luks_uuid: foreign_uuid.clone(),
-                devid: 1,
+                devid: Devid::new(1),
                 underlying: "/dev/vdz".to_owned(),
             }],
             missing_count: 0,
@@ -5630,7 +5653,7 @@ mod tests {
             devices: vec![PoolDevice {
                 mapper: MapperName("disk1".to_owned()),
                 luks_uuid: uuid,
-                devid: 1,
+                devid: Devid::new(1),
                 underlying: "/dev/vda".to_owned(),
             }],
             missing_count: 0,
@@ -5693,15 +5716,25 @@ mod tests {
     // `alpha` before `bravo`, while preserving present-then-missing grouping.
     #[test]
     fn build_disk_views_sorts_present_rows_by_name_not_devid() {
-        let (bravo_uuid, bravo_member) =
-            disk_member_with(951, "bravo", "/dev/disk/by-id/disk-bravo", Some(1), None);
-        let (alpha_uuid, alpha_member) =
-            disk_member_with(952, "alpha", "/dev/disk/by-id/disk-alpha", Some(2), None);
+        let (bravo_uuid, bravo_member) = disk_member_with(
+            951,
+            "bravo",
+            "/dev/disk/by-id/disk-bravo",
+            Some(Devid::new(1)),
+            None,
+        );
+        let (alpha_uuid, alpha_member) = disk_member_with(
+            952,
+            "alpha",
+            "/dev/disk/by-id/disk-alpha",
+            Some(Devid::new(2)),
+            None,
+        );
         let (aardvark_uuid, aardvark_member) = disk_member_with(
             953,
             "aardvark",
             "/dev/disk/by-id/disk-aardvark",
-            Some(3),
+            Some(Devid::new(3)),
             None,
         );
         let membership = membership_from(vec![
@@ -5740,18 +5773,18 @@ mod tests {
                 PoolDevice {
                     mapper: MapperName("braid-bravo".to_owned()),
                     luks_uuid: bravo_uuid,
-                    devid: 1,
+                    devid: Devid::new(1),
                     underlying: "/dev/vdb".to_owned(),
                 },
                 PoolDevice {
                     mapper: MapperName("braid-alpha".to_owned()),
                     luks_uuid: alpha_uuid,
-                    devid: 2,
+                    devid: Devid::new(2),
                     underlying: "/dev/vda".to_owned(),
                 },
             ],
             missing_count: 1,
-            missing_devids: vec![3],
+            missing_devids: vec![Devid::new(3)],
             total_devices: 3,
             fsid: None,
             null_underlying: vec![],
@@ -5802,13 +5835,13 @@ mod tests {
                 PoolDevice {
                     mapper: MapperName("braid-disk1".to_owned()),
                     luks_uuid: foreign_uuid,
-                    devid: 1,
+                    devid: Devid::new(1),
                     underlying: "/dev/vdz".to_owned(),
                 },
                 PoolDevice {
                     mapper: MapperName("braid-member".to_owned()),
                     luks_uuid: member_uuid.clone(),
-                    devid: 2,
+                    devid: Devid::new(2),
                     underlying: "/dev/vda".to_owned(),
                 },
             ],
@@ -5830,7 +5863,7 @@ mod tests {
         let stats = BtrfsDeviceStatsOutput {
             devices: vec![
                 DeviceErrorStats {
-                    devid: 1,
+                    devid: Devid::new(1),
                     read_io_errs: 5,
                     write_io_errs: 0,
                     flush_io_errs: 0,
@@ -5838,7 +5871,7 @@ mod tests {
                     generation_errs: 0,
                 },
                 DeviceErrorStats {
-                    devid: 2,
+                    devid: Devid::new(2),
                     read_io_errs: 7,
                     write_io_errs: 0,
                     flush_io_errs: 0,
@@ -5991,12 +6024,27 @@ mod tests {
         // membership devids instead.
         // Scenario: a three-disk pool has one present disk, one hot-unplugged
         // null-underlying mapper, and one btrfs-MISSING placeholder.
-        let (uuid1, member1) =
-            disk_member_with(11, "toshiba1", "/dev/disk/by-id/disk1", Some(1), None);
-        let (uuid2, member2) =
-            disk_member_with(12, "toshiba2", "/dev/disk/by-id/disk2", Some(2), None);
-        let (uuid3, member3) =
-            disk_member_with(13, "toshiba3", "/dev/disk/by-id/disk3", Some(3), None);
+        let (uuid1, member1) = disk_member_with(
+            11,
+            "toshiba1",
+            "/dev/disk/by-id/disk1",
+            Some(Devid::new(1)),
+            None,
+        );
+        let (uuid2, member2) = disk_member_with(
+            12,
+            "toshiba2",
+            "/dev/disk/by-id/disk2",
+            Some(Devid::new(2)),
+            None,
+        );
+        let (uuid3, member3) = disk_member_with(
+            13,
+            "toshiba3",
+            "/dev/disk/by-id/disk3",
+            Some(Devid::new(3)),
+            None,
+        );
         let membership = membership_from(vec![
             (uuid1.clone(), member1),
             (uuid2, member2),
@@ -6007,24 +6055,33 @@ mod tests {
             devices: vec![PoolDevice {
                 mapper: MapperName("braid-toshiba1".to_owned()),
                 luks_uuid: uuid1,
-                devid: 1,
+                devid: Devid::new(1),
                 underlying: "/dev/vda".to_owned(),
             }],
             missing_count: 2,
-            missing_devids: vec![3],
+            missing_devids: vec![Devid::new(3)],
             total_devices: 3,
             fsid: None,
             null_underlying: vec![NullUnderlyingDevice {
                 mapper: MapperName("braid-toshiba2".to_owned()),
-                devid: 2,
+                devid: Devid::new(2),
             }],
         };
 
         let names = build_devid_names(&pool, &membership);
 
-        assert_eq!(names.get(&1).map(String::as_str), Some("toshiba1"));
-        assert_eq!(names.get(&2).map(String::as_str), Some("toshiba2"));
-        assert_eq!(names.get(&3).map(String::as_str), Some("toshiba3"));
+        assert_eq!(
+            names.get(&Devid::new(1)).map(String::as_str),
+            Some("toshiba1")
+        );
+        assert_eq!(
+            names.get(&Devid::new(2)).map(String::as_str),
+            Some("toshiba2")
+        );
+        assert_eq!(
+            names.get(&Devid::new(3)).map(String::as_str),
+            Some("toshiba3")
+        );
     }
 
     #[test]
@@ -6040,7 +6097,7 @@ mod tests {
             devices: vec![PoolDevice {
                 mapper: MapperName("foreign-live".to_owned()),
                 luks_uuid: test_uuid(910),
-                devid: 7,
+                devid: Devid::new(7),
                 underlying: "/dev/vdz".to_owned(),
             }],
             missing_count: 0,
@@ -6052,7 +6109,10 @@ mod tests {
 
         let names = build_devid_names(&pool, &PoolMembership::empty());
 
-        assert_eq!(names.get(&7).map(String::as_str), Some("foreign-live"));
+        assert_eq!(
+            names.get(&Devid::new(7)).map(String::as_str),
+            Some("foreign-live")
+        );
     }
 
     #[test]
@@ -6065,17 +6125,27 @@ mod tests {
         // see; load_membership remains the authoritative refusal for it.
         // Scenario: two pool.json entries both claim devid 7 (only reachable via
         // the for_corruption_tests bypass) and btrfs reports devid 7 as MISSING.
-        let (uuid1, member1) =
-            disk_member_with(921, "toshiba1", "/dev/disk/by-id/disk1", Some(7), None);
-        let (uuid2, member2) =
-            disk_member_with(922, "toshiba2", "/dev/disk/by-id/disk2", Some(7), None);
+        let (uuid1, member1) = disk_member_with(
+            921,
+            "toshiba1",
+            "/dev/disk/by-id/disk1",
+            Some(Devid::new(7)),
+            None,
+        );
+        let (uuid2, member2) = disk_member_with(
+            922,
+            "toshiba2",
+            "/dev/disk/by-id/disk2",
+            Some(Devid::new(7)),
+            None,
+        );
         let membership =
             PoolMembership::for_corruption_tests(vec![(uuid1, member1), (uuid2, member2)]);
         let pool = PoolState {
             mounted: true,
             devices: vec![],
             missing_count: 1,
-            missing_devids: vec![7],
+            missing_devids: vec![Devid::new(7)],
             total_devices: 1,
             fsid: None,
             null_underlying: vec![],
@@ -6083,7 +6153,11 @@ mod tests {
 
         let names = build_devid_names(&pool, &membership);
 
-        assert_eq!(names.get(&7), None, "duplicate devid must be left unnamed");
+        assert_eq!(
+            names.get(&Devid::new(7)),
+            None,
+            "duplicate devid must be left unnamed"
+        );
     }
 
     // =======================================================================
@@ -6132,7 +6206,7 @@ mod tests {
             devices: vec![PoolDevice {
                 mapper: MapperName("braid-disk1".to_owned()),
                 luks_uuid: LuksUuid::parse("99999999-9999-9999-9999-999999999999").unwrap(),
-                devid: 1,
+                devid: Devid::new(1),
                 underlying: "/dev/vdz".to_owned(),
             }],
             missing_count: 0,
@@ -6176,15 +6250,25 @@ mod tests {
     //   present-then-missing grouping.
     #[test]
     fn build_disk_views_sorts_present_compact_rows_by_name_not_devid() {
-        let (bravo_uuid, bravo_member) =
-            disk_member_with(961, "bravo", "/dev/disk/by-id/disk-bravo", Some(1), None);
-        let (alpha_uuid, alpha_member) =
-            disk_member_with(962, "alpha", "/dev/disk/by-id/disk-alpha", Some(2), None);
+        let (bravo_uuid, bravo_member) = disk_member_with(
+            961,
+            "bravo",
+            "/dev/disk/by-id/disk-bravo",
+            Some(Devid::new(1)),
+            None,
+        );
+        let (alpha_uuid, alpha_member) = disk_member_with(
+            962,
+            "alpha",
+            "/dev/disk/by-id/disk-alpha",
+            Some(Devid::new(2)),
+            None,
+        );
         let (aardvark_uuid, aardvark_member) = disk_member_with(
             963,
             "aardvark",
             "/dev/disk/by-id/disk-aardvark",
-            Some(3),
+            Some(Devid::new(3)),
             None,
         );
         let membership = membership_from(vec![
@@ -6198,18 +6282,18 @@ mod tests {
                 PoolDevice {
                     mapper: MapperName("braid-bravo".to_owned()),
                     luks_uuid: bravo_uuid,
-                    devid: 1,
+                    devid: Devid::new(1),
                     underlying: "/dev/vdb".to_owned(),
                 },
                 PoolDevice {
                     mapper: MapperName("braid-alpha".to_owned()),
                     luks_uuid: alpha_uuid,
-                    devid: 2,
+                    devid: Devid::new(2),
                     underlying: "/dev/vda".to_owned(),
                 },
             ],
             missing_count: 1,
-            missing_devids: vec![3],
+            missing_devids: vec![Devid::new(3)],
             total_devices: 3,
             fsid: None,
             null_underlying: vec![],
@@ -6222,7 +6306,7 @@ mod tests {
 
         let views = build_disk_views(&runner, &membership, &config_disks, &[], &pool, &stats);
 
-        let rows: Vec<(&str, &str, Option<u64>, DiskStatus)> = views
+        let rows: Vec<(&str, &str, Option<Devid>, DiskStatus)> = views
             .compact_drives
             .iter()
             .map(|d| (d.name.as_str(), d.device_short.as_str(), d.devid, d.status))
@@ -6230,9 +6314,9 @@ mod tests {
         assert_eq!(
             rows,
             vec![
-                ("alpha", "vda", Some(2), DiskStatus::Present),
-                ("bravo", "vdb", Some(1), DiskStatus::Present),
-                ("aardvark", "-", Some(3), DiskStatus::Missing),
+                ("alpha", "vda", Some(Devid::new(2)), DiskStatus::Present),
+                ("bravo", "vdb", Some(Devid::new(1)), DiskStatus::Present),
+                ("aardvark", "-", Some(Devid::new(3)), DiskStatus::Missing),
             ]
         );
     }
@@ -6247,14 +6331,20 @@ mod tests {
         // detail test.
         // Scenario: pool.json remembers toshiba3 as devid 3 and btrfs reports
         // devid 3 in the alert-local missing set.
-        let (_, member) = disk_member_with(931, "toshiba3", "/dev/disk/by-id/disk3", Some(3), None);
+        let (_, member) = disk_member_with(
+            931,
+            "toshiba3",
+            "/dev/disk/by-id/disk3",
+            Some(Devid::new(3)),
+            None,
+        );
         let membership = membership_from(vec![(test_uuid(931), member)]);
         let config_disks = status_cfg_absent("toshiba3", "/dev/disk/by-id/disk3");
         let pool = PoolState {
             mounted: true,
             devices: vec![],
             missing_count: 1,
-            missing_devids: vec![3],
+            missing_devids: vec![Devid::new(3)],
             total_devices: 1,
             fsid: None,
             null_underlying: vec![],
@@ -6266,7 +6356,7 @@ mod tests {
 
         assert_eq!(views.compact_drives.len(), 1);
         assert_eq!(views.compact_drives[0].name, "toshiba3");
-        assert_eq!(views.compact_drives[0].devid, Some(3));
+        assert_eq!(views.compact_drives[0].devid, Some(Devid::new(3)));
         assert_eq!(views.compact_drives[0].status, DiskStatus::Missing);
     }
 
@@ -6279,7 +6369,13 @@ mod tests {
         // the show branch, this devid lives only in the compact projection.
         // Scenario: pool.json remembers toshiba3 as devid 3, but live btrfs has
         // no MISSING or null-underlying record for devid 3.
-        let (_, member) = disk_member_with(941, "toshiba3", "/dev/disk/by-id/disk3", Some(3), None);
+        let (_, member) = disk_member_with(
+            941,
+            "toshiba3",
+            "/dev/disk/by-id/disk3",
+            Some(Devid::new(3)),
+            None,
+        );
         let membership = membership_from(vec![(test_uuid(941), member)]);
         let config_disks = status_cfg_absent("toshiba3", "/dev/disk/by-id/disk3");
         let pool = status_pool_empty();
@@ -6441,8 +6537,13 @@ mod tests {
         // Scenario: report.disks contains the unpooled missing-row shape and
         // the human formatter receives `{3: "toshiba3"}` from build_status.
         let disks = vec![status_disk_report_missing("toshiba3")];
-        let report = status_report_with_alerts(disks, vec![AlertCause::MissingDevice { devid: 3 }]);
-        let devid_names = std::collections::HashMap::from([(3, "toshiba3".to_owned())]);
+        let report = status_report_with_alerts(
+            disks,
+            vec![AlertCause::MissingDevice {
+                devid: Devid::new(3),
+            }],
+        );
+        let devid_names = std::collections::HashMap::from([(Devid::new(3), "toshiba3".to_owned())]);
         let human = format_status_human(&report, None, None, Some(&devid_names));
         assert!(
             human.contains("missing device: toshiba3 (devid 3)"),
@@ -6457,13 +6558,19 @@ mod tests {
         // the display name in the banner.
         // Scenario: devid 1 has an entry in the status-built devid name map.
         let disks = vec![
-            status_disk_report_named("aaa", 1),
-            status_disk_report_named("bbb", 2),
+            status_disk_report_named("aaa", Devid::new(1)),
+            status_disk_report_named("bbb", Devid::new(2)),
         ];
-        let report =
-            status_report_with_alerts(disks, vec![AlertCause::BtrfsDeviceErrors { devid: 1 }]);
-        let devid_names =
-            std::collections::HashMap::from([(1, "aaa".to_owned()), (2, "bbb".to_owned())]);
+        let report = status_report_with_alerts(
+            disks,
+            vec![AlertCause::BtrfsDeviceErrors {
+                devid: Devid::new(1),
+            }],
+        );
+        let devid_names = std::collections::HashMap::from([
+            (Devid::new(1), "aaa".to_owned()),
+            (Devid::new(2), "bbb".to_owned()),
+        ]);
         let human = format_status_human(&report, None, None, Some(&devid_names));
         assert!(
             human.contains("btrfs device errors on aaa (devid 1)"),
@@ -6479,9 +6586,13 @@ mod tests {
         // rows with stale or unrelated devids must not influence the banner.
         // Scenario: the report has a DiskReport with devid 99, but the status
         // path did not authorize a display-name binding for devid 99.
-        let disks = vec![status_disk_report_named("aaa", 99)];
-        let report =
-            status_report_with_alerts(disks, vec![AlertCause::MissingDevice { devid: 99 }]);
+        let disks = vec![status_disk_report_named("aaa", Devid::new(99))];
+        let report = status_report_with_alerts(
+            disks,
+            vec![AlertCause::MissingDevice {
+                devid: Devid::new(99),
+            }],
+        );
         let devid_names = std::collections::HashMap::new();
         let human = format_status_human(&report, None, None, Some(&devid_names));
         assert!(
@@ -6503,7 +6614,7 @@ mod tests {
             devices: vec![PoolDevice {
                 mapper: MapperName("foreign-live".to_owned()),
                 luks_uuid: test_uuid(950),
-                devid: 1,
+                devid: Devid::new(1),
                 underlying: "/dev/vdz".to_owned(),
             }],
             missing_count: 0,
@@ -6514,8 +6625,10 @@ mod tests {
         };
         let devid_names = build_devid_names(&pool, &PoolMembership::empty());
         let report = status_report_with_alerts(
-            vec![status_disk_report_named("foreign-live", 1)],
-            vec![AlertCause::BtrfsDeviceErrors { devid: 1 }],
+            vec![status_disk_report_named("foreign-live", Devid::new(1))],
+            vec![AlertCause::BtrfsDeviceErrors {
+                devid: Devid::new(1),
+            }],
         );
 
         let human = format_status_human(&report, None, None, Some(&devid_names));
@@ -7138,7 +7251,7 @@ mod tests {
             devices: vec![PoolDevice {
                 mapper: MapperName("braid-disk1".to_owned()),
                 luks_uuid: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
-                devid: 1,
+                devid: Devid::new(1),
                 underlying: "/dev/vda".to_owned(),
             }],
             missing_count: 0,
@@ -7158,7 +7271,7 @@ mod tests {
         }];
         let stats = BtrfsDeviceStatsOutput {
             devices: vec![DeviceErrorStats {
-                devid: 1,
+                devid: Devid::new(1),
                 read_io_errs: 5,
                 write_io_errs: 0,
                 flush_io_errs: 0,

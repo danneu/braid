@@ -6,7 +6,7 @@ use crate::progress::{
 };
 use crate::repair_hint;
 use crate::status_tag::{StatusTag, color_enabled_for_stderr, emit_status, status_line};
-use crate::types::{LuksUuid, MapperName, MountPoint};
+use crate::types::{Devid, LuksUuid, MapperName, MountPoint};
 use std::collections::BTreeMap;
 
 #[derive(Debug, thiserror::Error)]
@@ -24,7 +24,7 @@ pub enum PoolError {
 /// execute), which a mapper-name-only comparison would miss.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceIdentity {
-    pub devid: u64,
+    pub devid: Devid,
     pub luks_uuid: LuksUuid,
 }
 
@@ -539,7 +539,7 @@ fn device_remove_result(
 /// Replace a device in the pool using `btrfs replace start` with progress display.
 pub fn pool_replace_device<R: CommandRunner + Sync>(
     runner: &R,
-    devid: u64,
+    devid: Devid,
     target_device: &str,
     mount_point: &MountPoint,
     progress: ProgressOutput,
@@ -563,7 +563,7 @@ pub fn pool_replace_device<R: CommandRunner + Sync>(
 /// Resize a device in the pool to its maximum capacity.
 pub fn pool_resize_device<R: CommandRunner + Sync>(
     runner: &R,
-    devid: u64,
+    devid: Devid,
     mount_point: &MountPoint,
 ) -> Result<(), PoolError> {
     let result = runner.run(&CmdRequest::BtrfsFilesystemResize {
@@ -1547,7 +1547,7 @@ mod tests {
     fn pool_replace_device_issues_correct_replace_start() {
         let runner = MockRunner::default().with_output(
             CmdRequest::BtrfsReplaceStart {
-                devid: 2,
+                devid: Devid::new(2),
                 target_device: "/dev/mapper/braid-new".to_owned(),
                 mount_point: MountPoint("/mnt/storage".to_owned()),
             },
@@ -1556,7 +1556,7 @@ mod tests {
 
         let result = pool_replace_device(
             &runner,
-            2,
+            Devid::new(2),
             "/dev/mapper/braid-new",
             &mp(),
             ProgressOutput::Off,
@@ -1575,7 +1575,7 @@ mod tests {
     fn pool_replace_device_propagates_failure() {
         let runner = MockRunner::default().with_output(
             CmdRequest::BtrfsReplaceStart {
-                devid: 2,
+                devid: Devid::new(2),
                 target_device: "/dev/mapper/braid-new".to_owned(),
                 mount_point: MountPoint("/mnt/storage".to_owned()),
             },
@@ -1589,7 +1589,7 @@ mod tests {
 
         let result = pool_replace_device(
             &runner,
-            2,
+            Devid::new(2),
             "/dev/mapper/braid-new",
             &mp(),
             ProgressOutput::Off,
@@ -1619,7 +1619,7 @@ mod tests {
     fn pool_replace_device_scrub_in_progress_includes_hint() {
         let runner = MockRunner::default().with_output(
             CmdRequest::BtrfsReplaceStart {
-                devid: 2,
+                devid: Devid::new(2),
                 target_device: "/dev/mapper/braid-new".to_owned(),
                 mount_point: MountPoint("/mnt/storage".to_owned()),
             },
@@ -1633,7 +1633,7 @@ mod tests {
 
         let result = pool_replace_device(
             &runner,
-            2,
+            Devid::new(2),
             "/dev/mapper/braid-new",
             &mp(),
             ProgressOutput::Off,
@@ -1660,7 +1660,7 @@ mod tests {
     fn pool_replace_device_no_hint_for_unrelated_failure() {
         let runner = MockRunner::default().with_output(
             CmdRequest::BtrfsReplaceStart {
-                devid: 2,
+                devid: Devid::new(2),
                 target_device: "/dev/mapper/braid-new".to_owned(),
                 mount_point: MountPoint("/mnt/storage".to_owned()),
             },
@@ -1674,7 +1674,7 @@ mod tests {
 
         let result = pool_replace_device(
             &runner,
-            2,
+            Devid::new(2),
             "/dev/mapper/braid-new",
             &mp(),
             ProgressOutput::Off,
@@ -1702,7 +1702,7 @@ mod tests {
             m.insert(
                 mapper_name(&name),
                 DeviceIdentity {
-                    devid: i,
+                    devid: Devid::new(i),
                     luks_uuid: LuksUuid::parse(&format!(
                         "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
                         i as u32, i as u16, i as u16, i as u16, i

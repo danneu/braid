@@ -22,7 +22,7 @@ use crate::tui::model::{
     DrivingDrive, FanReading, FanSnapshot, PoolState, TemperatureReading, UnpooledDiskRender,
     UpsSnapshot, smart_query_device,
 };
-use crate::types::{ByIdPath, ConfigDiskState, DiskName, LuksUuid, MountPoint};
+use crate::types::{ByIdPath, ConfigDiskState, Devid, DiskName, LuksUuid, MountPoint};
 
 /// Best-effort ownership-aware lock classifier for a disk that the mounted
 /// pool probe could not identify by LUKS UUID or persisted devid.
@@ -161,7 +161,7 @@ pub fn probe_pool_for_tui<R: CommandRunner, F: Filesystem + ?Sized>(
         .iter()
         .map(|(name, uuid)| (uuid, name.as_str()))
         .collect();
-    let persisted_devid_to_name: HashMap<u64, &str> = disks
+    let persisted_devid_to_name: HashMap<Devid, &str> = disks
         .devid
         .iter()
         .map(|(name, devid)| (*devid, name.as_str()))
@@ -220,7 +220,7 @@ pub fn probe_pool_for_tui<R: CommandRunner, F: Filesystem + ?Sized>(
     // null_underlying and missing_devids are exactly the cases where btrfs
     // still reports a device but no live LUKS UUID is observable; bind those
     // through the persisted prior devid.
-    let devid_to_name: HashMap<u64, &str> = domain
+    let devid_to_name: HashMap<Devid, &str> = domain
         .devices
         .iter()
         .filter_map(|d| uuid_to_name.get(&d.luks_uuid).map(|name| (d.devid, *name)))
@@ -966,7 +966,10 @@ mod tests {
                     LuksUuid::parse("22222222-2222-2222-2222-222222222222").unwrap(),
                 ),
             ]),
-            devid: HashMap::from([("toshiba".to_owned(), 1), ("ironwolf".to_owned(), 2)]),
+            devid: HashMap::from([
+                ("toshiba".to_owned(), Devid::new(1)),
+                ("ironwolf".to_owned(), Devid::new(2)),
+            ]),
         }
     }
 
@@ -985,7 +988,7 @@ mod tests {
                 "vdb".to_owned(),
                 LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
             )]),
-            devid: HashMap::from([("vdb".to_owned(), 1)]),
+            devid: HashMap::from([("vdb".to_owned(), Devid::new(1))]),
         }
     }
 
@@ -2461,7 +2464,10 @@ mod tests {
                 "toshiba".to_owned(),
                 LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
             )]),
-            devid: HashMap::from([("toshiba".to_owned(), 1), ("ironwolf".to_owned(), 2)]),
+            devid: HashMap::from([
+                ("toshiba".to_owned(), Devid::new(1)),
+                ("ironwolf".to_owned(), Devid::new(2)),
+            ]),
         };
 
         let pool = expect_pool(

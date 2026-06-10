@@ -194,7 +194,7 @@ mod tests {
     use super::*;
     use crate::cmd::{CmdRequest, MockRunner, RawCommandOutput};
     use crate::membership::DiskMember;
-    use crate::types::{LuksUuid, MapperName};
+    use crate::types::{Devid, LuksUuid, MapperName};
     use zeroize::Zeroizing;
 
     // Test-module seed allocation: cli/src/credential_verify.rs uses 600-609.
@@ -624,7 +624,7 @@ mod tests {
         let device = PoolDevice {
             mapper: MapperName("braid-WRONG".into()),
             luks_uuid: uuid,
-            devid: 1,
+            devid: Devid::new(1),
             underlying: "/dev/vdb".into(),
         };
 
@@ -655,7 +655,7 @@ mod tests {
         let foreign = PoolDevice {
             mapper: MapperName("braid-WRONG".into()),
             luks_uuid: test_uuid(601),
-            devid: 2,
+            devid: Devid::new(2),
             underlying: "/dev/vdc".into(),
         };
 

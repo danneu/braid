@@ -91,16 +91,15 @@ pub fn cmd_monitor<R: CommandRunner, F: Filesystem + ?Sized>(
             .map_err(|e| format!("acked-stats unreadable -- {e}"))?;
 
         // 4. Compute alert-local membership views.
-        let alert_missing_devids = pool.alert_missing_devids();
-        let recognized_devids = pool.recognized_devids();
+        let devids = pool.alert_devids();
 
         // 5. Check smartd alert flag
         let smartd_active = alert::smartd_alert_active(paths);
 
         // 6. Reconcile stale ack state: prune orphan devids and self-heal
         //    missing_acked for devices that are present again.
-        let present_devids: BTreeSet<u64> = pool.present_devids.iter().copied().collect();
-        let still_relevant_devids: BTreeSet<u64> = recognized_devids.iter().copied().collect();
+        let present_devids: BTreeSet<_> = pool.present_devids.iter().copied().collect();
+        let still_relevant_devids: BTreeSet<_> = devids.recognized.iter().copied().collect();
         let ack_changed =
             alert::reconcile_acked_stats(&mut acked, &still_relevant_devids, &present_devids);
         if ack_changed {
@@ -110,14 +109,7 @@ pub fn cmd_monitor<R: CommandRunner, F: Filesystem + ?Sized>(
 
         // 7. Compute live alert state. Identity is the devid carried on each
         //    stats row by btrfs -- no path-to-devid map needed.
-        let live_causes = compute_alert_state(
-            &device_stats,
-            &acked,
-            &recognized_devids,
-            &alert_missing_devids,
-            smartd_active,
-        )
-        .causes;
+        let live_causes = compute_alert_state(&device_stats, &acked, &devids, smartd_active).causes;
 
         Ok(Some(live_causes))
     })();
@@ -167,6 +159,7 @@ mod tests {
         assert_monitor_single_computation_error, isolated_paths, monitor_fs_btrfs, monitor_fs_ext4,
         monitor_fs_mountinfo_error, monitor_fs_not_mounted, monitor_mp,
     };
+    use crate::types::Devid;
 
     fn acked_disk(missing_acked: bool, read_io_errs: u64) -> alert::AckedDisk {
         alert::AckedDisk {
@@ -642,7 +635,9 @@ mod tests {
     fn stats_failure_merges_existing_non_computation_latch_once() {
         let (_dir, paths) = isolated_paths();
         let existing = alert::AlertState {
-            causes: vec![AlertCause::MissingDevice { devid: 7 }],
+            causes: vec![AlertCause::MissingDevice {
+                devid: Devid::new(7),
+            }],
         };
         alert::save_alert_latch(&existing, &paths).unwrap();
         let runner = MonitorTestRunner::with_override(MonitorOverride::StatsResult(Err(
@@ -655,7 +650,7 @@ mod tests {
             state
                 .causes
                 .iter()
-                .filter(|cause| matches!(cause, AlertCause::MissingDevice { devid: 7 }))
+                .filter(|cause| matches!(cause, AlertCause::MissingDevice { devid } if *devid == Devid::new(7)))
                 .count(),
             1,
             "original MissingDevice cause must remain latched"
@@ -702,7 +697,9 @@ mod tests {
     fn healthy_cycle_carries_forward_existing_non_computation_latch() {
         let (_dir, paths) = isolated_paths();
         let existing = alert::AlertState {
-            causes: vec![AlertCause::MissingDevice { devid: 7 }],
+            causes: vec![AlertCause::MissingDevice {
+                devid: Devid::new(7),
+            }],
         };
         alert::save_alert_latch(&existing, &paths).unwrap();
 
@@ -716,7 +713,9 @@ mod tests {
         let state = alert_state(&result);
         assert_eq!(
             state.causes,
-            vec![AlertCause::MissingDevice { devid: 7 }],
+            vec![AlertCause::MissingDevice {
+                devid: Devid::new(7),
+            }],
             "healthy cycle must carry forward the latched cause unchanged"
         );
 

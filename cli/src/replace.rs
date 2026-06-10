@@ -127,8 +127,8 @@ pub enum ReplaceError {
     )]
     OldDevidMismatch {
         old_name: String,
-        pool_devid: u64,
-        supplied_devid: u64,
+        pool_devid: Devid,
+        supplied_devid: Devid,
     },
     /// Old member is being replaced via the missing path but the
     /// persisted membership row has no `devid`. Without a persisted
@@ -156,7 +156,7 @@ pub struct ReplaceParams<'a> {
     pub config: &'a Config,
     pub old_name: &'a str,
     pub new_name: &'a str,
-    pub missing_id: Option<u64>,
+    pub missing_id: Option<Devid>,
     pub dry_run: bool,
     pub yes: bool,
     pub passphrase_stdin: bool,
@@ -1118,7 +1118,7 @@ fn verify_existing_luks_new_target_preflight<R: CommandRunner>(
 /// counter. Pairing is by the btrfs-native devid row key, not by mapper
 /// path -- the row's path string can differ from the expected mapper path
 /// without changing which live btrfs device it describes.
-fn source_has_io_errors(stats: &crate::parse::types::BtrfsDeviceStatsOutput, devid: u64) -> bool {
+fn source_has_io_errors(stats: &crate::parse::types::BtrfsDeviceStatsOutput, devid: Devid) -> bool {
     stats.devices.iter().any(|d| {
         d.devid == devid
             && (d.read_io_errs > 0
@@ -1131,7 +1131,7 @@ fn source_has_io_errors(stats: &crate::parse::types::BtrfsDeviceStatsOutput, dev
 
 /// Shared source-health note body so dry-run stdout and real-run stderr render
 /// the same warning through `PreviewNote::Warn`'s owned `[warn]` prefix.
-fn format_source_io_error_warning(devid: u64) -> String {
+fn format_source_io_error_warning(devid: Devid) -> String {
     format!(
         "source device (devid {devid}) has I/O errors. \
          btrfs replace will read from mirrors where possible, \
@@ -1141,7 +1141,7 @@ fn format_source_io_error_warning(devid: u64) -> String {
 
 /// Shared source-health probe failure body for the non-blocking diagnostic
 /// path; replace must keep planning even when the stats probe is unavailable.
-fn format_source_io_probe_failure(devid: u64, err: &str) -> String {
+fn format_source_io_probe_failure(devid: Devid, err: &str) -> String {
     format!("could not probe source device (devid {devid}) for I/O errors: {err}")
 }
 
@@ -1657,9 +1657,9 @@ where
 #[derive(Debug, Clone)]
 pub enum ReplaceSource {
     /// Old disk is alive in the pool -- replace via `btrfs replace start`.
-    Live { mapper: MapperName, devid: u64 },
+    Live { mapper: MapperName, devid: Devid },
     /// Old disk is missing -- replace via `btrfs replace start` by devid.
-    Missing { devid: u64 },
+    Missing { devid: Devid },
 }
 
 struct ReplaceWorkPlanInput<'a> {
@@ -1829,7 +1829,7 @@ fn resolve_replace_source(
     old_name: &DiskName,
     old_uuid: &LuksUuid,
     old_member: &membership::DiskMember,
-    missing_id: Option<u64>,
+    missing_id: Option<Devid>,
     pool: &PoolState,
 ) -> Result<ReplaceSource, ReplaceError> {
     // Pattern 4: find by UUID, not by reconstructed mapper.
@@ -1871,7 +1871,7 @@ fn resolve_replace_source(
         }
     };
 
-    let null_underlying_refusal = |devid: u64| {
+    let null_underlying_refusal = |devid: Devid| {
         ReplaceError::Validation(format!(
             "devid {devid} is hot-unplugged but btrfs has not yet \
              promoted it to MISSING (LUKS mapper open, backing device \
@@ -2038,7 +2038,7 @@ fn replace_work_plan_test_pool(
         devices.push(PoolDevice {
             mapper: mapper_name(&test_name),
             luks_uuid: synth_test_uuid(next_devid),
-            devid: next_devid,
+            devid: Devid::new(next_devid),
             underlying: format!("/dev/test-{next_devid}"),
         });
         next_devid += 1;
@@ -2241,15 +2241,15 @@ mod tests {
         let stats = parse_btrfs_device_stats(&stats_raw).expect("parses");
 
         assert!(
-            source_has_io_errors(&stats, 1),
+            source_has_io_errors(&stats, Devid::new(1)),
             "devid 1 has read_io_errs=5; mismatched path must not hide it"
         );
         assert!(
-            !source_has_io_errors(&stats, 2),
+            !source_has_io_errors(&stats, Devid::new(2)),
             "devid 2 has zero counters; must not report errors"
         );
         assert!(
-            !source_has_io_errors(&stats, 99),
+            !source_has_io_errors(&stats, Devid::new(99)),
             "no row for devid 99; must not report errors"
         );
     }
@@ -2293,7 +2293,9 @@ mod tests {
             &ReplaceConfirmOld {
                 name: "old1",
                 hw: None,
-                source: &ReplaceSource::Missing { devid: 2 },
+                source: &ReplaceSource::Missing {
+                    devid: Devid::new(2),
+                },
             },
             &ReplaceConfirmNew {
                 name: "new1",
@@ -2323,7 +2325,9 @@ mod tests {
             &ReplaceConfirmOld {
                 name: "old1",
                 hw: None,
-                source: &ReplaceSource::Missing { devid: 2 },
+                source: &ReplaceSource::Missing {
+                    devid: Devid::new(2),
+                },
             },
             &ReplaceConfirmNew {
                 name: "new1",
@@ -2362,13 +2366,13 @@ mod tests {
                 PoolDevice {
                     mapper: MapperName("braid-disk1".into()),
                     luks_uuid: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
-                    devid: 1,
+                    devid: Devid::new(1),
                     underlying: "/dev/vda".into(),
                 },
                 PoolDevice {
                     mapper: MapperName("braid-disk2".into()),
                     luks_uuid: LuksUuid::parse("22222222-2222-2222-2222-222222222222").unwrap(),
-                    devid: 2,
+                    devid: Devid::new(2),
                     underlying: "/dev/vdb".into(),
                 },
             ],
@@ -2380,9 +2384,9 @@ mod tests {
         }
     }
 
-    fn null_underlying_device(devid: u64) -> NullUnderlyingDevice {
+    fn null_underlying_device(devid: Devid) -> NullUnderlyingDevice {
         NullUnderlyingDevice {
-            mapper: mapper_name(&disk_name(&format!("disk{devid}"))),
+            mapper: mapper_name(&disk_name(&format!("disk{}", devid.get()))),
             devid,
         }
     }
@@ -2401,7 +2405,7 @@ mod tests {
         let member = membership::DiskMember {
             name: disk_name("disk2"),
             by_id: ByIdPath::parse("/dev/disk/by-id/virtio-disk2").unwrap(),
-            devid: Some(2),
+            devid: Some(Devid::new(2)),
             added_at: None,
         };
         (uuid, member)
@@ -2428,8 +2432,14 @@ mod tests {
     fn live_old_with_missing_id_rejects() {
         let pool = two_device_pool();
         let (uuid, member) = disk2_member_for_two_device_pool();
-        let err = resolve_replace_source(&disk_name("disk2"), &uuid, &member, Some(99), &pool)
-            .unwrap_err();
+        let err = resolve_replace_source(
+            &disk_name("disk2"),
+            &uuid,
+            &member,
+            Some(Devid::new(99)),
+            &pool,
+        )
+        .unwrap_err();
         assert!(
             err.to_string().contains("--missing-id cannot be used"),
             "unexpected error: {err}"
@@ -2500,7 +2510,7 @@ mod tests {
         };
         let source = ReplaceSource::Live {
             mapper: MapperName("braid-disk2".into()),
-            devid: 2,
+            devid: Devid::new(2),
         };
         let steps = replace_work_plan_for_test(&ReplaceWorkPlanTestInput {
             new_name: "disk3",
@@ -2557,7 +2567,9 @@ mod tests {
             by_id_path: ByIdPath::parse("/dev/disk/by-id/virtio-disk3").unwrap(),
             state: PresentConfigDiskState::PresentNotLuks,
         };
-        let source = ReplaceSource::Missing { devid: 2 };
+        let source = ReplaceSource::Missing {
+            devid: Devid::new(2),
+        };
         let steps = replace_work_plan_for_test(&ReplaceWorkPlanTestInput {
             new_name: "disk3",
             new_by_id: &ByIdPath::parse("/dev/disk/by-id/virtio-disk3").unwrap(),
@@ -2623,7 +2635,7 @@ mod tests {
                 hw: Some(&old_hw),
                 source: &ReplaceSource::Live {
                     mapper: MapperName("braid-disk2".into()),
-                    devid: 2,
+                    devid: Devid::new(2),
                 },
             },
             &ReplaceConfirmNew {
@@ -2658,11 +2670,11 @@ mod tests {
         pool.devices.retain(|d| d.mapper.as_str() != "braid-disk2");
         pool.missing_count = 1;
         pool.total_devices = 2;
-        pool.missing_devids = vec![2];
+        pool.missing_devids = vec![Devid::new(2)];
         let (uuid, member) = disk2_member_for_two_device_pool();
         let result = resolve_replace_source(&disk_name("disk2"), &uuid, &member, None, &pool);
         assert!(
-            matches!(result, Ok(ReplaceSource::Missing { devid: 2 })),
+            matches!(result, Ok(ReplaceSource::Missing { devid }) if devid == Devid::new(2)),
             "expected Missing {{ devid: 2 }}, got: {result:?}"
         );
     }
@@ -2678,11 +2690,17 @@ mod tests {
         pool.devices.retain(|d| d.mapper.as_str() != "braid-disk2");
         pool.missing_count = 1;
         pool.total_devices = 2;
-        pool.missing_devids = vec![2];
+        pool.missing_devids = vec![Devid::new(2)];
         let (uuid, member) = disk2_member_for_two_device_pool();
-        let result = resolve_replace_source(&disk_name("disk2"), &uuid, &member, Some(2), &pool);
+        let result = resolve_replace_source(
+            &disk_name("disk2"),
+            &uuid,
+            &member,
+            Some(Devid::new(2)),
+            &pool,
+        );
         assert!(
-            matches!(result, Ok(ReplaceSource::Missing { devid: 2 })),
+            matches!(result, Ok(ReplaceSource::Missing { devid }) if devid == Devid::new(2)),
             "expected Missing {{ devid: 2 }}, got: {result:?}"
         );
     }
@@ -2702,17 +2720,17 @@ mod tests {
         pool.devices.retain(|d| d.mapper.as_str() != "braid-disk2");
         pool.missing_count = 2;
         pool.total_devices = 3;
-        pool.missing_devids = vec![2, 3];
+        pool.missing_devids = vec![Devid::new(2), Devid::new(3)];
         let uuid = LuksUuid::parse("33333333-3333-3333-3333-333333333333").unwrap();
         let member = membership::DiskMember {
             name: disk_name("disk3"),
             by_id: ByIdPath::parse("/dev/disk/by-id/virtio-disk3").unwrap(),
-            devid: Some(3),
+            devid: Some(Devid::new(3)),
             added_at: None,
         };
         let result = resolve_replace_source(&disk_name("disk3"), &uuid, &member, None, &pool);
         assert!(
-            matches!(result, Ok(ReplaceSource::Missing { devid: 3 })),
+            matches!(result, Ok(ReplaceSource::Missing { devid }) if devid == Devid::new(3)),
             "expected Missing {{ devid: 3 }} (persisted devid disambiguates the \
              two-element missing set), got: {result:?}"
         );
@@ -2731,11 +2749,18 @@ mod tests {
         pool.devices.retain(|d| d.mapper.as_str() != "braid-disk2");
         pool.missing_count = 1;
         pool.total_devices = 2;
-        pool.null_underlying.push(null_underlying_device(2));
+        pool.null_underlying
+            .push(null_underlying_device(Devid::new(2)));
         let (uuid, member) = disk2_member_for_two_device_pool();
 
-        let err = resolve_replace_source(&disk_name("disk2"), &uuid, &member, Some(2), &pool)
-            .unwrap_err();
+        let err = resolve_replace_source(
+            &disk_name("disk2"),
+            &uuid,
+            &member,
+            Some(Devid::new(2)),
+            &pool,
+        )
+        .unwrap_err();
 
         assert_eq!(
             err.to_string(),
@@ -2760,7 +2785,8 @@ mod tests {
         pool.devices.retain(|d| d.mapper.as_str() != "braid-disk2");
         pool.missing_count = 1;
         pool.total_devices = 2;
-        pool.null_underlying.push(null_underlying_device(2));
+        pool.null_underlying
+            .push(null_underlying_device(Devid::new(2)));
         let (uuid, member) = disk2_member_for_two_device_pool();
 
         let err =
@@ -2788,14 +2814,21 @@ mod tests {
         pool.devices.retain(|d| d.mapper.as_str() != "braid-disk2");
         pool.missing_count = 1;
         pool.total_devices = 2;
-        pool.missing_devids = vec![2];
-        pool.null_underlying.push(null_underlying_device(2));
+        pool.missing_devids = vec![Devid::new(2)];
+        pool.null_underlying
+            .push(null_underlying_device(Devid::new(2)));
         let (uuid, member) = disk2_member_for_two_device_pool();
 
-        let result = resolve_replace_source(&disk_name("disk2"), &uuid, &member, Some(2), &pool);
+        let result = resolve_replace_source(
+            &disk_name("disk2"),
+            &uuid,
+            &member,
+            Some(Devid::new(2)),
+            &pool,
+        );
 
         assert!(
-            matches!(result, Ok(ReplaceSource::Missing { devid: 2 })),
+            matches!(result, Ok(ReplaceSource::Missing { devid }) if devid == Devid::new(2)),
             "expected Missing {{ devid: 2 }}, got: {result:?}"
         );
     }
@@ -2818,11 +2851,17 @@ mod tests {
         let member = membership::DiskMember {
             name: disk_name("disk2"),
             by_id: ByIdPath::parse("/dev/disk/by-id/virtio-disk2").unwrap(),
-            devid: Some(1),
+            devid: Some(Devid::new(1)),
             added_at: None,
         };
-        let err = resolve_replace_source(&disk_name("disk2"), &uuid, &member, Some(1), &pool)
-            .unwrap_err();
+        let err = resolve_replace_source(
+            &disk_name("disk2"),
+            &uuid,
+            &member,
+            Some(Devid::new(1)),
+            &pool,
+        )
+        .unwrap_err();
         assert!(
             err.to_string().contains("live device"),
             "expected 'live device' error, got: {err}"
@@ -2843,8 +2882,14 @@ mod tests {
         pool.missing_count = 1;
         pool.total_devices = 2;
         let (uuid, member) = disk2_member_for_two_device_pool();
-        let err = resolve_replace_source(&disk_name("disk2"), &uuid, &member, Some(99), &pool)
-            .unwrap_err();
+        let err = resolve_replace_source(
+            &disk_name("disk2"),
+            &uuid,
+            &member,
+            Some(Devid::new(99)),
+            &pool,
+        )
+        .unwrap_err();
         let msg = err.to_string();
         assert!(
             !msg.contains("Some(2)"),
@@ -2866,8 +2911,8 @@ mod tests {
                 supplied_devid,
             } => {
                 assert_eq!(old_name, "disk2");
-                assert_eq!(pool_devid, 2);
-                assert_eq!(supplied_devid, 99);
+                assert_eq!(pool_devid, Devid::new(2));
+                assert_eq!(supplied_devid, Devid::new(99));
             }
             other => panic!("expected OldDevidMismatch, got: {other:?}"),
         }
@@ -2886,7 +2931,7 @@ mod tests {
         pool.devices.retain(|d| d.mapper.as_str() != "braid-disk2");
         pool.missing_count = 1;
         pool.total_devices = 2;
-        pool.missing_devids = vec![3];
+        pool.missing_devids = vec![Devid::new(3)];
         let (uuid, member) = disk2_member_for_two_device_pool();
         let err =
             resolve_replace_source(&disk_name("disk2"), &uuid, &member, None, &pool).unwrap_err();
@@ -2944,8 +2989,14 @@ mod tests {
             devid: None,
             added_at: None,
         };
-        let err = resolve_replace_source(&disk_name("disk2"), &uuid, &member, Some(2), &pool)
-            .unwrap_err();
+        let err = resolve_replace_source(
+            &disk_name("disk2"),
+            &uuid,
+            &member,
+            Some(Devid::new(2)),
+            &pool,
+        )
+        .unwrap_err();
         assert!(
             matches!(err, ReplaceError::OldMemberMissingDevid { .. }),
             "expected OldMemberMissingDevid, got: {err:?}"
@@ -3051,7 +3102,7 @@ mod tests {
     fn build_replace_journal_source_records_live_mapper() {
         let source = ReplaceSource::Live {
             mapper: MapperName("braid-disk2".into()),
-            devid: 2,
+            devid: Devid::new(2),
         };
 
         let journal_source = build_replace_journal_source(&source);
@@ -3059,7 +3110,7 @@ mod tests {
         assert_eq!(
             journal_source,
             journal::ReplaceJournalSource::Live {
-                old_devid: 2,
+                old_devid: Devid::new(2),
                 old_mapper: MapperName("braid-disk2".into()),
             }
         );
@@ -3072,13 +3123,17 @@ mod tests {
     // Scenario: replace plans by `--missing-id 2`.
     #[test]
     fn build_replace_journal_source_records_missing_devid() {
-        let source = ReplaceSource::Missing { devid: 2 };
+        let source = ReplaceSource::Missing {
+            devid: Devid::new(2),
+        };
 
         let journal_source = build_replace_journal_source(&source);
 
         assert_eq!(
             journal_source,
-            journal::ReplaceJournalSource::Missing { old_devid: 2 }
+            journal::ReplaceJournalSource::Missing {
+                old_devid: Devid::new(2),
+            }
         );
     }
 
@@ -3089,7 +3144,9 @@ mod tests {
     fn dry_run_missing_not_last_omits_rebalance() {
         let _config = make_replace_config();
         let new_probed = new_probed_not_luks();
-        let source = ReplaceSource::Missing { devid: 2 };
+        let source = ReplaceSource::Missing {
+            devid: Devid::new(2),
+        };
         let steps = replace_work_plan_for_test(&ReplaceWorkPlanTestInput {
             new_name: "disk3",
             new_by_id: &ByIdPath::parse("/dev/disk/by-id/virtio-disk3").unwrap(),
@@ -3119,7 +3176,9 @@ mod tests {
     fn dry_run_missing_single_device_omits_rebalance() {
         let _config = make_replace_config();
         let new_probed = new_probed_not_luks();
-        let source = ReplaceSource::Missing { devid: 2 };
+        let source = ReplaceSource::Missing {
+            devid: Devid::new(2),
+        };
         let steps = replace_work_plan_for_test(&ReplaceWorkPlanTestInput {
             new_name: "disk3",
             new_by_id: &ByIdPath::parse("/dev/disk/by-id/virtio-disk3").unwrap(),
@@ -3244,7 +3303,7 @@ mod tests {
         };
         let source = ReplaceSource::Live {
             mapper: MapperName("braid-disk2".into()),
-            devid: 2,
+            devid: Devid::new(2),
         };
         let plan = ReplacePlan {
             notes: vec![],
@@ -3332,13 +3391,13 @@ mod tests {
                 PoolDevice {
                     mapper: MapperName("braid-disk1".into()),
                     luks_uuid: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
-                    devid: 1,
+                    devid: Devid::new(1),
                     underlying: "/dev/vdb".into(),
                 },
                 PoolDevice {
                     mapper: MapperName("braid-disk2".into()),
                     luks_uuid: old_uuid.clone(),
-                    devid: 2,
+                    devid: Devid::new(2),
                     underlying: "/dev/vdc".into(),
                 },
             ],
@@ -3351,7 +3410,7 @@ mod tests {
 
         let replace_source = ReplaceSource::Live {
             mapper: MapperName("braid-disk2".into()),
-            devid: 2,
+            devid: Devid::new(2),
         };
         let member_verify_targets = build_member_verify_targets(
             &PoolMembership::empty(),
@@ -3967,7 +4026,9 @@ mod tests {
             .expect("cryptsetup close on braid-disk2 must be issued even when resize fails");
         let resize_idx = log
             .iter()
-            .position(|r| matches!(r, CmdRequest::BtrfsFilesystemResize { devid: 2, .. }))
+            .position(|r| {
+                matches!(r, CmdRequest::BtrfsFilesystemResize { devid, .. } if *devid == Devid::new(2))
+            })
             .expect("btrfs filesystem resize on devid 2 must be issued");
         assert!(
             close_idx < resize_idx,
@@ -4294,9 +4355,10 @@ mod tests {
         );
         // Execution continues past the skip -- maintenance still replays.
         assert!(
-            requests
-                .iter()
-                .any(|r| matches!(r, CmdRequest::BtrfsFilesystemResize { devid: 2, .. })),
+            requests.iter().any(|r| matches!(
+                r,
+                CmdRequest::BtrfsFilesystemResize { devid, .. } if *devid == Devid::new(2)
+            )),
             "resize must still replay after the foreign close skip: {requests:?}"
         );
         // Operator-facing warning names both UUIDs (emitted inside the probe helper).
@@ -4343,7 +4405,7 @@ mod tests {
             &f.replace_params()
                 .old("disk2")
                 .new_disk("disk3=/dev/disk/by-id/virtio-disk3")
-                .missing_id(Some(2))
+                .missing_id(Some(Devid::new(2)))
                 .build(),
         );
 
@@ -4371,7 +4433,7 @@ mod tests {
         let new_probed = new_probed_not_luks();
         let source = ReplaceSource::Live {
             mapper: MapperName("braid-disk2".into()),
-            devid: 2,
+            devid: Devid::new(2),
         };
         let steps = replace_work_plan_for_test(&ReplaceWorkPlanTestInput {
             new_name: "disk3",
@@ -4403,7 +4465,7 @@ mod tests {
         let new_probed = new_probed_not_luks();
         let source = ReplaceSource::Live {
             mapper: MapperName("braid-disk2".into()),
-            devid: 2,
+            devid: Devid::new(2),
         };
         let kf = Path::new("/mnt/usb/braid.key");
         let luks_format_extra_opts = vec![
@@ -4494,7 +4556,7 @@ mod tests {
         let new_probed = new_probed_not_luks();
         let source = ReplaceSource::Live {
             mapper: MapperName("braid-disk2".into()),
-            devid: 2,
+            devid: Devid::new(2),
         };
         let new_by_id = ByIdPath::parse("/dev/disk/by-id/virtio-disk3").unwrap();
         let mount_point = MountPoint("/mnt/storage".into());
@@ -4561,7 +4623,7 @@ mod tests {
         };
         let source = ReplaceSource::Live {
             mapper: MapperName("braid-disk2".into()),
-            devid: 2,
+            devid: Devid::new(2),
         };
         let kf = Path::new("/mnt/usb/braid.key");
         let (_tmp, paths) = test_paths();
@@ -4581,7 +4643,7 @@ mod tests {
             pool: replace_work_plan_test_pool(
                 &ReplaceSource::Live {
                     mapper: MapperName("braid-disk2".into()),
-                    devid: 2,
+                    devid: Devid::new(2),
                 },
                 &old_uuid,
                 false,
@@ -4658,7 +4720,9 @@ mod tests {
     //   soft-balance tail appears.
     fn dry_run_render_missing_path_ordering() {
         let new_probed = new_probed_not_luks();
-        let source = ReplaceSource::Missing { devid: 2 };
+        let source = ReplaceSource::Missing {
+            devid: Devid::new(2),
+        };
         let steps = replace_work_plan_for_test(&ReplaceWorkPlanTestInput {
             new_name: "disk3",
             new_by_id: &ByIdPath::parse("/dev/disk/by-id/virtio-disk3").unwrap(),
@@ -4787,13 +4851,13 @@ mod tests {
                 PoolDevice {
                     mapper: MapperName("braid-WRONG".into()),
                     luks_uuid: drifted_uuid.clone(),
-                    devid: 1,
+                    devid: Devid::new(1),
                     underlying: "/dev/vdb".into(),
                 },
                 PoolDevice {
                     mapper: MapperName("braid-disk2".into()),
                     luks_uuid: old_uuid.clone(),
-                    devid: 2,
+                    devid: Devid::new(2),
                     underlying: "/dev/vdc".into(),
                 },
             ],
@@ -4810,14 +4874,14 @@ mod tests {
                 membership::DiskMember {
                     name: disk_name("disk1"),
                     by_id: ByIdPath::parse("/dev/disk/by-id/virtio-disk1").unwrap(),
-                    devid: Some(1),
+                    devid: Some(Devid::new(1)),
                     added_at: None,
                 },
             )
             .unwrap();
         let replace_source = ReplaceSource::Live {
             mapper: MapperName("braid-disk2".into()),
-            devid: 2,
+            devid: Devid::new(2),
         };
         let member_verify_targets =
             build_member_verify_targets(&membership, &pool, &replace_source, &old_uuid);
@@ -5489,7 +5553,7 @@ mod tests {
             &f.replace_params()
                 .old("disk2")
                 .new_disk("disk3=/dev/disk/by-id/virtio-disk3")
-                .missing_id(Some(2))
+                .missing_id(Some(Devid::new(2)))
                 .build(),
         );
 
@@ -5510,11 +5574,15 @@ mod tests {
         let log = runner.requests();
         let replace_idx = log
             .iter()
-            .position(|r| matches!(r, CmdRequest::BtrfsReplaceStart { devid: 2, .. }))
+            .position(|r| {
+                matches!(r, CmdRequest::BtrfsReplaceStart { devid, .. } if *devid == Devid::new(2))
+            })
             .expect("btrfs replace start on devid 2 must be issued");
         let resize_idx = log
             .iter()
-            .position(|r| matches!(r, CmdRequest::BtrfsFilesystemResize { devid: 2, .. }))
+            .position(|r| {
+                matches!(r, CmdRequest::BtrfsFilesystemResize { devid, .. } if *devid == Devid::new(2))
+            })
             .expect("btrfs filesystem resize on devid 2 must be issued");
         let balance_idx = log
             .iter()
@@ -5629,7 +5697,7 @@ mod tests {
             &f.replace_params()
                 .old("disk2")
                 .new_disk("disk3=/dev/disk/by-id/virtio-disk3")
-                .missing_id(Some(2))
+                .missing_id(Some(Devid::new(2)))
                 .enroll_key_file(Some(kf_path.as_path()))
                 .luks_format_extra_opts(&luks_format_extra_opts)
                 .build(),
@@ -5742,7 +5810,7 @@ mod tests {
             &f.replace_params()
                 .old("disk2")
                 .new_disk("disk3=/dev/disk/by-id/virtio-disk3")
-                .missing_id(Some(2))
+                .missing_id(Some(Devid::new(2)))
                 .build(),
         )
         .expect_err("post-format header-backup failure should abort replace")
@@ -5819,7 +5887,7 @@ mod tests {
             &f.replace_params()
                 .old("disk2")
                 .new_disk("disk3=/dev/disk/by-id/virtio-disk3")
-                .missing_id(Some(2))
+                .missing_id(Some(Devid::new(2)))
                 .build(),
         );
 
@@ -6108,7 +6176,7 @@ mod tests {
             &f.replace_params()
                 .old("disk2")
                 .new_disk("disk3=/dev/disk/by-id/virtio-disk3")
-                .missing_id(Some(2))
+                .missing_id(Some(Devid::new(2)))
                 .dry_run(true)
                 .build(),
         )
@@ -6174,13 +6242,13 @@ mod tests {
         let member_r = membership::DiskMember {
             name: disk_name("misleading-label"),
             by_id: ByIdPath::parse("/dev/disk/by-id/right").unwrap(),
-            devid: Some(2),
+            devid: Some(Devid::new(2)),
             added_at: None,
         };
         let member_d = membership::DiskMember {
             name: disk_name("decoy"),
             by_id: ByIdPath::parse("/dev/disk/by-id/misleading-label").unwrap(),
-            devid: Some(99),
+            devid: Some(Devid::new(99)),
             added_at: None,
         };
         let pre = membership_from(vec![(u_r, member_r), (u_d, member_d)]);
@@ -6219,7 +6287,7 @@ mod tests {
         )
         .expect("missing-path decoy fixture should plan");
         match &plan.work_plan.replace_source {
-            ReplaceSource::Missing { devid } => assert_eq!(*devid, 2),
+            ReplaceSource::Missing { devid } => assert_eq!(*devid, Devid::new(2)),
             other => panic!("expected Missing {{ devid: 2 }}, got: {other:?}"),
         }
 
@@ -6313,7 +6381,7 @@ mod tests {
                 _ => None,
             });
         let dev_info = crate::btrfs_ioctl::tests_support::MockBtrfsDevInfo::default()
-            .with_total_bytes("/mnt/storage", 2, 520_093_697);
+            .with_total_bytes("/mnt/storage", Devid::new(2), 520_093_697);
 
         let failure = match super::plan_replace(
             &runner,
@@ -6364,7 +6432,7 @@ mod tests {
         let runner =
             ReplacementPool::two_disk_healthy().install(MockRunner::default(), replace_done);
         let dev_info = crate::btrfs_ioctl::tests_support::MockBtrfsDevInfo::default()
-            .with_total_bytes("/mnt/storage", 2, 520_093_697);
+            .with_total_bytes("/mnt/storage", Devid::new(2), 520_093_697);
 
         let failure = match super::plan_replace(
             &runner,
@@ -6408,13 +6476,16 @@ mod tests {
         let runner =
             ReplacementPool::one_live_one_missing().install(MockRunner::default(), replace_done);
         let dev_info = crate::btrfs_ioctl::tests_support::MockBtrfsDevInfo::default()
-            .with_total_bytes("/mnt/storage", 2, 520_093_697);
+            .with_total_bytes("/mnt/storage", Devid::new(2), 520_093_697);
 
         let failure = match super::plan_replace(
             &runner,
             &fs,
             &dev_info,
-            &f.replace_params().missing_id(Some(2)).dry_run(true).build(),
+            &f.replace_params()
+                .missing_id(Some(Devid::new(2)))
+                .dry_run(true)
+                .build(),
         ) {
             Ok(_) => panic!("undersized target for missing source should fail planning"),
             Err(failure) => failure,
@@ -7099,7 +7170,7 @@ mod tests {
             })
             .collect();
         assert_eq!(warns.len(), 1, "expected one Warn note, got {warns:?}");
-        assert_eq!(warns[0], &format_source_io_error_warning(2));
+        assert_eq!(warns[0], &format_source_io_error_warning(Devid::new(2)));
 
         let rendered = plan.preview().render();
         assert!(
@@ -7218,7 +7289,7 @@ mod tests {
             &f.replace_params()
                 .old("disk2")
                 .new_disk("disk3=/dev/disk/by-id/virtio-disk3")
-                .missing_id(Some(2))
+                .missing_id(Some(Devid::new(2)))
                 .dry_run(true)
                 .build(),
         )
@@ -7272,7 +7343,9 @@ mod tests {
 
         assert!(result.is_err(), "forced replace-start failure must surface");
         assert_eq!(
-            stderr.matches(&format_source_io_error_warning(2)).count(),
+            stderr
+                .matches(&format_source_io_error_warning(Devid::new(2)))
+                .count(),
             1,
             "real-run stderr must render source I/O warning exactly once, got:\n{stderr}"
         );
@@ -7380,13 +7453,13 @@ mod tests {
         let member_r = membership::DiskMember {
             name: disk_name("misleading-label"),
             by_id: ByIdPath::parse("/dev/disk/by-id/right").unwrap(),
-            devid: Some(2),
+            devid: Some(Devid::new(2)),
             added_at: None,
         };
         let member_d = membership::DiskMember {
             name: disk_name("decoy"),
             by_id: ByIdPath::parse("/dev/disk/by-id/misleading-label").unwrap(),
-            devid: Some(99),
+            devid: Some(Devid::new(99)),
             added_at: None,
         };
         let pre = membership_from(vec![(u_r.clone(), member_r), (u_d.clone(), member_d)]);
@@ -7399,11 +7472,11 @@ mod tests {
             devices: vec![PoolDevice {
                 mapper: MapperName("braid-keeper".into()),
                 luks_uuid: LuksUuid::parse("cccccccc-cccc-cccc-cccc-cccccccc0602").unwrap(),
-                devid: 1,
+                devid: Devid::new(1),
                 underlying: "/dev/vda".into(),
             }],
             missing_count: 1,
-            missing_devids: vec![2],
+            missing_devids: vec![Devid::new(2)],
             total_devices: 2,
             fsid: None,
             null_underlying: vec![],
@@ -7418,14 +7491,14 @@ mod tests {
         );
         assert_eq!(
             resolved_member.devid,
-            Some(2),
+            Some(Devid::new(2)),
             "U_R's persisted devid must be 2 (the missing devid)"
         );
         let source =
             resolve_replace_source(&target_name, resolved_uuid, resolved_member, None, &pool)
                 .expect("missing-path resolution must succeed for U_R");
         match source {
-            ReplaceSource::Missing { devid } => assert_eq!(devid, 2),
+            ReplaceSource::Missing { devid } => assert_eq!(devid, Devid::new(2)),
             other => panic!("expected ReplaceSource::Missing {{ devid: 2 }}, got {other:?}"),
         }
         // Build target_membership the way plan_replace does and assert
@@ -7485,7 +7558,7 @@ mod tests {
         let member = membership::DiskMember {
             name: disk_name("right"),
             by_id: ByIdPath::parse("/dev/disk/by-id/virtio-right").unwrap(),
-            devid: Some(7),
+            devid: Some(Devid::new(7)),
             added_at: None,
         };
         let pool = PoolState {
@@ -7493,7 +7566,7 @@ mod tests {
             devices: vec![PoolDevice {
                 mapper: MapperName("braid-WRONG".into()),
                 luks_uuid: u_old.clone(),
-                devid: 7,
+                devid: Devid::new(7),
                 underlying: "/dev/vdz".into(),
             }],
             missing_count: 0,
@@ -7511,7 +7584,7 @@ mod tests {
                     "braid-WRONG",
                     "observed mapper must be cloned, not reconstructed"
                 );
-                assert_eq!(devid, 7);
+                assert_eq!(devid, Devid::new(7));
             }
             other => panic!("expected ReplaceSource::Live, got {other:?}"),
         }
@@ -7521,7 +7594,7 @@ mod tests {
         assert_eq!(
             journal_source,
             journal::ReplaceJournalSource::Live {
-                old_devid: 7,
+                old_devid: Devid::new(7),
                 old_mapper: MapperName("braid-WRONG".into()),
             }
         );
@@ -7957,7 +8030,7 @@ mod tests {
         let member = membership::DiskMember {
             name: disk_name("clash"),
             by_id: ByIdPath::parse("/dev/disk/by-id/clash").unwrap(),
-            devid: Some(9),
+            devid: Some(Devid::new(9)),
             added_at: None,
         };
         let pre = membership_from(vec![
@@ -7966,7 +8039,7 @@ mod tests {
                 membership::DiskMember {
                     name: disk_name("oldname"),
                     by_id: ByIdPath::parse("/dev/disk/by-id/old").unwrap(),
-                    devid: Some(7),
+                    devid: Some(Devid::new(7)),
                     added_at: None,
                 },
             ),
@@ -8014,7 +8087,7 @@ mod tests {
             membership::DiskMember {
                 name: disk_name("oldname"),
                 by_id: ByIdPath::parse("/dev/disk/by-id/old").unwrap(),
-                devid: Some(11),
+                devid: Some(Devid::new(11)),
                 added_at: None,
             },
         )]);
@@ -8023,7 +8096,7 @@ mod tests {
             devices: vec![PoolDevice {
                 mapper: MapperName("braid-foreign".into()),
                 luks_uuid: colliding.clone(),
-                devid: 22,
+                devid: Devid::new(22),
                 underlying: "/dev/foreign".into(),
             }],
             missing_count: 0,
@@ -8062,7 +8135,7 @@ mod tests {
             membership::DiskMember {
                 name: disk_name("oldname"),
                 by_id: ByIdPath::parse("/dev/disk/by-id/old").unwrap(),
-                devid: Some(11),
+                devid: Some(Devid::new(11)),
                 added_at: None,
             },
         )]);

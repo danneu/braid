@@ -5,6 +5,7 @@ use nom::{
 };
 
 use crate::cmd::RawCommandOutput;
+use crate::types::Devid;
 
 use super::ParseError;
 use super::types::{BtrfsDeviceUsageEntry, BtrfsDeviceUsageOutput, DeviceAllocation};
@@ -140,7 +141,7 @@ fn finalize_device(cmd: &str, dev: PartialDevice) -> Result<BtrfsDeviceUsageEntr
 
     Ok(BtrfsDeviceUsageEntry {
         path: dev.path,
-        devid: dev.devid,
+        devid: Devid::new(dev.devid),
         device_size,
         device_slack,
         allocations: dev.allocations,
@@ -181,13 +182,13 @@ mod tests {
             "devid 1 path should be dm or mapper, got: {}",
             out.devices[0].path
         );
-        assert_eq!(out.devices[0].devid, 1);
+        assert_eq!(out.devices[0].devid, Devid::new(1));
         assert!(
             is_dm_or_mapper_path(&out.devices[1].path),
             "devid 2 path should be dm or mapper, got: {}",
             out.devices[1].path
         );
-        assert_eq!(out.devices[1].devid, 2);
+        assert_eq!(out.devices[1].devid, Devid::new(2));
         assert!(out.devices[0].device_size > 0);
         assert!(out.devices[0].unallocated > 0);
     }
@@ -212,7 +213,7 @@ mod tests {
         let out = parse_btrfs_device_usage(&raw).unwrap();
         assert_eq!(out.devices.len(), 1);
         assert_eq!(out.devices[0].path, "/dev/mapper/braid-vda");
-        assert_eq!(out.devices[0].devid, 1);
+        assert_eq!(out.devices[0].devid, Devid::new(1));
         assert_eq!(out.devices[0].device_size, 536870912);
         assert_eq!(out.devices[0].device_slack, 0);
         assert_eq!(out.devices[0].unallocated, 398458880);
@@ -260,7 +261,7 @@ mod tests {
         assert_eq!(out.devices.len(), 2);
         let missing = &out.devices[1];
         assert_eq!(missing.path, "<missing disk>");
-        assert_eq!(missing.devid, 3);
+        assert_eq!(missing.devid, Devid::new(3));
         assert_eq!(missing.device_size, 0);
         assert_eq!(missing.device_slack, 0);
         assert_eq!(missing.unallocated, 1_234_567);
@@ -340,7 +341,7 @@ mod tests {
     fn device_usage_used_bytes_helper() {
         let entry = BtrfsDeviceUsageEntry {
             path: "/dev/mapper/test".into(),
-            devid: 1,
+            devid: Devid::new(1),
             device_size: 1000,
             device_slack: 0,
             allocations: vec![
@@ -369,7 +370,7 @@ mod tests {
     fn device_usage_used_bytes_empty() {
         let entry = BtrfsDeviceUsageEntry {
             path: "/dev/mapper/test".into(),
-            devid: 1,
+            devid: Devid::new(1),
             device_size: 1000,
             device_slack: 0,
             allocations: vec![],

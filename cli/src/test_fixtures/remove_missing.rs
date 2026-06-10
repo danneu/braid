@@ -17,6 +17,7 @@ use crate::membership::{self, PoolMembership};
 use crate::progress::{self, ProgressOutput};
 use crate::remove_missing::RemoveMissingParams;
 use crate::state_paths::StatePaths;
+use crate::types::Devid;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -194,7 +195,7 @@ impl PoolFixture {
                 seed,
                 name,
                 &format!("/dev/disk/by-id/virtio-{name}"),
-                Some(devid),
+                Some(Devid::new(devid)),
                 None,
             );
             m.insert(uuid, member).expect("fixture insert");
@@ -223,7 +224,7 @@ impl PoolFixture {
                 seed,
                 name,
                 &format!("/dev/disk/by-id/virtio-{name}"),
-                Some(devid),
+                Some(Devid::new(devid)),
                 None,
             );
             m.insert(uuid, member).expect("fixture insert");
@@ -246,7 +247,7 @@ impl PoolFixture {
     pub(crate) fn remove_missing_params(&self) -> RemoveMissingParamsBuilder<'_> {
         RemoveMissingParamsBuilder {
             config: &self.config,
-            missing_id: 3,
+            missing_id: Devid::new(3),
             dry_run: false,
             yes: true,
             progress: ProgressOutput::Off,
@@ -264,7 +265,7 @@ impl PoolFixture {
 /// dry-run, yes, progress, sleeper).
 pub(crate) struct RemoveMissingParamsBuilder<'a> {
     config: &'a Config,
-    missing_id: u64,
+    missing_id: Devid,
     dry_run: bool,
     yes: bool,
     progress: ProgressOutput,
@@ -275,7 +276,7 @@ pub(crate) struct RemoveMissingParamsBuilder<'a> {
 }
 
 impl<'a> RemoveMissingParamsBuilder<'a> {
-    pub(crate) fn missing_id(mut self, id: u64) -> Self {
+    pub(crate) fn missing_id(mut self, id: Devid) -> Self {
         self.missing_id = id;
         self
     }

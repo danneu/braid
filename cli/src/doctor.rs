@@ -1957,7 +1957,7 @@ mod tests {
         test_uuid, unlock_btrfs_balance_status_idle, unlock_btrfs_balance_status_paused,
         unlock_btrfs_balance_status_paused_skip_balance, ups_ctx, valid_config_json, write_temp,
     };
-    use crate::types::MountPoint;
+    use crate::types::{Devid, MountPoint};
 
     fn find_check<'a>(report: &'a DoctorReport, name: &str) -> &'a CheckResult {
         report
@@ -2023,7 +2023,10 @@ mod tests {
         exit_status: i32,
     ) -> (tempfile::TempDir, StatePaths, MockRunner, Vec<CheckResult>) {
         let (dir, paths) = isolated_paths();
-        save_doctor_membership(&paths, &[(1, "disk1", "/dev/disk/by-id/disk1", Some(1))]);
+        save_doctor_membership(
+            &paths,
+            &[(1, "disk1", "/dev/disk/by-id/disk1", Some(Devid::new(1)))],
+        );
         let runner = MockRunner::default().with_output(
             CmdRequest::SmartctlSelftestLogJson {
                 device: "/dev/disk/by-id/disk1".to_owned(),
@@ -2054,7 +2057,7 @@ mod tests {
         &results[0]
     }
 
-    fn save_doctor_membership(paths: &StatePaths, entries: &[(u64, &str, &str, Option<u64>)]) {
+    fn save_doctor_membership(paths: &StatePaths, entries: &[(u64, &str, &str, Option<Devid>)]) {
         let mut m = membership::PoolMembership::empty();
         for (seed, name, by_id, devid) in entries {
             let (uuid, member) = disk_member_with(*seed, name, by_id, *devid, None);
@@ -2183,7 +2186,10 @@ mod tests {
     #[test]
     fn check_smart_selftest_runner_spawn_failure_skips() {
         let (dir, paths) = isolated_paths();
-        save_doctor_membership(&paths, &[(1, "disk1", "/dev/disk/by-id/disk1", Some(1))]);
+        save_doctor_membership(
+            &paths,
+            &[(1, "disk1", "/dev/disk/by-id/disk1", Some(Devid::new(1)))],
+        );
         let runner = MockRunner::default().with_handler(|request| match request {
             CmdRequest::SmartctlSelftestLogJson { .. } => {
                 Some(Err(CmdError::Failed("smartctl: not found".into())))
@@ -2490,9 +2496,9 @@ mod tests {
         save_doctor_membership(
             &paths,
             &[
-                (1, "disk1", "/dev/disk/by-id/disk1", Some(1)),
-                (2, "disk2", "/dev/disk/by-id/disk2", Some(2)),
-                (3, "disk3", "/dev/disk/by-id/disk3", Some(3)),
+                (1, "disk1", "/dev/disk/by-id/disk1", Some(Devid::new(1))),
+                (2, "disk2", "/dev/disk/by-id/disk2", Some(Devid::new(2))),
+                (3, "disk3", "/dev/disk/by-id/disk3", Some(Devid::new(3))),
             ],
         );
         let runner = smart_selftest_runner_for(&[
@@ -2533,9 +2539,9 @@ mod tests {
         save_doctor_membership(
             &paths,
             &[
-                (3, "zeta", "/dev/disk/by-id/zeta", Some(3)),
-                (1, "alpha", "/dev/disk/by-id/alpha", Some(1)),
-                (2, "middle", "/dev/disk/by-id/middle", Some(2)),
+                (3, "zeta", "/dev/disk/by-id/zeta", Some(Devid::new(3))),
+                (1, "alpha", "/dev/disk/by-id/alpha", Some(Devid::new(1))),
+                (2, "middle", "/dev/disk/by-id/middle", Some(Devid::new(2))),
             ],
         );
         let runner = smart_selftest_runner_for(&[
@@ -2575,9 +2581,9 @@ mod tests {
         save_doctor_membership(
             &paths,
             &[
-                (1, "disk1", "/dev/disk/by-id/disk1", Some(1)),
-                (2, "disk2", "/dev/disk/by-id/disk2", Some(2)),
-                (3, "disk3", "/dev/disk/by-id/disk3", Some(3)),
+                (1, "disk1", "/dev/disk/by-id/disk1", Some(Devid::new(1))),
+                (2, "disk2", "/dev/disk/by-id/disk2", Some(Devid::new(2))),
+                (3, "disk3", "/dev/disk/by-id/disk3", Some(Devid::new(3))),
             ],
         );
         let runner = smart_selftest_runner_for(&[
@@ -2684,7 +2690,10 @@ mod tests {
     #[test]
     fn check_smart_selftest_present_member_queries_live_underlying() {
         let (dir, paths) = isolated_paths();
-        save_doctor_membership(&paths, &[(1, "disk1", "/dev/disk/by-id/disk1", Some(1))]);
+        save_doctor_membership(
+            &paths,
+            &[(1, "disk1", "/dev/disk/by-id/disk1", Some(Devid::new(1)))],
+        );
         let (live_req, live_out) =
             smartctl_selftest_json("/dev/vdb", "smartctl-selftest-ata-recent-pass.json", 0);
         let (by_id_req, by_id_out) = smartctl_selftest_json(
@@ -2720,7 +2729,10 @@ mod tests {
     #[test]
     fn check_smart_selftest_present_member_warn_hint_uses_by_id() {
         let (dir, paths) = isolated_paths();
-        save_doctor_membership(&paths, &[(1, "disk1", "/dev/disk/by-id/disk1", Some(1))]);
+        save_doctor_membership(
+            &paths,
+            &[(1, "disk1", "/dev/disk/by-id/disk1", Some(Devid::new(1)))],
+        );
         let (live_req, live_out) =
             smartctl_selftest_json("/dev/vdb", "smartctl-selftest-ata-stale.json", 0);
         let (by_id_req, by_id_out) = smartctl_selftest_json(
@@ -4151,8 +4163,11 @@ mod tests {
     #[test]
     fn data_profile_mismatch_recommends_replace_when_degraded() {
         let (df_req, df_out) = df_json(DF_MIXED);
-        let runner = pool_state_runner(vec![("braid-disk1", 1, "/dev/vdb", test_uuid(1))], &[2])
-            .with_output(df_req, df_out);
+        let runner = pool_state_runner(
+            vec![("braid-disk1", 1, "/dev/vdb", test_uuid(1))],
+            &[Devid::new(2)],
+        )
+        .with_output(df_req, df_out);
         let fs = DoctorMockFs::mounted_btrfs_only();
         let f = write_temp(valid_config_json());
         let report = run_doctor(f.path(), &runner, &fs, &isolated_paths().1, human_options());
@@ -4652,8 +4667,11 @@ mod tests {
     #[test]
     fn metadata_profile_mismatch_recommends_replace_when_degraded() {
         let (df_req, df_out) = df_json(DF_MIXED_METADATA);
-        let runner = pool_state_runner(vec![("braid-disk1", 1, "/dev/vdb", test_uuid(1))], &[2])
-            .with_output(df_req, df_out);
+        let runner = pool_state_runner(
+            vec![("braid-disk1", 1, "/dev/vdb", test_uuid(1))],
+            &[Devid::new(2)],
+        )
+        .with_output(df_req, df_out);
         let fs = DoctorMockFs::mounted_btrfs_only();
         let f = write_temp(valid_config_json());
         let report = run_doctor(f.path(), &runner, &fs, &isolated_paths().1, human_options());
@@ -4834,8 +4852,11 @@ mod tests {
             ]
         }"#;
         let (df_req, df_out) = df_json(mixed_system);
-        let runner = pool_state_runner(vec![("braid-disk1", 1, "/dev/vdb", test_uuid(1))], &[2])
-            .with_output(df_req, df_out);
+        let runner = pool_state_runner(
+            vec![("braid-disk1", 1, "/dev/vdb", test_uuid(1))],
+            &[Devid::new(2)],
+        )
+        .with_output(df_req, df_out);
         let fs = DoctorMockFs::mounted_btrfs_only();
         let f = write_temp(valid_config_json());
         let report = run_doctor(f.path(), &runner, &fs, &isolated_paths().1, human_options());
@@ -4963,7 +4984,10 @@ mod tests {
     // Scenario: btrfs reports one MISSING devid in a two-device pool.
     #[test]
     fn enospc_risk_degraded_pool_skips() {
-        let runner = pool_state_runner(vec![("braid-disk1", 1, "/dev/vdb", test_uuid(1))], &[2]);
+        let runner = pool_state_runner(
+            vec![("braid-disk1", 1, "/dev/vdb", test_uuid(1))],
+            &[Devid::new(2)],
+        );
         let (_dir, paths) = isolated_paths();
         let fs = DoctorMockFs::mounted_btrfs_only();
         let mut ctx =
@@ -4995,7 +5019,7 @@ mod tests {
         df: &str,
         usage: impl AsRef<str>,
         present: Vec<(&'static str, u64, &'static str, LuksUuid)>,
-        missing_devids: &[u64],
+        missing_devids: &[Devid],
     ) -> CheckResult {
         let usage = usage.as_ref();
         let (df_req, df_out) = df_json(df);
@@ -5183,7 +5207,7 @@ mod tests {
             DF_METADATA_78_USED,
             device_usage_two_tight(),
             vec![("braid-disk1", 1, "/dev/vdb", test_uuid(1))],
-            &[2],
+            &[Devid::new(2)],
         );
 
         assert_eq!(check.status, CheckStatus::Skip);
@@ -5240,7 +5264,7 @@ mod tests {
                 missing_count: 1,
                 total_devices: 2,
                 fsid: None,
-                missing_devids: vec![2],
+                missing_devids: vec![Devid::new(2)],
                 null_underlying: vec![],
             }),
         );
@@ -5485,7 +5509,10 @@ mod tests {
     // Scenario: one drive died in a 2-disk NAS.
     #[test]
     fn pool_missing_devices_warns_with_replace_recommendation() {
-        let runner = pool_state_runner(vec![("braid-disk1", 1, "/dev/vdb", test_uuid(1))], &[2]);
+        let runner = pool_state_runner(
+            vec![("braid-disk1", 1, "/dev/vdb", test_uuid(1))],
+            &[Devid::new(2)],
+        );
         let fs = DoctorMockFs::mounted_btrfs_only();
         let f = write_temp(valid_config_json());
         let report = run_doctor(f.path(), &runner, &fs, &isolated_paths().1, human_options());
@@ -5528,7 +5555,10 @@ mod tests {
     // replace one by name while optionally checking against the listed devids.
     #[test]
     fn pool_missing_devices_plural_warns_with_single_replace_command() {
-        let runner = pool_state_runner(vec![("braid-disk1", 1, "/dev/vdb", test_uuid(1))], &[2, 3]);
+        let runner = pool_state_runner(
+            vec![("braid-disk1", 1, "/dev/vdb", test_uuid(1))],
+            &[Devid::new(2), Devid::new(3)],
+        );
         let fs = DoctorMockFs::mounted_btrfs_only();
         let f = write_temp(valid_config_json());
         let report = run_doctor(f.path(), &runner, &fs, &isolated_paths().1, human_options());
@@ -5604,7 +5634,12 @@ mod tests {
         let (_dir, paths) = isolated_paths();
         save_doctor_membership(
             &paths,
-            &[(170, "disk1", "/dev/disk/by-id/virtio-disk1", Some(1))],
+            &[(
+                170,
+                "disk1",
+                "/dev/disk/by-id/virtio-disk1",
+                Some(Devid::new(1)),
+            )],
         );
         let known_uuid = test_uuid(170);
         let foreign_uuid = test_uuid(171);
@@ -5676,7 +5711,12 @@ mod tests {
         let (_dir, paths) = isolated_paths();
         save_doctor_membership(
             &paths,
-            &[(180, "disk1", "/dev/disk/by-id/virtio-disk1", Some(1))],
+            &[(
+                180,
+                "disk1",
+                "/dev/disk/by-id/virtio-disk1",
+                Some(Devid::new(1)),
+            )],
         );
         let known_uuid = test_uuid(180);
         let stranger_uuid = test_uuid(181);
@@ -5747,7 +5787,12 @@ mod tests {
         let (_dir, paths) = isolated_paths();
         save_doctor_membership(
             &paths,
-            &[(172, "disk1", "/dev/disk/by-id/virtio-disk1", Some(1))],
+            &[(
+                172,
+                "disk1",
+                "/dev/disk/by-id/virtio-disk1",
+                Some(Devid::new(1)),
+            )],
         );
         let known_uuid = test_uuid(172);
         let runner = pool_state_runner(vec![("braid-disk1", 1, "/dev/vdb", known_uuid)], &[]);

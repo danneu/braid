@@ -89,12 +89,11 @@ fn cmd_ack_impl<R: CommandRunner, F: Filesystem + ?Sized>(
     let device_stats = parse_btrfs_device_stats(&stats_raw)?;
 
     // 4. Compute alert-local membership views.
-    let alert_missing_devids = pool.alert_missing_devids();
-    let recognized_devids = pool.recognized_devids();
+    let devids = pool.alert_devids();
 
     // 5. Snapshot current state. Identity is the devid carried on each
     //    stats row by btrfs -- no path-to-devid map needed.
-    let new_acked = snapshot_current(&device_stats, &recognized_devids, &alert_missing_devids);
+    let new_acked = snapshot_current(&device_stats, &devids);
     save_acked_stats(&new_acked, paths).map_err(AckError::Io)?;
 
     if let Err(e) = cleanup_alert_files_and_beeper(paths, stop_beeper, remove_smartd) {
@@ -147,7 +146,7 @@ fn ack_offline(
     // only SmartdAlert / ComputationError causes does not need ack-state
     // updates, and coupling them would let an unrelated corrupt acked-stats
     // file fail an otherwise-fine offline ack.
-    let missing_devids: Vec<u64> = causes
+    let missing_devids: Vec<_> = causes
         .iter()
         .filter_map(|c| match c {
             AlertCause::MissingDevice { devid } => Some(*devid),
@@ -306,6 +305,7 @@ mod tests {
         ack_offline_fs_that_touches_smartd, ack_write_latch, isolated_paths, monitor_fs_btrfs,
         monitor_mp,
     };
+    use crate::types::Devid;
     use std::collections::BTreeMap;
     #[cfg(unix)]
     use std::os::unix::process::ExitStatusExt;
@@ -412,7 +412,12 @@ mod tests {
     #[test]
     fn cmd_ack_does_not_persist_unrecognized_devid_in_acked_stats() {
         let (_dir, paths) = isolated_paths();
-        ack_write_latch(&paths, vec![AlertCause::MissingDevice { devid: 7 }]);
+        ack_write_latch(
+            &paths,
+            vec![AlertCause::MissingDevice {
+                devid: Devid::new(7),
+            }],
+        );
         let runner = ack_mounted_probe_runner_with_stale_devid_stats();
         let beeper = || {};
 
@@ -482,7 +487,9 @@ mod tests {
         match first {
             MonitorResult::Alert(s) => assert_eq!(
                 s.causes,
-                vec![AlertCause::BtrfsDeviceErrors { devid: 1 }],
+                vec![AlertCause::BtrfsDeviceErrors {
+                    devid: Devid::new(1)
+                }],
                 "monitor must latch exactly the devid-1 btrfs error"
             ),
             other => panic!("expected Alert, got {other:?}"),
@@ -534,8 +541,9 @@ mod tests {
         let third = cmd_monitor(&runner_higher, &fs, &mp, &paths);
         match third {
             MonitorResult::Alert(s) => assert!(
-                s.causes
-                    .contains(&AlertCause::BtrfsDeviceErrors { devid: 1 }),
+                s.causes.contains(&AlertCause::BtrfsDeviceErrors {
+                    devid: Devid::new(1)
+                }),
                 "errors above the baseline must re-fire, got {:?}",
                 s.causes
             ),
@@ -666,7 +674,12 @@ mod tests {
     #[test]
     fn cmd_ack_mounted_with_btrfs_errors_preserves_mid_probe_smartd_flag() {
         let (_dir, paths) = isolated_paths();
-        ack_write_latch(&paths, vec![AlertCause::BtrfsDeviceErrors { devid: 1 }]);
+        ack_write_latch(
+            &paths,
+            vec![AlertCause::BtrfsDeviceErrors {
+                devid: Devid::new(1),
+            }],
+        );
         let fs = ack_mounted_fs_that_touches_smartd(&paths);
         let runner = ack_mounted_probe_runner_with_device_stats();
 
@@ -697,7 +710,12 @@ mod tests {
     #[test]
     fn ack_offline_with_missing_device_preserves_mid_probe_smartd_flag() {
         let (_dir, paths) = isolated_paths();
-        ack_write_latch(&paths, vec![AlertCause::MissingDevice { devid: 2 }]);
+        ack_write_latch(
+            &paths,
+            vec![AlertCause::MissingDevice {
+                devid: Devid::new(2),
+            }],
+        );
         let fs = ack_offline_fs_that_touches_smartd(&paths);
 
         let result = cmd_ack_impl(&AckPanicRunner, &fs, &ack_mp(), &paths, &ack_noop_beeper);
@@ -852,7 +870,12 @@ mod tests {
     #[test]
     fn cmd_ack_returns_cleanup_failed_when_corrupt_latch_cleanup_errors_after_baseline_saved() {
         let (_dir, paths) = isolated_paths();
-        ack_write_latch(&paths, vec![AlertCause::BtrfsDeviceErrors { devid: 1 }]);
+        ack_write_latch(
+            &paths,
+            vec![AlertCause::BtrfsDeviceErrors {
+                devid: Devid::new(1),
+            }],
+        );
         // remove_file on a directory returns EISDIR (Linux) / EPERM (macOS)
         // -- a platform-portable non-NotFound io::Error from
         // remove_alert_latch_corrupt.
@@ -969,7 +992,12 @@ mod tests {
     #[test]
     fn cmd_ack_mounted_retry_after_cleanup_failed_completes_recovery() {
         let (_dir, paths) = isolated_paths();
-        ack_write_latch(&paths, vec![AlertCause::BtrfsDeviceErrors { devid: 1 }]);
+        ack_write_latch(
+            &paths,
+            vec![AlertCause::BtrfsDeviceErrors {
+                devid: Devid::new(1),
+            }],
+        );
         std::fs::create_dir(paths.alert_latch_corrupt()).unwrap();
 
         let runner = ack_mounted_probe_runner_with_device_stats();
@@ -1025,7 +1053,12 @@ mod tests {
     #[test]
     fn ack_offline_retry_after_cleanup_failed_completes_recovery() {
         let (_dir, paths) = isolated_paths();
-        ack_write_latch(&paths, vec![AlertCause::MissingDevice { devid: 1 }]);
+        ack_write_latch(
+            &paths,
+            vec![AlertCause::MissingDevice {
+                devid: Devid::new(1),
+            }],
+        );
         std::fs::create_dir(paths.alert_latch_corrupt()).unwrap();
 
         let beeper_calls_first = std::cell::Cell::new(0u32);
@@ -1156,7 +1189,12 @@ mod tests {
     #[test]
     fn cmd_ack_mounted_sentinel_only_retry_does_not_query_btrfs_or_rewrite_baseline() {
         let (_dir, paths) = isolated_paths();
-        ack_write_latch(&paths, vec![AlertCause::BtrfsDeviceErrors { devid: 1 }]);
+        ack_write_latch(
+            &paths,
+            vec![AlertCause::BtrfsDeviceErrors {
+                devid: Devid::new(1),
+            }],
+        );
         std::fs::create_dir(paths.alert_latch_corrupt()).unwrap();
 
         let runner = ack_mounted_probe_runner_with_device_stats();
@@ -1218,7 +1256,12 @@ mod tests {
     #[test]
     fn cmd_ack_mounted_retry_after_poisoned_sentinel_completes_recovery() {
         let (_dir, paths) = isolated_paths();
-        ack_write_latch(&paths, vec![AlertCause::BtrfsDeviceErrors { devid: 1 }]);
+        ack_write_latch(
+            &paths,
+            vec![AlertCause::BtrfsDeviceErrors {
+                devid: Devid::new(1),
+            }],
+        );
         std::fs::create_dir(paths.alert_cleanup_pending()).unwrap();
         let original_latch_bytes = std::fs::read(paths.alert_latch_json()).unwrap();
 
@@ -1366,7 +1409,12 @@ mod tests {
     #[test]
     fn cmd_ack_with_foreign_fstype_and_alerts_returns_probe_error_and_preserves_state() {
         let (_dir, paths) = isolated_paths();
-        ack_write_latch(&paths, vec![AlertCause::MissingDevice { devid: 2 }]);
+        ack_write_latch(
+            &paths,
+            vec![AlertCause::MissingDevice {
+                devid: Devid::new(2),
+            }],
+        );
         let original_latch_bytes = std::fs::read(paths.alert_latch_json()).unwrap();
         std::fs::write(paths.smartd_alert(), b"").unwrap();
 
@@ -1511,7 +1559,12 @@ mod tests {
     #[test]
     fn cmd_ack_impl_with_foreign_fstype_does_not_invoke_beeper() {
         let (_dir, paths) = isolated_paths();
-        ack_write_latch(&paths, vec![AlertCause::MissingDevice { devid: 2 }]);
+        ack_write_latch(
+            &paths,
+            vec![AlertCause::MissingDevice {
+                devid: Devid::new(2),
+            }],
+        );
         let beeper_calls = std::cell::Cell::new(0u32);
         let beeper = || beeper_calls.set(beeper_calls.get() + 1);
 
@@ -1547,7 +1600,12 @@ mod tests {
     #[test]
     fn ack_offline_with_missing_device_cause_marks_missing_acked() {
         let (_dir, paths) = isolated_paths();
-        ack_write_latch(&paths, vec![AlertCause::MissingDevice { devid: 2 }]);
+        ack_write_latch(
+            &paths,
+            vec![AlertCause::MissingDevice {
+                devid: Devid::new(2),
+            }],
+        );
         let beeper_calls = std::cell::Cell::new(0u32);
         let beeper = || beeper_calls.set(beeper_calls.get() + 1);
 
@@ -1591,7 +1649,12 @@ mod tests {
     #[test]
     fn ack_offline_cleanup_failure_after_missing_acked_returns_cleanup_failed() {
         let (_dir, paths) = isolated_paths();
-        ack_write_latch(&paths, vec![AlertCause::MissingDevice { devid: 1 }]);
+        ack_write_latch(
+            &paths,
+            vec![AlertCause::MissingDevice {
+                devid: Devid::new(1),
+            }],
+        );
         // remove_file on a directory returns EISDIR (Linux) / EPERM (macOS)
         // -- a platform-portable non-NotFound io::Error from
         // remove_alert_latch_corrupt.
@@ -1714,8 +1777,12 @@ mod tests {
         ack_write_latch(
             &paths,
             vec![
-                AlertCause::BtrfsDeviceErrors { devid: 1 },
-                AlertCause::MissingDevice { devid: 2 },
+                AlertCause::BtrfsDeviceErrors {
+                    devid: Devid::new(1),
+                },
+                AlertCause::MissingDevice {
+                    devid: Devid::new(2),
+                },
             ],
         );
         let original_latch_bytes = std::fs::read(paths.alert_latch_json()).unwrap();
@@ -1771,7 +1838,12 @@ mod tests {
         );
         save_acked_stats(&AckedStats(map), &paths).unwrap();
 
-        ack_write_latch(&paths, vec![AlertCause::MissingDevice { devid: 1 }]);
+        ack_write_latch(
+            &paths,
+            vec![AlertCause::MissingDevice {
+                devid: Devid::new(1),
+            }],
+        );
 
         cmd_ack_impl(
             &AckPanicRunner,
@@ -1857,7 +1929,12 @@ mod tests {
         std::fs::write(paths.acked_stats_json(), b"not json").unwrap();
         let original_bytes = std::fs::read(paths.acked_stats_json()).unwrap();
 
-        ack_write_latch(&paths, vec![AlertCause::MissingDevice { devid: 1 }]);
+        ack_write_latch(
+            &paths,
+            vec![AlertCause::MissingDevice {
+                devid: Devid::new(1),
+            }],
+        );
 
         let result = cmd_ack_impl(
             &AckPanicRunner,

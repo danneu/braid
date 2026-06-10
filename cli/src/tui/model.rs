@@ -7,7 +7,7 @@ use crate::state_paths::StatePaths;
 use crate::status::{BalanceReport, DiskErrors};
 use crate::tui::browse::BrowseState;
 use crate::tui::effect::Effect;
-use crate::types::{LuksUuid, MountPoint};
+use crate::types::{Devid, LuksUuid, MountPoint};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tab {
@@ -62,7 +62,7 @@ pub struct DiskIdentity {
     pub luks_uuid: HashMap<String, LuksUuid>,
     /// Persistent btrfs devid bindings, used when a live probe cannot observe
     /// the underlying LUKS UUID for a mounted device.
-    pub devid: HashMap<String, u64>,
+    pub devid: HashMap<String, Devid>,
 }
 
 impl DiskIdentity {
@@ -81,7 +81,7 @@ impl DiskIdentity {
             .iter()
             .map(|(uuid, member)| (member.name.as_str().to_owned(), (*uuid).clone()))
             .collect();
-        let devid: HashMap<String, u64> = members
+        let devid: HashMap<String, Devid> = members
             .iter()
             .filter_map(|(_, member)| {
                 member
@@ -650,7 +650,7 @@ mod tests {
             DiskMember {
                 name: disk_name("zeta"),
                 by_id: by_id("/dev/disk/by-id/braid-zeta"),
-                devid: Some(7),
+                devid: Some(Devid::new(7)),
                 added_at: None,
             },
         )
@@ -680,7 +680,7 @@ mod tests {
         assert_eq!(identity.luks_uuid.get("alpha"), Some(&uuid_b));
         assert_eq!(identity.luks_uuid.get("zeta"), Some(&uuid_a));
         assert_eq!(identity.devid.len(), 1);
-        assert_eq!(identity.devid.get("zeta"), Some(&7));
+        assert_eq!(identity.devid.get("zeta"), Some(&Devid::new(7)));
         assert!(!identity.devid.contains_key("alpha"));
     }
 
@@ -692,7 +692,7 @@ mod tests {
                 "alpha".to_owned(),
                 uuid("11111111-1111-1111-1111-111111111111"),
             )]),
-            devid: HashMap::from([("alpha".to_owned(), 9)]),
+            devid: HashMap::from([("alpha".to_owned(), Devid::new(9))]),
         }
     }
 

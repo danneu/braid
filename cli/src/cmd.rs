@@ -1,4 +1,4 @@
-use crate::types::{LuksFormatExtraOpts, LuksLabel, LuksUuid, MapperName, MountPoint};
+use crate::types::{Devid, LuksFormatExtraOpts, LuksLabel, LuksUuid, MapperName, MountPoint};
 use std::os::unix::process::ExitStatusExt;
 use thiserror::Error;
 
@@ -200,7 +200,7 @@ pub enum CmdRequest {
     },
     // btrfs replace commands
     BtrfsReplaceStart {
-        devid: u64,
+        devid: Devid,
         target_device: String,
         mount_point: MountPoint,
     },
@@ -208,7 +208,7 @@ pub enum CmdRequest {
         mount_point: MountPoint,
     },
     BtrfsFilesystemResize {
-        devid: u64,
+        devid: Devid,
         mount_point: MountPoint,
     },
     // Keyfile commands (auto-unlock)
@@ -2582,7 +2582,7 @@ mod tests {
     // healthy mirrors, and finishes in minutes instead of hours.
     fn btrfs_replace_start_includes_read_from_mirrors_flag() {
         let cmd = CmdRequest::BtrfsReplaceStart {
-            devid: 2,
+            devid: Devid::new(2),
             target_device: "/dev/mapper/braid-new".to_owned(),
             mount_point: MountPoint("/mnt/storage".to_owned()),
         }
