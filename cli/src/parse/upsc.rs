@@ -243,21 +243,45 @@ mod tests {
         assert!(out.status_flags.contains(&UpsStatusFlag::CommBad));
     }
 
-    // Intent: parse_upsc returns empty status_flags for absent or empty
-    // ups.status. Preflight treats empty-set as fail-closed, so the parser
-    // does not need to invent a sentinel.
+    // Intent: parse_upsc returns empty status_flags when ups.status is absent.
+    // Preflight treats empty-set as fail-closed, so the parser does not need
+    // to invent a sentinel.
     // Why: a real dummy-ups fixture with a blank `.dev` file emits no
     // ups.status line until the driver fills one in. Parser must not panic
     // or synthesize flags.
     // Scenario: operator started dummy-ups against a stub file before the
     // first status write arrived.
     #[test]
-    fn empty_status_produces_no_flags() {
+    fn absent_status_produces_no_flags() {
         let out = parse_upsc("battery.charge: 50\ndriver.name: usbhid-ups\n");
         assert!(out.status_flags.is_empty());
         assert_eq!(out.battery.charge_pct, Some(50));
         // driver.name is not a typed key yet -> lands in `extra`.
         assert_eq!(out.extra.get("driver.name"), Some(&"usbhid-ups".to_owned()));
+    }
+
+    // Intent: an explicit-but-empty `ups.status:` value yields zero flags --
+    // the same empty set as an absent key, but via a different code path
+    // (the match arm runs; the split loop iterates zero times).
+    // Why it exists: this empty-set result rides entirely on
+    // `split_ascii_whitespace` yielding no tokens for "" -- there is no
+    // explicit empty guard. A swap to `split(' ')` would emit a stray
+    // `Unknown("")`, silently breaking the `ups_status_empty` JSON warning
+    // and the `(unknown -- ups.status missing)` human sentinel. Until now
+    // only the `emptyups.dev` VM canary (tests/cli/braid-status-ups) covered
+    // this path; this is its cheap unit mirror.
+    // Scenario: a driver publishes ups.status with no tokens -- the dummy-ups
+    // `emptyups.dev` fixture sets an explicit empty status line, since the
+    // driver would otherwise default a missing status to OL.
+    #[test]
+    fn empty_status_value_produces_no_flags() {
+        let out = parse_upsc("battery.charge: 55\nups.status:\n");
+        assert!(out.status_flags.is_empty());
+        // charge still parses -> the empty status line was consumed, not that
+        // the whole parse degraded to empty.
+        assert_eq!(out.battery.charge_pct, Some(55));
+        // The empty status line routes to the typed arm, not `extra`.
+        assert!(out.extra.get("ups.status").is_none());
     }
 
     // Intent: parse_upsc populates the full typed model when all expected
