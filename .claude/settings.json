@@ -3,7 +3,6 @@
   "autoMemoryEnabled": false,
   "permissions": {
     "allow": [
-      // Cargo: build, test, lint, inspect
       "Bash(cargo build:*)",
       "Bash(cargo check:*)",
       "Bash(cargo test:*)",
@@ -13,7 +12,6 @@
       "Bash(cargo metadata *)",
       "Bash(cargo tree *)",
 
-      // just recipes: test, lint, docs
       "Bash(just test:*)",
       "Bash(just test-rust:*)",
       "Bash(just test-repro:*)",
