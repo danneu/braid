@@ -92,11 +92,11 @@ lsblk -d -o NAME,SIZE,MODEL,ID-LINK
 Example output:
 
 ```
-NAME  SIZE MODEL               ID-LINK
-sda   12T  TOSHIBA MN07ACA12T  ata-TOSHIBA_MN07ACA12T_XXXX
-sdb   12T  TOSHIBA MN07ACA12T  ata-TOSHIBA_MN07ACA12T_YYYY
-sdc   12T  TOSHIBA MN07ACA12T  ata-TOSHIBA_MN07ACA12T_ZZZZ
-sdd  500G  Samsung SSD 860     ata-Samsung_SSD_860_AAAA      # boot drive -- leave this alone
+NAME   SIZE MODEL               ID-LINK
+sda   10.9T TOSHIBA MN07ACA12T  ata-TOSHIBA_MN07ACA12T_XXXX
+sdb   10.9T TOSHIBA MN07ACA12T  ata-TOSHIBA_MN07ACA12T_YYYY
+sdc   10.9T TOSHIBA MN07ACA12T  ata-TOSHIBA_MN07ACA12T_ZZZZ
+sdd  465.8G Samsung SSD 860     ata-Samsung_SSD_860_AAAA     <- boot drive, leave it alone
 ```
 
 You need the `ID-LINK` values. braid always uses `/dev/disk/by-id/` paths -- never `/dev/sdX`, which can change between reboots.

@@ -2,7 +2,11 @@
 
 [![Cachix Cache](https://img.shields.io/badge/cachix-braid-blue.svg)](https://braid.cachix.org)
 
-braid is a NixOS CLI tool for managing an encrypted, redundant NAS. It wraps two standard Linux tools into a simple interface:
+braid is a CLI + NixOS module for running an encrypted, redundant NAS, with
+goodies like USB-keyfile auto-unlock on boot, disk-failure alerts, scheduled
+scrubs, and UPS-safe poweroff.
+
+It wraps two standard Linux tools into a simple interface:
 
 - **[LUKS](https://en.wikipedia.org/wiki/Linux_Unified_Key_Setup)** -- full disk encryption (passphrase-based, keys never stored on disk)
 - **[btrfs RAID1](https://btrfs.readthedocs.io/en/latest/)** -- checksumming filesystem with automatic self-healing from redundant copies
@@ -11,44 +15,178 @@ And it leans heavily on **[systemd](https://systemd.io/)**, built into NixOS: th
 unlock/mount lifecycle, scrub timers, and UPS/fan/suspend services all run as
 systemd units.
 
+Full manual: [danneu.github.io/braid](https://danneu.github.io/braid/).
+
 ## Quick start
 
-```sh
-# Find your disks
+Once the NixOS module is installed (see [Install](#install)), the whole NAS
+lifecycle is a handful of commands. Full walkthrough:
+[Getting started](docs/guides/getting-started.md).
+
+**Find your disks.** braid only accepts stable `/dev/disk/by-id/` paths --
+`/dev/sdX` names can change between reboots:
+
+```
 lsblk -d -o NAME,SIZE,MODEL,ID-LINK
 
-# Add disks to the pool
-sudo braid add toshiba=/dev/disk/by-id/ata-Toshiba_MN07_XXXX \
-               ironwolf=/dev/disk/by-id/ata-Ironwolf_ST12_YYYY
-
-# Unlock after boot
-sudo braid unlock
-
-# Check pool health
-sudo braid status
-
-# Remove a disk
-sudo braid remove ironwolf
-
-# Replace a failed disk
-sudo braid replace --old ironwolf --new seagate=/dev/disk/by-id/ata-Seagate_NEW_ZZZZ
-
-# Lock the pool
-sudo braid lock
+NAME   SIZE MODEL               ID-LINK
+sda   10.9T TOSHIBA MN07ACA12T  ata-TOSHIBA_MN07ACA12T_XXXX
+sdb   10.9T TOSHIBA MN07ACA12T  ata-TOSHIBA_MN07ACA12T_YYYY
+sdc  465.8G Samsung SSD 860     ata-Samsung_SSD_860_AAAA     <- boot drive, leave it alone
 ```
 
-See the [command reference](docs/commands/) for full usage of each command.
+**Create the pool.** Pick a short name for each drive and set one passphrase.
+braid shows exactly what it is about to destroy and waits for an explicit yes:
+
+```
+sudo braid add toshiba1=/dev/disk/by-id/ata-TOSHIBA_MN07ACA12T_XXXX \
+               toshiba2=/dev/disk/by-id/ata-TOSHIBA_MN07ACA12T_YYYY
+
+Add to pool:
+  toshiba1  /dev/disk/by-id/ata-TOSHIBA_MN07ACA12T_XXXX
+            TOSHIBA MN07ACA12T | 10.91 TiB | serial XXXX
+            Will be LUKS-formatted (existing data will be inaccessible)
+  toshiba2  /dev/disk/by-id/ata-TOSHIBA_MN07ACA12T_YYYY
+            TOSHIBA MN07ACA12T | 10.91 TiB | serial YYYY
+            Will be LUKS-formatted (existing data will be inaccessible)
+
+Type 'yes' to continue: yes
+LUKS passphrase:
+Confirm LUKS passphrase:
+[wait] disk toshiba1: formatting LUKS...
+[ok]   disk toshiba1: LUKS formatted
+LUKS header backed up: /var/lib/braid/luks-headers/braid-toshiba1.luksheader
+[wait] disk toshiba1: unlocking...
+[ok]   disk toshiba1: unlocked
+...
+Pool created (RAID1) and mounted at /mnt/storage
+Done. toshiba1, toshiba2 are now part of the pool.
+```
+
+The pool is now an ordinary directory:
+
+```sh
+cp -r ~/photos /mnt/storage/
+```
+
+**Check pool health.** `braid status` shows the pool, capacity, and two layers
+of per-disk health: btrfs's own I/O accounting and the drive's SMART
+self-report:
+
+```
+sudo braid status
+
+Pool:     /mnt/storage
+Status:   intact
+FSID:     f5f5f5f5-aaaa-bbbb-cccc-d0d0d0d0d0d0
+Profile:
+  Data:      RAID1
+  Metadata:  RAID1
+  System:    RAID1
+...
+Drives:
+  toshiba1     sda  devid=1  present
+  toshiba2     sdb  devid=2  present
+
+Capacity:
+  Total:  10.91 TiB (Estimated)
+  Used:   1.21 TiB
+  Free:   9.66 TiB
+
+Last scrub: Mon Jun  1 03:00:00 2026 (no errors)
+
+Disks:
+
+  toshiba1          devid 1   present
+    Device:  /dev/disk/by-id/ata-TOSHIBA_MN07ACA12T_XXXX
+    Model:   TOSHIBA MN07ACA12T
+    Serial:  XXXX
+    LUKS:    aaaaaaaa-1111-2222-3333-444444444444
+    btrfs:   read 0 / write 0 / flush 0 / corruption 0 / generation 0
+    SMART:   ok
+
+  ...
+```
+
+**After every reboot.** The drives stay encrypted and the pool stays offline
+until you unlock it:
+
+```
+sudo braid unlock
+
+LUKS passphrase:
+```
+
+`sudo braid lock` takes the pool offline again by hand; shutdown locks it
+automatically. To unlock on boot without typing the passphrase, enable
+`braid.autoUnlock` with a USB keyfile ([Auto-unlock](docs/guides/auto-unlock.md)).
+
+**When a disk dies.** `braid status` flags the failure and hands you the exact
+repair command on the `Action:` line:
+
+```
+sudo braid status
+
+Pool:     /mnt/storage
+Status:   DEGRADED (1 missing device)
+...
+Drives:
+  toshiba1     sda  devid=1  present
+  toshiba2     -    devid=2  missing
+...
+  toshiba2          MISSING
+    Device:  /dev/disk/by-id/ata-TOSHIBA_MN07ACA12T_YYYY  (not found)
+    btrfs:   unknown (device absent)
+    SMART:   unknown (device absent)
+    Action:  braid replace --old toshiba2 --new <new-name>=/dev/disk/by-id/<...>
+```
+
+Plug in a replacement drive and run the command from the `Action:` line:
+
+```sh
+sudo braid replace --old toshiba2 --new wd1=/dev/disk/by-id/ata-WDC_WD120EFBX-68B0EN0_ZZZZ
+```
+
+btrfs rebuilds the dead disk's data onto the new drive from the surviving
+copy.
+
+Grow the pool any time by running `braid add` again with another drive. Every
+mutating command previews its full plan with `--dry-run` and asks for
+confirmation before touching disks -- see [Safety](#safety). Full usage of
+every command: [command reference](docs/commands/).
 
 ## Features
 
-- **Full disk encryption** -- passphrase or USB keyfile to unlock
-- **Redundancy** -- data stored on two disks; tolerates a single disk failure
-- **Dynamic pool** -- add or remove drives with a command, no `nixos-rebuild`
-- **Self-healing** -- btrfs checksums every block and silently repairs corruption from the redundant copy
-- **Offline-write safety** -- the pool mountpoint is sealed immutable while the pool is unmounted, so a process writing it before the pool mounts fails loudly with `EPERM` instead of silently landing data on the root disk (which the pool would then hide on mount)
-- **CLI-owned membership** -- `braid add`/`remove`/`replace` manage the pool; state lives in UUID-keyed `/var/lib/braid/pool.json`
+- **Full disk encryption** -- passphrase or USB keyfile to unlock; every LUKS
+  format writes a header backup to `/var/lib/braid/luks-headers/`
+- **Redundancy** -- two copies of every block; tolerates a single disk failure
+- **Self-healing** -- btrfs checksums every block and repairs corruption from
+  the redundant copy; scheduled scrubs sweep the whole array
+- **Dynamic pool** -- add, remove, or replace drives with one command, no
+  `nixos-rebuild`; membership lives in UUID-keyed `/var/lib/braid/pool.json`
+- **Offline-write safety** -- the unmounted mountpoint is sealed immutable, so
+  stray writes fail with `EPERM` instead of landing on the root disk
+- **Monitoring** -- btrfs error counters and smartd health checks raise
+  alerts, beep the PC speaker until acknowledged (`braid ack`), and can run a
+  custom notify command
+- **Fail-closed mutations** -- an interrupted command leaves a marker that
+  blocks further mutations until `braid recover` finishes the job or refuses
 - **UPS safety** -- with UPS support enabled, NUT drives orderly poweroff on low battery, mutating commands refuse to start unless UPS utility power is verified, and `braid ups status` / the TUI show live UPS state
 - **TUI dashboard** -- `braid tui` shows pool health, disk status, balance progress, SMART data, and (when enabled) chassis fan telemetry plus UPS state
+
+<!-- TODO(dan): capture this screenshot from the NAS and commit it at docs/assets/tui.png -->
+
+![braid tui dashboard](docs/assets/tui.png)
+
+## Why braid
+
+- **vs. TrueNAS / Synology** -- braid is not an appliance. It's your own NixOS
+  box: config in git, reproducible, no web-UI lock-in.
+- **vs. ZFS on NixOS** -- btrfs RAID1 grows one drive at a time and tolerates
+  mixed sizes; in-kernel, no out-of-tree module to chase kernel updates.
+- **vs. hand-rolled LUKS + btrfs** -- braid is the playbook codified: correct
+  ordering, confirmations, header backups, fail-closed recovery when a step
+  is interrupted.
 
 ## Downsides
 
@@ -119,7 +257,12 @@ nix.settings = {
 };
 ```
 
-## Previewing and confirming changes
+## Safety
+
+Every pool mutation previews its plan, asks for confirmation, and fails closed
+if interrupted. Alongside that, every LUKS format writes a header backup to
+`/var/lib/braid/luks-headers/`, and the offline mountpoint is sealed immutable
+so stray writes fail with `EPERM` instead of landing on the root disk.
 
 ### Preview with --dry-run
 
@@ -129,40 +272,43 @@ step is tagged `[destructive]`, `[safe]`, or `[long]` (a long-running step like 
 btrfs balance), so you can see at a glance what each step does, and the `$` line
 beneath each step is the literal command:
 
-```
-sudo braid add ironwolf=/dev/disk/by-id/ata-Ironwolf_ST12_YYYY \
-               toshiba=/dev/disk/by-id/ata-Toshiba_MN07_XXXX --dry-run
+Here is the quick start's create-pool command again, with `--dry-run`:
 
-[destructive] LUKS format /dev/disk/by-id/ata-Ironwolf_ST12_YYYY
-$ cryptsetup luksFormat --type luks2 --batch-mode '--key-file=-' --uuid '<generated-at-format-time>' --label braid-ironwolf /dev/disk/by-id/ata-Ironwolf_ST12_YYYY
-[safe] LUKS header backup -> /var/lib/braid/luks-headers/braid-ironwolf.luksheader
-$ cryptsetup luksHeaderBackup --header-backup-file /var/lib/braid/luks-headers/braid-ironwolf.luksheader /dev/disk/by-id/ata-Ironwolf_ST12_YYYY
-[safe] LUKS open -> braid-ironwolf
-$ cryptsetup open --type luks '--key-file=-' --perf-no_read_workqueue --perf-no_write_workqueue /dev/disk/by-id/ata-Ironwolf_ST12_YYYY braid-ironwolf
-[destructive] LUKS format /dev/disk/by-id/ata-Toshiba_MN07_XXXX
-$ cryptsetup luksFormat --type luks2 --batch-mode '--key-file=-' --uuid '<generated-at-format-time>' --label braid-toshiba /dev/disk/by-id/ata-Toshiba_MN07_XXXX
-[safe] LUKS header backup -> /var/lib/braid/luks-headers/braid-toshiba.luksheader
-$ cryptsetup luksHeaderBackup --header-backup-file /var/lib/braid/luks-headers/braid-toshiba.luksheader /dev/disk/by-id/ata-Toshiba_MN07_XXXX
-[safe] LUKS open -> braid-toshiba
-$ cryptsetup open --type luks '--key-file=-' --perf-no_read_workqueue --perf-no_write_workqueue /dev/disk/by-id/ata-Toshiba_MN07_XXXX braid-toshiba
-[safe] mkfs.btrfs RAID1 /dev/mapper/braid-ironwolf /dev/mapper/braid-toshiba
-$ mkfs.btrfs -d raid1 -m raid1 -O block-group-tree /dev/mapper/braid-ironwolf /dev/mapper/braid-toshiba
+```
+sudo braid add toshiba1=/dev/disk/by-id/ata-TOSHIBA_MN07ACA12T_XXXX \
+               toshiba2=/dev/disk/by-id/ata-TOSHIBA_MN07ACA12T_YYYY --dry-run
+
+[destructive] LUKS format /dev/disk/by-id/ata-TOSHIBA_MN07ACA12T_XXXX
+$ cryptsetup luksFormat --type luks2 --batch-mode '--key-file=-' --uuid '<generated-at-format-time>' --label braid-toshiba1 /dev/disk/by-id/ata-TOSHIBA_MN07ACA12T_XXXX
+[safe] LUKS header backup -> /var/lib/braid/luks-headers/braid-toshiba1.luksheader
+$ cryptsetup luksHeaderBackup --header-backup-file /var/lib/braid/luks-headers/braid-toshiba1.luksheader /dev/disk/by-id/ata-TOSHIBA_MN07ACA12T_XXXX
+[safe] LUKS open -> braid-toshiba1
+$ cryptsetup open --type luks '--key-file=-' --perf-no_read_workqueue --perf-no_write_workqueue /dev/disk/by-id/ata-TOSHIBA_MN07ACA12T_XXXX braid-toshiba1
+[destructive] LUKS format /dev/disk/by-id/ata-TOSHIBA_MN07ACA12T_YYYY
+$ cryptsetup luksFormat --type luks2 --batch-mode '--key-file=-' --uuid '<generated-at-format-time>' --label braid-toshiba2 /dev/disk/by-id/ata-TOSHIBA_MN07ACA12T_YYYY
+[safe] LUKS header backup -> /var/lib/braid/luks-headers/braid-toshiba2.luksheader
+$ cryptsetup luksHeaderBackup --header-backup-file /var/lib/braid/luks-headers/braid-toshiba2.luksheader /dev/disk/by-id/ata-TOSHIBA_MN07ACA12T_YYYY
+[safe] LUKS open -> braid-toshiba2
+$ cryptsetup open --type luks '--key-file=-' --perf-no_read_workqueue --perf-no_write_workqueue /dev/disk/by-id/ata-TOSHIBA_MN07ACA12T_YYYY braid-toshiba2
+[safe] mkfs.btrfs RAID1 /dev/mapper/braid-toshiba1 /dev/mapper/braid-toshiba2
+$ mkfs.btrfs -d raid1 -m raid1 -O block-group-tree /dev/mapper/braid-toshiba1 /dev/mapper/braid-toshiba2
 [safe] mount -> /mnt/storage
-$ mount -o 'noatime,skip_balance,subvolid=5' /dev/mapper/braid-ironwolf /mnt/storage
+$ mount -o 'noatime,skip_balance,subvolid=5' /dev/mapper/braid-toshiba1 /mnt/storage
 ```
 
 ### Confirm before it runs
 
 Without `--dry-run`, the data-shape commands (`add`, `remove`, `remove-missing`,
 `replace`) show what they are about to do and wait for you to type `yes` --
-anything else aborts:
+anything else aborts. Here, removing `wd1` from a pool that has grown to three
+disks:
 
 ```
-sudo braid remove ironwolf
+sudo braid remove wd1
 
 Remove from pool:
-  ironwolf  Seagate IronWolf | 12.00 TiB | serial ZL2A1B2C
-            devid 2 | data will migrate to remaining disks
+  wd1  WDC WD120EFBX-68B0EN0 | 10.91 TiB | serial ZZZZ
+       devid 3 | data will migrate to remaining disks
 
 Pool: 3 disks -> 2 disks
 
@@ -172,16 +318,22 @@ Type 'yes' to continue:
 Pass `--yes` to skip the prompt (for scripts and automation):
 
 ```
-sudo braid remove ironwolf --yes
+sudo braid remove wd1 --yes
 ```
 
-## Recovery
+### If a command is interrupted
 
-If a mutation is interrupted, braid leaves `/var/lib/braid/pending-op.json` in place and normal commands refuse until recovery completes. Run `sudo braid recover` (add `--allow-degraded` when a member is missing). Recovery repairs `pool.json` from committed live btrfs membership and, when btrfs balance state is idle, finishes only the owed post-mutation maintenance, such as resize or soft RAID1 balance. If owed RAID1 replay finds a paused, running, or unknown balance state, recover fails closed and preserves `pending-op.json` for manual inspection.
-
-`pool.json` is keyed by each member's LUKS UUID. Disk names are still the names you type in commands and see in output; by-id paths are the hardware addresses braid uses to find disks.
+An interrupted mutation leaves `/var/lib/braid/pending-op.json` behind, and
+other commands refuse to run until you finish recovery with `sudo braid
+recover`. Recovery completes the part that is safe to finish and refuses
+anything ambiguous rather than guess. Details:
+[recover](docs/commands/recover.md) and
+[Recovery scenarios](docs/guides/recovery-scenarios.md).
 
 ## Docs
+
+Published at [danneu.github.io/braid](https://danneu.github.io/braid/); the
+same pages live in [docs/](docs/).
 
 ### Commands
 
