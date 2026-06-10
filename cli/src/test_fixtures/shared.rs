@@ -428,7 +428,8 @@ impl PoolFixture {
         let mount_point = MountPoint::new("/mnt/storage".into());
         std::fs::write(
             &config_path,
-            serde_json::to_vec(&serde_json::json!({ "mount_point": mount_point.as_str() })).unwrap(),
+            serde_json::to_vec(&serde_json::json!({ "mount_point": mount_point.as_str() }))
+                .unwrap(),
         )
         .expect("write config.json");
         let config = Config::new(mount_point).expect("config from canonical mount_point");

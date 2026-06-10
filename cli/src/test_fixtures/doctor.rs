@@ -544,7 +544,9 @@ impl CommandRunner for PoolMissingDevicesRunner {
             CmdRequest::MountpointCheck { path } if path.as_str() == "/mnt/storage" => {
                 Ok(mountpoint_ok().1)
             }
-            CmdRequest::BtrfsFilesystemShow { mount_point } if mount_point.as_str() == "/mnt/storage" => {
+            CmdRequest::BtrfsFilesystemShow { mount_point }
+                if mount_point.as_str() == "/mnt/storage" =>
+            {
                 Ok(doctor_btrfs_show(&[("braid-disk1", 1)], &[]))
             }
             CmdRequest::CryptsetupStatus { mapper } if mapper.as_str() == "braid-disk1" => {
