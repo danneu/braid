@@ -209,6 +209,25 @@ pub(crate) fn idle_scrub_running() -> (CmdRequest, RawCommandOutput) {
     )
 }
 
+/// Sparse running-scrub record (parser parity: `scrub_running_minimal`)
+/// whose byte counters are absent, so `cmd_idle` must still report busy
+/// with `pct: None`. This is a parser-contract / format-drift case, not
+/// live btrfs output -- a real running scrub always carries byte counters
+/// (`idle_scrub_running` is the percentage-bearing case).
+pub(crate) fn idle_scrub_running_no_bytes() -> (CmdRequest, RawCommandOutput) {
+    (
+        CmdRequest::BtrfsScrubStatus {
+            mount_point: idle_mp(),
+        },
+        mock_ok(
+            "btrfs scrub status --raw /mnt/storage",
+            "UUID:             12345678-1234-1234-1234-123456789abc\n\
+             Status:           running\n\
+             Error summary:    no errors found\n",
+        ),
+    )
+}
+
 /// Narrow idle runner that seeds only `BtrfsScrubStatus` and leaves removed
 /// subprocess probes observable as missing mocks.
 pub(crate) fn idle_runner_with_scrub_finished() -> MockRunner {

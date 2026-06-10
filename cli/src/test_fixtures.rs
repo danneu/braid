@@ -162,7 +162,7 @@ pub(crate) use enroll_key_file::{
 pub(crate) use idle::{
     IDLE_FSID, IDLE_FSID_OTHER, IdleMockFs, assert_idle_busy_unknown_prefix, idle_mp,
     idle_ready_for_sysfs_check, idle_runner_with_scrub_finished, idle_scrub_finished,
-    idle_scrub_running,
+    idle_scrub_running, idle_scrub_running_no_bytes,
 };
 pub(crate) use lock::{
     LockNoopSleeper, RecordingRunner as LockRecordingRunner, lock_count_forget_steps, lock_err_raw,

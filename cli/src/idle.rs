@@ -122,7 +122,8 @@ mod tests {
     use crate::test_fixtures::{
         IDLE_FSID, IDLE_FSID_OTHER, IdleMockFs, assert_idle_busy_unknown_prefix, idle_mp,
         idle_ready_for_sysfs_check, idle_runner_with_scrub_finished, idle_scrub_running,
-        scrub_status_aborted, scrub_status_interrupted, scrub_status_never, scrub_status_unknown,
+        idle_scrub_running_no_bytes, scrub_status_aborted, scrub_status_interrupted,
+        scrub_status_never, scrub_status_unknown,
     };
     use std::io::ErrorKind;
 
@@ -248,6 +249,35 @@ mod tests {
         assert_eq!(
             result,
             IdleResult::Busy(BusyReason::ScrubRunning { pct: Some(45) })
+        );
+    }
+
+    // Intent: a running scrub whose byte counters are absent maps to
+    //   Busy(ScrubRunning { pct: None }), never Idle.
+    // Why it exists: the sibling busy_when_scrub_running only pins the
+    //   both-counters-present case (pct: Some). The Busy decision sits
+    //   outside the (bytes_scrubbed, total_bytes) match, but no cmd_idle
+    //   test pins that for pct: None. A refactor folding the Busy/Idle
+    //   choice into the pct match -- returning Idle when the percentage
+    //   cannot be computed -- would compile, keep parser tests green (they
+    //   classify ScrubState, not IdleResult), keep busy_when_scrub_running
+    //   green, and silently allow suspend whenever pct is unknowable. Same
+    //   wiring-pin contract as idle_when_scrub_{never,aborted,interrupted}.
+    // Scenario: btrfs-progs output drift (parser-compatibility risk) keeps
+    //   `Status: running` but reshapes/omits the `Total to scrub` /
+    //   `Bytes scrubbed` lines braid parses; the parser tolerates this
+    //   sparse record (scrub_running_minimal), pct is unknowable, and the
+    //   gate must still block suspend.
+    #[test]
+    fn busy_when_scrub_running_no_bytes() {
+        let (scrub_req, scrub_out) = idle_scrub_running_no_bytes();
+        let runner = MockRunner::default().with_output(scrub_req, scrub_out);
+        let fs = IdleMockFs::with_exclop("none");
+
+        let result = cmd_idle(&runner, &fs, &idle_mp());
+        assert_eq!(
+            result,
+            IdleResult::Busy(BusyReason::ScrubRunning { pct: None })
         );
     }
 
