@@ -304,6 +304,24 @@ mod tests {
         ups_query_healthy_minimal, ups_write_config,
     };
 
+    /// Baseline `UpscOutput` for render-branch tests: status OL, every
+    /// optional field absent. Tests override just the field under test via
+    /// `UpscOutput { field: ..., ..base_output() }`. `UpscOutput` has no
+    /// `Default` because status order is a contract, so this helper keeps
+    /// that fact local to the render tests.
+    fn base_output() -> UpscOutput {
+        UpscOutput {
+            status_flags: vec![UpsStatusFlag::Ol],
+            battery: BatteryFields::default(),
+            load_pct: None,
+            realpower_nominal_watts: None,
+            input: InputFields::default(),
+            test_result: None,
+            device: DeviceFields::default(),
+            extra: std::collections::BTreeMap::new(),
+        }
+    }
+
     // Intent: format_status renders OL verbatim when the UPS is on utility power.
     // Why: operators triaging preflight failures need the rendered line to
     // match NUT's own token vocabulary; translating OL to "online" would
@@ -503,28 +521,25 @@ mod tests {
         assert_eq!(value["status_flags"], serde_json::json!(["WEIRD"]));
     }
 
-    // Intent: format_human emits exactly `Battery: --`, `Runtime: --`,
-    // and `Load: --` when charge, runtime, and load are missing.
+    // Intent: format_human emits exactly `Battery: --`, `Runtime: --`, and
+    // `Load: --` when charge/runtime/load are missing, while omitting absent
+    // provenance lines.
     // Why it exists: captured fixtures populate these fields, so snapshots
-    // only pin the Some arm; this catches dash sentinel drift.
+    // only pin the Some arms; this catches dash sentinel and omitted-line drift.
     // Scenario: a UPS driver has surfaced ups.status but no numeric telemetry.
     #[test]
-    fn format_human_renders_dash_for_missing_optional_fields() {
-        let parsed = UpscOutput {
-            status_flags: vec![UpsStatusFlag::Ol],
-            battery: BatteryFields::default(),
-            load_pct: None,
-            realpower_nominal_watts: None,
-            input: InputFields::default(),
-            test_result: None,
-            device: DeviceFields::default(),
-            extra: std::collections::BTreeMap::new(),
-        };
+    fn format_human_renders_sentinels_and_omits_absent_provenance() {
+        let parsed = base_output();
         let rendered = format_human("ups", &parsed);
         let lines: Vec<&str> = rendered.lines().collect();
         assert!(lines.contains(&"Battery: --"), "got: {rendered}");
         assert!(lines.contains(&"Runtime: --"), "got: {rendered}");
         assert!(lines.contains(&"Load: --"), "got: {rendered}");
+        assert!(
+            !rendered.contains("Battery manufactured"),
+            "got: {rendered}"
+        );
+        assert!(!rendered.contains("Last test"), "got: {rendered}");
     }
 
     // Intent: format_human emits exactly `Load: 50%` when load is present
@@ -535,19 +550,86 @@ mod tests {
     #[test]
     fn format_human_load_omits_estimated_when_nominal_watts_missing() {
         let parsed = UpscOutput {
-            status_flags: vec![UpsStatusFlag::Ol],
-            battery: BatteryFields::default(),
             load_pct: Some(50),
-            realpower_nominal_watts: None,
-            input: InputFields::default(),
-            test_result: None,
-            device: DeviceFields::default(),
-            extra: std::collections::BTreeMap::new(),
+            ..base_output()
         };
         let rendered = format_human("ups", &parsed);
         let lines: Vec<&str> = rendered.lines().collect();
         assert!(lines.contains(&"Load: 50%"), "got: {rendered}");
         assert!(!rendered.contains("estimated"), "got: {rendered}");
+    }
+
+    // Intent: format_human omits transfer context unless both low and high
+    // transfer bounds are present.
+    // Why it exists: snapshots only pin the fully-bound fixture shape; a
+    // partial render like `(transfer -142 V)` would mislead operators.
+    // Scenario: a UPS driver reports line voltage and only one transfer bound.
+    #[test]
+    fn format_human_omits_transfer_context_when_bounds_incomplete() {
+        for input in [
+            InputFields {
+                voltage: Some("120.0".into()),
+                transfer_low: Some("88".into()),
+                ..Default::default()
+            },
+            InputFields {
+                voltage: Some("120.0".into()),
+                transfer_high: Some("142".into()),
+                ..Default::default()
+            },
+        ] {
+            let rendered = format_human(
+                "ups",
+                &UpscOutput {
+                    input,
+                    ..base_output()
+                },
+            );
+            assert!(
+                rendered.lines().any(|line| line == "Input: 120.0 V"),
+                "got: {rendered}"
+            );
+            assert!(!rendered.contains("transfer"), "got: {rendered}");
+        }
+    }
+
+    // Intent: format_human's device line collapses to whichever device field is
+    // present and disappears when both fields are absent.
+    // Why it exists: fixtures publish both mfr and model, so snapshots cannot
+    // catch swapped single-field arms or a stray blank `Device:` line.
+    // Scenario: sparse UPS drivers report model only, mfr only, or neither.
+    #[test]
+    fn format_human_device_line_collapses_to_present_field() {
+        let model_only = UpscOutput {
+            device: DeviceFields {
+                model: Some("Back-UPS ES 550G".into()),
+                ..Default::default()
+            },
+            ..base_output()
+        };
+        assert!(
+            format_human("ups", &model_only)
+                .lines()
+                .any(|line| line == "Device: Back-UPS ES 550G")
+        );
+
+        let mfr_only = UpscOutput {
+            device: DeviceFields {
+                mfr: Some("APC".into()),
+                ..Default::default()
+            },
+            ..base_output()
+        };
+        assert!(
+            format_human("ups", &mfr_only)
+                .lines()
+                .any(|line| line == "Device: APC")
+        );
+
+        assert!(
+            !format_human("ups", &base_output()).contains("Device:"),
+            "neither field should omit Device line"
+        );
     }
 
     // Intent: format_human emits exactly the line
@@ -562,13 +644,7 @@ mod tests {
     fn format_human_empty_status_renders_sentinel() {
         let parsed = UpscOutput {
             status_flags: Vec::new(),
-            battery: BatteryFields::default(),
-            load_pct: None,
-            realpower_nominal_watts: None,
-            input: InputFields::default(),
-            test_result: None,
-            device: DeviceFields::default(),
-            extra: std::collections::BTreeMap::new(),
+            ..base_output()
         };
         let rendered = format_human("ups", &parsed);
         let lines: Vec<&str> = rendered.lines().collect();
