@@ -3,17 +3,25 @@
   "autoMemoryEnabled": false,
   "permissions": {
     "allow": [
-      "Bash(nix log:*)",
-      "Bash(grep:*)",
-      "Bash(head:*)",
-      "Bash(tail:*)",
-      "Bash(modinfo:*)",
-      "Bash(zstdcat:*)",
-      "Bash(git ls-remote *)",
+      // Cargo: build, test, lint, inspect
+      "Bash(cargo build:*)",
+      "Bash(cargo check:*)",
+      "Bash(cargo test:*)",
+      "Bash(cargo insta:*)",
+      "Bash(cargo clippy:*)",
+      "Bash(cargo fmt *)",
+      "Bash(cargo metadata *)",
       "Bash(cargo tree *)",
-      "Bash(nix --version)",
-      "Bash(just --list)",
-      "WebSearch"
+
+      // just recipes: test, lint, docs
+      "Bash(just test:*)",
+      "Bash(just test-rust:*)",
+      "Bash(just test-repro:*)",
+      "Bash(just test-vm *)",
+      "Bash(just clippy:*)",
+      "Bash(just check-docs *)",
+      "Bash(just docs-build *)",
+      "Bash(just --list)"
     ]
   }
 }
