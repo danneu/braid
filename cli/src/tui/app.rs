@@ -954,6 +954,113 @@ mod tests {
         assert_eq!(w.sample_count, 1);
     }
 
+    // Intent: one disk's watermark must keep accumulating across a disk-name
+    //         change between probes -- two ticks, same LUKS UUID, different name
+    //         map key, produce a single watermark entry with sample_count == 2
+    //         and a widened range.
+    // Why: TemperatureReading.id is the LUKS UUID (decision 024) so session
+    //      watermarks survive device-path / name changes on unplug/replug. This
+    //      pins the fold/consumer side; the producer (id == live LUKS UUID) is
+    //      pinned by `cli/src/tui/probe.rs#smartctl_health_for_present_member_uses_live_underlying`.
+    //      A fold that folded on the name map key would fork one disk's history
+    //      into two entries and never cross the >=2 render threshold.
+    // Scenario: toshiba reports 38 C, then the same encrypted disk reappears
+    //           under a drifted name "toshiba-relabel" reporting 44 C.
+    #[test]
+    fn probe_finished_watermark_survives_disk_name_change() {
+        let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Loading);
+        let uuid = "11111111-1111-1111-1111-111111111111";
+        let id = temp_uuid(uuid);
+        update(
+            &mut model,
+            Message::PoolProbeFinished(
+                pool_probe_ok(Some(pool_with_temperature("toshiba", uuid, 38))),
+                Duration::from_millis(10),
+            ),
+        );
+        update(
+            &mut model,
+            Message::PoolProbeFinished(
+                pool_probe_ok(Some(pool_with_temperature("toshiba-relabel", uuid, 44))),
+                Duration::from_millis(10),
+            ),
+        );
+        assert_eq!(
+            model.session_temperature_stats.len(),
+            1,
+            "name change must not fork the entry"
+        );
+        let w = model.session_temperature_stats.get(&id).unwrap();
+        assert_eq!(w.min_celsius, 38);
+        assert_eq!(w.max_celsius, 44);
+        assert_eq!(w.sample_count, 2);
+    }
+
+    // Intent: a probe that reuses a display name for a DIFFERENT LUKS UUID must
+    //         start a separate watermark, not merge the second disk's temperature
+    //         into the first disk's hi/lo range.
+    // Why: identity is the LUKS UUID, not the name -- decision 024's identity
+    //      table marks `DiskName` non-identity and reusable, and the membership
+    //      duplicate-name guard only rejects collisions among current members
+    //      (`cli/src/membership.rs#PoolMembership::insert`), so a name freed by
+    //      `remove` can be reassigned by `add` to a different physical disk
+    //      (fresh LUKS UUID). A name-keyed fold would silently contaminate one
+    //      disk's thermal history with another's. (Not a `braid replace`: replace
+    //      rejects --old == --new and always names the new disk distinctly,
+    //      `cli/src/replace.rs#plan_replace`.)
+    // Scenario: the bay shown as "bay3" reads 38 C; that disk is removed and a
+    //           different disk is later added under the freed name "bay3" (new
+    //           UUID), which reads 50 C in a later probe.
+    #[test]
+    fn probe_finished_watermark_separate_per_uuid_under_reused_name() {
+        let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Loading);
+        let first = "11111111-1111-1111-1111-111111111111";
+        let second = "22222222-2222-2222-2222-222222222222";
+        update(
+            &mut model,
+            Message::PoolProbeFinished(
+                pool_probe_ok(Some(pool_with_temperature("bay3", first, 38))),
+                Duration::from_millis(10),
+            ),
+        );
+        update(
+            &mut model,
+            Message::PoolProbeFinished(
+                pool_probe_ok(Some(pool_with_temperature("bay3", second, 50))),
+                Duration::from_millis(10),
+            ),
+        );
+        assert_eq!(
+            model.session_temperature_stats.len(),
+            2,
+            "reused name must not merge two UUIDs"
+        );
+        let w_first = model
+            .session_temperature_stats
+            .get(&temp_uuid(first))
+            .unwrap();
+        assert_eq!(
+            (
+                w_first.min_celsius,
+                w_first.max_celsius,
+                w_first.sample_count
+            ),
+            (38, 38, 1)
+        );
+        let w_second = model
+            .session_temperature_stats
+            .get(&temp_uuid(second))
+            .unwrap();
+        assert_eq!(
+            (
+                w_second.min_celsius,
+                w_second.max_celsius,
+                w_second.sample_count
+            ),
+            (50, 50, 1)
+        );
+    }
+
     // Intent: FanProbeFinished must install the snapshot, clear the
     //         in-flight flag, and emit exactly one ScheduleFanProbe --
     //         no pool-probe side-effects.

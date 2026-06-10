@@ -260,6 +260,13 @@ warns rather than claiming every declared member is assembled.
   reads the live backing path for a verified-present member (surviving by-id
   drift), and that a foreign / ownership-unverified mapper does not surface the
   live device's metadata under the declared disk.
+- `cli/src/tui/app.rs` unit tests pin that session temperature watermarks
+  accumulate by LUKS UUID: a member's watermark keeps widening across a
+  disk-name change between probes, and a reused display name carrying a
+  different LUKS UUID (`DiskName` is non-identity and reusable) starts a
+  separate watermark instead of merging two disks' thermal history.
+  `cli/src/tui/probe.rs` pins the producer side -- the reading's `id` is the
+  member's live LUKS UUID.
 - `cli/src/tui/probe.rs` and `cli/src/tui/browse/state.rs` unit tests pin that
   the TUI Browse SMART picker resolves a verified-present member through its live
   backing path (`PoolState.disk_underlying`, shared with the Data-tab SMART
