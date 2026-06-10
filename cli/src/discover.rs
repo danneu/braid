@@ -1451,6 +1451,42 @@ mod tests {
         ));
     }
 
+    // Intent: a missing /dev/disk/by-id directory yields an Ok(empty)
+    //   membership -- which the CLI routes to the NoMembersDiscovered refusal
+    //   -- not a hard DiscoverError::ReadDir I/O error.
+    // Why it exists: the read_dir NotFound arm is the only discover branch that
+    //   turns an absent by-id directory into an empty scan. The
+    //   braid-discover-empty-scan.py VM test only exercises a present directory
+    //   with no braid disks (the loop falls through empty), so a regression
+    //   collapsing this arm into the generic ReadDir error -- swapping the
+    //   remediation-bearing refusal for a raw I/O error -- would pass every
+    //   other test. Mirrors classify_pool_json's absent-vs-other-io test pair,
+    //   but for the by-id read_dir.
+    // Scenario: a minimal or early-boot host with no block devices exposing
+    //   by-id symlinks has no /dev/disk/by-id at all; `braid discover` must
+    //   refuse cleanly with the no-members message, not crash with an I/O error.
+    #[test]
+    fn discover_returns_empty_when_by_id_dir_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let absent = dir.path().join("by-id-does-not-exist");
+        let runner = DiscoverLabelMap::new(&[]);
+
+        let scan = discover_from_dir(&runner, &RealByIdResolver, &absent);
+        let members = scan
+            .result
+            .expect("absent by-id dir must yield Ok(empty), not DiscoverError::ReadDir");
+
+        assert!(
+            members.is_empty(),
+            "absent by-id dir must yield an empty membership: {members:?}"
+        );
+        assert!(
+            scan.warnings.is_empty(),
+            "absent by-id dir must produce no warnings: {:?}",
+            scan.warnings
+        );
+    }
+
     #[test]
     fn label_collision_sorts_paths_lexicographically() {
         /*
