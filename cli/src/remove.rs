@@ -535,7 +535,7 @@ pub fn plan_remove<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     }
 
     // Preflight
-    let fsid = pool.fsid.as_deref().expect("mounted pool must have FSID");
+    let fsid = pool.fsid.as_ref().expect("mounted pool must have FSID");
     match preflight::require_mutation_preflight(fs, fsid, config.mount_point()) {
         Ok(preflight_notes) => notes.extend(preflight_notes),
         Err(msg) => return Err(PlanFailure::empty(RemoveError::Validation(msg))),
@@ -1568,7 +1568,7 @@ mod tests {
             missing_count: 0,
             missing_devids: vec![],
             total_devices: 3,
-            fsid: Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into()),
+            fsid: Some(Fsid::parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").unwrap()),
             null_underlying: vec![],
         };
         let mount_point = MountPoint("/mnt/storage".into());
@@ -1617,7 +1617,7 @@ mod tests {
             missing_count: 0,
             missing_devids: vec![],
             total_devices: 2,
-            fsid: Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into()),
+            fsid: Some(Fsid::parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").unwrap()),
             null_underlying: vec![],
         };
         let mount_point = MountPoint("/mnt/storage".into());
@@ -1714,7 +1714,7 @@ mod tests {
             missing_count: 0,
             missing_devids: vec![],
             total_devices: 2,
-            fsid: Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into()),
+            fsid: Some(Fsid::parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").unwrap()),
             null_underlying: vec![],
         };
         let mount_point = MountPoint("/mnt/storage".into());

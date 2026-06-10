@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize, Serializer};
 
-use crate::types::LuksUuid;
+use crate::types::{Fsid, LuksUuid};
 
 // --- JSON command output structs ---
 
@@ -124,7 +124,7 @@ pub struct BtrfsShowDevice {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BtrfsFilesystemShowOutput {
-    pub uuid: Option<String>,
+    pub uuid: Option<Fsid>,
     pub total_devices: u64,
     pub devices: Vec<BtrfsShowDevice>,
     pub has_missing: bool,

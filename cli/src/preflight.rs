@@ -17,7 +17,7 @@ use crate::probe::Filesystem;
 use crate::repair_hint;
 use crate::state_paths::StatePaths;
 use crate::status::format_bytes;
-use crate::types::{MountPoint, PoolState};
+use crate::types::{Fsid, MountPoint, PoolState};
 use crate::ups::{UpsQueryError, query_ups};
 
 /// Refuse if pool.json lists members but the pool is not mounted (locked).
@@ -141,12 +141,16 @@ pub(crate) enum ExclusiveOpError {
 }
 
 /// Shared sysfs reader so policy preflight and host-wide scans classify the
-/// kernel state through the same path, trim, and parser contract.
-fn read_exclop_for_fsid<F: Filesystem + ?Sized>(
+/// kernel state through the same path, trim, and parser contract. Takes a raw
+/// `&str` entry, not an `&Fsid`: the scoped callers pass a validated
+/// `fsid.as_str()`, but `check_any_btrfs_exclusive_op` passes an unvalidated
+/// `/sys/fs/btrfs` directory name that must be *read* (fail-closed) even when
+/// it is not a parseable UUID -- so the leaf cannot demand a typed FSID.
+fn read_exclop_for_sysfs_entry<F: Filesystem + ?Sized>(
     fs: &F,
-    fsid: &str,
+    entry: &str,
 ) -> Result<Option<ExclusiveOp>, ExclusiveOpError> {
-    let path = format!("/sys/fs/btrfs/{fsid}/exclusive_operation");
+    let path = format!("/sys/fs/btrfs/{entry}/exclusive_operation");
     let contents = fs.read_to_string(&path).map_err(ExclusiveOpError::Read)?;
     ExclusiveOp::parse(contents.trim()).map_err(ExclusiveOpError::Unrecognized)
 }
@@ -188,10 +192,10 @@ enum ExclusiveOpPolicy {
 /// unrecognized value, or sysfs read failure).
 fn check_exclusive_op_with_policy<F: Filesystem + ?Sized>(
     fs: &F,
-    fsid: &str,
+    fsid: &Fsid,
     policy: ExclusiveOpPolicy,
 ) -> Result<Option<ExclusiveOp>, String> {
-    let op = match read_exclop_for_fsid(fs, fsid).map_err(|e| e.to_string())? {
+    let op = match read_exclop_for_sysfs_entry(fs, fsid.as_str()).map_err(|e| e.to_string())? {
         None => return Ok(None),
         Some(op) => op,
     };
@@ -258,7 +262,7 @@ pub(crate) fn check_any_btrfs_exclusive_op<F: Filesystem + ?Sized>(
             continue;
         }
         found_fsid_dir = true;
-        if let Some(op) = read_exclop_for_fsid(fs, &entry)? {
+        if let Some(op) = read_exclop_for_sysfs_entry(fs, &entry)? {
             return Err(ExclusiveOpError::Busy(op));
         }
     }
@@ -647,7 +651,7 @@ pub fn check_ups_not_on_battery<R: CommandRunner>(
 /// degraded), in that insertion order.
 pub fn require_mutation_preflight<F: Filesystem + ?Sized>(
     fs: &F,
-    fsid: &str,
+    fsid: &Fsid,
     mount_point: &MountPoint,
 ) -> Result<Vec<PreviewNote>, String> {
     let mut notes: Vec<PreviewNote> = Vec::new();
@@ -672,7 +676,7 @@ pub fn require_mutation_preflight<F: Filesystem + ?Sized>(
 /// is mid balance/device-add/device-remove/device-replace/resize.
 ///
 /// Returns `Err(String)` suitable for wrapping in `LockError::Failed`.
-pub fn require_lock_preflight<F: Filesystem + ?Sized>(fs: &F, fsid: &str) -> Result<(), String> {
+pub fn require_lock_preflight<F: Filesystem + ?Sized>(fs: &F, fsid: &Fsid) -> Result<(), String> {
     check_exclusive_op_with_policy(fs, fsid, ExclusiveOpPolicy::RejectAnyBusy).map(|_| ())
 }
 
@@ -682,7 +686,7 @@ pub fn require_lock_preflight<F: Filesystem + ?Sized>(fs: &F, fsid: &str) -> Res
 /// pause a running balance before unmount and then resume it during recover.
 pub fn require_systemd_stop_lock_preflight<F: Filesystem + ?Sized>(
     fs: &F,
-    fsid: &str,
+    fsid: &Fsid,
 ) -> Result<(), String> {
     check_exclusive_op_with_policy(fs, fsid, ExclusiveOpPolicy::AllowBalanceElseReject).map(|_| ())
 }
@@ -694,7 +698,7 @@ pub fn require_systemd_stop_lock_preflight<F: Filesystem + ?Sized>(
 /// non-balance exclusive operation with the same message as lock preflight.
 pub fn systemd_stop_lock_requires_balance_pause<F: Filesystem + ?Sized>(
     fs: &F,
-    fsid: &str,
+    fsid: &Fsid,
 ) -> Result<bool, String> {
     check_exclusive_op_with_policy(fs, fsid, ExclusiveOpPolicy::AllowBalanceElseReject)
         .map(|op| matches!(op, Some(ExclusiveOp::Balance)))
@@ -772,6 +776,13 @@ mod tests {
     }
 
     const FSID: &str = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+
+    /// Typed `FSID` for the scoped preflight guards, which now take `&Fsid`.
+    /// The `&str` const stays for `with_sysfs`, which keys the mock sysfs path
+    /// by raw string (the leaf reader's contract), so both spellings coexist.
+    fn fsid() -> Fsid {
+        Fsid::parse(FSID).unwrap()
+    }
     const TARGET: &str = "/dev/disk/by-id/virtio-disk3";
     const SOURCE_TOTAL: u64 = 520_093_696;
     const TARGET_RAW_512_MIB: u64 = 536_870_912;
@@ -1673,7 +1684,7 @@ mod tests {
     // Scenario: No active exclusive op.
     fn lock_preflight_passes_when_none() {
         let fs = MockFs::with_sysfs(FSID, "none\n");
-        assert!(require_lock_preflight(&fs, FSID).is_ok());
+        assert!(require_lock_preflight(&fs, &fsid()).is_ok());
     }
 
     #[test]
@@ -1682,7 +1693,7 @@ mod tests {
     // Scenario: sysfs says "device add".
     fn lock_preflight_rejects_busy_op() {
         let fs = MockFs::with_sysfs(FSID, "device add\n");
-        let err = require_lock_preflight(&fs, FSID).unwrap_err();
+        let err = require_lock_preflight(&fs, &fsid()).unwrap_err();
         assert!(
             err.contains("device add") && err.contains("in progress"),
             "expected 'device add' + 'in progress' in: {err}"
@@ -1695,7 +1706,7 @@ mod tests {
     // Scenario: sysfs says "balance paused".
     fn lock_preflight_rejects_balance_paused() {
         let fs = MockFs::with_sysfs(FSID, "balance paused\n");
-        let err = require_lock_preflight(&fs, FSID).unwrap_err();
+        let err = require_lock_preflight(&fs, &fsid()).unwrap_err();
         assert!(
             err.contains("balance (paused)") && err.contains("in progress"),
             "expected 'balance (paused)' + 'in progress' in: {err}"
@@ -1710,7 +1721,7 @@ mod tests {
     //   (for example, namespace/sandbox without sysfs or permission denied).
     fn lock_preflight_rejects_on_sysfs_read_failure() {
         let fs = MockFs::empty();
-        let err = require_lock_preflight(&fs, FSID).unwrap_err();
+        let err = require_lock_preflight(&fs, &fsid()).unwrap_err();
         assert!(
             err.contains("cannot read exclusive operation status"),
             "expected read-failure error, got: {err}"
@@ -1726,7 +1737,7 @@ mod tests {
     // Scenario: New btrfs version writes a value not in exclop_def[].
     fn lock_preflight_rejects_on_unrecognized_value() {
         let fs = MockFs::with_sysfs(FSID, "brand new op\n");
-        let err = require_lock_preflight(&fs, FSID).unwrap_err();
+        let err = require_lock_preflight(&fs, &fsid()).unwrap_err();
         assert!(
             err.contains("unrecognized exclusive operation"),
             "expected unrecognized-value error, got: {err}"
@@ -1751,11 +1762,11 @@ mod tests {
         let fs = MockFs::with_sysfs(FSID, "balance\n").with_sysfs_entry(OTHER_FSID, "none\n");
 
         assert!(
-            require_lock_preflight(&fs, OTHER_FSID).is_ok(),
+            require_lock_preflight(&fs, &Fsid::parse(OTHER_FSID).unwrap()).is_ok(),
             "expected idle fsid to pass preflight"
         );
 
-        let err = require_lock_preflight(&fs, FSID).unwrap_err();
+        let err = require_lock_preflight(&fs, &fsid()).unwrap_err();
         assert!(
             err.contains("in progress"),
             "expected busy refusal for the balancing fsid, got: {err}"
@@ -1773,7 +1784,7 @@ mod tests {
         for body in ["none\n", "balance\n", "balance paused\n"] {
             let fs = MockFs::with_sysfs(FSID, body);
             assert!(
-                require_systemd_stop_lock_preflight(&fs, FSID).is_ok(),
+                require_systemd_stop_lock_preflight(&fs, &fsid()).is_ok(),
                 "expected systemd-stop preflight to allow {body:?}"
             );
         }
@@ -1792,7 +1803,7 @@ mod tests {
         ] {
             let fs = MockFs::with_sysfs(FSID, body);
             assert_eq!(
-                systemd_stop_lock_requires_balance_pause(&fs, FSID),
+                systemd_stop_lock_requires_balance_pause(&fs, &fsid()),
                 Ok(expected),
                 "unexpected pause requirement for {body:?}"
             );
@@ -1814,7 +1825,7 @@ mod tests {
             "swap activate",
         ] {
             let fs = MockFs::with_sysfs(FSID, &format!("{op}\n"));
-            let err = require_systemd_stop_lock_preflight(&fs, FSID).unwrap_err();
+            let err = require_systemd_stop_lock_preflight(&fs, &fsid()).unwrap_err();
             assert!(
                 err.contains(op) && err.contains("cannot lock") && err.contains("in progress"),
                 "expected systemd-stop refusal naming {op:?}, got: {err}"
@@ -1836,7 +1847,7 @@ mod tests {
     // Scenario: sysfs says "none", mountinfo reports rw.
     fn mutation_preflight_passes_when_none() {
         let fs = MockFs::with_sysfs(FSID, "none\n").with_mountinfo(&mountinfo_rw());
-        let notes = require_mutation_preflight(&fs, FSID, &mp()).unwrap();
+        let notes = require_mutation_preflight(&fs, &fsid(), &mp()).unwrap();
         assert!(notes.is_empty(), "expected empty notes, got {notes:?}");
     }
 
@@ -1847,7 +1858,7 @@ mod tests {
     // Scenario: sysfs says "balance paused".
     fn mutation_preflight_rejects_balance_paused() {
         let fs = MockFs::with_sysfs(FSID, "balance paused\n");
-        let err = require_mutation_preflight(&fs, FSID, &mp()).unwrap_err();
+        let err = require_mutation_preflight(&fs, &fsid(), &mp()).unwrap_err();
         assert!(
             err.contains("balance is paused"),
             "expected 'balance is paused' in: {err}"
@@ -1863,7 +1874,7 @@ mod tests {
     // Scenario: sysfs says "device add", mountinfo reports rw.
     fn mutation_preflight_busy_op_returns_info_note() {
         let fs = MockFs::with_sysfs(FSID, "device add\n").with_mountinfo(&mountinfo_rw());
-        let notes = require_mutation_preflight(&fs, FSID, &mp()).unwrap();
+        let notes = require_mutation_preflight(&fs, &fsid(), &mp()).unwrap();
         assert_eq!(notes.len(), 1, "expected one Info note, got {notes:?}");
         match &notes[0] {
             PreviewNote::Info(body) => {
@@ -1884,7 +1895,7 @@ mod tests {
     fn mutation_preflight_readonly_probe_failure_returns_warn_note() {
         let fs = MockFs::with_sysfs(FSID, "none\n")
             .with_mountinfo_error(std::io::ErrorKind::PermissionDenied);
-        let notes = require_mutation_preflight(&fs, FSID, &mp()).unwrap();
+        let notes = require_mutation_preflight(&fs, &fsid(), &mp()).unwrap();
         assert_eq!(notes.len(), 1, "expected one Warn note, got {notes:?}");
         match &notes[0] {
             PreviewNote::Warn(body) => {
@@ -1908,7 +1919,7 @@ mod tests {
     fn mutation_preflight_busy_and_probe_failure_returns_info_then_warn() {
         let fs = MockFs::with_sysfs(FSID, "device add\n")
             .with_mountinfo_error(std::io::ErrorKind::PermissionDenied);
-        let notes = require_mutation_preflight(&fs, FSID, &mp()).unwrap();
+        let notes = require_mutation_preflight(&fs, &fsid(), &mp()).unwrap();
         assert_eq!(notes.len(), 2, "expected two notes, got {notes:?}");
         assert!(
             matches!(
@@ -2120,7 +2131,7 @@ mod tests {
     fn mutation_preflight_rejects_read_only() {
         let fs = MockFs::with_sysfs(FSID, "none\n")
             .with_mountinfo(&mountinfo_for_target("ro,relatime", "rw,space_cache=v2"));
-        let err = require_mutation_preflight(&fs, FSID, &mp()).unwrap_err();
+        let err = require_mutation_preflight(&fs, &fsid(), &mp()).unwrap_err();
         assert!(err.contains("read-only"), "expected 'read-only' in: {err}");
     }
 
@@ -2133,7 +2144,7 @@ mod tests {
             missing_count: 0,
             missing_devids: vec![],
             total_devices: 0,
-            fsid: Some(FSID.to_owned()),
+            fsid: Some(Fsid::parse(FSID).unwrap()),
             null_underlying: vec![],
         }
     }

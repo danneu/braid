@@ -23,7 +23,7 @@ use crate::state_paths::StatePaths;
 use crate::status::{BalanceReport, get_balance_report};
 use crate::status_tag::{StatusTag, color_enabled_for_stderr, emit_status, status_line};
 use crate::types::{
-    ByIdPath, ConfigDiskState, DiskName, LuksUuid, MountPoint, PoolDevice, PoolState,
+    ByIdPath, ConfigDiskState, DiskName, Fsid, LuksUuid, MountPoint, PoolDevice, PoolState,
     format_uuid_list,
 };
 use std::path::PathBuf;
@@ -2169,7 +2169,7 @@ fn verify_recover_passphrase_for_add_replay<R: CommandRunner, F: Filesystem + ?S
 fn visible_btrfs_fsid<R: CommandRunner>(
     runner: &R,
     mapper_path: &str,
-) -> Result<Option<String>, RecoverError> {
+) -> Result<Option<Fsid>, RecoverError> {
     let show_raw = runner.run(&CmdRequest::BtrfsFilesystemShowTarget {
         target: mapper_path.to_owned(),
     })?;
@@ -4984,7 +4984,8 @@ mod tests {
                 "disk2",
                 "/dev/disk/by-id/virtio-disk2",
                 journal::AddJournalMode::RecoverableBraidLabeled {
-                    verified_pool_fsid: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into(),
+                    verified_pool_fsid: Fsid::parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+                        .unwrap(),
                     enroll_key_file: None,
                 },
             ),
@@ -5018,7 +5019,8 @@ mod tests {
                 "disk3",
                 "/dev/disk/by-id/virtio-disk3",
                 journal::AddJournalMode::RecoverableBraidLabeled {
-                    verified_pool_fsid: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into(),
+                    verified_pool_fsid: Fsid::parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+                        .unwrap(),
                     enroll_key_file: None,
                 },
             ),
@@ -5058,7 +5060,10 @@ mod tests {
                             name,
                             &format!("/dev/disk/by-id/virtio-{name}"),
                             journal::AddJournalMode::RecoverableBraidLabeled {
-                                verified_pool_fsid: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into(),
+                                verified_pool_fsid: Fsid::parse(
+                                    "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+                                )
+                                .unwrap(),
                                 enroll_key_file: None,
                             },
                         ),
@@ -5098,7 +5103,8 @@ mod tests {
                     "disk2",
                     "/dev/disk/by-id/virtio-disk2",
                     journal::AddJournalMode::RecoverableBraidLabeled {
-                        verified_pool_fsid: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into(),
+                        verified_pool_fsid: Fsid::parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+                            .unwrap(),
                         enroll_key_file: None,
                     },
                 ),
@@ -5174,7 +5180,7 @@ mod tests {
             }],
             missing_count: 0,
             total_devices: 1,
-            fsid: Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into()),
+            fsid: Some(Fsid::parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").unwrap()),
             missing_devids: vec![],
             null_underlying: vec![],
         }
@@ -5211,7 +5217,7 @@ mod tests {
             ],
             missing_count: 0,
             total_devices: 2,
-            fsid: Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into()),
+            fsid: Some(Fsid::parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").unwrap()),
             missing_devids: vec![],
             null_underlying: vec![],
         }
@@ -5236,7 +5242,7 @@ mod tests {
             ],
             missing_count: 0,
             total_devices: 2,
-            fsid: Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into()),
+            fsid: Some(Fsid::parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").unwrap()),
             missing_devids: vec![],
             null_underlying: vec![],
         }
@@ -5277,7 +5283,7 @@ mod tests {
             ],
             missing_count: 0,
             total_devices: 2,
-            fsid: Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into()),
+            fsid: Some(Fsid::parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").unwrap()),
             missing_devids: vec![],
             null_underlying: vec![],
         }
@@ -5302,7 +5308,7 @@ mod tests {
             ],
             missing_count: 0,
             total_devices: 2,
-            fsid: Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into()),
+            fsid: Some(Fsid::parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").unwrap()),
             missing_devids: vec![],
             null_underlying: vec![],
         }
@@ -5331,7 +5337,7 @@ mod tests {
             }],
             missing_count: 1,
             total_devices: 2,
-            fsid: Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into()),
+            fsid: Some(Fsid::parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").unwrap()),
             missing_devids: vec![2],
             null_underlying: vec![],
         }
@@ -5362,7 +5368,7 @@ mod tests {
             ],
             missing_count: 0,
             total_devices: 3,
-            fsid: Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into()),
+            fsid: Some(Fsid::parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").unwrap()),
             missing_devids: vec![],
             null_underlying: vec![],
         }
@@ -7240,7 +7246,7 @@ mod tests {
             }],
             missing_count: 0,
             total_devices: 1,
-            fsid: Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into()),
+            fsid: Some(Fsid::parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").unwrap()),
             missing_devids: vec![],
             null_underlying: vec![],
         };
@@ -7306,7 +7312,7 @@ mod tests {
             }],
             missing_count: 0,
             total_devices: 1,
-            fsid: Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into()),
+            fsid: Some(Fsid::parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").unwrap()),
             missing_devids: vec![],
             null_underlying: vec![],
         };
@@ -8199,7 +8205,8 @@ mod tests {
                 "disk2",
                 "/dev/disk/by-id/virtio-disk2",
                 journal::AddJournalMode::RecoverableBraidLabeled {
-                    verified_pool_fsid: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into(),
+                    verified_pool_fsid: Fsid::parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+                        .unwrap(),
                     enroll_key_file: Some(std::path::PathBuf::from("/run/keys/braid.key")),
                 },
             ),
@@ -8254,7 +8261,8 @@ mod tests {
                 "disk2",
                 "/dev/disk/by-id/virtio-disk2",
                 journal::AddJournalMode::RecoverableBraidLabeled {
-                    verified_pool_fsid: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into(),
+                    verified_pool_fsid: Fsid::parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+                        .unwrap(),
                     enroll_key_file: None,
                 },
             ),

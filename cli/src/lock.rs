@@ -11,7 +11,7 @@ use crate::preview::{Preview, PreviewCompleteness, PreviewNote};
 use crate::probe::{Filesystem, ProbeError, probe_fsid, probe_pool};
 use crate::progress::{RealSleeper, Sleeper};
 use crate::status_tag::{StatusTag, color_enabled_for_stderr, emit_status, status_line};
-use crate::types::{DiskName, LuksUuid, MapperName, MountPoint, PoolState, format_uuid_list};
+use crate::types::{DiskName, Fsid, LuksUuid, MapperName, MountPoint, PoolState, format_uuid_list};
 use std::collections::HashSet;
 use std::io::{self, Write};
 
@@ -79,10 +79,7 @@ enum Snapshot {
     /// preflight -- it is not compared to any persisted pool identity
     /// (braid persists none); `probe_error` is quoted in the fallback
     /// warning.
-    ProbeFailed {
-        fsid: String,
-        probe_error: ProbeError,
-    },
+    ProbeFailed { fsid: Fsid, probe_error: ProbeError },
     /// Pool is not mounted. Skips the mounted-pool `probe_pool` call
     /// and the FSID preflight gate; UUID-scanned mapper cleanup still
     /// runs via `build_close_sets_uuid_scanned_fallback` to close any
@@ -4568,7 +4565,7 @@ mod tests {
             ],
             missing_count: 0,
             total_devices: 2,
-            fsid: Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into()),
+            fsid: Some(Fsid::parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").unwrap()),
             missing_devids: vec![],
             null_underlying: vec![],
         }
@@ -4590,7 +4587,7 @@ mod tests {
             }],
             missing_count: 1,
             total_devices: 2,
-            fsid: Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into()),
+            fsid: Some(Fsid::parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").unwrap()),
             missing_devids: vec![null_devid],
             null_underlying: vec![NullUnderlyingDevice {
                 mapper: MapperName(null_mapper.into()),
@@ -4713,7 +4710,7 @@ mod tests {
             }],
             missing_count: 0,
             total_devices: 1,
-            fsid: Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into()),
+            fsid: Some(Fsid::parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").unwrap()),
             missing_devids: vec![],
             null_underlying: vec![],
         };

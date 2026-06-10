@@ -60,7 +60,7 @@ pub struct StatusReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub profile: Option<ProfileJson>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub fsid: Option<String>,
+    pub fsid: Option<Fsid>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub capacity: Option<CapacityReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1394,7 +1394,7 @@ fn format_status_human(
             .display_human(report.missing_count.unwrap_or(0))
     ));
 
-    if let Some(fsid) = report.fsid.as_deref() {
+    if let Some(fsid) = report.fsid.as_ref() {
         out.push_str(&format!("FSID:     {fsid}\n"));
     }
 
@@ -1907,7 +1907,7 @@ mod tests {
             present_count: Some(3),
             missing_count: Some(0),
             profile: Some(ProfileJson::from(&df_summary.profile_summary)),
-            fsid: Some(TEST_FSID.to_owned()),
+            fsid: Some(Fsid::parse(TEST_FSID).unwrap()),
             capacity: Some(capacity),
             last_scrub: Some(last_scrub),
             balance: None,
@@ -2449,7 +2449,7 @@ mod tests {
             present_count: Some(1),
             missing_count: Some(0),
             profile: Some(profile_json(&["single"], &["DUP"], &["DUP"])),
-            fsid: Some(TEST_FSID.to_owned()),
+            fsid: Some(Fsid::parse(TEST_FSID).unwrap()),
             capacity: Some(CapacityReport {
                 total_bytes: Some(1073741824),
                 used_bytes: 536870912,
@@ -2531,7 +2531,7 @@ mod tests {
             present_count: Some(3),
             missing_count: Some(0),
             profile: Some(ProfileJson::uniform("RAID1")),
-            fsid: Some(TEST_FSID.to_owned()),
+            fsid: Some(Fsid::parse(TEST_FSID).unwrap()),
             capacity: Some(CapacityReport {
                 total_bytes: Some(1040187392),
                 used_bytes: 33914880,
@@ -2622,7 +2622,7 @@ mod tests {
             present_count: Some(2),
             missing_count: Some(0),
             profile: Some(profile_json(&["single", "RAID1"], &["RAID1"], &["RAID1"])),
-            fsid: Some(TEST_FSID.to_owned()),
+            fsid: Some(Fsid::parse(TEST_FSID).unwrap()),
             capacity: None,
             last_scrub: Some(ScrubReport::Never),
             balance: None,
@@ -2681,7 +2681,7 @@ mod tests {
             present_count: Some(2),
             missing_count: Some(0),
             profile: Some(profile_json(&["RAID5"], &["RAID1"], &["RAID1"])),
-            fsid: Some(TEST_FSID.to_owned()),
+            fsid: Some(Fsid::parse(TEST_FSID).unwrap()),
             capacity: None,
             last_scrub: Some(ScrubReport::Never),
             balance: None,
@@ -2739,7 +2739,7 @@ mod tests {
             present_count: Some(2),
             missing_count: Some(0),
             profile: Some(profile_json(&["RAID1"], &[], &[])),
-            fsid: Some(TEST_FSID.to_owned()),
+            fsid: Some(Fsid::parse(TEST_FSID).unwrap()),
             capacity: None,
             last_scrub: Some(ScrubReport::Never),
             balance: None,

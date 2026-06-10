@@ -333,8 +333,16 @@ fn validate_execute_pool_identity(
     }
 
     if planned_pool.mounted && fresh_pool.mounted && fresh_pool.fsid != planned_pool.fsid {
-        let planned = planned_pool.fsid.as_deref().unwrap_or("<unknown>");
-        let fresh = fresh_pool.fsid.as_deref().unwrap_or("<unknown>");
+        let planned = planned_pool
+            .fsid
+            .as_ref()
+            .map(Fsid::as_str)
+            .unwrap_or("<unknown>");
+        let fresh = fresh_pool
+            .fsid
+            .as_ref()
+            .map(Fsid::as_str)
+            .unwrap_or("<unknown>");
         return Err(AddError::Validation(format!(
             "pool fsid changed between planning and execution (was {planned}, now {fresh}) -- aborting before journal write. The pool you planned against is no longer the same filesystem."
         )));
@@ -512,7 +520,7 @@ struct RecoverableBraidTarget {
     by_id: ByIdPath,
     mapper_path: String,
     luks_uuid: LuksUuid,
-    verified_pool_fsid: String,
+    verified_pool_fsid: Fsid,
     /// Keyfile to enroll into LUKS slot 1 if `add --enroll DIR` was
     /// passed against this target and the per-disk planner classified
     /// the disk as `NeedsEnroll`. `None` means either no `--enroll`
@@ -1749,7 +1757,7 @@ pub fn plan_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     }
 
     if pool.mounted {
-        let fsid = pool.fsid.as_deref().expect("mounted pool must have FSID");
+        let fsid = pool.fsid.as_ref().expect("mounted pool must have FSID");
         match preflight::require_mutation_preflight(fs, fsid, config.mount_point()) {
             Ok(preflight_notes) => notes.extend(preflight_notes),
             Err(msg) => return Err(PlanFailure::empty(AddError::Validation(msg))),
@@ -2636,7 +2644,7 @@ mod tests {
             missing_count: 0,
             missing_devids: vec![],
             total_devices: 1,
-            fsid: Some(fsid.to_owned()),
+            fsid: Some(Fsid::parse(fsid).unwrap()),
             null_underlying: vec![],
         }
     }
@@ -2715,7 +2723,7 @@ mod tests {
             missing_count: 0,
             missing_devids: vec![],
             total_devices: 1,
-            fsid: Some(fsid.to_owned()),
+            fsid: Some(Fsid::parse(fsid).unwrap()),
             null_underlying: vec![],
         };
         let mn = MapperName("braid-disk1".into());
@@ -2763,7 +2771,7 @@ mod tests {
             missing_count: 0,
             missing_devids: vec![],
             total_devices,
-            fsid: Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".to_owned()),
+            fsid: Some(Fsid::parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").unwrap()),
             null_underlying: vec![],
         }
     }
@@ -2929,7 +2937,7 @@ mod tests {
             header_backup_path: PathBuf::from("/tmp/mock-header"),
             by_id: ByIdPath::parse(by_id).unwrap(),
             luks_uuid: LuksUuid::parse(uuid).unwrap(),
-            verified_pool_fsid: POOL_FSID.to_owned(),
+            verified_pool_fsid: Fsid::parse(POOL_FSID).unwrap(),
             enroll_key_file: None,
             name,
         }
@@ -3563,7 +3571,7 @@ mod tests {
             }],
             missing_count: 0,
             total_devices: 1,
-            fsid: Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into()),
+            fsid: Some(Fsid::parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").unwrap()),
             missing_devids: vec![],
             null_underlying: vec![],
         };
@@ -3818,7 +3826,7 @@ mod tests {
             missing_count: 0,
             missing_devids: vec![],
             total_devices: 1,
-            fsid: Some(pool_fsid.to_owned()),
+            fsid: Some(Fsid::parse(pool_fsid).unwrap()),
             null_underlying: vec![],
         };
         let mut pool_membership = PoolMembership::empty();
@@ -4590,7 +4598,7 @@ mod tests {
             missing_count: 0,
             missing_devids: vec![],
             total_devices: 1,
-            fsid: Some(POOL_FSID.into()),
+            fsid: Some(Fsid::parse(POOL_FSID).unwrap()),
             null_underlying: vec![],
         };
         let probed = vec![PresentConfigDisk {
@@ -4700,7 +4708,7 @@ mod tests {
             missing_count: 0,
             missing_devids: vec![],
             total_devices: 1,
-            fsid: Some(POOL_FSID.into()),
+            fsid: Some(Fsid::parse(POOL_FSID).unwrap()),
             null_underlying: vec![],
         };
         let plan = plan_for_execute_target(
@@ -4781,7 +4789,7 @@ mod tests {
             missing_count: 1,
             missing_devids: vec![2],
             total_devices: 2,
-            fsid: Some(POOL_FSID.into()),
+            fsid: Some(Fsid::parse(POOL_FSID).unwrap()),
             null_underlying: vec![],
         };
         let plan = plan_for_execute_target(
@@ -4849,7 +4857,7 @@ mod tests {
             missing_count: 0,
             missing_devids: vec![],
             total_devices: 1,
-            fsid: Some(POOL_FSID.into()),
+            fsid: Some(Fsid::parse(POOL_FSID).unwrap()),
             null_underlying: vec![],
         };
         let mut plan = plan_for_execute_target(
@@ -7358,7 +7366,7 @@ mod tests {
             }],
             missing_count: 0,
             total_devices: 1,
-            fsid: Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into()),
+            fsid: Some(Fsid::parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").unwrap()),
             missing_devids: vec![],
             null_underlying: vec![],
         };
@@ -10418,7 +10426,7 @@ mod tests {
         let by_id = ByIdPath::parse(BY_ID).unwrap();
         let mut pool =
             pool_with_live_devices(vec![live_pool_device("braid-drifted", &uuid, "/dev/vdb")]);
-        pool.fsid = Some("cc86845b-aec3-408e-bef5-553affc1f2b1".into());
+        pool.fsid = Some(Fsid::parse("cc86845b-aec3-408e-bef5-553affc1f2b1").unwrap());
         let runner = cloned_disk_runner(&[(BY_ID, collision_uuid)]);
         let recording = RequestRecordingRunner::new(runner);
         let probed = vec![cloned_disk_probed("clone", by_id.as_str(), collision_uuid)];
@@ -10473,7 +10481,7 @@ mod tests {
         let by_id = ByIdPath::parse(BY_ID).unwrap();
         let mut pool =
             pool_with_live_devices(vec![live_pool_device("braid-foreign", &uuid, "/dev/vdc")]);
-        pool.fsid = Some("cc86845b-aec3-408e-bef5-553affc1f2b1".into());
+        pool.fsid = Some(Fsid::parse("cc86845b-aec3-408e-bef5-553affc1f2b1").unwrap());
         let runner = cloned_disk_runner(&[(BY_ID, collision_uuid)]);
         let recording = RequestRecordingRunner::new(runner);
         let probed = vec![cloned_disk_probed("clone", by_id.as_str(), collision_uuid)];
@@ -10524,7 +10532,7 @@ mod tests {
         let by_id = ByIdPath::parse("/dev/disk/by-id/usb-CLONE").unwrap();
         let mut pool =
             pool_with_live_devices(vec![live_pool_device("braid-drifted", &uuid, "/dev/vdb")]);
-        pool.fsid = Some("cc86845b-aec3-408e-bef5-553affc1f2b1".into());
+        pool.fsid = Some(Fsid::parse("cc86845b-aec3-408e-bef5-553affc1f2b1").unwrap());
         let runner = RequestRecordingRunner::new(MockRunner::default());
         let probed = vec![cloned_disk_probed_with_mapper_state(
             "clone",
@@ -10580,7 +10588,7 @@ mod tests {
         let fresh_by_id = ByIdPath::parse("/dev/disk/by-id/usb-FRESH").unwrap();
         let mut pool =
             pool_with_live_devices(vec![live_pool_device("braid-drifted", &uuid, "/dev/vdb")]);
-        pool.fsid = Some("cc86845b-aec3-408e-bef5-553affc1f2b1".into());
+        pool.fsid = Some(Fsid::parse("cc86845b-aec3-408e-bef5-553affc1f2b1").unwrap());
         let runner = RequestRecordingRunner::new(MockRunner::default());
         let probed = vec![
             cloned_disk_probed_with_mapper_state(
@@ -10660,7 +10668,7 @@ mod tests {
         let by_id = ByIdPath::parse("/dev/disk/by-id/usb-CLONE").unwrap();
         let mut pool =
             pool_with_live_devices(vec![live_pool_device("braid-foreign", &uuid, "/dev/vdc")]);
-        pool.fsid = Some("cc86845b-aec3-408e-bef5-553affc1f2b1".into());
+        pool.fsid = Some(Fsid::parse("cc86845b-aec3-408e-bef5-553affc1f2b1").unwrap());
         let runner = RequestRecordingRunner::new(MockRunner::default());
         let probed = vec![cloned_disk_probed_with_mapper_state(
             "clone",
@@ -11103,7 +11111,7 @@ mod tests {
             missing_count: 0,
             missing_devids: vec![],
             total_devices: 1,
-            fsid: Some("cc86845b-aec3-408e-bef5-553affc1f2b1".into()),
+            fsid: Some(Fsid::parse("cc86845b-aec3-408e-bef5-553affc1f2b1").unwrap()),
             null_underlying: vec![],
         };
         let runner = cloned_disk_runner(&[("/dev/disk/by-id/usb-CLONE", collision_uuid)]);

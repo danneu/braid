@@ -5,6 +5,7 @@ use nom::{
 };
 
 use crate::cmd::RawCommandOutput;
+use crate::types::Fsid;
 
 use super::ParseError;
 use super::types::{BtrfsFilesystemShowOutput, BtrfsShowDevice};
@@ -128,9 +129,22 @@ pub fn parse_btrfs_filesystem_show(
         .lines()
         .any(|line| parse_missing_sentinel(line).is_ok());
 
+    // Route the found FSID through Fsid::parse so the value-type is the single
+    // source of canonicalization, mirroring how parse_cryptsetup_luks_uuid_from_dump
+    // builds a LuksUuid. An absent uuid line stays None; a present-but-malformed
+    // FSID becomes ParseError::InvalidValue rather than a silently-untyped string.
     let uuid = stdout
         .lines()
-        .find_map(|line| parse_uuid_line(line).ok().map(|(_, u)| u.to_owned()));
+        .find_map(|line| parse_uuid_line(line).ok().map(|(_, u)| u))
+        .map(|found| {
+            Fsid::parse(found).map_err(|e| ParseError::InvalidValue {
+                cmd: raw.cmd.clone(),
+                field: "uuid".into(),
+                raw: e.raw,
+                detail: e.detail,
+            })
+        })
+        .transpose()?;
 
     Ok(BtrfsFilesystemShowOutput {
         uuid,
@@ -178,10 +192,10 @@ mod tests {
         );
         let uuid = out
             .uuid
-            .as_deref()
+            .as_ref()
             .expect("FSID must be parsed from uuid line");
         assert!(
-            uuid::Uuid::parse_str(uuid).is_ok(),
+            uuid::Uuid::parse_str(uuid.as_str()).is_ok(),
             "FSID should be a valid UUID, got: {uuid}"
         );
         assert_eq!(out.devices[1].devid, 2);
@@ -276,9 +290,43 @@ mod tests {
         };
         let out = parse_btrfs_filesystem_show(&raw).unwrap();
         assert_eq!(
-            out.uuid.as_deref(),
+            out.uuid.as_ref().map(Fsid::as_str),
             Some("f1e2d3c4-b5a6-9788-7654-321fedcba098")
         );
+    }
+
+    // Intent: a present-but-malformed `uuid:` value surfaces as
+    //   ParseError::InvalidValue naming the `uuid` field, parallel to the
+    //   cryptsetup luks_uuid_from_dump_returns_invalid_value_when_unparseable
+    //   test.
+    // Why it exists: the FSID value-type is constructed here via Fsid::parse;
+    //   an upstream btrfs-progs that emitted a non-UUID FSID must fail loudly
+    //   at the producer rather than flow an untyped string into the
+    //   plan->recover identity comparison.
+    // Scenario: a corrupted or future-format btrfs filesystem show prints a
+    //   `uuid:` line whose value is not a UUID.
+    #[test]
+    fn btrfs_show_returns_invalid_value_for_malformed_fsid() {
+        let raw = RawCommandOutput {
+            cmd: "btrfs filesystem show".into(),
+            stdout: "Label: none  uuid: not-a-uuid\n\
+                     \tTotal devices 1 FS bytes used 4.00GiB\n\
+                     \tdevid    1 size 10.00GiB used 5.00GiB path /dev/mapper/braid-vda\n"
+                .into(),
+            stderr: String::new(),
+            exit_status: 0,
+        };
+        let err = parse_btrfs_filesystem_show(&raw).unwrap_err();
+        match err {
+            ParseError::InvalidValue {
+                field, raw, detail, ..
+            } => {
+                assert_eq!(field, "uuid");
+                assert_eq!(raw, "not-a-uuid");
+                assert!(!detail.is_empty(), "detail must carry uuid-crate reason");
+            }
+            other => panic!("expected InvalidValue uuid, got {other:?}"),
+        }
     }
 
     #[test]

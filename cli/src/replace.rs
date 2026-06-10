@@ -961,8 +961,16 @@ fn verify_replace_execute_live_pool_uuid<R: CommandRunner, F: Filesystem + ?Size
     }
 
     if fresh_pool.fsid != planned_pool.fsid {
-        let planned = planned_pool.fsid.as_deref().unwrap_or("<unknown>");
-        let fresh = fresh_pool.fsid.as_deref().unwrap_or("<unknown>");
+        let planned = planned_pool
+            .fsid
+            .as_ref()
+            .map(Fsid::as_str)
+            .unwrap_or("<unknown>");
+        let fresh = fresh_pool
+            .fsid
+            .as_ref()
+            .map(Fsid::as_str)
+            .unwrap_or("<unknown>");
         return Err(ReplaceError::Validation(format!(
             "pool fsid changed between planning and execution (was {planned}, now {fresh}) -- aborting before journal write. The pool you planned against is no longer the same filesystem."
         )));
@@ -1269,7 +1277,7 @@ where
     }
 
     // Preflight
-    let fsid = pool.fsid.as_deref().expect("mounted pool must have FSID");
+    let fsid = pool.fsid.as_ref().expect("mounted pool must have FSID");
     match preflight::require_mutation_preflight(fs, fsid, config.mount_point()) {
         Ok(preflight_notes) => notes.extend(preflight_notes),
         Err(msg) => return Err(PlanFailure::empty(ReplaceError::Validation(msg))),
@@ -3331,7 +3339,7 @@ mod tests {
             ],
             missing_count: 0,
             total_devices: 2,
-            fsid: Some(REPLACE_TEST_FSID.to_owned()),
+            fsid: Some(Fsid::parse(REPLACE_TEST_FSID).unwrap()),
             missing_devids: vec![],
             null_underlying: vec![],
         };
@@ -4766,7 +4774,7 @@ mod tests {
             ],
             missing_count: 0,
             total_devices: 2,
-            fsid: Some(REPLACE_TEST_FSID.to_owned()),
+            fsid: Some(Fsid::parse(REPLACE_TEST_FSID).unwrap()),
             missing_devids: vec![],
             null_underlying: vec![],
         };

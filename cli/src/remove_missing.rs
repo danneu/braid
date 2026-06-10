@@ -366,7 +366,7 @@ pub fn plan_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     }
 
     // Preflight
-    let fsid = pool.fsid.as_deref().expect("mounted pool must have FSID");
+    let fsid = pool.fsid.as_ref().expect("mounted pool must have FSID");
     match preflight::require_mutation_preflight(fs, fsid, config.mount_point()) {
         Ok(preflight_notes) => notes.extend(preflight_notes),
         Err(msg) => return Err(PlanFailure::empty(RemoveMissingError::Validation(msg))),
@@ -739,7 +739,7 @@ mod tests {
     use crate::test_fixtures::{
         DeviceUsageSpec, MockFs, PoolFixture, RemoveMissingPool, device_usage_raw_body, mock_ok,
     };
-    use crate::types::{NullUnderlyingDevice, PoolDevice};
+    use crate::types::{Fsid, NullUnderlyingDevice, PoolDevice};
 
     fn mp() -> MountPoint {
         MountPoint("/mnt/storage".into())
@@ -760,7 +760,7 @@ mod tests {
             devices: vec![],
             missing_count: 1,
             total_devices: 2,
-            fsid: Some("cc86845b-aec3-408e-bef5-553affc1f2b1".to_owned()),
+            fsid: Some(Fsid::parse("cc86845b-aec3-408e-bef5-553affc1f2b1").unwrap()),
             missing_devids: vec![],
             null_underlying: vec![],
         }

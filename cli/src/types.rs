@@ -94,6 +94,83 @@ impl<'de> Deserialize<'de> for LuksUuid {
 }
 
 // ---------------------------------------------------------------------------
+// Fsid -- canonical, validated btrfs filesystem UUID identity
+// ---------------------------------------------------------------------------
+
+/// Persistent btrfs filesystem UUID identity. Inner string is canonicalized to
+/// lowercase hyphenated form via `Fsid::parse`. The type is the single source of
+/// truth for "which btrfs pool" across `pending-op.json`, planner code, and live
+/// probes; raw-string FSID comparison across the plan->recover boundary is the
+/// mix-up this type makes a compile error.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Fsid(String);
+
+/// Error returned when constructing an `Fsid` from text that is not a
+/// recognized UUID form. Routed through `Fsid::parse` so call sites surface
+/// the offending input verbatim, mirroring `LuksUuidParseError`.
+#[derive(Debug, Error)]
+#[error("invalid btrfs FSID '{raw}': {detail}")]
+pub struct FsidParseError {
+    /// Original text supplied by the parser or a fixture before
+    /// canonicalization failed.
+    pub raw: String,
+    /// Parser-specific reason from `uuid::Uuid`, kept so CLI errors do not
+    /// collapse all malformed FSIDs into the same opaque message.
+    pub detail: String,
+}
+
+impl Fsid {
+    /// Parse and canonicalize any UUID form accepted by `uuid::Uuid` to
+    /// lowercase hyphenated text. The only validating constructor; production
+    /// (the btrfs-show parser) and tests share it so a hand-edited
+    /// `pending-op.json` FSID canonicalizes the same way probed btrfs output
+    /// does. No `new_v4`: braid never mints an FSID -- btrfs owns it.
+    pub fn parse(raw: &str) -> Result<Self, FsidParseError> {
+        match uuid::Uuid::parse_str(raw) {
+            Ok(u) => Ok(Fsid(u.hyphenated().to_string())),
+            Err(e) => Err(FsidParseError {
+                raw: raw.to_owned(),
+                detail: e.to_string(),
+            }),
+        }
+    }
+
+    /// Observation accessor for log lines, sysfs-path interpolation, and any
+    /// non-Display formatter site that needs the raw canonical form.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for Fsid {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl Serialize for Fsid {
+    fn serialize<S>(&self, ser: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        ser.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for Fsid {
+    fn deserialize<D>(de: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // Re-parse through Fsid::parse so a hand-edited pending-op.json FSID is
+        // re-validated and re-canonicalized on load -- the operator-editable
+        // journal defense, identical to LuksUuid.
+        let s = String::deserialize(de)?;
+        Fsid::parse(&s).map_err(serde::de::Error::custom)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // DiskName -- presentation identity, validated to the braid disk-name contract
 // ---------------------------------------------------------------------------
 
@@ -431,7 +508,7 @@ pub struct PoolState {
     pub missing_count: u64,
     pub total_devices: u64,
     /// btrfs filesystem FSID (uuid), populated when pool is mounted.
-    pub fsid: Option<String>,
+    pub fsid: Option<Fsid>,
     /// Devids of missing devices (from btrfs filesystem show MISSING sentinels).
     ///
     /// Authoritative to btrfs — does NOT include null-underlying devices.
@@ -694,6 +771,87 @@ mod tests {
         let lower: LuksUuid =
             serde_json::from_str("\"8c78a966-ef17-4610-b835-5b376ef10b4e\"").unwrap();
         assert_eq!(upper, lower);
+    }
+
+    // -- Fsid ---------------------------------------------------------------
+
+    #[test]
+    fn fsid_parse_canonicalizes_uppercase() {
+        // Intent: uppercase hyphenated FSID canonicalizes to lowercase.
+        // Why: canonicalization gates equality with btrfs's lowercase output
+        //   across the plan->recover boundary.
+        // Scenario: an operator hand-edits pending-op.json with an uppercase
+        //   verified_pool_fsid; the loaded value equates with probed output.
+        let f = Fsid::parse("8C78A966-EF17-4610-B835-5B376EF10B4E").unwrap();
+        assert_eq!(f.as_str(), "8c78a966-ef17-4610-b835-5b376ef10b4e");
+    }
+
+    #[test]
+    fn fsid_parse_canonicalizes_simple_form() {
+        // Intent: 32-hex simple form parses to the canonical hyphenated form.
+        // Why: the canonicalizer is the single source of truth for FSID
+        //   equality regardless of which UUID spelling the input carried.
+        let f = Fsid::parse("8c78a966ef174610b8355b376ef10b4e").unwrap();
+        assert_eq!(f.as_str(), "8c78a966-ef17-4610-b835-5b376ef10b4e");
+    }
+
+    #[test]
+    fn fsid_parse_canonicalizes_urn() {
+        // Intent: URN form (`urn:uuid:...`) parses to the canonical
+        //   hyphenated form.
+        // Why: uuid::Uuid::parse_str accepts URN; the canonicalizer must not
+        //   silently reject a valid alternative form.
+        let f = Fsid::parse("urn:uuid:8c78a966-ef17-4610-b835-5b376ef10b4e").unwrap();
+        assert_eq!(f.as_str(), "8c78a966-ef17-4610-b835-5b376ef10b4e");
+    }
+
+    #[test]
+    fn fsid_parse_rejects_invalid() {
+        // Intent: non-UUID text fails parse with the offending raw input.
+        // Why: invalid identity must surface as a parse error so the
+        //   btrfs-show parser can route it into ParseError::InvalidValue and
+        //   the journal deserialize path can reject a corrupt FSID.
+        let err = Fsid::parse("not-a-uuid").unwrap_err();
+        assert_eq!(err.raw, "not-a-uuid");
+        assert!(
+            !err.detail.is_empty(),
+            "detail must carry uuid-crate reason"
+        );
+    }
+
+    #[test]
+    fn fsid_serialize_round_trip() {
+        // Intent: serialize emits canonical form; deserialize re-parses
+        //   through the canonicalizer.
+        // Why: round-trip stability is load-bearing for pending-op.json
+        //   journal write and replay.
+        let f = Fsid::parse("8C78A966-EF17-4610-B835-5B376EF10B4E").unwrap();
+        let s = serde_json::to_string(&f).unwrap();
+        assert_eq!(s, "\"8c78a966-ef17-4610-b835-5b376ef10b4e\"");
+        let back: Fsid = serde_json::from_str(&s).unwrap();
+        assert_eq!(back, f);
+    }
+
+    #[test]
+    fn fsid_deserialize_canonicalizes_uppercase() {
+        // Intent: a JSON-source uppercase FSID deserializes equal to its
+        //   lowercase form.
+        // Why: this is the operator-editable journal defense -- a hand-edited
+        //   uppercase verified_pool_fsid in pending-op.json must load as the
+        //   canonical lowercase form and equate with probed btrfs output.
+        let upper: Fsid = serde_json::from_str("\"8C78A966-EF17-4610-B835-5B376EF10B4E\"").unwrap();
+        let lower: Fsid = serde_json::from_str("\"8c78a966-ef17-4610-b835-5b376ef10b4e\"").unwrap();
+        assert_eq!(upper, lower);
+    }
+
+    #[test]
+    fn fsid_deserialize_rejects_invalid() {
+        // Intent: a JSON-source non-UUID FSID fails to deserialize.
+        // Why: deny_unknown_fields catches stale keys, but a malformed value
+        //   on a known field requires Deserialize to route through
+        //   Fsid::parse so a corrupt journal FSID is rejected on load.
+        let r: Result<Fsid, _> = serde_json::from_str("\"fsid-1\"");
+        assert!(r.is_err());
     }
 
     // -- DiskName -----------------------------------------------------------

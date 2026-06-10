@@ -509,7 +509,7 @@ pub fn probe_fsid<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
     mount_point: &MountPoint,
-) -> Result<String, ProbeError> {
+) -> Result<Fsid, ProbeError> {
     match crate::mount_check::fstype_at_mount_via_fs(fs, mount_point.as_str())? {
         None => {
             return Err(ProbeError::PoolDevice {
@@ -1538,7 +1538,7 @@ mod tests {
             MapperName("braid-ironwolf".into())
         );
         assert_eq!(
-            result.fsid.as_deref(),
+            result.fsid.as_ref().map(Fsid::as_str),
             Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"),
             "pool FSID must be populated from btrfs filesystem show"
         );
@@ -2232,7 +2232,7 @@ mod tests {
         );
 
         let fsid = probe_fsid(&runner, &fs, &mp()).unwrap();
-        assert_eq!(fsid, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+        assert_eq!(fsid.as_str(), "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
     }
 
     // Intent: probe_fsid preserves probe_pool's NotBtrfs contract.

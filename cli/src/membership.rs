@@ -1259,7 +1259,7 @@ mod tests {
     // the report content (which the doctor downstream renders) and a
     // separate forthcoming doctor test pins the rendered substring.
 
-    use crate::types::{MapperName, PoolDevice, PoolState};
+    use crate::types::{Fsid, MapperName, PoolDevice, PoolState};
 
     fn pool_state_with(devices: Vec<PoolDevice>) -> PoolState {
         PoolState {
@@ -1267,7 +1267,7 @@ mod tests {
             devices,
             missing_count: 0,
             total_devices: 0,
-            fsid: Some("11111111-1111-1111-1111-111111111111".into()),
+            fsid: Some(Fsid::parse("11111111-1111-1111-1111-111111111111").unwrap()),
             missing_devids: vec![],
             null_underlying: vec![],
         }

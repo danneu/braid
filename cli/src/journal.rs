@@ -1,7 +1,7 @@
 use crate::membership::{LuksUuidMap, PoolMembership};
 use crate::state_io::atomic_write;
 use crate::state_paths::StatePaths;
-use crate::types::{ByIdPath, DiskName, LuksFormatExtraOpts, LuksUuid, MapperName};
+use crate::types::{ByIdPath, DiskName, Fsid, LuksFormatExtraOpts, LuksUuid, MapperName};
 use crate::util::now_iso;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -75,7 +75,7 @@ pub enum AddJournalMode {
     /// Add-recovery FSID cross-check that the UUID gate does not subsume
     /// (see plan lines 979-987).
     RecoverableBraidLabeled {
-        verified_pool_fsid: String,
+        verified_pool_fsid: Fsid,
         /// Keyfile to enroll into LUKS slot 1 if `add --enroll DIR` was
         /// passed against this returning braid disk and slot 1 was empty
         /// at planning time. `None` covers both the no-`--enroll` case
@@ -605,7 +605,8 @@ mod tests {
                 name: DiskName::parse("disk2").unwrap(),
                 by_id: ByIdPath::parse("/dev/disk/by-id/ata-Y").unwrap(),
                 mode: AddJournalMode::RecoverableBraidLabeled {
-                    verified_pool_fsid: "fsid-1".into(),
+                    verified_pool_fsid: Fsid::parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+                        .unwrap(),
                     enroll_key_file: Some(PathBuf::from("/run/keys/braid.key")),
                 },
             },
@@ -962,7 +963,7 @@ mod tests {
                     "name": "disk2",
                     "by_id": "/dev/disk/by-id/ata-Y",
                     "mode": {{ "RecoverableBraidLabeled": {{
-                      "verified_pool_fsid": "fsid-1",
+                      "verified_pool_fsid": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
                       "luks_uuid": "{u_resurrected}",
                       "enroll_key_file": null
                     }} }}
