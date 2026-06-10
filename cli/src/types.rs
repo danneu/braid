@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fmt;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 // ---------------------------------------------------------------------------
@@ -493,6 +494,41 @@ impl fmt::Display for LuksLabel {
 impl fmt::Display for MountPoint {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(f)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// KeyFilePath -- the keyfile enrolled into LUKS slot 1
+// ---------------------------------------------------------------------------
+
+/// The operator-supplied keyfile whose bytes braid enrolls into LUKS
+/// slot 1. A distinct type from `HeaderBackupPath` so the two paths that
+/// sit side by side in every enrollment render cannot be transposed.
+/// Minted where a validated keyfile becomes "the keyfile to enroll"; the
+/// raw CLI path stays `&Path` (there it is operator input, not yet a role).
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct KeyFilePath(PathBuf); // tuple field private => mint only via `new`
+
+impl KeyFilePath {
+    /// Mint the role type where a validated keyfile becomes "the keyfile to
+    /// enroll". `pub(crate)` so only braid's own resolution points -- not
+    /// arbitrary downstream code -- can create one, matching `LuksUuid`'s
+    /// controlled-construction shape.
+    pub(crate) fn new(path: PathBuf) -> Self {
+        Self(path)
+    }
+
+    /// Borrow as `&Path` for argv/`display()`, validation/probe gates, and
+    /// `luks::enroll_key_file`.
+    pub fn as_path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl fmt::Display for KeyFilePath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.display().fmt(f)
     }
 }
 

@@ -8,8 +8,8 @@ use crate::credential_verify::{
 use crate::inhibit::AcquireSleepInhibitor;
 use crate::journal;
 use crate::luks::{
-    BackingPathResolver, KeySlotState, LUKS_SLOT_KEYFILE, OpenOutcome, PassphraseReader,
-    backup_luks_header_post_mutation, check_key_slot, ensure_luks_open,
+    BackingPathResolver, HeaderBackupPath, KeySlotState, LUKS_SLOT_KEYFILE, OpenOutcome,
+    PassphraseReader, backup_luks_header_post_mutation, check_key_slot, ensure_luks_open,
     format_keyfile_asymmetry_warning, format_keyfile_enrollment_probe_failure,
     format_target_keyfile_probe_failure, luks_format, luks_header_backup_path,
     probe_pool_keyfile_enrollment, read_passphrase_with,
@@ -30,7 +30,7 @@ use crate::repair_hint;
 use crate::state_paths::StatePaths;
 use crate::status_tag::{StatusTag, color_enabled_for_stderr, emit_status, status_line};
 use crate::types::*;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// Errors raised by `braid add` planning and execution. Two refusals cover
 /// duplicate LUKS UUIDs, both raised from planning BEFORE any
@@ -510,8 +510,8 @@ struct FreshLuksTarget {
     mapper_path: String,
     luks_uuid: LuksUuid,
     luks_format_extra_opts: LuksFormatExtraOpts,
-    enroll_key_file: Option<PathBuf>,
-    header_backup_path: PathBuf,
+    enroll_key_file: Option<KeyFilePath>,
+    header_backup_path: HeaderBackupPath,
 }
 
 #[derive(Debug, Clone)]
@@ -526,12 +526,12 @@ struct RecoverableBraidTarget {
     /// the disk as `NeedsEnroll`. `None` means either no `--enroll`
     /// flag, or the disk's slot 1 already authenticates with the
     /// supplied keyfile (idempotent skip).
-    enroll_key_file: Option<PathBuf>,
+    enroll_key_file: Option<KeyFilePath>,
     /// Where the post-enrollment LUKS header backup lands, computed at
     /// plan time so render_steps does not need access to `paths`.
     /// Mirrors `FreshLuksTarget::header_backup_path`. Unused when
     /// `enroll_key_file` is `None`.
-    header_backup_path: PathBuf,
+    header_backup_path: HeaderBackupPath,
 }
 
 #[derive(Debug, Clone)]
@@ -546,9 +546,9 @@ struct ClosedPresentLuksCandidate {
     /// identity is verified at execution time, this keyfile is
     /// promoted into the runtime `RecoverableBraidTarget` and
     /// journaled, so crash-recovery can replay enrollment.
-    enroll_key_file: Option<PathBuf>,
+    enroll_key_file: Option<KeyFilePath>,
     /// See `RecoverableBraidTarget::header_backup_path`.
-    header_backup_path: PathBuf,
+    header_backup_path: HeaderBackupPath,
 }
 
 #[derive(Debug, Clone)]
@@ -686,7 +686,7 @@ impl AddWorkPlan {
                             ),
                             commands: vec![CmdRequest::CryptsetupLuksAddKeyFile {
                                 device: target.by_id.as_str().to_owned(),
-                                key_file_path: kf.display().to_string(),
+                                key_file_path: kf.as_path().display().to_string(),
                             }],
                         });
                     }
@@ -694,11 +694,11 @@ impl AddWorkPlan {
                         risk: "safe",
                         description: format!(
                             "LUKS header backup -> {}",
-                            target.header_backup_path.display()
+                            target.header_backup_path.as_path().display()
                         ),
                         commands: vec![CmdRequest::CryptsetupLuksHeaderBackup {
                             device: target.by_id.as_str().to_owned(),
-                            backup_path: target.header_backup_path.display().to_string(),
+                            backup_path: target.header_backup_path.as_path().display().to_string(),
                         }],
                     });
                     steps.push(Step {
@@ -853,23 +853,26 @@ impl AddWorkPlan {
 fn push_returned_disk_enrollment_steps(
     steps: &mut Vec<Step>,
     by_id: &ByIdPath,
-    key_file: &Path,
-    header_backup_path: &Path,
+    key_file: &KeyFilePath,
+    header_backup_path: &HeaderBackupPath,
 ) {
     steps.push(Step {
         risk: "safe",
         description: format!("enroll keyfile -> LUKS slot 1 on {}", by_id),
         commands: vec![CmdRequest::CryptsetupLuksAddKeyFile {
             device: by_id.as_str().to_owned(),
-            key_file_path: key_file.display().to_string(),
+            key_file_path: key_file.as_path().display().to_string(),
         }],
     });
     steps.push(Step {
         risk: "safe",
-        description: format!("LUKS header backup -> {}", header_backup_path.display()),
+        description: format!(
+            "LUKS header backup -> {}",
+            header_backup_path.as_path().display()
+        ),
         commands: vec![CmdRequest::CryptsetupLuksHeaderBackup {
             device: by_id.as_str().to_owned(),
-            backup_path: header_backup_path.display().to_string(),
+            backup_path: header_backup_path.as_path().display().to_string(),
         }],
     });
 }
@@ -1371,7 +1374,7 @@ impl AddPlan {
                 &target.mapper_name,
                 params.paths,
             )?;
-            eprintln!("LUKS header backed up: {}", backup_path.display());
+            eprintln!("LUKS header backed up: {backup_path}");
 
             eprint!(
                 "{}",
@@ -1451,7 +1454,7 @@ impl AddPlan {
                 &mapper,
                 params.paths,
             )?;
-            eprintln!("LUKS header backed up: {}", backup_path.display());
+            eprintln!("LUKS header backed up: {backup_path}");
         }
 
         // Both passes complete -- mappers are committed for pool operations.
@@ -2058,7 +2061,7 @@ fn resolve_existing_luks_enroll<R: CommandRunner>(
     name: &DiskName,
     by_id: &ByIdPath,
     user_enroll_key_file: Option<&Path>,
-) -> Result<Option<PathBuf>, AddError> {
+) -> Result<Option<KeyFilePath>, AddError> {
     let Some(kf) = user_enroll_key_file else {
         return Ok(None);
     };
@@ -2071,7 +2074,7 @@ fn resolve_existing_luks_enroll<R: CommandRunner>(
     ) {
         Ok(crate::enroll_key_file::DiskEnrollAction::AlreadyEnrolled { .. }) => Ok(None),
         Ok(crate::enroll_key_file::DiskEnrollAction::NeedsEnroll { .. }) => {
-            Ok(Some(kf.to_path_buf()))
+            Ok(Some(KeyFilePath::new(kf.to_path_buf())))
         }
         Err(e) => Err(AddError::Validation(e.to_string())),
     }
@@ -2110,7 +2113,9 @@ fn build_add_work_plan<R: CommandRunner>(
                     mapper_path,
                     luks_uuid: luks_uuid.clone(),
                     luks_format_extra_opts: input.luks_format_extra_opts.clone(),
-                    enroll_key_file: input.enroll_key_file.map(Path::to_path_buf),
+                    enroll_key_file: input
+                        .enroll_key_file
+                        .map(|p| KeyFilePath::new(p.to_path_buf())),
                     header_backup_path,
                 };
                 assert_target_uuid_unique(
@@ -2934,7 +2939,7 @@ mod tests {
         let name = DiskName::parse(name).unwrap();
         RecoverableBraidTarget {
             mapper_path: format!("/dev/mapper/{}", mapper_name(&name)),
-            header_backup_path: PathBuf::from("/tmp/mock-header"),
+            header_backup_path: luks_header_backup_path(Path::new("/tmp"), &mapper_name(&name)),
             by_id: ByIdPath::parse(by_id).unwrap(),
             luks_uuid: LuksUuid::parse(uuid).unwrap(),
             verified_pool_fsid: Fsid::parse(POOL_FSID).unwrap(),
@@ -2948,7 +2953,7 @@ mod tests {
         FreshLuksTarget {
             mapper_name: mapper_name(&name),
             mapper_path: format!("/dev/mapper/{}", mapper_name(&name)),
-            header_backup_path: PathBuf::from("/tmp/mock-header"),
+            header_backup_path: luks_header_backup_path(Path::new("/tmp"), &mapper_name(&name)),
             by_id: ByIdPath::parse(by_id).unwrap(),
             luks_uuid: LuksUuid::parse(uuid).unwrap(),
             luks_format_extra_opts: LuksFormatExtraOpts::default(),
@@ -7546,12 +7551,21 @@ mod tests {
             "expected luksFormat({format}) < luksAddKey({addkey}) < \
              luksHeaderBackup({backup}) < luksOpen({open}); got:\n{output}"
         );
-        // Sanity: the addKey line must reference the keyfile path so a
-        // future change that drops --enroll-key-file plumbing fails here too.
+        // Pin BOTH stringly fields with distinct keyfile and header paths
+        // so a transposition at the terminal render (keyfile string into
+        // HeaderBackup.backup_path, or the reverse) fails here even though
+        // the newtypes already guard the function boundary.
         assert!(
-            lines[addkey].contains("/mnt/usb/braid.key"),
-            "luksAddKey line must mention the keyfile path; got: {}",
+            lines[addkey].contains("/mnt/usb/braid.key")
+                && !lines[addkey].contains("braid-disk1.luksheader"),
+            "luksAddKey line must carry the keyfile, not the header path; got: {}",
             lines[addkey]
+        );
+        assert!(
+            lines[backup].contains("braid-disk1.luksheader")
+                && !lines[backup].contains("/mnt/usb/braid.key"),
+            "luksHeaderBackup line must carry the header path, not the keyfile; got: {}",
+            lines[backup]
         );
     }
 
@@ -7644,10 +7658,19 @@ mod tests {
             "expected luksOpen({open}) < luksAddKey({addkey}) < \
              luksHeaderBackup({backup}) < btrfs device add({add}); got:\n{output}"
         );
+        // Pin both stringly fields with distinct paths so a keyfile/header
+        // transposition at the returned-disk render boundary fails here.
         assert!(
-            lines[addkey].contains("/mnt/usb/braid.key"),
-            "addKey command must reference the keyfile path: {}",
+            lines[addkey].contains("/mnt/usb/braid.key")
+                && !lines[addkey].contains("braid-disk1.luksheader"),
+            "addKey command must carry the keyfile, not the header path: {}",
             lines[addkey]
+        );
+        assert!(
+            lines[backup].contains("braid-disk1.luksheader")
+                && !lines[backup].contains("/mnt/usb/braid.key"),
+            "headerBackup command must carry the header path, not the keyfile: {}",
+            lines[backup]
         );
     }
 
@@ -8533,6 +8556,26 @@ mod tests {
             format < addkey && addkey < backup && backup < open,
             "expected order LuksFormat({format}) < LuksAddKeyFile({addkey}) < \
              LuksHeaderBackup({backup}) < LuksOpen({open}); log = {log:?}"
+        );
+
+        // Pin BOTH stringly fields with distinct keyfile and header paths so
+        // a transposition at the execute-path render (keyfile bytes into the
+        // header-backup destination, or the reverse) fails here.
+        let CmdRequest::CryptsetupLuksAddKeyFile { key_file_path, .. } = &log[addkey] else {
+            unreachable!("indexed the luksAddKey request above");
+        };
+        let CmdRequest::CryptsetupLuksHeaderBackup { backup_path, .. } = &log[backup] else {
+            unreachable!("indexed the luksHeaderBackup request above");
+        };
+        assert_eq!(
+            key_file_path,
+            &kf_path.display().to_string(),
+            "luksAddKey must enroll the operator keyfile, not the header path"
+        );
+        assert!(
+            backup_path.contains("braid-disk1.luksheader")
+                && backup_path != &kf_path.display().to_string(),
+            "luksHeaderBackup must target the header path, not the keyfile; got: {backup_path}"
         );
     }
 

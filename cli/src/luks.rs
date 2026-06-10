@@ -8,7 +8,8 @@ use crate::parse::{
 use crate::secret::Passphrase;
 use crate::state_paths::StatePaths;
 use crate::types::{
-    ByIdPath, DiskName, LuksFormatExtraOpts, LuksLabel, LuksUuid, MapperName, PoolDevice,
+    ByIdPath, DiskName, KeyFilePath, LuksFormatExtraOpts, LuksLabel, LuksUuid, MapperName,
+    PoolDevice,
 };
 use nix::sys::termios::{LocalFlags, SetArg, Termios};
 use std::io::{Read, Write};
@@ -473,10 +474,35 @@ pub fn luks_format<R: CommandRunner>(
     Ok(())
 }
 
+/// The `<headers_dir>/<mapper>.luksheader` destination braid writes the
+/// post-enrollment LUKS header backup to. A distinct type from
+/// `KeyFilePath` so the slot-1 key source and the backup destination --
+/// which sit side by side in every enrollment render -- cannot be
+/// transposed. Minted only by `luks_header_backup_path` (private field,
+/// no public ctor), the single definitional source, like `mapper_name`
+/// mints `MapperName`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct HeaderBackupPath(PathBuf); // tuple field private => only `luks` can mint
+
+impl HeaderBackupPath {
+    /// Borrow as `&Path` for argv/`display()` and the atomic-rename writer.
+    pub fn as_path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for HeaderBackupPath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.display().fmt(f)
+    }
+}
+
 /// Single source of truth for the `<headers_dir>/<mapper>.luksheader`
 /// convention shared by planner previews, journal replay, and the writer.
-pub(crate) fn luks_header_backup_path(headers_dir: &Path, mapper: &MapperName) -> PathBuf {
-    headers_dir.join(format!("{}.luksheader", mapper.0))
+/// Returns the role type so the destination cannot be confused with the
+/// slot-1 keyfile at any render site.
+pub(crate) fn luks_header_backup_path(headers_dir: &Path, mapper: &MapperName) -> HeaderBackupPath {
+    HeaderBackupPath(headers_dir.join(format!("{}.luksheader", mapper.0)))
 }
 
 /// Back up the LUKS header to `dir/<mapper>.luksheader`.
@@ -486,7 +512,7 @@ pub(crate) fn backup_luks_header_to<R: CommandRunner>(
     device: &str,
     mapper: &MapperName,
     dir: &std::path::Path,
-) -> Result<PathBuf, LuksError> {
+) -> Result<HeaderBackupPath, LuksError> {
     if !dir.exists() {
         std::fs::create_dir_all(dir)?;
         std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
@@ -494,7 +520,7 @@ pub(crate) fn backup_luks_header_to<R: CommandRunner>(
 
     let backup_path = luks_header_backup_path(dir, mapper);
     let tmp_path = {
-        let mut tmp = backup_path.clone().into_os_string();
+        let mut tmp = backup_path.as_path().to_path_buf().into_os_string();
         tmp.push(".tmp");
         PathBuf::from(tmp)
     };
@@ -516,7 +542,7 @@ pub(crate) fn backup_luks_header_to<R: CommandRunner>(
     }
     // cryptsetup already creates the file as 0400, but enforce it ourselves for defense-in-depth
     std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o400))?;
-    crate::state_io::durable_rename(&tmp_path, &backup_path)?;
+    crate::state_io::durable_rename(&tmp_path, backup_path.as_path())?;
 
     Ok(backup_path)
 }
@@ -527,7 +553,7 @@ pub fn backup_luks_header<R: CommandRunner>(
     device: &str,
     mapper: &MapperName,
     paths: &StatePaths,
-) -> Result<PathBuf, LuksError> {
+) -> Result<HeaderBackupPath, LuksError> {
     backup_luks_header_to(runner, device, mapper, &paths.luks_headers_dir())
 }
 
@@ -548,7 +574,7 @@ pub fn backup_luks_header_post_mutation<R: CommandRunner>(
     device: &str,
     mapper: &MapperName,
     paths: &StatePaths,
-) -> Result<PathBuf, LuksError> {
+) -> Result<HeaderBackupPath, LuksError> {
     backup_luks_header(runner, device, mapper, paths)
         .map_err(|e| LuksError::Validation(header_backup_failure_message(device, &e)))
 }
@@ -1057,12 +1083,12 @@ pub fn enroll_key_file<R: CommandRunner>(
     runner: &R,
     device: &str,
     passphrase: &Passphrase,
-    key_file_path: &std::path::Path,
+    key_file_path: &KeyFilePath,
 ) -> Result<(), LuksError> {
     let result = runner.run_with_stdin(
         &CmdRequest::CryptsetupLuksAddKeyFile {
             device: device.to_owned(),
-            key_file_path: key_file_path.display().to_string(),
+            key_file_path: key_file_path.as_path().display().to_string(),
         },
         passphrase.expose_secret().as_bytes(),
     )?;
@@ -1299,7 +1325,7 @@ mod tests {
         let mapper = MapperName("braid-disk1".to_owned());
 
         assert_eq!(
-            luks_header_backup_path(dir, &mapper),
+            luks_header_backup_path(dir, &mapper).as_path(),
             PathBuf::from("/var/lib/braid/luks-headers/braid-disk1.luksheader"),
         );
     }
@@ -1417,10 +1443,10 @@ mod tests {
             .expect("successful backup should pass through");
 
         assert_eq!(
-            path,
+            path.as_path(),
             paths.luks_headers_dir().join("braid-disk1.luksheader")
         );
-        assert!(path.exists(), "final backup file should exist");
+        assert!(path.as_path().exists(), "final backup file should exist");
     }
 
     // Intent: exact-size regular files are accepted as user-supplied keyfiles.

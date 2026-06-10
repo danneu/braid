@@ -23,8 +23,8 @@ use crate::state_paths::StatePaths;
 use crate::status::{BalanceReport, get_balance_report};
 use crate::status_tag::{StatusTag, color_enabled_for_stderr, emit_status, status_line};
 use crate::types::{
-    ByIdPath, ConfigDiskState, DiskName, Fsid, LuksUuid, MountPoint, PoolDevice, PoolState,
-    format_uuid_list,
+    ByIdPath, ConfigDiskState, DiskName, Fsid, KeyFilePath, LuksUuid, MountPoint, PoolDevice,
+    PoolState, format_uuid_list,
 };
 use std::path::PathBuf;
 use std::time::Duration;
@@ -793,11 +793,12 @@ fn render_add_pool_mutation_recovery_steps(
                 if let Some(key_file) = enroll_key_file {
                     commands.push(CmdRequest::CryptsetupLuksAddKeyFile {
                         device: target.by_id.as_str().to_owned(),
-                        key_file_path: key_file.display().to_string(),
+                        key_file_path: key_file.as_path().display().to_string(),
                     });
                     commands.push(CmdRequest::CryptsetupLuksHeaderBackup {
                         device: target.by_id.as_str().to_owned(),
                         backup_path: luks::luks_header_backup_path(&plan.luks_headers_dir, &mapper)
+                            .as_path()
                             .display()
                             .to_string(),
                     });
@@ -836,12 +837,13 @@ fn render_add_pool_mutation_recovery_steps(
                 if let Some(key_file) = enroll_key_file {
                     commands.push(CmdRequest::CryptsetupLuksAddKeyFile {
                         device: target.by_id.as_str().to_owned(),
-                        key_file_path: key_file.display().to_string(),
+                        key_file_path: key_file.as_path().display().to_string(),
                     });
                 }
                 commands.push(CmdRequest::CryptsetupLuksHeaderBackup {
                     device: target.by_id.as_str().to_owned(),
                     backup_path: luks::luks_header_backup_path(&plan.luks_headers_dir, &mapper)
+                        .as_path()
                         .display()
                         .to_string(),
                 });
@@ -2213,10 +2215,10 @@ fn ensure_keyfile_enrolled<R: CommandRunner>(
     runner: &R,
     device: &str,
     passphrase: &Passphrase,
-    key_file: &std::path::Path,
+    key_file: &KeyFilePath,
 ) -> Result<(), RecoverError> {
-    luks::validate_user_keyfile_path(key_file)?;
-    match luks::verify_key_file(runner, device, key_file)? {
+    luks::validate_user_keyfile_path(key_file.as_path())?;
+    match luks::verify_key_file(runner, device, key_file.as_path())? {
         VerifyOutcome::Authenticated => Ok(()),
         VerifyOutcome::Rejected => {
             luks::enroll_key_file(runner, device, passphrase, key_file)?;
@@ -4664,7 +4666,7 @@ mod tests {
         let extras = strip_legacy_managed_format_opts(extras);
         journal::AddJournalMode::FreshLuks {
             extra_opts: LuksFormatExtraOpts::parse(&extras).expect("valid fixture extra opts"),
-            enroll_key_file,
+            enroll_key_file: enroll_key_file.map(KeyFilePath::new),
         }
     }
 
@@ -4957,7 +4959,7 @@ mod tests {
                     ..
                 } = &mut target.mode
                 {
-                    *stored = Some(enroll_key_file.clone());
+                    *stored = Some(KeyFilePath::new(enroll_key_file.clone()));
                 }
             }
         } else {
@@ -8207,7 +8209,9 @@ mod tests {
                 journal::AddJournalMode::RecoverableBraidLabeled {
                     verified_pool_fsid: Fsid::parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
                         .unwrap(),
-                    enroll_key_file: Some(std::path::PathBuf::from("/run/keys/braid.key")),
+                    enroll_key_file: Some(KeyFilePath::new(std::path::PathBuf::from(
+                        "/run/keys/braid.key",
+                    ))),
                 },
             ),
         )]);
@@ -8228,9 +8232,10 @@ mod tests {
         render_add_pool_mutation_recovery_steps(&plan, &mut steps, &targets, false, None);
         let output = Step::render_dry_run(&steps);
 
+        let lines: Vec<&str> = output.lines().collect();
         let find = |needle: &str| -> usize {
-            output
-                .lines()
+            lines
+                .iter()
                 .position(|line| line.contains(needle))
                 .unwrap_or_else(|| panic!("missing {needle:?} in:\n{output}"))
         };
@@ -8242,6 +8247,92 @@ mod tests {
         assert!(
             addkey < backup && backup < scan_forget && scan_forget < wipefs && wipefs < add,
             "expected luksAddKey({addkey}) < luksHeaderBackup({backup}) < scan-forget({scan_forget}) < wipefs({wipefs}) < device-add({add}); got:\n{output}"
+        );
+        // Pin BOTH stringly fields with distinct keyfile and header paths so a
+        // keyfile/header transposition in the RecoverableBraidLabeled replay
+        // render fails here even though the newtypes guard the boundary.
+        assert!(
+            lines[addkey].contains("/run/keys/braid.key")
+                && !lines[addkey].contains("braid-disk2.luksheader"),
+            "luksAddKey must carry the keyfile, not the header path; got: {}",
+            lines[addkey]
+        );
+        assert!(
+            lines[backup].contains("braid-disk2.luksheader")
+                && !lines[backup].contains("/run/keys/braid.key"),
+            "luksHeaderBackup must carry the header path, not the keyfile; got: {}",
+            lines[backup]
+        );
+    }
+
+    // Intent: the FreshLuks recovery replay arm with `enroll_key_file:
+    //   Some(kf)` renders luksFormat -> luksAddKey -> luksHeaderBackup ->
+    //   open -> add, and the addKey carries the keyfile while the backup
+    //   carries the header path -- never the reverse.
+    // Why it exists: the FreshLuks render is the second of the two recover
+    //   replay arms that emit an addKey/headerBackup pair into stringly
+    //   `CmdRequest` fields by hand. The newtypes guard the function
+    //   boundary, but a transposition at the terminal `.display()` still
+    //   compiles; this pins both exact fields with distinct paths so such a
+    //   swap fails a test.
+    // Scenario: a crash mid-`add --enroll DIR` against a fresh (non-LUKS)
+    //   disk; recovery replays the format + enrollment.
+    #[test]
+    fn render_add_recovery_fresh_luks_with_enroll_pins_keyfile_and_header_fields() {
+        let targets = add_targets(vec![(
+            uuid_for_name("disk2"),
+            add_target(
+                "disk2",
+                "/dev/disk/by-id/virtio-disk2",
+                fresh_mode(
+                    Vec::new(),
+                    Some(std::path::PathBuf::from("/run/keys/braid.key")),
+                ),
+            ),
+        )]);
+
+        let plan = RecoverWorkPlan {
+            open_plan: None,
+            pre_resolved_credential: None,
+            journal: recoverable_pool_mutation_add_journal(),
+            admission_membership: PoolMembership::empty(),
+            mount_point: MountPoint("/mnt/storage".into()),
+            pool_json_path: std::path::PathBuf::from("/var/lib/braid/pool.json"),
+            pending_op_path: std::path::PathBuf::from("/var/lib/braid/pending-op.json"),
+            luks_headers_dir: std::path::PathBuf::from("/var/lib/braid/luks-headers"),
+            actions: Vec::new(),
+        };
+
+        let mut steps = Vec::new();
+        render_add_pool_mutation_recovery_steps(&plan, &mut steps, &targets, false, None);
+        let output = Step::render_dry_run(&steps);
+        let lines: Vec<&str> = output.lines().collect();
+        let find = |needle: &str| -> usize {
+            lines
+                .iter()
+                .position(|line| line.contains(needle))
+                .unwrap_or_else(|| panic!("missing {needle:?} in:\n{output}"))
+        };
+        let format = find("$ cryptsetup luksFormat");
+        let addkey = find("$ cryptsetup luksAddKey");
+        let backup = find("$ cryptsetup luksHeaderBackup");
+        let open = find("$ cryptsetup open --type luks");
+        assert!(
+            format < addkey && addkey < backup && backup < open,
+            "expected luksFormat({format}) < luksAddKey({addkey}) < luksHeaderBackup({backup}) < open({open}); got:\n{output}"
+        );
+        // Pin BOTH stringly fields with distinct keyfile and header paths.
+        assert!(
+            lines[addkey].contains("/run/keys/braid.key")
+                && !lines[addkey].contains("braid-disk2.luksheader"),
+            "luksAddKey must carry the keyfile, not the header path; got: {}",
+            lines[addkey]
+        );
+        assert!(
+            lines[backup].contains("braid-disk2.luksheader")
+                && !lines[backup].contains("/run/keys/braid.key"),
+            "luksHeaderBackup must carry the header path, not the keyfile; got: {}",
+            lines[backup]
         );
     }
 
@@ -8938,7 +9029,7 @@ mod tests {
             &accepted,
             "/dev/disk/by-id/virtio-disk2",
             &passphrase("testpass"),
-            &key_file,
+            &KeyFilePath::new(key_file.clone()),
         )
         .expect("accepted keyfile should be treated as already enrolled");
         assert!(
@@ -8973,7 +9064,7 @@ mod tests {
             &rejected,
             "/dev/disk/by-id/virtio-disk2",
             &passphrase("testpass"),
-            &key_file,
+            &KeyFilePath::new(key_file.clone()),
         )
         .expect("rejected keyfile should be enrolled with the passphrase");
         assert!(
@@ -8998,7 +9089,7 @@ mod tests {
             &busy,
             "/dev/disk/by-id/virtio-disk2",
             &passphrase("testpass"),
-            &key_file,
+            &KeyFilePath::new(key_file.clone()),
         )
         .unwrap_err();
         assert!(
@@ -9023,7 +9114,7 @@ mod tests {
             &runner,
             "/dev/disk/by-id/virtio-disk2",
             &passphrase("testpass"),
-            &key_file,
+            &KeyFilePath::new(key_file.clone()),
         )
         .expect_err("wrong-size keyfile must fail");
 
@@ -15410,7 +15501,7 @@ mod tests {
             by_id: ByIdPath::parse("/dev/disk/by-id/virtio-new").unwrap(),
             mode: journal::ReplaceJournalMode::FreshLuks {
                 extra_opts: LuksFormatExtraOpts::default(),
-                enroll_key_file: Some(enroll_key_file),
+                enroll_key_file: Some(KeyFilePath::new(enroll_key_file)),
             },
         };
         *restore_raid1_after_commit = false;
@@ -15433,7 +15524,7 @@ mod tests {
             ..
         } = &mut new_target.mode
         {
-            *stored = Some(enroll_key_file);
+            *stored = Some(KeyFilePath::new(enroll_key_file));
         } else {
             unreachable!("replace_journal returns ExistingLuks");
         }

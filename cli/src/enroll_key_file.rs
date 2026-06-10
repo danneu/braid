@@ -18,7 +18,7 @@ use crate::probe::{self, Filesystem};
 use crate::secret::Passphrase;
 use crate::state_paths::StatePaths;
 use crate::status_tag::{StatusTag, color_enabled_for_stderr, emit_status, status_line};
-use crate::types::{ByIdPath, ConfigDiskState, DiskName, LuksUuid, MountPoint};
+use crate::types::{ByIdPath, ConfigDiskState, DiskName, KeyFilePath, LuksUuid, MountPoint};
 use std::io::Read;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
@@ -350,7 +350,7 @@ fn apply_enrollment<R: CommandRunner>(
     runner: &R,
     plan: &[DiskEnrollAction],
     passphrase: &Passphrase,
-    key_file_path: &Path,
+    key_file_path: &KeyFilePath,
     paths: &StatePaths,
 ) -> Result<(), EnrollKeyFileError> {
     let color_enabled = color_enabled_for_stderr();
@@ -378,7 +378,7 @@ fn apply_enrollment<R: CommandRunner>(
             let mn = mapper_name(name);
             let backup_path =
                 luks::backup_luks_header_post_mutation(runner, by_id.as_str(), &mn, paths)?;
-            eprintln!("LUKS header backed up: {}", backup_path.display());
+            eprintln!("LUKS header backed up: {backup_path}");
         }
     }
 
@@ -433,7 +433,7 @@ fn generate_key_file(path: &Path) -> Result<(), std::io::Error> {
 /// Compile dry-run steps from discovered candidates.
 pub fn compile_enroll_steps(
     candidates: &[EnrollmentCandidate],
-    key_file_path: &Path,
+    key_file_path: &KeyFilePath,
     generate: bool,
     paths: &StatePaths,
 ) -> Vec<Step> {
@@ -442,7 +442,7 @@ pub fn compile_enroll_steps(
     if generate {
         steps.push(Step {
             risk: "safe",
-            description: format!("generate keyfile -> {}", key_file_path.display()),
+            description: format!("generate keyfile -> {}", key_file_path.as_path().display()),
             commands: vec![],
         });
     }
@@ -454,16 +454,16 @@ pub fn compile_enroll_steps(
             description: format!("enroll keyfile -> LUKS slot 1 on {}", c.by_id),
             commands: vec![CmdRequest::CryptsetupLuksAddKeyFile {
                 device: c.by_id.as_str().to_owned(),
-                key_file_path: key_file_path.display().to_string(),
+                key_file_path: key_file_path.as_path().display().to_string(),
             }],
         });
         let backup_path = luks::luks_header_backup_path(&paths.luks_headers_dir(), &mn);
         steps.push(Step {
             risk: "safe",
-            description: format!("LUKS header backup -> {}", backup_path.display()),
+            description: format!("LUKS header backup -> {}", backup_path.as_path().display()),
             commands: vec![CmdRequest::CryptsetupLuksHeaderBackup {
                 device: c.by_id.as_str().to_owned(),
-                backup_path: backup_path.display().to_string(),
+                backup_path: backup_path.as_path().display().to_string(),
             }],
         });
     }
@@ -568,13 +568,11 @@ impl EnrollPlan {
             eprintln!("ok: generated {}", params.key_file_path.display());
         }
 
-        let apply_result = apply_enrollment(
-            runner,
-            &enrollment,
-            &passphrase,
-            params.key_file_path,
-            params.paths,
-        );
+        // Mint the role type once the validate/generate gate has run: the
+        // raw CLI path is now "the keyfile to enroll".
+        let key_file = KeyFilePath::new(params.key_file_path.to_path_buf());
+        let apply_result =
+            apply_enrollment(runner, &enrollment, &passphrase, &key_file, params.paths);
 
         match apply_result {
             Ok(()) => Ok(()),
@@ -787,7 +785,7 @@ pub fn plan_enroll<R: CommandRunner, F: Filesystem + ?Sized>(
         }
         compile_enroll_steps(
             &needs_enroll,
-            params.key_file_path,
+            &KeyFilePath::new(params.key_file_path.to_path_buf()),
             params.generate,
             params.paths,
         )
@@ -3041,7 +3039,7 @@ mod tests {
             &runner,
             &plan,
             &enroll_passphrase(pass),
-            Path::new(kf),
+            &KeyFilePath::new(Path::new(kf).to_path_buf()),
             &paths,
         )
         .unwrap();
@@ -3085,7 +3083,7 @@ mod tests {
             &runner,
             &plan,
             &enroll_passphrase(pass),
-            Path::new(kf),
+            &KeyFilePath::new(Path::new(kf).to_path_buf()),
             &paths,
         )
         .unwrap();
@@ -3135,7 +3133,7 @@ mod tests {
             &runner,
             &plan,
             &enroll_passphrase(pass),
-            Path::new(kf),
+            &KeyFilePath::new(Path::new(kf).to_path_buf()),
             &paths,
         )
         .unwrap();
@@ -3190,7 +3188,7 @@ mod tests {
             &runner,
             &plan,
             &enroll_passphrase(pass),
-            Path::new(kf),
+            &KeyFilePath::new(Path::new(kf).to_path_buf()),
             &paths,
         )
         .expect_err("backup failure should abort enrollment apply")
@@ -3255,7 +3253,7 @@ mod tests {
             &runner,
             &plan,
             &enroll_passphrase(pass),
-            Path::new(kf),
+            &KeyFilePath::new(Path::new(kf).to_path_buf()),
             &paths,
         )
         .expect_err("disk1 backup failure should abort enrollment apply")
@@ -4270,8 +4268,12 @@ mod tests {
             enroll_candidate("ccc", "/dev/disk/by-id/disk-ccc"),
         ];
         let (_state_dir, paths) = isolated_paths();
-        let steps =
-            compile_enroll_steps(&candidates, Path::new("/mnt/usb/braid.key"), true, &paths);
+        let steps = compile_enroll_steps(
+            &candidates,
+            &KeyFilePath::new(Path::new("/mnt/usb/braid.key").to_path_buf()),
+            true,
+            &paths,
+        );
         let output = Step::render_dry_run(&steps);
 
         // 1 generate + 3× (enroll + backup) = 7 steps
@@ -4286,6 +4288,27 @@ mod tests {
         assert!(output.contains("LUKS header backup"));
         assert!(output.contains("cryptsetup luksAddKey"));
         assert!(output.contains("cryptsetup luksHeaderBackup"));
+
+        // Pin BOTH stringly fields with distinct keyfile and header paths so a
+        // transposition at the standalone-enroll render boundary (keyfile into
+        // HeaderBackup.backup_path, or the reverse) fails here.
+        let lines: Vec<&str> = output.lines().collect();
+        let addkey = lines
+            .iter()
+            .find(|l| l.contains("$ cryptsetup luksAddKey"))
+            .expect("addKey line present");
+        let backup = lines
+            .iter()
+            .find(|l| l.contains("$ cryptsetup luksHeaderBackup"))
+            .expect("headerBackup line present");
+        assert!(
+            addkey.contains("/mnt/usb/braid.key") && !addkey.contains("braid-aaa.luksheader"),
+            "luksAddKey must carry the keyfile, not the header path; got: {addkey}"
+        );
+        assert!(
+            backup.contains("braid-aaa.luksheader") && !backup.contains("/mnt/usb/braid.key"),
+            "luksHeaderBackup must carry the header path, not the keyfile; got: {backup}"
+        );
     }
 
     #[test]
@@ -4298,8 +4321,12 @@ mod tests {
             enroll_candidate("bbb", "/dev/disk/by-id/disk-bbb"),
         ];
         let (_state_dir, paths) = isolated_paths();
-        let steps =
-            compile_enroll_steps(&candidates, Path::new("/mnt/usb/braid.key"), false, &paths);
+        let steps = compile_enroll_steps(
+            &candidates,
+            &KeyFilePath::new(Path::new("/mnt/usb/braid.key").to_path_buf()),
+            false,
+            &paths,
+        );
         let output = Step::render_dry_run(&steps);
 
         // No generate step. 2× (enroll + backup) = 4 steps, each 2 lines = 8

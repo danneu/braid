@@ -1,7 +1,9 @@
 use crate::membership::{LuksUuidMap, PoolMembership};
 use crate::state_io::atomic_write;
 use crate::state_paths::StatePaths;
-use crate::types::{ByIdPath, DiskName, Fsid, LuksFormatExtraOpts, LuksUuid, MapperName};
+use crate::types::{
+    ByIdPath, DiskName, Fsid, KeyFilePath, LuksFormatExtraOpts, LuksUuid, MapperName,
+};
 use crate::util::now_iso;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -82,14 +84,14 @@ pub enum AddJournalMode {
         /// and the idempotent-skip case (slot 1 already authenticates).
         /// Recovery replays `cryptsetup luksAddKey` + `luksHeaderBackup`
         /// before pool_add_device when this is `Some`.
-        enroll_key_file: Option<PathBuf>,
+        enroll_key_file: Option<KeyFilePath>,
     },
     /// Fresh `cryptsetup luksFormat` of a non-LUKS or wipeable disk. The
     /// label is derived via `config::luks_label_for` at the format call
     /// site; only the structured `extra_opts` argv slice is journaled.
     FreshLuks {
         extra_opts: LuksFormatExtraOpts,
-        enroll_key_file: Option<PathBuf>,
+        enroll_key_file: Option<KeyFilePath>,
     },
 }
 
@@ -156,7 +158,7 @@ pub enum ReplaceJournalMode {
     /// `extra_opts` is journaled.
     FreshLuks {
         extra_opts: LuksFormatExtraOpts,
-        enroll_key_file: Option<PathBuf>,
+        enroll_key_file: Option<KeyFilePath>,
     },
     /// Adoption of an already-LUKS new disk. Identity is `new_uuid` at
     /// the op level; only the enroll keyfile (if any) lives here.
@@ -167,7 +169,7 @@ pub enum ReplaceJournalMode {
         /// and the idempotent-skip case. Recovery replays
         /// `cryptsetup luksAddKey` + `luksHeaderBackup` after the LUKS
         /// UUID identity probe and credential verification when `Some`.
-        enroll_key_file: Option<PathBuf>,
+        enroll_key_file: Option<KeyFilePath>,
     },
 }
 
@@ -525,7 +527,9 @@ mod tests {
                 new_target: ReplaceJournalTarget {
                     by_id: ByIdPath::parse("/dev/disk/by-id/ata-NEW").unwrap(),
                     mode: ReplaceJournalMode::ExistingLuks {
-                        enroll_key_file: Some(PathBuf::from("/run/keys/braid.key")),
+                        enroll_key_file: Some(KeyFilePath::new(PathBuf::from(
+                            "/run/keys/braid.key",
+                        ))),
                     },
                 },
                 source: ReplaceJournalSource::Live {
@@ -607,7 +611,7 @@ mod tests {
                 mode: AddJournalMode::RecoverableBraidLabeled {
                     verified_pool_fsid: Fsid::parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
                         .unwrap(),
-                    enroll_key_file: Some(PathBuf::from("/run/keys/braid.key")),
+                    enroll_key_file: Some(KeyFilePath::new(PathBuf::from("/run/keys/braid.key"))),
                 },
             },
         )]);
