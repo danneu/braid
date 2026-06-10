@@ -431,6 +431,20 @@ pub struct ReplaceSourceProbe {
     pub devid: u64,
 }
 
+/// Candidate replacement device's raw byte size (lsblk `-b`). Distinct from
+/// `Luks2SegmentOffset` so `mapper_capacity_from_dynamic_segment` cannot
+/// transpose size and offset: a swap inverts the capacity guard and would
+/// format or accept an undersized disk before `btrfs replace`'s own check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RawDeviceSize(u64);
+
+/// LUKS2 data-segment offset in bytes (real luksDump offset for existing
+/// targets, the default header size for fresh ones). Subtracted from
+/// `RawDeviceSize` to model mapper capacity; typed apart from it so the
+/// subtraction operands cannot be reversed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Luks2SegmentOffset(u64);
+
 /// Target state needed to compute the mapper capacity btrfs will compare
 /// against the source device during `btrfs replace start`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -483,7 +497,7 @@ where
             let capacity = match parsed.segment_size {
                 Luks2SegmentSize::Dynamic => mapper_capacity_from_dynamic_segment(
                     raw_target,
-                    parsed.segment_offset_bytes,
+                    Luks2SegmentOffset(parsed.segment_offset_bytes),
                     by_id,
                 )?,
                 Luks2SegmentSize::Fixed(0) => {
@@ -497,8 +511,11 @@ where
         }
         ReplaceTargetProbe::PresentNotLuks { by_id } => {
             let raw_target = target_raw_size(runner, by_id)?;
-            let capacity =
-                mapper_capacity_from_dynamic_segment(raw_target, LUKS2_DEFAULT_HDR_SIZE, by_id)?;
+            let capacity = mapper_capacity_from_dynamic_segment(
+                raw_target,
+                Luks2SegmentOffset(LUKS2_DEFAULT_HDR_SIZE),
+                by_id,
+            )?;
             (by_id, capacity)
         }
     };
@@ -520,9 +537,10 @@ where
     Ok(())
 }
 
-fn target_raw_size<R: CommandRunner>(runner: &R, by_id: &str) -> Result<u64, String> {
+fn target_raw_size<R: CommandRunner>(runner: &R, by_id: &str) -> Result<RawDeviceSize, String> {
     confirm::query_disk_hw_info(runner, by_id)
         .size
+        .map(RawDeviceSize)
         .ok_or_else(|| {
             format!(
                 "failed to read raw size for target {by_id} with lsblk -- cannot verify the new disk is large enough"
@@ -539,21 +557,21 @@ fn target_raw_size<R: CommandRunner>(runner: &R, by_id: &str) -> Result<u64, Str
 /// their real luksDump segment offset; fresh targets pass the default 16 MiB
 /// offset, which holds because braid rejects offset/sector-size format flags.
 fn mapper_capacity_from_dynamic_segment(
-    raw_target: u64,
-    offset: u64,
+    raw_target: RawDeviceSize,
+    offset: Luks2SegmentOffset,
     by_id: &str,
 ) -> Result<u64, String> {
-    if raw_target <= offset {
+    if raw_target.0 <= offset.0 {
         return Err(format!(
             "target raw size {} ({}) is not larger than LUKS2 segment offset {} ({}) for {} -- header may be corrupt",
-            raw_target,
-            format_bytes(raw_target),
-            offset,
-            format_bytes(offset),
+            raw_target.0,
+            format_bytes(raw_target.0),
+            offset.0,
+            format_bytes(offset.0),
             by_id,
         ));
     }
-    Ok(raw_target - offset)
+    Ok(raw_target.0 - offset.0)
 }
 
 /// Refuse unless the configured UPS explicitly reports utility power
