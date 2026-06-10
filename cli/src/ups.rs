@@ -13,6 +13,7 @@ use crate::cmd::{CmdError, CmdRequest, CommandRunner};
 use crate::config::{ConfigError, config_read};
 use crate::parse::parse_upsc;
 use crate::parse::types::{UpsStatusFlag, UpscOutput};
+use crate::util::detail_suffix;
 use std::path::Path;
 
 #[derive(Debug, thiserror::Error)]
@@ -47,7 +48,7 @@ pub enum UpsQueryError {
     InvocationFailed(#[from] CmdError),
     /// `upsc` exited non-zero. This covers an unreachable upsd daemon, an
     /// unknown UPS name, or another fatal NUT path.
-    #[error("upsc query failed (exit {exit_code}): {stderr}")]
+    #[error("upsc query failed (exit {exit_code}){}", detail_suffix(.stderr))]
     QueryFailed { exit_code: i32, stderr: String },
 }
 
@@ -148,7 +149,7 @@ pub fn cmd_ups_status<R: CommandRunner>(
             return emit_invocation_failed(json, e);
         }
         Err(UpsQueryError::QueryFailed { exit_code, stderr }) => {
-            return emit_query_failed(json, format!("exit {exit_code}: {stderr}"));
+            return emit_query_failed(json, format!("exit {exit_code}{}", detail_suffix(&stderr)));
         }
     };
     if json {
@@ -301,7 +302,7 @@ mod tests {
     use crate::parse::types::{BatteryFields, DeviceFields, InputFields};
     use crate::test_fixtures::{
         ups_query_connection_refused_no_newline, ups_query_connection_refused_with_newline,
-        ups_query_healthy_minimal, ups_write_config,
+        ups_query_empty_stderr_exit_1, ups_query_healthy_minimal, ups_write_config,
     };
 
     /// Baseline `UpscOutput` for render-branch tests: status OL, every
@@ -761,6 +762,33 @@ mod tests {
         assert_eq!(out.parsed.battery.charge_pct, Some(100));
     }
 
+    // Intent: UpsQueryError::QueryFailed Display drops the stderr suffix only
+    // when stderr is empty.
+    // Why it exists: the inner query error has a distinct Display surface from
+    // cmd_ups_status' outer UpsError wrapping, so the shared suffix rule needs
+    // a direct pin here.
+    // Scenario: upsc exits 1 with no stderr in a future NUT or wrapper path,
+    // then with the current daemon-down diagnostic.
+    #[test]
+    fn ups_query_error_display_omits_empty_stderr_tail() {
+        assert_eq!(
+            UpsQueryError::QueryFailed {
+                exit_code: 1,
+                stderr: String::new(),
+            }
+            .to_string(),
+            "upsc query failed (exit 1)"
+        );
+        assert_eq!(
+            UpsQueryError::QueryFailed {
+                exit_code: 1,
+                stderr: "boom".into(),
+            }
+            .to_string(),
+            "upsc query failed (exit 1): boom"
+        );
+    }
+
     // Intent: cmd_ups_status routes invocation failure to
     // UpsError::InvocationFailed with a PATH hint.
     // Why it exists: CLI shell at main.rs prints e.to_string() to stderr for
@@ -835,6 +863,27 @@ mod tests {
             err.to_string(),
             "upsc query failed: exit 1: Error: Connection failure: Connection refused"
         );
+    }
+
+    // Intent: cmd_ups_status reports a non-zero upsc exit with empty stderr
+    // without a dangling `: ` detail tail.
+    // Why it exists: the JSON-facing detail and the human UpsError wrapper are
+    // composed separately, so both must preserve the empty-stderr rule.
+    // Scenario: upsc exits 1 but a future NUT path writes no stderr.
+    #[test]
+    fn cmd_ups_status_empty_stderr_query_failed_omits_detail_tail() {
+        let (request, output) = ups_query_empty_stderr_exit_1();
+        let runner = MockRunner::default().with_output(request, output);
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = ups_write_config(&dir, "ups");
+        let err = cmd_ups_status(&runner, &cfg, false).expect_err("query failure expected");
+        match &err {
+            UpsError::QueryFailed { detail } => {
+                assert_eq!(detail, "exit 1");
+            }
+            other => panic!("expected QueryFailed, got {other:?}"),
+        }
+        assert_eq!(err.to_string(), "upsc query failed: exit 1");
     }
 
     // Intent: emit_query_failed in --json mode returns

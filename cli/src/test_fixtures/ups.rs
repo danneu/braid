@@ -54,3 +54,16 @@ pub(crate) fn ups_query_connection_refused_no_newline() -> (CmdRequest, RawComma
         },
     )
 }
+
+/// Non-zero `upsc` response with empty stderr for suffix-rendering tests.
+pub(crate) fn ups_query_empty_stderr_exit_1() -> (CmdRequest, RawCommandOutput) {
+    (
+        CmdRequest::UpscQuery { name: "ups".into() },
+        RawCommandOutput {
+            cmd: "upsc ups".into(),
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_status: 1,
+        },
+    )
+}

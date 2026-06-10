@@ -19,6 +19,7 @@ use crate::state_paths::StatePaths;
 use crate::status::format_bytes;
 use crate::types::{Devid, Fsid, MountPoint, PoolState};
 use crate::ups::{UpsQueryError, query_ups};
+use crate::util::detail_suffix;
 
 /// Refuse if pool.json lists members but the pool is not mounted (locked).
 /// Catches the silent-bootstrap case where `braid add` against a locked pool
@@ -623,7 +624,7 @@ pub fn check_ups_not_on_battery<R: CommandRunner>(
             return refuse("upsc invocation failed");
         }
         Err(UpsQueryError::QueryFailed { stderr, .. }) => {
-            return refuse(&format!("upsc query failed: {stderr}"));
+            return refuse(&format!("upsc query failed{}", detail_suffix(&stderr)));
         }
     };
     if parsed.status_flags.is_empty() {
@@ -2069,6 +2070,29 @@ mod tests {
         assert!(err.contains("utility power"), "got: {err}");
         assert!(err.contains("upsc query failed"), "got: {err}");
         assert!(err.contains("Connection failure"), "got: {err}");
+    }
+
+    // Intent: query failure with empty stderr refuses without a dangling
+    // suffix inside the parenthesized context.
+    // Why: the preflight refusal wraps the query detail in a larger safety
+    // message, so a contentless `: ` tail would be visible to operators
+    // before every refused mutation.
+    // Scenario: upsc exits non-zero but writes nothing to stderr while a
+    // mutation preflight tries to prove utility power.
+    #[test]
+    fn ups_query_failed_with_empty_stderr_refuses_without_detail_tail() {
+        let runner = MockRunner::default().with_output(
+            CmdRequest::UpscQuery { name: "ups".into() },
+            RawCommandOutput {
+                cmd: "upsc ups".into(),
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_status: 1,
+            },
+        );
+        let err = check_ups_not_on_battery(&runner, Some("ups"), "add").unwrap_err();
+        assert!(err.contains("utility power"), "got: {err}");
+        assert!(err.contains("(upsc query failed)"), "got: {err}");
     }
 
     #[test]

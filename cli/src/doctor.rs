@@ -1389,9 +1389,10 @@ fn check_ups_daemon_up<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> Chec
         Err(crate::ups::UpsQueryError::QueryFailed { exit_code, stderr }) => CheckResult::warn(
             name,
             format!(
-                "upsc {} failed (exit {exit_code}): {stderr} -- \
+                "upsc {} failed (exit {exit_code}){} -- \
                  check 'systemctl status upsd.service' or verify the UPS name",
-                ups_cfg.name
+                ups_cfg.name,
+                crate::util::detail_suffix(&stderr)
             ),
         ),
         Ok(q) if q.parsed.status_flags.is_empty() => CheckResult::warn(
@@ -6464,6 +6465,40 @@ mod tests {
         );
         assert!(
             r.message.contains("systemctl status upsd.service"),
+            "got: {}",
+            r.message
+        );
+        assert!(
+            r.message.contains("verify the UPS name"),
+            "got: {}",
+            r.message
+        );
+    }
+
+    // Intent: check_ups_daemon_up warns on an empty-stderr `upsc` query
+    // failure without rendering a dangling colon or doubled space.
+    // Why it exists: doctor composes parenthesized exit text before the
+    // remediation suffix; this boundary must share the empty-stderr rule
+    // without losing the operator hint.
+    // Scenario: upsc exits 1 but writes no stderr while doctor checks an
+    // enabled UPS configuration.
+    #[test]
+    fn ups_daemon_check_warns_when_upsc_query_fails_with_empty_stderr() {
+        let runner = MockRunner::default().with_output(
+            CmdRequest::UpscQuery { name: "ups".into() },
+            RawCommandOutput {
+                cmd: "upsc ups".into(),
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_status: 1,
+            },
+        );
+        let (_dir, paths) = isolated_paths();
+        let mut ctx = ups_ctx(&runner, &paths, config_with_ups_enabled());
+        let r = check_ups_daemon_up(&mut ctx);
+        assert_eq!(r.status, CheckStatus::Warn, "got: {r:?}");
+        assert!(
+            r.message.contains("failed (exit 1) -- check"),
             "got: {}",
             r.message
         );

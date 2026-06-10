@@ -234,5 +234,5 @@ pub(crate) use unlock::{
 #[allow(unused_imports)]
 pub(crate) use ups::{
     ups_query_connection_refused_no_newline, ups_query_connection_refused_with_newline,
-    ups_query_healthy_minimal, ups_write_config,
+    ups_query_empty_stderr_exit_1, ups_query_healthy_minimal, ups_write_config,
 };

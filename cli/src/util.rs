@@ -34,9 +34,21 @@ pub(crate) fn format_duration_secs(secs: u64) -> String {
     }
 }
 
+/// Centralizes the "drop the trailing `: <detail>` clause when detail is
+/// blank" rule so command-failure messages never trail a contentless colon
+/// at a tool boundary. Callers pass already-trimmed text; the helper keys
+/// off `is_empty()` only.
+pub(crate) fn detail_suffix(detail: &str) -> String {
+    if detail.is_empty() {
+        String::new()
+    } else {
+        format!(": {detail}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{format_duration_secs, require_tty_inner};
+    use super::{detail_suffix, format_duration_secs, require_tty_inner};
 
     // Intent: require_tty_inner returns Ok only when both stdin and stdout
     // are terminals.
@@ -65,5 +77,18 @@ mod tests {
         assert_eq!(format_duration_secs(60), "1m 0s");
         assert_eq!(format_duration_secs(3599), "59m 59s");
         assert_eq!(format_duration_secs(3600), "1h 0m 0s");
+    }
+
+    // Intent: detail_suffix omits the separator only when the supplied detail
+    // is actually empty.
+    // Why it exists: command-failure renderers trim stderr at capture sites;
+    // the shared suffix helper must not add another normalization boundary.
+    // Scenario: a tool exits non-zero with blank stderr, real stderr, or
+    // whitespace that a caller deliberately did not trim.
+    #[test]
+    fn detail_suffix_only_omits_empty_detail() {
+        assert_eq!(detail_suffix(""), "");
+        assert_eq!(detail_suffix("x"), ": x");
+        assert_eq!(detail_suffix("  "), ":   ");
     }
 }
