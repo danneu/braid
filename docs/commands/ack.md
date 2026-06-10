@@ -49,7 +49,16 @@ On a cleanup I/O error, ack preserves retry state so the next `braid ack` resume
 
 When ack reaches cleanup and a later cleanup step fails, it leaves `/var/lib/braid/alert-cleanup-pending`. `braid status` surfaces ``ack cleanup pending -- re-run `braid ack` to resume`` as an alert cause until cleanup finishes. If that sentinel is the only remaining alert signal, the next `braid ack` re-enters cleanup directly (no btrfs probe, no baseline rewrite) and prints `acknowledged current alerts` on success -- expected output because only leftover cleanup ran.
 
-If the pool is offline but alerts exist (e.g., a latched smartd alert), ack still clears the latch and flag without snapshotting device stats. Offline means there is no mount at the configured mount point. If that path is occupied by a non-btrfs filesystem, `braid ack` returns a probe error naming the fstype and preserves `alert-latch.json`, `smartd-alert`, and `acked-stats.json`.
+When the pool is offline (no mount at the configured mount point), `braid ack` cannot run `btrfs device stats`, so what it can clear depends on which alert signals are present:
+
+- A smartd alert -- a latched smartd cause, a bare `smartd-alert` flag present at ack entry, or both -- clears any latch and removes the `smartd-alert` flag; no `acked-stats.json` write is needed.
+- A latched computation error clears the latch; it re-fires on the next monitor cycle only if the underlying computation still fails.
+- A latched missing device is recorded as acknowledged in `acked-stats.json` (so the next monitor cycle stays quiet) and the latch is cleared, without querying btrfs.
+- A latched btrfs device error is refused: ack exits non-zero with `cannot ack btrfs device errors while pool is offline -- unlock the pool first` and leaves all alert state untouched, because re-baselining the error counters needs live `btrfs device stats`, which requires the pool mounted. The refusal is all-or-nothing -- a co-latched missing device is not partially acknowledged, so unlock and re-run to clear everything.
+
+If that mount point is occupied by a non-btrfs filesystem, `braid ack` returns a probe error naming the fstype and preserves `alert-latch.json`, `smartd-alert`, and `acked-stats.json`.
+
+See [ADR 014: Offline ack policy](../design/decisions/014-alerts.md#offline-ack-policy) for the rationale.
 
 ## Flags
 
@@ -57,7 +66,8 @@ None.
 
 ## Safety checks
 
-- If the pool is not mounted and no alerts are latched, ack refuses with "pool is not mounted -- nothing to acknowledge"
+- If the pool is offline and no alert signal is present -- no latch entries, no smartd alert flag, no corrupt latch, and no pending ack cleanup -- ack refuses with "pool is not mounted -- nothing to acknowledge"
+- If the pool is offline and any latched cause is a btrfs device error, ack refuses with "cannot ack btrfs device errors while pool is offline -- unlock the pool first" and leaves all alert state untouched (a co-latched missing device is not partially acknowledged).
 - If the pool is mounted but healthy with no latch entries, no smartd alert flag, and no corrupt latch, ack is a no-op and does not mutate `acked-stats.json`
 - If the configured mount point is mounted as something other than btrfs, ack refuses with the fstype mismatch and does not clear or rewrite alert state
 - If another braid operation holds the pool lock (`/run/braid-pool.lock`), waits up to 10 seconds for it to finish: proceeds if the lock frees within that window, otherwise exits 1 with the pool-lock retry message.

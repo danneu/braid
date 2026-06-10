@@ -596,6 +596,45 @@ mod tests {
         );
     }
 
+    /*
+     * Intent: Offline ack with a bare smartd-alert flag present at entry and
+     * no latch clears the flag and exits Ok, not PoolNotMounted.
+     * Why it exists: ack_offline's gate is
+     * `has_alert = !causes.is_empty() || smartd_active || latch_corrupt`. Every
+     * other offline smartd test either carries a SmartdAlert *cause* in the
+     * latch (gate satisfied by `causes`) or has the flag arrive mid-probe
+     * (asserting PoolNotMounted), so a regression dropping the `smartd_active`
+     * term would slip through. This pins that term directly.
+     * Scenario: smartd wrote /var/lib/braid/smartd-alert; before monitor
+     * latched it, the user locked the pool and runs `braid ack`.
+     */
+    #[test]
+    fn ack_offline_smartd_flag_no_latch_clears_flag_not_pool_not_mounted() {
+        let (_dir, paths) = isolated_paths();
+        std::fs::write(paths.smartd_alert(), b"").unwrap();
+
+        let result = cmd_ack_impl(
+            &AckPanicRunner,
+            &ack_fs_not_mounted(),
+            &ack_mp(),
+            &paths,
+            &ack_noop_beeper,
+        );
+
+        assert!(
+            result.is_ok(),
+            "offline smartd-flag ack must succeed, got {result:?}"
+        );
+        assert!(
+            !paths.smartd_alert().exists(),
+            "smartd flag must be removed"
+        );
+        assert!(
+            !paths.acked_stats_json().exists(),
+            "smartd-only offline ack must not write acked-stats"
+        );
+    }
+
     // Intent: Offline ack does not let a smartd flag written during probing
     // turn an empty entry snapshot into an acknowledged alert.
     // Why it exists: The smartd hook is not under the pool lock, so it can
