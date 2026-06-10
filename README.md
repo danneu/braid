@@ -17,6 +17,8 @@ systemd units.
 
 Full manual: [danneu.github.io/braid](https://danneu.github.io/braid/).
 
+![braid tui dashboard](docs/assets/tui.png)
+
 ## Quick start
 
 Once the NixOS module is installed (see [Install](#install)), the whole NAS
@@ -173,10 +175,6 @@ every command: [command reference](docs/commands/).
   blocks further mutations until `braid recover` finishes the job or refuses
 - **UPS safety** -- with UPS support enabled, NUT drives orderly poweroff on low battery, mutating commands refuse to start unless UPS utility power is verified, and `braid ups status` / the TUI show live UPS state
 - **TUI dashboard** -- `braid tui` shows pool health, disk status, balance progress, SMART data, and (when enabled) chassis fan telemetry plus UPS state
-
-<!-- TODO(dan): capture this screenshot from the NAS and commit it at docs/assets/tui.png -->
-
-![braid tui dashboard](docs/assets/tui.png)
 
 ## Why braid
 
