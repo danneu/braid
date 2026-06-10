@@ -1,10 +1,11 @@
-# braid-status-ups parser canary.
+# End-to-end `braid ups status` wiring test + live-tool NUT parser canary.
 #
-# Runs `braid ups status` (human + JSON) against a live dummy-ups setup
-# and confirms the parser round-trips the expected fields. This mirrors
-# the golden-fixture contract under CLI invocation, catching any drift
-# that would only show up at runtime (wrapper PATH regressions,
-# config.json emission changes, etc.).
+# Runs the full `braid ups status` outcome matrix (human + JSON) against
+# a live dummy-ups setup. Beyond parser round-tripping, it uniquely guards
+# the command's per-branch process contracts: exit codes, `--json` stderr
+# silence, and stdout/stderr routing. See `braid-status-ups.nix` for the
+# full rationale and coverage split, including wrapper-PATH and config
+# plumbing shared with `tool-versions.py` and `ups-preflight-on-battery.py`.
 
 import json
 import re

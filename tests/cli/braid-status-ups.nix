@@ -1,26 +1,50 @@
-# Test: braid-status-ups -- parser-canary for `braid ups status`
+# Test: braid-status-ups -- end-to-end `braid ups status` wiring test
+# plus live-tool NUT parser canary
 #
 # What: Boots a VM with `braid.ups.enable = true` + a dummy-ups driver
 # (.dev file), then exercises `braid ups status` and `braid ups status
-# --json` against the live NUT stack. Asserts the parser round-trips
-# the expected status flag on the live-tool output for the currently
-# pinned `nut` package.
+# --json` against the live NUT stack. It drives the full `{human, json}`
+# x `{ok, empty-status, query-failed, invocation-failed, not-enabled}`
+# outcome matrix; parser round-tripping on the currently pinned `nut`
+# package is one cell in that matrix.
 #
 # Why: NUT joins btrfs-progs / cryptsetup / util-linux as a pinned
 # parser-critical tool (see docs/design/decisions/010-toolchain-pinning.md).
 # Fixture-backed golden tests lock in the contract against captured
 # output; this canary is the live-tool mirror that confirms the pin
 # actually still parses when the wrapped `upsc` runs end-to-end through
-# the CLI. Without it, a refactor that silently broke `cmd_ups_status`
-# would pass golden tests and only fail at runtime on a real host.
+# the CLI.
+#
+# Unique to this file: no other test drives `braid ups status` across
+# the full `{human, json}` x `{ok, empty-status, query-failed,
+# invocation-failed, not-enabled}` matrix and checks each outcome's
+# process contract -- exit codes, `--json` stderr silence,
+# stdout/stderr routing, human-vs-json wording, the empty-status
+# warning, and the not-enabled stdout hint. Without that coverage, a
+# refactor that silently broke `cmd_ups_status` could pass golden tests
+# and only fail at runtime on a real host.
+#
+# Shared end-to-end coverage: resolving `upsc` through the wrapper on an
+# empty PATH is also covered by
+# `tests/cli/tool-versions.py#assert_wrapper_finds_upsc`, and module
+# `config.ups` plumbing from `/etc/braid/config.json` through live NUT is
+# also covered by `tests/module/ups-preflight-on-battery.py`. This file
+# exercises those paths incidentally, not uniquely.
+#
+# Already covered in Rust: the JSON sentinel shapes, human wording, and
+# query-boundary classification are pinned by `cli/src/ups.rs` unit tests
+# plus insta snapshots, while the `parse_upsc` contract is pinned by the
+# golden fixtures. Those prove pure logic and fixture parsing; they do
+# not exercise the end-to-end command.
 #
 # Companion to `braid-status-rust` etc.; included in the `just
-# test-parsers` invocation so a single command runs the whole CLI
-# parser-canary surface.
+# test-parsers` invocation so a single command runs the whole CLI parser
+# validation surface.
 #
 # We deliberately reuse the same single-.dev + fixture pattern that
 # `tests/module/lib/ups-fixture.nix` uses, but without any pool
-# machinery -- this is a pure parser canary, not a shutdown test.
+# machinery -- this only exercises `braid ups status`, not
+# UPS-triggered shutdown.
 { braid }:
 {
   name = "braid-status-ups";
