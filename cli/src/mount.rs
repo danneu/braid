@@ -453,10 +453,7 @@ fn explain_open_failure(
 fn credential_verify_targets(to_unlock: &[(DiskName, ByIdPath)]) -> Vec<CredentialVerifyTarget> {
     to_unlock
         .iter()
-        .map(|(name, by_id)| CredentialVerifyTarget {
-            name: name.as_str().to_owned(),
-            device: by_id.as_str().to_owned(),
-        })
+        .map(|(name, by_id)| CredentialVerifyTarget::named_candidate(name, by_id))
         .collect()
 }
 
@@ -503,13 +500,13 @@ fn open_disks_with_credential<R: CommandRunner>(
     }) {
         Ok(()) => {}
         Err(CredentialVerifyError::Rejected { target }) => {
-            let original_summary = format!("{noun} rejected on '{}'", target.name);
+            let original_summary = format!("{noun} rejected on '{}'", target.name());
             let ok_fallback =
-                MountError::Failed(format!("wrong {noun} (rejected by {})", target.name));
-            let header_state = luks::probe_luks_header(runner, &target.device);
+                MountError::Failed(format!("wrong {noun} (rejected by {})", target.name()));
+            let header_state = luks::probe_luks_header(runner, target.device());
             return Err(explain_open_failure(
-                &target.name,
-                &target.device,
+                target.name(),
+                target.device(),
                 header_state,
                 &original_summary,
                 ok_fallback,
@@ -519,11 +516,11 @@ fn open_disks_with_credential<R: CommandRunner>(
             target,
             source: e @ LuksError::OpenFailed { .. },
         }) => {
-            let original_summary = format!("verify failed on '{}': {e}", target.name);
-            let header_state = luks::probe_luks_header(runner, &target.device);
+            let original_summary = format!("verify failed on '{}': {e}", target.name());
+            let header_state = luks::probe_luks_header(runner, target.device());
             return Err(explain_open_failure(
-                &target.name,
-                &target.device,
+                target.name(),
+                target.device(),
                 header_state,
                 &original_summary,
                 MountError::Luks(e),

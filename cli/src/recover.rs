@@ -2087,13 +2087,7 @@ fn verify_recover_passphrase_for_add_replay<R: CommandRunner, F: Filesystem + ?S
     let mut verify_targets: Vec<_> = pool
         .devices
         .iter()
-        .map(|device| CredentialVerifyTarget {
-            // Decision-024 display join: resolve the live member's operator
-            // name through membership so the credential-verify message
-            // survives mapper drift. Identity decisions above use live UUID.
-            name: membership::present_device_name(membership, device),
-            device: device.underlying.clone(),
-        })
+        .map(|device| CredentialVerifyTarget::existing_pool_member(membership, device))
         .collect();
     if verify_targets.is_empty() {
         return Err(RecoverError::Failed(
@@ -2143,10 +2137,10 @@ fn verify_recover_passphrase_for_add_replay<R: CommandRunner, F: Filesystem + ?S
                 }
             }
         }
-        verify_targets.push(CredentialVerifyTarget {
-            name: target.name.as_str().to_owned(),
-            device: target.by_id.as_str().to_owned(),
-        });
+        verify_targets.push(CredentialVerifyTarget::named_candidate(
+            &target.name,
+            &target.by_id,
+        ));
     }
 
     verify_credential_for_targets(
@@ -2160,13 +2154,13 @@ fn verify_recover_passphrase_for_add_replay<R: CommandRunner, F: Filesystem + ?S
         crate::credential_verify::CredentialVerifyError::Rejected { target } => {
             RecoverError::Failed(format!(
                 "recover add passphrase was rejected by '{}'",
-                target.name
+                target.name()
             ))
         }
         crate::credential_verify::CredentialVerifyError::Luks { target, source } => {
             RecoverError::Failed(format!(
                 "recover add credential verification failed on '{}': {source}",
-                target.name
+                target.name()
             ))
         }
     })
@@ -2832,18 +2826,9 @@ fn verify_replace_fresh_prep_passphrase<R: CommandRunner>(
     let mut targets: Vec<_> = pool
         .devices
         .iter()
-        .map(|device| CredentialVerifyTarget {
-            // Decision-024 display join: resolve each existing member's
-            // operator name through membership so the credential-verify
-            // message survives mapper drift. Identity uses live UUID above.
-            name: membership::present_device_name(membership, device),
-            device: device.underlying.clone(),
-        })
+        .map(|device| CredentialVerifyTarget::existing_pool_member(membership, device))
         .collect();
-    targets.push(CredentialVerifyTarget {
-        name: new_name.as_str().to_owned(),
-        device: new_by_id.as_str().to_owned(),
-    });
+    targets.push(CredentialVerifyTarget::named_candidate(new_name, new_by_id));
     verify_credential_for_targets(
         runner,
         &targets,
@@ -2855,13 +2840,13 @@ fn verify_replace_fresh_prep_passphrase<R: CommandRunner>(
         crate::credential_verify::CredentialVerifyError::Rejected { target } => {
             RecoverError::Failed(format!(
                 "recover replace passphrase was rejected by '{}'",
-                target.name
+                target.name()
             ))
         }
         crate::credential_verify::CredentialVerifyError::Luks { target, source } => {
             RecoverError::Failed(format!(
                 "recover replace credential verification failed on '{}': {source}",
-                target.name
+                target.name()
             ))
         }
     })

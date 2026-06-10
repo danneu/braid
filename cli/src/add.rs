@@ -1097,12 +1097,13 @@ impl AddPlan {
                             format!(
                                 "passphrase does not match existing pool member '{}'. \
                              All disks must use the same passphrase.",
-                                target.name
+                                target.name()
                             )
                         } else {
                             format!(
                                 "passphrase rejected by candidate disk '{}' ({})",
-                                target.name, target.device
+                                target.name(),
+                                target.device()
                             )
                         },
                     ));
@@ -1985,14 +1986,7 @@ fn build_add_credential_prelude(
         .pool
         .devices
         .iter()
-        .map(|device| CredentialVerifyTarget {
-            // Decision-024 display join: resolve the live member's operator
-            // name through membership (UUID->DiskName), matching status/TUI so
-            // the credential-verify message survives mapper drift. Identity is
-            // `device`, not this cosmetic name.
-            name: membership::present_device_name(input.pool_membership, device),
-            device: device.underlying.clone(),
-        })
+        .map(|device| CredentialVerifyTarget::existing_pool_member(input.pool_membership, device))
         .collect();
     verify_targets.extend(input.probed.iter().enumerate().filter_map(|(i, probed)| {
         let PresentConfigDiskState::PresentLuks { uuid, .. } = &probed.state else {
@@ -2001,10 +1995,10 @@ fn build_add_credential_prelude(
         if input.pool.devices.iter().any(|d| d.luks_uuid == *uuid) {
             return None;
         }
-        Some(CredentialVerifyTarget {
-            name: input.names[i].as_str().to_owned(),
-            device: input.by_ids[i].as_str().to_owned(),
-        })
+        Some(CredentialVerifyTarget::named_candidate(
+            &input.names[i],
+            input.by_ids[i],
+        ))
     }));
 
     AddCredentialPrelude {
@@ -7412,10 +7406,11 @@ mod tests {
             "only the live pool member should be a verify target"
         );
         assert_eq!(
-            prelude.verify_targets[0].name, "disk1",
+            prelude.verify_targets[0].name(),
+            "disk1",
             "drifted-mapper member must resolve to 'disk1' via membership, not 'braid-WRONG'"
         );
-        assert_eq!(prelude.verify_targets[0].device, "/dev/vda");
+        assert_eq!(prelude.verify_targets[0].device(), "/dev/vda");
     }
 
     #[test]

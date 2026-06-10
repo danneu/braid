@@ -1,13 +1,57 @@
 use crate::cmd::CommandRunner;
 use crate::luks::{self, LuksError, VerifyOutcome};
+use crate::membership::{self, PoolMembership};
 use crate::secret::Passphrase;
 use crate::status_tag::{StatusTag, status_line};
+use crate::types::{ByIdPath, DiskName, PoolDevice};
 use std::path::Path;
 
+/// One disk a credential is checked against: a cosmetic display `name`
+/// plus the `device` path cryptsetup verification runs on. Fields are
+/// private so a target can only be minted by `existing_pool_member`
+/// (UUID->DiskName join) or `named_candidate` (validated operator input)
+/// -- a mapper-derived display name is unconstructable (decision 024,
+/// principle 5).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialVerifyTarget {
-    pub name: String,
-    pub device: String,
+    name: String,
+    device: String,
+}
+
+impl CredentialVerifyTarget {
+    /// Decision-024 present-device display rule, enforced at the type
+    /// boundary: resolve a live pool member's display name through the
+    /// UUID->DiskName join so a drifted mapper can never leak into the
+    /// credential-verify line. Verification targets the live `underlying`
+    /// path.
+    pub fn existing_pool_member(membership: &PoolMembership, device: &PoolDevice) -> Self {
+        Self {
+            name: membership::present_device_name(membership, device),
+            device: device.underlying.clone(),
+        }
+    }
+
+    /// Operator-attested target: the name is an already-validated
+    /// `DiskName` (never a mapper basename), the device the by-id setup
+    /// handle.
+    pub fn named_candidate(name: &DiskName, device: &ByIdPath) -> Self {
+        Self {
+            name: name.as_str().to_owned(),
+            device: device.as_str().to_owned(),
+        }
+    }
+
+    /// Display name for verify rows and rejection messages (cosmetic
+    /// only; identity is `device`).
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Path cryptsetup verification runs on: a live member's `underlying`
+    /// path or a candidate's by-id handle.
+    pub fn device(&self) -> &str {
+        &self.device
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -149,7 +193,22 @@ pub fn probe_keyfile_enrollment<R: CommandRunner>(
 mod tests {
     use super::*;
     use crate::cmd::{CmdRequest, MockRunner, RawCommandOutput};
+    use crate::membership::DiskMember;
+    use crate::types::{LuksUuid, MapperName};
     use zeroize::Zeroizing;
+
+    // Test-module seed allocation: cli/src/credential_verify.rs uses 600-609.
+    fn test_uuid(seed: u64) -> LuksUuid {
+        LuksUuid::parse(&format!("00000000-0000-0000-0000-{:012x}", seed))
+            .expect("hand-padded UUID is canonical")
+    }
+
+    fn member(name: &str, by_id: &str) -> DiskMember {
+        DiskMember::new(
+            DiskName::parse(name).expect("valid disk name in fixture"),
+            ByIdPath::parse(by_id).expect("valid by-id path in fixture"),
+        )
+    }
 
     fn zpass(s: &str) -> Passphrase {
         Passphrase::from_zeroizing(Zeroizing::new(s.to_owned()))
@@ -544,5 +603,88 @@ mod tests {
                 &targets[0].name,
             )]
         );
+    }
+
+    // Intent: existing_pool_member resolves the display name through the
+    //   UUID->DiskName membership join and verifies against the live
+    //   backing path.
+    // Why it exists: the constructor is now the only way to mint a
+    //   live-member verify target; if it regressed to the mapper basename
+    //   or the by-id handle, every credential-verify line would re-violate
+    //   decision 024 under mapper drift -- exactly the original bug.
+    // Scenario: a pool member is open under a drifted mapper
+    //   (braid-WRONG) while membership names its UUID 'disk1'.
+    #[test]
+    fn existing_pool_member_resolves_drifted_mapper_through_uuid() {
+        let uuid = test_uuid(600);
+        let mut membership = PoolMembership::empty();
+        membership
+            .insert(uuid.clone(), member("disk1", "/dev/disk/by-id/ata-K"))
+            .unwrap();
+        let device = PoolDevice {
+            mapper: MapperName("braid-WRONG".into()),
+            luks_uuid: uuid,
+            devid: 1,
+            underlying: "/dev/vdb".into(),
+        };
+
+        let target = CredentialVerifyTarget::existing_pool_member(&membership, &device);
+
+        assert_eq!(
+            target.name(),
+            "disk1",
+            "drifted mapper must resolve to the membership name via UUID"
+        );
+        assert_eq!(
+            target.device(),
+            "/dev/vdb",
+            "verification must target the live backing path, not the mapper or by-id"
+        );
+    }
+
+    // Intent: a live device whose UUID is absent from membership falls
+    //   back to the full mapper basename as its display name.
+    // Why it exists: pins the constructor to present_device_name's
+    //   foreign fallback -- the full 'braid-WRONG', never stripped to
+    //   'WRONG', which would fabricate an operator-looking name.
+    // Scenario: a foreign LUKS device is open under a braid-* mapper
+    //   while membership is empty.
+    #[test]
+    fn existing_pool_member_foreign_uuid_falls_back_to_mapper_basename() {
+        let membership = PoolMembership::empty();
+        let foreign = PoolDevice {
+            mapper: MapperName("braid-WRONG".into()),
+            luks_uuid: test_uuid(601),
+            devid: 2,
+            underlying: "/dev/vdc".into(),
+        };
+
+        let target = CredentialVerifyTarget::existing_pool_member(&membership, &foreign);
+
+        assert_eq!(
+            target.name(),
+            "braid-WRONG",
+            "foreign UUID -> full mapper basename, NOT stripped to 'WRONG'"
+        );
+        assert_eq!(target.device(), "/dev/vdc");
+    }
+
+    // Intent: named_candidate carries the validated DiskName and by-id
+    //   handle through to the accessors unchanged.
+    // Why it exists: the operator-input constructor must not transform
+    //   either value -- the name is already validated at the boundary,
+    //   and the by-id path is the handle cryptsetup verification runs on.
+    // Scenario: enroll/mount/add/replace build a candidate target from
+    //   operator-supplied CLI input.
+    #[test]
+    fn named_candidate_round_trips_validated_inputs() {
+        let name = DiskName::parse("disk7").expect("valid disk name in fixture");
+        let by_id =
+            ByIdPath::parse("/dev/disk/by-id/ata-NEW").expect("valid by-id path in fixture");
+
+        let target = CredentialVerifyTarget::named_candidate(&name, &by_id);
+
+        assert_eq!(target.name(), "disk7");
+        assert_eq!(target.device(), "/dev/disk/by-id/ata-NEW");
     }
 }

@@ -488,10 +488,9 @@ impl ReplacePlan {
         // (`new_name`/`new_by_id`) is op-level, not a live pool member.
         let mut credential_targets = member_verify_targets;
         let new_disk_target = match &target_prep {
-            ReplaceTargetPrep::ExistingLuks { .. } => Some(CredentialVerifyTarget {
-                name: new_name.as_str().to_owned(),
-                device: new_by_id.as_str().to_owned(),
-            }),
+            ReplaceTargetPrep::ExistingLuks { .. } => Some(
+                CredentialVerifyTarget::named_candidate(&new_name, &new_by_id),
+            ),
             ReplaceTargetPrep::FreshLuks { .. } => None,
         };
         if let Some(target) = &new_disk_target {
@@ -512,12 +511,13 @@ impl ReplacePlan {
                     return Err(ReplaceError::Validation(if is_new_disk {
                         format!(
                             "passphrase rejected by new disk '{}' ({})",
-                            target.name, target.device
+                            target.name(),
+                            target.device()
                         )
                     } else {
                         format!(
                             "passphrase does not match existing pool member '{}'",
-                            target.name
+                            target.name()
                         )
                     }));
                 }
@@ -1708,10 +1708,7 @@ fn build_member_verify_targets(
         };
     anchor_members
         .into_iter()
-        .map(|device| CredentialVerifyTarget {
-            name: membership::present_device_name(pre_membership, device),
-            device: device.underlying.clone(),
-        })
+        .map(|device| CredentialVerifyTarget::existing_pool_member(pre_membership, device))
         .collect()
 }
 

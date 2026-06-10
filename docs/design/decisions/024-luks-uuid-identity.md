@@ -247,6 +247,12 @@ warns rather than claiming every declared member is assembled.
   member open under a drifted mapper (`braid-WRONG`) is named by its operator
   name (`disk1`) in the verify prelude and the `... does not match existing pool
   member '...'` / `... rejected by '...'` rejection, not the mapper basename.
+- `CredentialVerifyTarget`'s fields are private; its only constructors are
+  `existing_pool_member` (display name UUID-joined through membership) and
+  `named_candidate` (an operator-attested, already-validated `DiskName`), so
+  no call site can put a mapper-derived name into a credential-verify target.
+  `cli/src/credential_verify.rs` unit tests pin the drifted-mapper join and
+  the foreign-UUID full-basename fallback at the constructor.
 - `cli/src/tui/probe.rs` unit tests pin the TUI Data-tab Bus column's transport
   join to the parent disk's LUKS UUID, so a member open under a drifted mapper
   (`braid-WRONG`) still renders its bus instead of degrading to `--`.

@@ -273,10 +273,7 @@ pub(crate) fn plan_single_disk_enrollment<R: CommandRunner>(
         // must NOT be silently treated as "not enrolled" -- doing so
         // would let the flow proceed to slot preflight on a device that
         // may not even be readable.
-        let target = CredentialVerifyTarget {
-            name: name.as_str().to_owned(),
-            device: by_id.as_str().to_owned(),
-        };
+        let target = CredentialVerifyTarget::named_candidate(name, by_id);
         let color_enabled = color_enabled_for_stderr();
         if matches!(
             probe_keyfile_enrollment(runner, &target, key_file_path, color_enabled, emit_status,)?,
@@ -312,10 +309,7 @@ fn plan_enrollment<R: CommandRunner>(
     let color_enabled = color_enabled_for_stderr();
     let verify_targets: Vec<CredentialVerifyTarget> = candidates
         .iter()
-        .map(|c| CredentialVerifyTarget {
-            name: c.name.as_str().to_owned(),
-            device: c.by_id.as_str().to_owned(),
-        })
+        .map(|c| CredentialVerifyTarget::named_candidate(&c.name, &c.by_id))
         .collect();
     match verify_credential_for_targets(
         runner,
@@ -328,7 +322,7 @@ fn plan_enrollment<R: CommandRunner>(
         Err(CredentialVerifyError::Rejected { target }) => {
             return Err(EnrollKeyFileError::Validation(format!(
                 "wrong passphrase on {}",
-                target.name
+                target.name()
             )));
         }
         Err(CredentialVerifyError::Luks { source, .. }) => {
