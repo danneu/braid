@@ -6,6 +6,7 @@ use crate::parse::parse_btrfs_device_stats;
 use crate::probe::{Filesystem, ProbeError, probe_pool_alerts};
 use crate::state_paths::StatePaths;
 use crate::types::MountPoint;
+use crate::util::detail_suffix;
 
 /// Production entry point that wires ack cleanup to the real beeper stop hook.
 ///
@@ -243,17 +244,11 @@ fn format_systemctl_stop_failure(output: &std::process::Output) -> Option<String
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     let stderr = stderr.trim();
-    if stderr.is_empty() {
-        Some(format!(
-            "warning: systemctl stop braid-alert.service: {}",
-            output.status
-        ))
-    } else {
-        Some(format!(
-            "warning: systemctl stop braid-alert.service: {}: {stderr}",
-            output.status
-        ))
-    }
+    Some(format!(
+        "warning: systemctl stop braid-alert.service: {}{}",
+        output.status,
+        detail_suffix(stderr)
+    ))
 }
 
 #[derive(Debug, thiserror::Error)]

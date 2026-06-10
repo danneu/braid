@@ -1,4 +1,5 @@
 use crate::types::{Devid, LuksFormatExtraOpts, LuksLabel, LuksUuid, MapperName, MountPoint};
+use crate::util::detail_suffix;
 use std::os::unix::process::ExitStatusExt;
 use thiserror::Error;
 
@@ -1364,11 +1365,10 @@ fn output_to_raw(
             let name = signal_name(sig);
             let stderr = String::from_utf8_lossy(&output.stderr);
             let stderr = stderr.trim();
-            let detail = if stderr.is_empty() {
-                format!("{cmd_str}: killed by signal {sig} ({name})")
-            } else {
-                format!("{cmd_str}: killed by signal {sig} ({name}): {stderr}")
-            };
+            let detail = format!(
+                "{cmd_str}: killed by signal {sig} ({name}){}",
+                detail_suffix(stderr)
+            );
             return Err(CmdError::Failed(detail));
         }
     };

@@ -1,5 +1,6 @@
 use crate::cmd::{CmdRequest, CommandRunner};
 use crate::config::AutoSuspend;
+use crate::util::detail_suffix;
 
 /// Tri-state WoL readiness derived from one `ethtool <iface>` invocation.
 /// Shared by the doctor check and the autosuspend `wol-ready` gate so the
@@ -116,13 +117,10 @@ fn wol_not_ready_reason(interface: &str, readiness: WolReadiness) -> String {
             format!("{interface} ethtool output is unparseable -- cannot verify Wake-on-LAN")
         }
         WolReadiness::QueryFailed { exit, detail } => {
-            if detail.is_empty() {
-                format!("ethtool {interface} failed with exit {exit} -- cannot verify Wake-on-LAN")
-            } else {
-                format!(
-                    "ethtool {interface} failed with exit {exit}: {detail} -- cannot verify Wake-on-LAN"
-                )
-            }
+            format!(
+                "ethtool {interface} failed with exit {exit}{} -- cannot verify Wake-on-LAN",
+                detail_suffix(&detail)
+            )
         }
     }
 }

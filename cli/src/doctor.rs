@@ -1302,19 +1302,13 @@ fn check_beep_path<R: CommandRunner>(
 fn summarize_wol(interface: &str, stdout: &str, stderr: &str, exit_status: i32) -> CheckResult {
     let name = "wake_on_lan";
     match classify_wol(stdout, stderr, exit_status) {
-        WolReadiness::QueryFailed { exit, detail } => {
-            let suffix = if detail.is_empty() {
-                String::new()
-            } else {
-                format!(": {detail}")
-            };
-            CheckResult::fail(
-                name,
-                format!(
-                    "ethtool {interface} failed (exit {exit}){suffix} -- cannot verify Wake-on-LAN"
-                ),
-            )
-        }
+        WolReadiness::QueryFailed { exit, detail } => CheckResult::fail(
+            name,
+            format!(
+                "ethtool {interface} failed (exit {exit}){} -- cannot verify Wake-on-LAN",
+                crate::util::detail_suffix(&detail)
+            ),
+        ),
         WolReadiness::Unparseable => CheckResult::fail(
             name,
             format!(
