@@ -150,7 +150,8 @@ with subtest("braid unlock refuses with journal present"):
 # plan_open_pool accumulates per-disk probe events (disk1+disk2
 # available, disk3 absent) and then returns DegradedRefused. cmd_recover
 # must render those accumulated notes to stderr before the refusal
-# message, with stdout empty and a nonzero exit code.
+# message, with stdout empty and exit code 2 (the degraded-refused code,
+# distinct from the generic exit 1).
 with subtest("Test 3a: dry-run preserved-context failure -> stdout empty, stderr has context"):
     # Build a journal whose target_membership contains disk3 in
     # addition to the existing disk1+disk2. disk3 has no virtio-disk3
@@ -180,7 +181,10 @@ with subtest("Test 3a: dry-run preserved-context failure -> stdout empty, stderr
     exit_code, _ = machine.execute(
         "braid recover --dry-run >/tmp/pcf-stdout 2>/tmp/pcf-stderr"
     )
-    assert exit_code != 0, f"recover --dry-run should refuse without --allow-degraded, got exit {exit_code}"
+    assert exit_code == 2, (
+        "recover --dry-run degraded refusal must exit 2 "
+        f"(distinct from generic errors), got exit {exit_code}"
+    )
 
     out = machine.succeed("cat /tmp/pcf-stdout")
     err = machine.succeed("cat /tmp/pcf-stderr")
@@ -280,14 +284,18 @@ with subtest("Test 3b: dry-run stepful not-mounted -> stdout has banner+notes+st
 # Scenario: temporarily move pending-op.json aside. `braid recover
 # --dry-run` has nothing to recover; the failure happens before any
 # probe context accumulates. stdout must be empty and stderr must
-# contain only the error message.
+# contain only the error message. The exit code must be the generic 1,
+# not the degraded-refused 2.
 with subtest("Test 3c: no-journal failure -> stdout empty, stderr has only the error"):
     machine.succeed("mv /var/lib/braid/pending-op.json /tmp/saved-pending-op.json")
 
     exit_code, _ = machine.execute(
         "braid recover --dry-run >/tmp/nj-stdout 2>/tmp/nj-stderr"
     )
-    assert exit_code != 0, f"recover --dry-run with no journal should fail, got exit {exit_code}"
+    assert exit_code == 1, (
+        "no-journal failure must exit 1 (generic), "
+        f"not the degraded-refused 2, got exit {exit_code}"
+    )
 
     out = machine.succeed("cat /tmp/nj-stdout")
     err = machine.succeed("cat /tmp/nj-stderr")
