@@ -314,7 +314,7 @@ impl DeviceScrubEntry {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BtrfsScrubStatusPerDeviceOutput {
-    pub uuid: String,
+    pub uuid: Fsid,
     pub devices: Vec<DeviceScrubEntry>,
 }
 

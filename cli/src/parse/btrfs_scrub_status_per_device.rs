@@ -5,7 +5,7 @@ use nom::{
 };
 
 use crate::cmd::RawCommandOutput;
-use crate::types::Devid;
+use crate::types::{Devid, Fsid};
 
 use super::ParseError;
 use super::helpers::{parse_ctime, parse_duration_hms};
@@ -140,14 +140,23 @@ pub fn parse_btrfs_scrub_status_per_device(
 
     let stdout = &raw.stdout;
 
-    // Extract UUID
-    let uuid = stdout
+    // Extract UUID. Route the raw FSID through Fsid::parse so the value-type is
+    // the single source of canonicalization, mirroring parse_btrfs_filesystem_show.
+    // A missing line stays MissingField; a present-but-malformed FSID becomes
+    // ParseError::InvalidValue rather than a silently-untyped string.
+    let raw_uuid = stdout
         .lines()
-        .find_map(|l| l.trim().strip_prefix("UUID:").map(|v| v.trim().to_owned()))
+        .find_map(|l| l.trim().strip_prefix("UUID:").map(|v| v.trim()))
         .ok_or_else(|| ParseError::MissingField {
             cmd: CMD.to_owned(),
             field: "UUID".to_owned(),
         })?;
+    let uuid = Fsid::parse(raw_uuid).map_err(|e| ParseError::InvalidValue {
+        cmd: raw.cmd.clone(),
+        field: "uuid".into(),
+        raw: e.raw,
+        detail: e.detail,
+    })?;
 
     let mut devices: Vec<DeviceScrubEntry> = Vec::new();
     let mut current: Option<PartialDevice> = None;
@@ -241,9 +250,9 @@ mod tests {
         };
         let out = parse_btrfs_scrub_status_per_device(&raw).unwrap();
         assert!(
-            uuid::Uuid::parse_str(&out.uuid).is_ok(),
+            uuid::Uuid::parse_str(out.uuid.as_str()).is_ok(),
             "UUID should be valid, got: {}",
-            out.uuid
+            out.uuid.as_str()
         );
         assert!(out.devices.len() >= 2, "expected at least 2 devices");
         for dev in &out.devices {
@@ -269,9 +278,9 @@ mod tests {
         };
         let out = parse_btrfs_scrub_status_per_device(&raw).unwrap();
         assert!(
-            uuid::Uuid::parse_str(&out.uuid).is_ok(),
+            uuid::Uuid::parse_str(out.uuid.as_str()).is_ok(),
             "UUID should be valid, got: {}",
-            out.uuid
+            out.uuid.as_str()
         );
         assert!(out.devices.len() >= 2, "expected at least 2 devices");
         for dev in &out.devices {
@@ -323,7 +332,7 @@ Duration:         0:01:00
             exit_status: 0,
         };
         let out = parse_btrfs_scrub_status_per_device(&raw).unwrap();
-        assert_eq!(out.uuid, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+        assert_eq!(out.uuid.as_str(), "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
         assert_eq!(out.devices.len(), 1);
         assert_eq!(out.devices[0].devid, Devid::new(1));
         assert_eq!(out.devices[0].path.as_deref(), Some("/dev/sda"));
@@ -452,6 +461,49 @@ Duration:         0:00:30
             err,
             ParseError::CommandFailed { exit_code: 1, .. }
         ));
+    }
+
+    // Intent: a present-but-malformed UUID value surfaces as
+    //   ParseError::InvalidValue naming the `uuid` field, parallel to
+    //   btrfs_show_returns_invalid_value_for_malformed_fsid.
+    // Why it exists: the FSID value-type is constructed here via Fsid::parse;
+    //   an upstream btrfs-progs that emitted a non-UUID FSID in scrub output
+    //   must fail loudly at the parse boundary rather than store an untyped
+    //   string. The cmd assertion pins that the error preserves raw.cmd.
+    // Scenario: a corrupted or future-format btrfs scrub status prints a
+    //   `UUID:` line whose value is not a UUID.
+    #[test]
+    fn btrfs_scrub_per_device_returns_invalid_value_for_malformed_fsid() {
+        let raw = RawCommandOutput {
+            cmd: "test-scrub-cmd".into(),
+            stdout: "\
+UUID:             not-a-uuid
+
+Scrub device /dev/sda (id 1) history
+Status:           finished
+"
+            .into(),
+            stderr: String::new(),
+            exit_status: 0,
+        };
+        let err = parse_btrfs_scrub_status_per_device(&raw).unwrap_err();
+        match err {
+            ParseError::InvalidValue {
+                cmd,
+                field,
+                raw,
+                detail,
+            } => {
+                assert_eq!(field, "uuid");
+                assert_eq!(raw, "not-a-uuid");
+                assert!(!detail.is_empty(), "detail must carry uuid-crate reason");
+                assert_eq!(
+                    cmd, "test-scrub-cmd",
+                    "error must preserve raw.cmd, not the CMD constant"
+                );
+            }
+            other => panic!("expected InvalidValue uuid, got {other:?}"),
+        }
     }
 
     /// Intent: unknown keys from future btrfs-progs are silently skipped.
