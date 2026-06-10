@@ -118,13 +118,16 @@ pub fn cmd_monitor<R: CommandRunner, F: Filesystem + ?Sized>(
         Ok(None) => return MonitorResult::PoolOffline,
         Ok(Some(causes)) => (causes, None),
         Err(detail) => {
-            eprintln!("error: {detail}");
+            eprintln!("braid monitor: {detail}");
             (Vec::new(), Some(detail))
         }
     };
 
     // 8. Load existing latch (quarantine corrupt file if needed)
     let (existing_latch, latch_corrupt_detail) = alert::load_alert_latch_or_quarantine(paths);
+    if let Some(detail) = &latch_corrupt_detail {
+        eprintln!("braid monitor: warning: alert latch unreadable -- quarantining: {detail}");
+    }
 
     // 9. Surface computation failures and latch corruption as at most one
     // ComputationError cause so status sees it instead of silently rebuilding.
@@ -139,7 +142,7 @@ pub fn cmd_monitor<R: CommandRunner, F: Filesystem + ?Sized>(
     if merged.active()
         && let Err(e) = alert::save_alert_latch(&merged, paths)
     {
-        eprintln!("Warning: failed to write alert latch: {e}");
+        eprintln!("braid monitor: warning: failed to write alert latch: {e}");
     }
 
     // 12. Return result based on merged state

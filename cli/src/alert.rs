@@ -339,12 +339,15 @@ pub fn load_alert_latch_at(path: &Path) -> Result<Option<AlertState>, LatchLoadE
 /// `alert-latch.json.corrupt` (best effort) and return a detail string so the
 /// caller can plant a `ComputationError` cause. On success, behaves like
 /// `load_alert_latch`.
+///
+/// Does not write to stderr: the returned detail is the caller's to surface, so
+/// each caller can qualify it with its own command context (e.g. `cmd_monitor`
+/// prefixes `braid monitor:`).
 pub fn load_alert_latch_or_quarantine(paths: &StatePaths) -> (Option<AlertState>, Option<String>) {
     match load_alert_latch(paths) {
         Ok(opt) => (opt, None),
         Err(e) => {
             let parse_detail = e.to_string();
-            eprintln!("warning: alert latch unreadable -- quarantining: {parse_detail}");
             let detail = match quarantine_corrupt_latch(paths) {
                 Some(quarantine_detail) => format!("{parse_detail}; {quarantine_detail}"),
                 None => parse_detail,
