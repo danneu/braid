@@ -3,8 +3,8 @@ use serde::{Deserialize, Serialize};
 use crate::parse::types::{BtrfsBgType, BtrfsDfEntry};
 use crate::status::AllocationEntry;
 
-/// Per-block-group-type redundancy summary for `braid status` and `braid tui`.
-/// Shared so CLI and TUI classification stay in sync; rendering is per-caller.
+/// Per-block-group-type redundancy summary for `braid status`.
+/// One classifier feeds the human and JSON status surfaces; rendering is per-caller.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProfileSummary {
     pub data: TypeProfile,
@@ -20,7 +20,7 @@ pub struct TypeProfile {
     pub class: Redundancy,
 }
 
-/// Coarse redundancy category used to choose human and TUI render suffixes.
+/// Coarse redundancy category used to choose human status render suffixes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Redundancy {
     Mirrored,
@@ -176,7 +176,8 @@ mod tests {
 
     // Intent: a clean three-disk RAID1 pool classifies every block-group type
     // as mirrored.
-    // Why it exists: status and TUI must agree on the healthy RAID1 baseline.
+    // Why it exists: the healthy RAID1 baseline is the reference state every
+    // status surface reports; misclassifying it would mislabel a normal pool.
     // Scenario: a normal fully-balanced pool reports RAID1 Data, Metadata, and System rows.
     #[test]
     fn summary_for_3disk_raid1_pool() {
@@ -217,7 +218,7 @@ mod tests {
 
     // Intent: mixed data profiles retain canonical domain order.
     // Why it exists: alphabetical sorting would put RAID1 before single and
-    // make human, TUI, and JSON surfaces disagree with the intended examples.
+    // make human and JSON surfaces disagree with the intended examples.
     // Scenario: degraded writes created single data chunks before RAID1 was restored.
     #[test]
     fn summary_for_mixed_data_profile() {
@@ -264,7 +265,7 @@ mod tests {
     // Intent: empty df data reports Unknown with empty profile vectors.
     // Why it exists: renderers need to distinguish "no probe data" from a
     // non-empty unclassified profile name such as RAID5.
-    // Scenario: status or TUI asks for a summary before df rows are available.
+    // Scenario: status asks for a summary before df rows are available.
     #[test]
     fn summary_for_empty_df() {
         let summary = from_df_entries(&[]);
@@ -337,8 +338,9 @@ mod tests {
     }
 
     // Intent: allocation rows and parsed df entries feed the same classifier.
-    // Why it exists: human status formats serialized allocation while the TUI
-    // formats raw df entries; both must tell the same profile story.
+    // Why it exists: status classifies parsed df entries when building its
+    // report and serialized allocation when rendering the human form; both
+    // must tell the same profile story.
     // Scenario: status builds its report from df, then renders from the allocation field.
     #[test]
     fn from_allocation_matches_from_df_entries() {

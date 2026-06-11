@@ -13,7 +13,6 @@ use time::macros::format_description;
 
 use crate::config::FanControl;
 use crate::parse::types::{BtrfsBgType, ScrubState, ScrubTimestamp, SmartHealth, UpsStatusFlag};
-use crate::profile_summary::{self, Redundancy, TypeProfile};
 use crate::status::{BalanceReport, DiskErrors};
 use crate::tui::model::{
     DaemonStatus, DiskLockState, DiskLuksState, DrivingDrive, FanReading, Model, PoolState,
@@ -404,19 +403,6 @@ fn pool_info(pool: &PoolState) -> Paragraph<'_> {
         Span::raw(pool.mount_point.as_str().to_owned()),
     ])];
 
-    let profile = profile_summary::from_df_entries(&pool.df_entries);
-    if !profile_summary_is_empty(&profile) {
-        lines.push(Line::from(vec![
-            Span::styled("Profile    ", dim),
-            Span::raw(format!(
-                "data {} | meta {} | system {}",
-                format_type_profile_tui(&profile.data),
-                format_type_profile_tui(&profile.metadata),
-                format_type_profile_tui(&profile.system),
-            )),
-        ]));
-    }
-
     match &pool.balance {
         BalanceReport::Running {
             done_chunks,
@@ -479,31 +465,6 @@ fn pool_info(pool: &PoolState) -> Paragraph<'_> {
     }
 
     Paragraph::new(lines)
-}
-
-fn format_type_profile_tui(profile: &TypeProfile) -> String {
-    if profile.profiles.is_empty() {
-        return "unknown".to_owned();
-    }
-
-    match profile.class {
-        Redundancy::Mixed => "partial".to_owned(),
-        Redundancy::Mirrored
-        | Redundancy::SameDisk
-        | Redundancy::NoRedundancy
-        | Redundancy::Unknown => profile.profiles.join(", "),
-    }
-}
-
-fn profile_summary_is_empty(summary: &profile_summary::ProfileSummary) -> bool {
-    summary.data.profiles.is_empty()
-        && summary.metadata.profiles.is_empty()
-        && summary.system.profiles.is_empty()
-}
-
-fn pool_profile_rows(pool: &PoolState) -> u16 {
-    let summary = profile_summary::from_df_entries(&pool.df_entries);
-    (!profile_summary_is_empty(&summary)) as u16
 }
 
 fn pool_df_table(pool: &PoolState) -> Table<'_> {
@@ -1059,8 +1020,8 @@ fn view_data(model: &Model, frame: &mut Frame, area: Rect, _now: PrimitiveDateTi
                 .filter(|e| e.bg_type != BtrfsBgType::GlobalReserve)
                 .count() as u16;
             let usage_row = p.capacity_total_bytes.is_some() as u16;
-            // border + Path + optional Profile + balance + usage + blank + header + entries
-            1 + 1 + pool_profile_rows(p) + pool_balance_rows(p) + usage_row + 1 + 1 + df_rows
+            // border + Path + balance + usage + blank + header + entries
+            1 + 1 + pool_balance_rows(p) + usage_row + 1 + 1 + df_rows
         }
         None => 1 + 1,
     };
@@ -1111,7 +1072,7 @@ fn view_data(model: &Model, frame: &mut Frame, area: Rect, _now: PrimitiveDateTi
         | PoolStatus::Refreshing(pool)
         | PoolStatus::ErrorStale(_, pool) => {
             let usage_row = pool.capacity_total_bytes.is_some() as u16;
-            let info_rows = 1 + pool_profile_rows(pool) + pool_balance_rows(pool) + usage_row;
+            let info_rows = 1 + pool_balance_rows(pool) + usage_row;
             let df_rows = pool
                 .df_entries
                 .iter()
@@ -1629,43 +1590,10 @@ pub(crate) mod tests {
         snap!(buffer_to_string(&terminal));
     }
 
-    // Intent: the pool info widget renders a compact Profile row for a fully
-    // mirrored RAID1 pool.
-    // Why it exists: the TUI must summarize the same per-type profile facts as
-    // `braid status` without making operators read the allocation table.
-    // Scenario: a healthy three-disk pool reports RAID1 Data, Metadata, and System rows.
-    #[test]
-    fn tui_pool_info_3disk_raid1() {
-        let pool = pool_with_df_entries(vec![
-            df_entry(BtrfsBgType::Data, BtrfsProfile::Raid1),
-            df_entry(BtrfsBgType::Metadata, BtrfsProfile::Raid1),
-            df_entry(BtrfsBgType::System, BtrfsProfile::Raid1),
-        ]);
-        let model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(pool));
-        let terminal = render(&model, 60, 24);
-        snap!(buffer_to_string(&terminal));
-    }
-
-    // Intent: the pool info widget renders a compact Profile row for a
-    // single-disk bootstrap pool.
-    // Why it exists: data=single and metadata/system=DUP have different
-    // redundancy meanings and should stay visible in the TUI.
-    // Scenario: the first `braid add` created a one-device pool.
-    #[test]
-    fn tui_pool_info_single_disk() {
-        let pool = pool_with_df_entries(vec![
-            df_entry(BtrfsBgType::Data, BtrfsProfile::Single),
-            df_entry(BtrfsBgType::Metadata, BtrfsProfile::Dup),
-            df_entry(BtrfsBgType::System, BtrfsProfile::Dup),
-        ]);
-        let model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(pool));
-        let terminal = render(&model, 60, 24);
-        snap!(buffer_to_string(&terminal));
-    }
-
-    // Intent: the pool info widget renders mixed profile state as `partial`.
-    // Why it exists: the TUI has less room than status output, but it still
-    // needs to flag a not-fully-redundant block-group type.
+    // Intent: the allocation table renders a mixed-profile state as two Data
+    // rows (single + RAID1).
+    // Why it exists: the table is the only remaining TUI surface for spotting
+    // degraded redundancy; collapsing or dropping a per-profile row would hide it.
     // Scenario: degraded writes created single data chunks before RAID1 returned.
     #[test]
     fn tui_pool_info_mixed_data() {
@@ -1675,35 +1603,6 @@ pub(crate) mod tests {
             df_entry(BtrfsBgType::Metadata, BtrfsProfile::Raid1),
             df_entry(BtrfsBgType::System, BtrfsProfile::Raid1),
         ]);
-        let model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(pool));
-        let terminal = render(&model, 60, 24);
-        snap!(buffer_to_string(&terminal));
-    }
-
-    // Intent: the pool info widget prints non-empty Unknown profiles verbatim.
-    // Why it exists: `unknown` is reserved for missing data; a real profile
-    // name like RAID5 should not be hidden.
-    // Scenario: a non-braid-created pool reports Data=RAID5.
-    #[test]
-    fn tui_pool_info_unrecognized_profile_renders_verbatim() {
-        let pool = pool_with_df_entries(vec![
-            df_entry(BtrfsBgType::Data, BtrfsProfile::Raid5),
-            df_entry(BtrfsBgType::Metadata, BtrfsProfile::Raid1),
-            df_entry(BtrfsBgType::System, BtrfsProfile::Raid1),
-        ]);
-        let model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(pool));
-        let terminal = render(&model, 60, 24);
-        snap!(buffer_to_string(&terminal));
-    }
-
-    // Intent: the pool info widget renders missing per-type profile data as
-    // `unknown`.
-    // Why it exists: empty profile vectors mean btrfs reported no row for that
-    // type and must stay distinct from unclassified non-empty names.
-    // Scenario: df data contains only a Data=RAID1 row.
-    #[test]
-    fn tui_pool_info_missing_type_renders_unknown() {
-        let pool = pool_with_df_entries(vec![df_entry(BtrfsBgType::Data, BtrfsProfile::Raid1)]);
         let model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(pool));
         let terminal = render(&model, 60, 24);
         snap!(buffer_to_string(&terminal));
@@ -1948,46 +1847,6 @@ pub(crate) mod tests {
     fn snapshot_balance_unknown() {
         let mut pool = sample_pool();
         pool.balance = BalanceReport::Unknown;
-        let model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(pool));
-        let terminal = render(&model, 60, 26);
-        snap!(buffer_to_string(&terminal));
-    }
-
-    #[test]
-    fn snapshot_mixed_data_profile() {
-        let mut pool = sample_pool();
-        pool.df_entries = vec![
-            BtrfsDfEntry {
-                bg_type: BtrfsBgType::Data,
-                bg_profile: BtrfsProfile::Single,
-                bg_used: 536_870_912,
-                bg_total: 1_073_741_824,
-            },
-            BtrfsDfEntry {
-                bg_type: BtrfsBgType::Data,
-                bg_profile: BtrfsProfile::Raid1,
-                bg_used: 2_308_094_370_816,
-                bg_total: 5_937_955_045_376,
-            },
-            BtrfsDfEntry {
-                bg_type: BtrfsBgType::Metadata,
-                bg_profile: BtrfsProfile::Raid1,
-                bg_used: 1_610_612_736,
-                bg_total: 2_147_483_648,
-            },
-            BtrfsDfEntry {
-                bg_type: BtrfsBgType::System,
-                bg_profile: BtrfsProfile::Raid1,
-                bg_used: 16_384,
-                bg_total: 16_777_216,
-            },
-            BtrfsDfEntry {
-                bg_type: BtrfsBgType::GlobalReserve,
-                bg_profile: BtrfsProfile::Single,
-                bg_used: 0,
-                bg_total: 5_767_168,
-            },
-        ];
         let model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(pool));
         let terminal = render(&model, 60, 26);
         snap!(buffer_to_string(&terminal));

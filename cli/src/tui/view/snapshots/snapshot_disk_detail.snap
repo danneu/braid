@@ -1,26 +1,26 @@
 ---
 source: cli/src/tui/view/mod.rs
-assertion_line: 1777
+assertion_line: 1676
 expression: buffer_to_string(&terminal)
 ---
 Data  ┌ Disk Detail ─────────────────────────────────┐
       │ Disk       toshiba                           │
  Pool │ Status     unlocked                          │──────
  Path │ Cipher     aes-xts-plain64                   │
- Profi│ Key size   512 bits                          │
- Usage│ Keyslots   1 of 32 slots used                │
-      │                                              │
- Type │ Allocations ──────────────────────────────── │
- Data │ Type        Profile     Size                 │
- Metad│ Data        RAID1       1.3 TiB              │
- Syste│ Metadata    DUP         1.5 GiB              │
-      │ System      DUP         16.0 MiB             │
- Disks│ Unallocated             4.1 TiB              │──────
-     N│                                              │
- ▶ 1 t│ btrfs Device Errors ──────────────────────── │iB
-   2 i│ read            0                            │iB
-   3 w│ write           0                            │iB
-   4 s│ flush           0                            │iB
+ Usage│ Key size   512 bits                          │
+      │ Keyslots   1 of 32 slots used                │
+ Type │                                              │
+ Data │ Allocations ──────────────────────────────── │
+ Metad│ Type        Profile     Size                 │
+ Syste│ Data        RAID1       1.3 TiB              │
+      │ Metadata    DUP         1.5 GiB              │
+ Disks│ System      DUP         16.0 MiB             │──────
+     N│ Unallocated             4.1 TiB              │
+ ▶ 1 t│                                              │iB
+   2 i│ btrfs Device Errors ──────────────────────── │iB
+   3 w│ read            0                            │iB
+   4 s│ write           0                            │iB
+      │ flush           0                            │
       │ corruption      0                            │
       │ generation      0                            │
       │                                              │

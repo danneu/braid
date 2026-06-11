@@ -1,26 +1,26 @@
 ---
 source: cli/src/tui/view/mod.rs
-assertion_line: 1824
+assertion_line: 1723
 expression: buffer_to_string(&terminal)
 ---
 Data  ┌ Disk Detail ─────────────────────────────────┐
       │ Disk       toshiba                           │
  Pool │ Status     unlocked                          │──────
  Path │ underlying device gone                       │
- Profi│ Cipher     aes-xts-plain64                   │
- Usage│ Key size   512 bits                          │
-      │ Keyslots   1 of 32 slots used                │
- Type │                                              │
- Data │ Allocations ──────────────────────────────── │
- Metad│ Type        Profile     Size                 │
- Syste│ Data        RAID1       1.3 TiB              │
-      │ Metadata    DUP         1.5 GiB              │
- Disks│ System      DUP         16.0 MiB             │──────
-     N│ Unallocated             4.1 TiB              │
- ▶ 1 t│                                              │iB
-   2 i│ btrfs Device Errors ──────────────────────── │iB
-   3 w│ read            0                            │iB
-   4 s│ write           0                            │iB
+ Usage│ Cipher     aes-xts-plain64                   │
+      │ Key size   512 bits                          │
+ Type │ Keyslots   1 of 32 slots used                │
+ Data │                                              │
+ Metad│ Allocations ──────────────────────────────── │
+ Syste│ Type        Profile     Size                 │
+      │ Data        RAID1       1.3 TiB              │
+ Disks│ Metadata    DUP         1.5 GiB              │──────
+     N│ System      DUP         16.0 MiB             │
+ ▶ 1 t│ Unallocated             4.1 TiB              │iB
+   2 i│                                              │iB
+   3 w│ btrfs Device Errors ──────────────────────── │iB
+   4 s│ read            0                            │iB
+      │ write           0                            │
       │ flush           0                            │
       │ corruption      0                            │
       │ generation      0                            │

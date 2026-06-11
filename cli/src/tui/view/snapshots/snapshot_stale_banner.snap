@@ -1,13 +1,12 @@
 ---
 source: cli/src/tui/view/mod.rs
-assertion_line: 2046
+assertion_line: 1905
 expression: out
 ---
  pool data stale -- last pool refresh failed: btrfs spawn failed: ENOENT
 Data  Scrub  Browse
  Pool ──────────────────────────────────────────────────────────────────────────
  Path       /mnt/storage
- Profile    data RAID1 | meta RAID1 | system RAID1
  Usage      29% 2.1 TiB / 7.3 TiB (Estimated)
  Type       Profile  Used       Allocated
  Data       RAID1    2.1 TiB    5.4 TiB

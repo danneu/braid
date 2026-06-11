@@ -1,25 +1,25 @@
 ---
 source: cli/src/tui/view/mod.rs
-assertion_line: 1839
+assertion_line: 1738
 expression: buffer_to_string(&terminal)
 ---
 Data  Scrub  Browse
  Pool ┌ Disk Detail ─────────────────────────────────┐──────
  Path │ Disk       samsung                           │
- Profi│ Status     unlocked                          │
- Usage│ Cipher     aes-xts-plain64                   │
-      │ Key size   512 bits                          │
- Type │ Keyslots   1 of 32 slots used                │
- Data │                                              │
- Metad│ Allocations ──────────────────────────────── │
- Syste│ Type        Profile     Size                 │
-      │ Data        RAID1       768.0 GiB            │
- Disks│ Metadata    DUP         1.0 GiB              │──────
-     N│ System      DUP         16.0 MiB             │
-   1 t│ Unallocated             1.1 TiB              │iB
-   2 i│                                              │iB
-   3 w│ btrfs Device Errors ──────────────────────── │iB
- ▶ 4 s│ read            0                            │iB
+ Usage│ Status     unlocked                          │
+      │ Cipher     aes-xts-plain64                   │
+ Type │ Key size   512 bits                          │
+ Data │ Keyslots   1 of 32 slots used                │
+ Metad│                                              │
+ Syste│ Allocations ──────────────────────────────── │
+      │ Type        Profile     Size                 │
+ Disks│ Data        RAID1       768.0 GiB            │──────
+     N│ Metadata    DUP         1.0 GiB              │
+   1 t│ System      DUP         16.0 MiB             │iB
+   2 i│ Unallocated             1.1 TiB              │iB
+   3 w│                                              │iB
+ ▶ 4 s│ btrfs Device Errors ──────────────────────── │iB
+      │ read            0                            │
       │ write           0                            │
       │ flush           0                            │
       │ corruption      0                            │

@@ -54,13 +54,8 @@ Demo mode shows three fake disks with sample data, useful for exploring the inte
 
 ## What it shows
 
-**Main view** -- pool status, mount point, the `Profile` summary
-(`data <X> | meta <Y> | system <Z>`, where each value is the profile name
-verbatim for a single recognized profile such as `RAID1`, `DUP`, or `single`;
-`partial` when that block-group type spans more than one profile; the raw
-profile name verbatim for an unrecognized profile like `RAID5`; or `unknown`
-only when no block groups of that type were reported), capacity bar, balance
-state, and active alerts and advisories.
+**Main view** -- pool status, mount point, capacity bar, balance state, and
+active alerts and advisories.
 
 **Refreshing** -- while the pool is mounted, pool, disk, scrub, and alert data
 refresh automatically about every 10 seconds and immediately when you press

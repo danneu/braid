@@ -1,12 +1,11 @@
 ---
 source: cli/src/tui/view/mod.rs
-assertion_line: 1680
+assertion_line: 1608
 expression: buffer_to_string(&terminal)
 ---
 Data  Scrub  Browse
  Pool ──────────────────────────────────────────────────────
  Path       /mnt/storage
- Profile    data partial | meta RAID1 | system RAID1
  Usage      29% 2.1 TiB / 7.3 TiB (Estimated)
  Type       Profile  Used       Allocated
  Data       single   1.0 MiB    2.0 MiB
