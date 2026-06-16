@@ -397,6 +397,25 @@ ups.test.result: Done and passed\n\
         assert_eq!(out.load_pct, None);
     }
 
+    // Intent: percent parsing floors fractional values and rejects only
+    // integer parts above 100.
+    // Why it exists: this boundary policy is deliberate and documented in
+    // parse_pct and commit bcbc435b, but clean-integer fixtures would miss a
+    // refactor to rounding or decimal-rejecting parsing.
+    // Scenario: a UPS driver reports fractional charge/load values around
+    // 100% because of firmware floating-point drift, plus a genuinely
+    // out-of-range 101 value.
+    #[test]
+    fn pct_floors_fraction_and_gates_on_intpart() {
+        let near_full = parse_upsc("battery.charge: 99.9\nups.load: 100.5\n");
+        assert_eq!(near_full.battery.charge_pct, Some(99));
+        assert_eq!(near_full.load_pct, Some(100));
+
+        let over = parse_upsc("battery.charge: 101.0\nups.load: 101\n");
+        assert_eq!(over.battery.charge_pct, None);
+        assert_eq!(over.load_pct, None);
+    }
+
     // Intent: parse_upsc accepts the captured fixture for the
     // on-utility-power state and produces {OL} plus the typed tail.
     // Why: freezing the fixture contract here guards against later refactors
