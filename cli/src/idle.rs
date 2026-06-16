@@ -631,6 +631,44 @@ mod tests {
         );
     }
 
+    // Intent: when the host exposes multiple btrfs filesystems that are all
+    //   idle, `cmd_idle` issues exactly one `btrfs scrub status` probe, scoped
+    //   to the configured pool mount point -- never one probe per fsid.
+    // Why it exists: the scrub probe is deliberately pool-scoped, not host-wide
+    //   (ADR 016, "Scrub probe is scoped to the pool mount point"): a scrub on a
+    //   non-pool btrfs is not detected and does not block suspend. The sibling
+    //   exclop rule (host-wide) is pinned by
+    //   `idle_any_busy_blocks_suspend_multi_btrfs`; this is its scrub-side
+    //   mirror. Every other test that reaches the scrub probe seeds a single
+    //   fsid, and every existing multi-fsid test short-circuits at the sysfs
+    //   scan before scrub is reached -- so a future change that made scrub
+    //   host-wide (a probe per fsid), or scoped it to the wrong mount point,
+    //   would compile and keep all current idle tests green while silently
+    //   changing the documented suspend behavior. Asserting the exact request
+    //   log -- one `BtrfsScrubStatus` keyed to `idle_mp()` -- fails closed on
+    //   both regressions: MockRunner records every request before dispatch, so
+    //   a second per-fsid probe lands in the log even when unmocked.
+    // Scenario: NixOS host with a btrfs root alongside the braid pool; both are
+    //   idle. autosuspend must conclude Idle after a single pool-scoped scrub
+    //   probe, ignoring the non-pool filesystem entirely.
+    #[test]
+    fn idle_scrub_probe_stays_pool_scoped_multi_btrfs() {
+        let runner = idle_runner_with_scrub_finished();
+        let fs = IdleMockFs::mounted_btrfs_only()
+            .seed_btrfs_listing(&[IDLE_FSID, IDLE_FSID_OTHER])
+            .seed_exclop(IDLE_FSID, "none")
+            .seed_exclop(IDLE_FSID_OTHER, "none");
+
+        let result = cmd_idle(&runner, &fs, &idle_mp());
+        assert_eq!(result, IdleResult::Idle);
+        assert_eq!(
+            runner.requests(),
+            vec![CmdRequest::BtrfsScrubStatus {
+                mount_point: idle_mp()
+            }]
+        );
+    }
+
     /* Intent: `is_btrfs_mounted` returned true but `/sys/fs/btrfs/` is
      *   empty -> Busy::Unknown (fail-closed).
      * Why: this is an invariant violation -- a mounted btrfs always has
