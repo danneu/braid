@@ -1813,22 +1813,11 @@ pub fn plan_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         return Err(PlanFailure::with_notes(notes, AddError::Validation(msg)));
     }
 
-    // Missing-devices warning: body-only, no legacy `warning:` prefix.
-    // Lives on `notes` so it surfaces on both dry-run stdout (via
-    // `Preview::render`) and real-run stderr (via `AddPlan::execute`
-    // using `preview::render_notes_for_stderr`).
-    if pool.missing_count > 0 {
-        notes.push(PreviewNote::Warn(format_add_missing_devices_warning(
-            pool.missing_count,
-        )));
-    }
-
-    // Build the semantic work plan. This can fail on PresentLuks identity / foreign-pool
-    // guards -- any accumulated notes up to here (missing-devices) must
-    // survive on `PlanFailure::notes` so the caller can
-    // render them to stderr before the error.
+    // Build the semantic work plan first so the missing-devices warning can
+    // see whether real work will happen. This can fail on PresentLuks identity
+    // / foreign-pool guards.
     let by_ids_refs: Vec<&ByIdPath> = by_ids.iter().collect();
-    let work_plan = match build_add_work_plan(
+    let work_plan_result = build_add_work_plan(
         runner,
         &AddStepsInput {
             names: &names,
@@ -1842,7 +1831,24 @@ pub fn plan_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             backing_path_resolver: params.backing_path_resolver,
             pool_membership: &pool_membership,
         },
-    ) {
+    );
+
+    // Missing-devices warning: body-only, no legacy `warning:` prefix. Lives on
+    // `notes` so it surfaces on both dry-run stdout (via `Preview::render`) and
+    // real-run stderr (via `AddPlan::execute` using
+    // `preview::render_notes_for_stderr`). Emitted for a real add and for a
+    // planner refusal, but suppressed on a successful no-op re-add because
+    // "consider repairing first" would mislead when no work will happen.
+    let suppress_missing_warn = matches!(&work_plan_result, Ok(work_plan) if work_plan.is_noop());
+    if pool.missing_count > 0 && !suppress_missing_warn {
+        notes.push(PreviewNote::Warn(format_add_missing_devices_warning(
+            pool.missing_count,
+        )));
+    }
+
+    // Accumulated notes (missing-devices) must survive on `PlanFailure::notes`
+    // so the caller can render them to stderr before the error.
+    let work_plan = match work_plan_result {
         Ok(s) => s,
         Err(e) => {
             return Err(PlanFailure::with_notes(notes, e));
@@ -9591,6 +9597,54 @@ mod tests {
         assert_eq!(
             infos[0],
             &format_add_noop(&[DiskName::parse("disk2").unwrap()])
+        );
+    }
+
+    // Intent: a degraded-pool no-op re-add renders only the no-op note, with
+    // no missing-devices warning or degraded-balance skip note.
+    // Why it exists: the missing-devices warning says to repair before a real
+    // add, which contradicts a successful no-op where no action will happen.
+    // Scenario: disk2 is already a live pool member, the pool has one missing
+    // member, and the operator runs a no-op `braid add disk2`.
+    #[test]
+    fn plan_add_noop_on_degraded_pool_omits_missing_devices_warning() {
+        let fixture = plan_add_fixture();
+        let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
+        let runner = AddPlanTestRunner::new()
+            .with_keyfile_probes(vec![
+                AddPlanKeyfileProbe::Occupied,
+                AddPlanKeyfileProbe::Empty,
+            ])
+            .with_missing(1)
+            .with_target_probe(
+                "/dev/disk/by-id/virtio-disk2",
+                AddPlanTargetProbe::AlreadyInPoolSlot1Empty,
+            );
+
+        let disk_specs = ["disk2=/dev/disk/by-id/virtio-disk2".to_string()];
+        let plan = plan_add(&runner, &fs, &fixture.params(&disk_specs, true))
+            .expect("plan_add should succeed on a degraded no-op re-add");
+
+        assert_eq!(
+            plan.pool.missing_count, 1,
+            "test must exercise a degraded pool"
+        );
+
+        let preview = plan.preview();
+        assert!(
+            preview.steps.is_empty(),
+            "no-op must have zero steps, got: {:?}",
+            preview.steps
+        );
+
+        let rendered = preview.render();
+        assert_eq!(
+            rendered, "Nothing to do -- disk2 already in pool.\n",
+            "degraded no-op must render only the no-op line"
+        );
+        assert!(
+            !rendered.contains("nothing to do."),
+            "generic `nothing to do.` fallback must NOT appear alongside the Info note"
         );
     }
 
