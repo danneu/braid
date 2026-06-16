@@ -64,6 +64,22 @@ pub(crate) enum EnrollmentPlanMode {
     GenerateNew,
 }
 
+impl EnrollmentPlanMode {
+    /// Single source of truth for the `--generate` -> mode mapping:
+    /// `true -> GenerateNew` (keyfile does not exist yet, skip the probe),
+    /// `false -> ExistingKeyfile` (probe the on-disk keyfile). Both the
+    /// dry-run preview (`plan_enroll`) and the real run (`EnrollPlan::execute`)
+    /// route through here so the two paths can never classify a disk
+    /// differently.
+    fn from_generate(generate: bool) -> Self {
+        if generate {
+            Self::GenerateNew
+        } else {
+            Self::ExistingKeyfile
+        }
+    }
+}
+
 /// Which validation pass is checking the generated-keyfile target.
 /// The mount-point requirement is identical across passes; only the
 /// failure wording differs, because the caller's prior knowledge differs.
@@ -536,11 +552,7 @@ impl EnrollPlan {
             reprobe_member_luks_uuid(runner, &c.name, &c.by_id, &c.uuid)?;
         }
 
-        let mode = if self.generate {
-            EnrollmentPlanMode::GenerateNew
-        } else {
-            EnrollmentPlanMode::ExistingKeyfile
-        };
+        let mode = EnrollmentPlanMode::from_generate(self.generate);
         // `plan_enrollment` emits the `ok:` / `enroll:` status lines
         // directly on stderr -- intentionally scoped out of this
         // migration (they require a resolved passphrase and must not
@@ -755,11 +767,7 @@ pub fn plan_enroll<R: CommandRunner, F: Filesystem + ?Sized>(
     };
 
     let steps = if params.dry_run {
-        let mode = if params.generate {
-            EnrollmentPlanMode::GenerateNew
-        } else {
-            EnrollmentPlanMode::ExistingKeyfile
-        };
+        let mode = EnrollmentPlanMode::from_generate(params.generate);
         let mut needs_enroll: Vec<EnrollmentCandidate> = Vec::with_capacity(candidates.len());
         for c in &candidates {
             match plan_single_disk_enrollment(runner, &c.name, &c.by_id, params.key_file_path, mode)
