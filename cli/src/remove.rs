@@ -1449,6 +1449,60 @@ mod tests {
         );
     }
 
+    // Intent: a redundancy-preserving remove (3->2, remaining >= 2) issues no
+    // execute-time survivor-capacity probe -- the >= 2 path is intentionally
+    // not re-checked, unlike the fail-closed 2->1 path.
+    //
+    // Why it exists: the execute-time capacity re-check is gated on
+    // remaining == 1 and is fail-closed by design; the >= 2 branch is
+    // warn-and-proceed and leans on `btrfs device remove` ENOSPCing cleanly.
+    // The positive half is pinned by execute_rechecks_survivor_capacity_before_journal;
+    // this pins the negative half. Without it, a consistency refactor could add
+    // a hard re-check to the >= 2 execute path and refuse valid removes on
+    // transient probe errors. If placed after journal::write_journal, it would
+    // also strand pending-op.json, with no test to catch it.
+    //
+    // Scenario: an operator removes one disk from a healthy three-disk pool.
+    // Two survivors remain, so execute proceeds from the pre-journal topology
+    // gate straight to `btrfs device remove` with no survivor-capacity probe;
+    // the journal is written and then cleared on success, nothing stranded.
+    #[test]
+    fn execute_skips_survivor_capacity_recheck_for_multi_survivor() {
+        let f = PoolFixture::three_disk_healthy();
+        let fs = MockFs::storage(vec![]);
+        let params = f.remove_params().build();
+
+        let plan_runner = RemovalPool::three_disk().install(MockRunner::default());
+        let plan =
+            plan_remove(&plan_runner, &fs, &params).expect("plan succeeds on healthy 3-disk pool");
+
+        // Use a separate fresh runner so requests() captures only execute-phase
+        // requests; the plan-time >= 2 capacity probe stays on plan_runner.
+        let exec_runner = RemovalPool::three_disk().install(MockRunner::default());
+        plan.execute(&exec_runner, &fs, &params)
+            .expect("3->2 execute succeeds on a healthy pool");
+
+        let calls = exec_runner.requests();
+        assert!(
+            !calls.iter().any(|c| matches!(
+                c,
+                CmdRequest::BtrfsDeviceUsageRaw { .. } | CmdRequest::BtrfsFilesystemDfJson { .. }
+            )),
+            "the remaining >= 2 execute path must not re-probe survivor capacity \
+             (it relies on btrfs device remove ENOSPCing cleanly): {calls:?}"
+        );
+        assert!(
+            calls
+                .iter()
+                .any(|c| matches!(c, CmdRequest::BtrfsDeviceRemove { .. })),
+            "the 3->2 remove must actually reach btrfs device remove: {calls:?}"
+        );
+        assert!(
+            !f.paths.pending_op_json().exists(),
+            "a successful 3->2 remove must clear the journal -- nothing stranded",
+        );
+    }
+
     #[test]
     // Intent:
     // - What behavior this test (tries to) verify.
