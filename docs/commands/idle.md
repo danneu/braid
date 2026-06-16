@@ -71,6 +71,12 @@ runs, with no stdout output. The streams disambiguate this from the documented
 exits above: exit 0 prints `idle:` on stdout, busy/probe-failure exit 1 prints
 `busy:` on stdout, and config-load exit 2 emits a config-error diagnostic.
 
+Argument errors -- an unknown flag, a missing value -- also exit 2, but clap
+writes its own `error:` diagnostic to stderr and never the
+`failed to read/parse config file <path>` line a config-load exit 2 prints, so
+the stderr text still tells the two exit-2 cases apart. The autosuspend check
+runs a fixed argument list, so its only exit 2 is a config-load failure.
+
 ## Autosuspend integration
 
 `braid idle` is the activity check behind braid's auto-suspend. You don't write
