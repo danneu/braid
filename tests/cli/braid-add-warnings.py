@@ -144,7 +144,48 @@ with subtest("Real-run degraded add succeeds and skips the RAID1 balance"):
         "RAID1 profile must be preserved after the degraded add; got:\n{}".format(df)
     )
 
-# --- Phase 4: preserved-context failure uses canonical [warn] on stderr ---
+# --- Phase 4: real-run no-op keeps the pool-health warning ---
+#
+# Intent: `braid add disk1` (no --dry-run) on the still-degraded pool
+# is a no-op that prints the canonical missing-devices warning and the
+# no-op line to stderr, while omitting the work-only balance-skip note.
+#
+# Why it exists: moving the `is_noop` return above note emission, or
+# re-`is_noop`-gating the missing-devices warning, would make the real
+# command go silent about a degraded pool on the no-op path.
+#
+# Scenario: disk2 remains MISSING after Phase 3; disk1 is present and
+# already in the pool, and the operator re-runs `braid add disk1`.
+
+with subtest("Phase 4: real-run degraded no-op keeps health warning"):
+    machine.succeed(f"{add_cmd('disk1')} >/tmp/noop-stdout 2>/tmp/noop-stderr")
+    out = machine.succeed("cat /tmp/noop-stdout")
+    err = machine.succeed("cat /tmp/noop-stderr")
+
+    assert out == "", (
+        "real-run no-op stdout must be empty; got: {!r}".format(out)
+    )
+    assert expected_line in err, (
+        "real-run no-op stderr must contain the canonical `[warn] ...` line;"
+        " stderr={!r}".format(err)
+    )
+    assert "Nothing to do -- disk1 already in pool." in err, (
+        "real-run no-op stderr must contain the bare no-op Info line;"
+        " stderr={!r}".format(err)
+    )
+    assert skip_line not in err, (
+        "real-run no-op must not surface the work-only balance-skip note;"
+        " stderr={!r}".format(err)
+    )
+    assert "warning: pool has" not in err, (
+        "real-run no-op warning must not carry the legacy `warning:` prefix;"
+        " stderr={!r}".format(err)
+    )
+    assert "\x1b[" not in err, (
+        "real-run no-op stderr must be plain without a TTY; stderr={!r}".format(err)
+    )
+
+# --- Phase 5: preserved-context failure uses canonical [warn] on stderr ---
 #
 # Intent: when `plan_add` accumulates the missing-devices warn and then
 # fails later inside add work-plan rendering (BraidLabeledNoBtrfs
@@ -164,7 +205,7 @@ with subtest("Real-run degraded add succeeds and skips the RAID1 balance"):
 # classification returns BraidLabeledNoBtrfs. Run `braid add disk4`
 # (no --dry-run).
 
-with subtest("Phase 4: preserved-context failure renders canonical [warn]"):
+with subtest("Phase 5: preserved-context failure renders canonical [warn]"):
     dev4 = "/dev/disk/by-id/virtio-disk4"
     # LUKS-format disk4 with the braid-<name> label, then open the
     # mapper so plan_add's probe_config_disk sees PresentLuks with

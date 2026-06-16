@@ -1824,9 +1824,8 @@ pub fn plan_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         return Err(PlanFailure::with_notes(notes, AddError::Validation(msg)));
     }
 
-    // Build the semantic work plan first so the missing-devices warning can
-    // see whether real work will happen. This can fail on PresentLuks identity
-    // / foreign-pool guards.
+    // Build the semantic work plan. This can fail on PresentLuks identity /
+    // foreign-pool guards.
     let by_ids_refs: Vec<&ByIdPath> = by_ids.iter().collect();
     let work_plan_result = build_add_work_plan(
         runner,
@@ -1847,11 +1846,21 @@ pub fn plan_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     // Missing-devices warning: body-only, no legacy `warning:` prefix. Lives on
     // `notes` so it surfaces on both dry-run stdout (via `Preview::render`) and
     // real-run stderr (via `AddPlan::execute` using
-    // `preview::render_notes_for_stderr`). Emitted for a real add and for a
-    // planner refusal, but suppressed on a successful no-op re-add because
-    // "consider repairing first" would mislead when no work will happen.
-    let suppress_missing_warn = matches!(&work_plan_result, Ok(work_plan) if work_plan.is_noop());
-    if pool.missing_count > 0 && !suppress_missing_warn {
+    // `preview::render_notes_for_stderr`).
+    //
+    // Intentionally NOT gated on `is_noop` -- unlike the keyfile-asymmetry
+    // warning (derived from `work_plan.targets`, so no-ops do not warn) and
+    // the balance-skip note (`!is_noop`-gated below). Those two describe the
+    // work (the new drive, the skipped balance step) and are meaningless when
+    // nothing is added. This warning describes the pool's existing health and
+    // is true whether or not work happens, so a degraded no-op re-add still
+    // surfaces it: the `braid replace` hint is the repair pointer an operator
+    // who ran `add` against a degraded pool needs, and staying quiet would run
+    // counter to "never silently degraded"
+    // (docs/design/principles.md#1-resilient-by-default). Pinned by the
+    // `plan_add_degraded_noop_keeps_missing_warning` unit test and the
+    // real-run no-op phase in tests/cli/braid-add-warnings.py.
+    if pool.missing_count > 0 {
         notes.push(PreviewNote::Warn(format_add_missing_devices_warning(
             pool.missing_count,
         )));
@@ -9706,54 +9715,6 @@ mod tests {
         );
     }
 
-    // Intent: a degraded-pool no-op re-add renders only the no-op note, with
-    // no missing-devices warning or degraded-balance skip note.
-    // Why it exists: the missing-devices warning says to repair before a real
-    // add, which contradicts a successful no-op where no action will happen.
-    // Scenario: disk2 is already a live pool member, the pool has one missing
-    // member, and the operator runs a no-op `braid add disk2`.
-    #[test]
-    fn plan_add_noop_on_degraded_pool_omits_missing_devices_warning() {
-        let fixture = plan_add_fixture();
-        let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
-        let runner = AddPlanTestRunner::new()
-            .with_keyfile_probes(vec![
-                AddPlanKeyfileProbe::Occupied,
-                AddPlanKeyfileProbe::Empty,
-            ])
-            .with_missing(1)
-            .with_target_probe(
-                "/dev/disk/by-id/virtio-disk2",
-                AddPlanTargetProbe::AlreadyInPoolSlot1Empty,
-            );
-
-        let disk_specs = ["disk2=/dev/disk/by-id/virtio-disk2".to_string()];
-        let plan = plan_add(&runner, &fs, &fixture.params(&disk_specs, true))
-            .expect("plan_add should succeed on a degraded no-op re-add");
-
-        assert_eq!(
-            plan.pool.missing_count, 1,
-            "test must exercise a degraded pool"
-        );
-
-        let preview = plan.preview();
-        assert!(
-            preview.steps.is_empty(),
-            "no-op must have zero steps, got: {:?}",
-            preview.steps
-        );
-
-        let rendered = preview.render();
-        assert_eq!(
-            rendered, "Nothing to do -- disk2 already in pool.\n",
-            "degraded no-op must render only the no-op line"
-        );
-        assert!(
-            !rendered.contains("nothing to do."),
-            "generic `nothing to do.` fallback must NOT appear alongside the Info note"
-        );
-    }
-
     // Intent: open recoverable returning add targets with empty slot 1 emit
     // the keyfile-asymmetry warning.
     // Why it exists: the warning gate must cover both ClosedPresentLuks and
@@ -10096,6 +10057,90 @@ mod tests {
             rendered.matches(skip_body).count(),
             1,
             "degraded preview must surface the balance-skip note exactly once; got:\n{rendered}"
+        );
+    }
+
+    // Intent: a degraded no-op `braid add` surfaces the pool-health
+    // missing-devices warning and the no-op Info line, but omits the
+    // work-only balance-skip note.
+    // Why it exists: guards the deliberate "health warning fires on no-op,
+    // work notes do not" split. A regression that `is_noop`-gates the
+    // missing-devices warning, or a note-ordering refactor that drops it,
+    // must consciously update this test rather than silently going quiet
+    // about a degraded pool.
+    // Scenario: disk2 is already a live pool member, the pool has one missing
+    // member, and the operator runs a no-op `braid add disk2`.
+    #[test]
+    fn plan_add_degraded_noop_keeps_missing_warning() {
+        let fixture = plan_add_fixture();
+        let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
+        let runner = AddPlanTestRunner::new()
+            .with_keyfile_probes(vec![
+                AddPlanKeyfileProbe::Occupied,
+                AddPlanKeyfileProbe::Empty,
+            ])
+            .with_missing(1)
+            .with_target_probe(
+                "/dev/disk/by-id/virtio-disk2",
+                AddPlanTargetProbe::AlreadyInPoolSlot1Empty,
+            );
+
+        let disk_specs = ["disk2=/dev/disk/by-id/virtio-disk2".to_string()];
+        let plan = plan_add(&runner, &fs, &fixture.params(&disk_specs, true))
+            .expect("plan_add should succeed on a degraded no-op re-add");
+
+        assert_eq!(
+            plan.pool.missing_count, 1,
+            "test must exercise a degraded pool"
+        );
+
+        let warns: Vec<&String> = plan
+            .notes
+            .iter()
+            .filter_map(|n| match n {
+                PreviewNote::Warn(b) => Some(b),
+                _ => None,
+            })
+            .collect();
+        let infos: Vec<&String> = plan
+            .notes
+            .iter()
+            .filter_map(|n| match n {
+                PreviewNote::Info(b) => Some(b),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(warns.len(), 1, "expected one Warn note, got {warns:?}");
+        assert_eq!(warns[0], &format_add_missing_devices_warning(1));
+        assert_eq!(infos.len(), 1, "expected one Info note, got {infos:?}");
+        assert_eq!(
+            infos[0],
+            &format_add_noop(&[DiskName::parse("disk2").unwrap()])
+        );
+
+        let preview = plan.preview();
+        assert!(
+            preview.steps.is_empty(),
+            "no-op must have zero steps, got: {:?}",
+            preview.steps
+        );
+
+        let rendered = preview.render();
+        assert!(
+            rendered.contains("[warn] pool has 1 missing device"),
+            "degraded no-op must render the pool-health warning; got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("Nothing to do -- disk2 already in pool."),
+            "degraded no-op must render the no-op Info line; got:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains(&format_add_degraded_balance_skip()),
+            "degraded no-op must omit the work-only balance-skip note; got:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("nothing to do."),
+            "generic `nothing to do.` fallback must NOT appear alongside the Info note"
         );
     }
 
