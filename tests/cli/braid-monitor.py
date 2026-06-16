@@ -307,7 +307,11 @@ with subtest("MissingDevice alert acked offline does not re-fire on remount"):
     output = machine.succeed("braid status")
     assert "ALERT" in output, f"Expected ALERT in offline status, got: {output}"
     # Offline ack should succeed and persist missing_acked into acked-stats
-    machine.succeed("braid ack")
+    machine.succeed("braid ack >/tmp/ack-offline.out 2>/tmp/ack-offline.err")
+    stdout = machine.succeed("cat /tmp/ack-offline.out")
+    assert stdout == "acknowledged current alerts\n", (
+        f"offline MissingDevice ack must report no count, got: {stdout!r}"
+    )
     machine.fail("test -f /var/lib/braid/alert-latch.json")
     machine.succeed("test -f /var/lib/braid/acked-stats.json")
     acked = json.loads(machine.succeed("cat /var/lib/braid/acked-stats.json"))

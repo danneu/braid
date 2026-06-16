@@ -8,6 +8,14 @@ use crate::state_paths::StatePaths;
 use crate::types::MountPoint;
 use crate::util::detail_suffix;
 
+/// Shared no-count ack confirmation for paths that complete real cleanup but
+/// have no meaningful mounted latch count to report.
+///
+/// Offline ack intentionally uses this line even when the latch contains
+/// causes: only mounted ack re-baselines counters, so only mounted ack reports
+/// `causes.len()`.
+const ACK_NO_COUNT_LINE: &str = "acknowledged current alerts";
+
 /// Production entry point that wires ack cleanup to the real beeper stop hook.
 ///
 /// Tests call `cmd_ack_impl` directly with explicit hooks so they never shell
@@ -57,7 +65,7 @@ fn cmd_ack_impl<R: CommandRunner, F: Filesystem + ?Sized>(
         if let Err(e) = cleanup_alert_files_and_beeper(paths, stop_beeper, false) {
             return Err(AckError::CleanupFailed(e));
         }
-        println!("acknowledged current alerts");
+        println!("{ACK_NO_COUNT_LINE}");
         return Ok(());
     }
 
@@ -104,17 +112,22 @@ fn cmd_ack_impl<R: CommandRunner, F: Filesystem + ?Sized>(
     // 8. Print a count for latched causes. Smartd-only and corrupt-latch
     // gated acknowledgments still completed real cleanup, but have no
     // meaningful latch count to report.
-    if !causes.is_empty() {
-        println!(
-            "acknowledged {} alert{}",
-            causes.len(),
-            if causes.len() == 1 { "" } else { "s" }
-        );
-    } else {
-        println!("acknowledged current alerts");
-    }
+    println!("{}", format_ack_confirmation(causes.len()));
 
     Ok(())
+}
+
+/// Mounted ack confirmation builder so the user-facing count remains strictly
+/// tied to latched causes, not synthesized status-only alert signals.
+fn format_ack_confirmation(latched_count: usize) -> String {
+    if latched_count == 0 {
+        ACK_NO_COUNT_LINE.to_owned()
+    } else {
+        format!(
+            "acknowledged {latched_count} alert{}",
+            if latched_count == 1 { "" } else { "s" }
+        )
+    }
 }
 
 fn ack_offline(
@@ -166,7 +179,7 @@ fn ack_offline(
     if let Err(e) = cleanup_alert_files_and_beeper(paths, stop_beeper, remove_smartd) {
         return Err(AckError::CleanupFailed(e));
     }
-    println!("acknowledged current alerts");
+    println!("{ACK_NO_COUNT_LINE}");
     Ok(())
 }
 
@@ -306,6 +319,22 @@ mod tests {
     use std::os::unix::process::ExitStatusExt;
     #[cfg(unix)]
     use std::process::{ExitStatus, Output};
+
+    // Intent: The mounted ack confirmation formatter preserves the no-count
+    //   fallback and the singular/plural counted forms.
+    // Why it exists: Ack counts only latched causes; regressions that print
+    //   "acknowledged 0 alerts" or drop pluralization would make the CLI
+    //   contradict the documented confirmation contract.
+    // Scenario: A mounted operator ack covers zero, one, or several latched
+    //   causes while synthesized smartd and cleanup-pending signals remain
+    //   outside the reported count.
+    #[test]
+    fn format_ack_confirmation_pins_count_and_pluralization() {
+        assert_eq!(format_ack_confirmation(0), "acknowledged current alerts");
+        assert_eq!(format_ack_confirmation(1), "acknowledged 1 alert");
+        assert_eq!(format_ack_confirmation(2), "acknowledged 2 alerts");
+        assert_eq!(format_ack_confirmation(3), "acknowledged 3 alerts");
+    }
 
     /*
      * Intent: Mounted ack with no latched alert, no smartd flag, and no

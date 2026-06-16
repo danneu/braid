@@ -91,7 +91,11 @@ with subtest("Degraded pool: monitor triggers braid-alert.service"):
 # --- Subtest 8: Ack clears alert via systemd ---
 
 with subtest("braid ack clears alert and stops alert service"):
-    machine.succeed("braid ack")
+    machine.succeed("braid ack >/tmp/ack.out 2>/tmp/ack.err")
+    stdout = machine.succeed("cat /tmp/ack.out")
+    assert stdout == "acknowledged 1 alert\n", (
+        f"expected counted ack confirmation for one latched cause, got: {stdout!r}"
+    )
     machine.fail("systemctl is-active braid-alert.service")
     machine.fail("test -f /var/lib/braid/alert-latch.json")
 
