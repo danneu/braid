@@ -262,9 +262,10 @@ struct CompactDrive {
 /// Present devices mirror `build_disk_views`'s UUID-first name rule; missing
 /// and null-underlying entries use persisted devid only as the no-live-UUID
 /// fallback authorized for display joins.
-/// `membership` is `load_membership`-validated, so `by_devid`'s `DuplicateDevid` is
-/// unreachable here and is treated as an unnamed join rather than refused -- this
-/// read-only display must not abort, and `load_membership` owns the refusal.
+/// `membership` is either `load_membership`-validated or the empty fallback used
+/// when status degrades a load fault, so `by_devid`'s `DuplicateDevid` remains
+/// unreachable here and is treated as an unnamed join rather than refused. This
+/// read-only display must not abort while building diagnostic output.
 /// The TUI has parallel input-specific logic that can collapse into this once
 /// both paths expose the same membership-shaped inputs.
 fn build_devid_names(pool: &PoolState, membership: &PoolMembership) -> HashMap<Devid, String> {
@@ -308,8 +309,6 @@ pub enum StatusError {
     Parse(#[from] ParseError),
     #[error("json serialization failed: {0}")]
     Json(#[from] serde_json::Error),
-    #[error("{0}")]
-    Membership(#[from] membership::MembershipError),
 }
 
 // ---------------------------------------------------------------------------
@@ -401,6 +400,27 @@ fn assemble_advisories(paths: &StatePaths, foreign_fstype: Option<String>) -> Ve
     advisories
 }
 
+/// Advisory text for a membership-load fault that `build_status` degrades to
+/// empty membership. `Corrupt` already carries the `discover --write`
+/// remediation; `Conflict` and non-NotFound `Io` need status to add the same
+/// corrupt-or-unreadable rebuild guidance that bare `discover` uses.
+fn membership_load_advisory(e: &membership::MembershipError) -> String {
+    use membership::MembershipError;
+
+    match e {
+        MembershipError::Corrupt { .. } => e.to_string(),
+        MembershipError::Conflict(_) | MembershipError::Io { .. } => format!(
+            "pool membership unreadable: {e} -- run 'braid discover --write' to \
+             rebuild from existing disks (with all intended pool members attached; \
+             see docs/internals/luks-unlock.md)"
+        ),
+        MembershipError::DuplicateDevid { .. } | MembershipError::Save { .. } => unreachable!(
+            "membership_load_advisory only sees load_membership errors \
+             (Corrupt/Conflict/Io)"
+        ),
+    }
+}
+
 fn build_status<R: CommandRunner, F: Filesystem>(
     runner: &R,
     fs: &F,
@@ -429,7 +449,10 @@ fn build_status<R: CommandRunner, F: Filesystem>(
         {
             PoolMembership::empty()
         }
-        Err(e) => return Err(e.into()),
+        Err(e) => {
+            advisories.push(membership_load_advisory(&e));
+            PoolMembership::empty()
+        }
     };
 
     let dev_usage = if pool.missing_count == 0 {
@@ -6690,17 +6713,43 @@ mod tests {
     // Corrupt pool.json regression test
     // =======================================================================
 
+    fn assert_membership_load_fault_degrades(built: &BuiltStatus, expected_advisory_detail: &str) {
+        assert_eq!(built.report.status, StatusCode::Intact);
+        assert_eq!(built.report.present_count, Some(3));
+        assert_capacity_and_allocation_retained(built);
+        assert_scrub_and_balance_retained(built);
+        assert!(
+            built.report.advisories.iter().any(|a| {
+                a.contains("run 'braid discover --write'") && a.contains(expected_advisory_detail)
+            }),
+            "advisories: {:?}",
+            built.report.advisories
+        );
+
+        for disk_name in ["disk1", "disk2", "disk3"] {
+            let disk = built
+                .report
+                .disks
+                .iter()
+                .find(|d| d.name == disk_name)
+                .unwrap_or_else(|| panic!("missing present row for {disk_name}"));
+            assert_eq!(disk.status, DiskStatus::Present);
+        }
+    }
+
     #[test]
-    fn cmd_status_corrupt_membership_returns_error() {
-        // Intent: a corrupt pool.json must surface as an error, not be silently
-        // treated as an empty pool.
+    fn cmd_status_corrupt_membership_degrades_to_advisory() {
+        // Intent: a corrupt pool.json must surface as an advisory without
+        // blanking the mounted status report.
         //
-        // Why it exists: the original code used Err(_) => PoolMembership::empty(),
-        // which collapsed NotFound (expected) and Corrupt (data loss) into the
-        // same fallback, hiding corruption from the user.
+        // Why it exists: this supersedes 9e7ff222's error contract. Corruption
+        // must remain visible, but status is an always-available diagnostic
+        // (principles.md #3) and must degrade like doctor/discover rather than
+        // refuse all output.
         //
         // Scenario: pool is mounted and healthy, but pool.json contains garbage.
-        // braid status should return StatusError::Membership(Corrupt(..)).
+        // braid status returns Ok with the healthy pool body and the
+        // discover --write rebuild remediation in advisories.
         let (_tmp, paths) = isolated_paths();
         std::fs::write(paths.pool_json(), "not valid json {{{").unwrap();
 
@@ -6708,22 +6757,104 @@ mod tests {
         let fs = status_fs_three_disk();
         let config = status_config();
 
-        let result = cmd_status(
+        let built = build_status(
             &runner,
             &fs,
             &config,
-            false,
             &paths,
             crate::test_fixtures::mock_virtio_backing_path_resolver(),
-        );
-        assert!(result.is_err(), "expected error for corrupt pool.json");
-        assert!(
-            matches!(
-                result.unwrap_err(),
-                StatusError::Membership(membership::MembershipError::Corrupt { .. })
+        )
+        .expect("corrupt pool.json must not blank mounted status");
+
+        assert_membership_load_fault_degrades(&built, "pool membership file corrupt");
+    }
+
+    #[test]
+    fn cmd_status_conflict_membership_degrades_to_advisory() {
+        // Intent: a value-side pool.json conflict must surface as an advisory
+        // without blanking the mounted status report.
+        //
+        // Why it exists: Conflict's Display has no rebuild remediation, so
+        // status must wrap it before degrading to empty membership.
+        //
+        // Scenario: pool.json is valid JSON, but two UUID entries carry the
+        // same operator name. braid status returns Ok and keeps rendering the
+        // live pool with present devices named by mapper basename.
+        let (_tmp, paths) = isolated_paths();
+        let uuid1 = test_uuid(1);
+        let uuid2 = test_uuid(2);
+        let membership = membership_from(vec![
+            (
+                uuid1.clone(),
+                DiskMember::new(
+                    DiskName::parse("disk1").unwrap(),
+                    ByIdPath::parse("/dev/disk/by-id/disk1").unwrap(),
+                ),
             ),
-            "expected StatusError::Membership(Corrupt(..))"
-        );
+            (
+                uuid2.clone(),
+                DiskMember::new(
+                    DiskName::parse("disk2").unwrap(),
+                    ByIdPath::parse("/dev/disk/by-id/disk2").unwrap(),
+                ),
+            ),
+        ]);
+        membership::save_membership_to(&membership, &paths.pool_json()).unwrap();
+
+        let raw = std::fs::read_to_string(paths.pool_json()).unwrap();
+        let mut value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        value["disks"][uuid2.to_string()]["name"] =
+            value["disks"][uuid1.to_string()]["name"].clone();
+        std::fs::write(
+            paths.pool_json(),
+            serde_json::to_string_pretty(&value).unwrap(),
+        )
+        .unwrap();
+
+        let runner = status_runner_healthy_3disk_base();
+        let fs = status_fs_three_disk();
+        let config = status_config();
+
+        let built = build_status(
+            &runner,
+            &fs,
+            &config,
+            &paths,
+            crate::test_fixtures::mock_virtio_backing_path_resolver(),
+        )
+        .expect("conflicting pool.json must not blank mounted status");
+
+        assert_membership_load_fault_degrades(&built, "name 'disk1' already in use");
+    }
+
+    #[test]
+    fn cmd_status_io_membership_degrades_to_advisory() {
+        // Intent: a non-NotFound pool.json I/O fault must surface as an
+        // advisory without blanking the mounted status report.
+        //
+        // Why it exists: status should match doctor's catch-all degradation
+        // for unreadable membership, and Io's Display has no rebuild
+        // remediation unless status wraps it.
+        //
+        // Scenario: pool.json is a directory, so read_to_string fails after the
+        // pool is already known to be mounted and healthy.
+        let (_tmp, paths) = isolated_paths();
+        std::fs::create_dir(paths.pool_json()).unwrap();
+
+        let runner = status_runner_healthy_3disk_base();
+        let fs = status_fs_three_disk();
+        let config = status_config();
+
+        let built = build_status(
+            &runner,
+            &fs,
+            &config,
+            &paths,
+            crate::test_fixtures::mock_virtio_backing_path_resolver(),
+        )
+        .expect("unreadable pool.json must not blank mounted status");
+
+        assert_membership_load_fault_degrades(&built, "failed to read pool membership file");
     }
 
     /*
@@ -6734,7 +6865,7 @@ mod tests {
      *   `braid status` with a corrupt pool.json into a hard error.
      * Scenario: pool is offline (LUKS not unlocked, no btrfs at the mount
      *   point) and pool.json contains garbage. `braid status` must return Ok
-     *   with a NotMounted report rather than StatusError::Membership.
+     *   with a NotMounted report rather than a membership-load hard error.
      */
     #[test]
     fn cmd_status_unmounted_corrupt_membership_returns_ok() {

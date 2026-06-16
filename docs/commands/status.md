@@ -369,6 +369,23 @@ that is **not** live in the pool additionally gets an `unknown` disk row, so it
 is neither silently dropped from the detail section nor mislabeled `missing` in
 the compact `Drives:` list.
 
+**Pool-membership load fault.** A missing `pool.json` is treated silently as
+"no declared members," which is the expected first-boot/undiscovered state.
+When `pool.json` exists but is corrupt, unreadable, or fails the load-time
+uniqueness sweep, `braid status` stays non-fatal (exit 0): it records a
+rebuild advisory with the underlying fault detail and the same
+`discover --write` remediation used by bare `discover`:
+
+```
+warning: pool membership unreadable: ... -- run 'braid discover --write' to rebuild from existing disks (with all intended pool members attached; see docs/internals/luks-unlock.md)
+```
+
+The live mounted pool still renders from btrfs: pool summary, capacity,
+scrub/balance state, and per-disk detail remain available. Because the
+operator-name join is unavailable, present devices are shown under their
+mapper basenames (decision 024), and configured-but-absent member enumeration
+is lost until `pool.json` is rebuilt.
+
 ## JSON output
 
 `--json` produces a structured report suitable for monitoring tools. Key fields:
