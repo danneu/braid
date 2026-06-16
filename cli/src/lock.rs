@@ -99,6 +99,20 @@ pub enum LockMode {
     SystemdStop,
 }
 
+/// Centralizes the lock-mode policy gate so mounted probe success and mounted
+/// probe fallback cannot drift on whether a running balance is rejected or
+/// paused before teardown.
+fn lock_preflight_pause_decision<F: Filesystem + ?Sized>(
+    fs: &F,
+    mode: LockMode,
+    fsid: &Fsid,
+) -> Result<bool, String> {
+    match mode {
+        LockMode::User => preflight::require_lock_preflight(fs, fsid).map(|()| false),
+        LockMode::SystemdStop => preflight::systemd_stop_lock_requires_balance_pause(fs, fsid),
+    }
+}
+
 /// A mapper to close at lock execution. `mapper` is the observed name,
 /// while `kind` carries the member/orphan status behavior decided at
 /// plan time.
@@ -895,16 +909,8 @@ where
     let close_set = match &snapshot {
         Snapshot::Probed(pool) => {
             if let Some(fsid) = &pool.fsid {
-                match mode {
-                    LockMode::User => {
-                        preflight::require_lock_preflight(fs, fsid).map_err(LockError::Failed)?;
-                    }
-                    LockMode::SystemdStop => {
-                        pause_balance_before_unmount =
-                            preflight::systemd_stop_lock_requires_balance_pause(fs, fsid)
-                                .map_err(LockError::Failed)?;
-                    }
-                }
+                pause_balance_before_unmount =
+                    lock_preflight_pause_decision(fs, mode, fsid).map_err(LockError::Failed)?;
             }
             build_close_sets_full(runner, fs, pool, membership, &mut acc)
         }
@@ -913,16 +919,8 @@ where
                 .push(PreviewNote::Warn(uuid_scanned_fallback_warn_body(
                     probe_error,
                 )));
-            match mode {
-                LockMode::User => {
-                    preflight::require_lock_preflight(fs, fsid).map_err(LockError::Failed)?;
-                }
-                LockMode::SystemdStop => {
-                    pause_balance_before_unmount =
-                        preflight::systemd_stop_lock_requires_balance_pause(fs, fsid)
-                            .map_err(LockError::Failed)?;
-                }
-            }
+            pause_balance_before_unmount =
+                lock_preflight_pause_decision(fs, mode, fsid).map_err(LockError::Failed)?;
             build_close_sets_uuid_scanned_fallback(runner, fs, membership, &mut acc)
         }
         Snapshot::Unmounted => {
@@ -3030,6 +3028,63 @@ mod tests {
         assert_eq!(
             member_summaries(&plan.close_set),
             vec![("braid-aaa".to_owned(), "aaa".to_owned())],
+        );
+        assert!(!plan.cleanup_uncertain);
+    }
+
+    // Intent: systemd-stop lock under the mounted ProbeFailed fallback pauses a
+    //   running balance before teardown instead of refusing it.
+    // Why it exists: the ProbeFailed arm used to carry its own LockMode
+    //   dispatch; routing it to the user preflight would make ExecStop refuse
+    //   to lock during a balance and strand LUKS open across shutdown while
+    //   healthy-probe and user-mode tests stayed green.
+    // Scenario: btrfs reports a non-/dev/mapper/ path for braid's mounted pool
+    //   (modeled here by a per-device probe failure) while UPS low-battery
+    //   shutdown interrupts a running balance and ExecStop runs lock cleanup.
+    #[test]
+    fn systemd_stop_probe_failed_fallback_pauses_running_balance() {
+        let runner = lock_with_fsid_probe_mocks(MockRunner::default().with_output(
+            CmdRequest::MountpointCheck {
+                path: MountPoint::new("/mnt/storage".to_owned()),
+            },
+            lock_ok_raw("mountpoint -q /mnt/storage"),
+        ))
+        .with_output_sequence(
+            CmdRequest::CryptsetupStatus {
+                mapper: MapperName::from_basename("braid-aaa".into()),
+            },
+            vec![
+                lock_err_raw("cryptsetup status braid-aaa", 5, "transient status failure"),
+                cryptsetup_status_active("braid-aaa", "/dev/disk/by-id/a"),
+            ],
+        );
+        let fs =
+            lock_fs(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]).with_excl_op("balance");
+        let config = lock_test_config();
+        let membership = lock_test_membership();
+
+        let plan = plan_lock(&runner, &fs, &config, &membership, LockMode::SystemdStop)
+            .expect("probe-failed fallback should plan under systemd-stop");
+
+        assert!(
+            plan.notes.iter().any(|note| matches!(
+                note,
+                PreviewNote::Warn(body)
+                    if body.contains("falling back to UUID-scanned mapper cleanup")
+            )),
+            "expected the ProbeFailed fallback warning, got: {:?}",
+            plan.notes,
+        );
+        assert!(
+            plan.pause_balance_before_unmount,
+            "systemd-stop fallback must pause a running balance before unmount"
+        );
+        assert_eq!(
+            member_summaries(&plan.close_set),
+            vec![
+                ("braid-aaa".to_owned(), "aaa".to_owned()),
+                ("braid-bbb".to_owned(), "bbb".to_owned()),
+            ],
         );
         assert!(!plan.cleanup_uncertain);
     }
