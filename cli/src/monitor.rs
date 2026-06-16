@@ -453,6 +453,67 @@ mod tests {
         );
     }
 
+    // Intent: cmd_monitor latches exactly BtrfsDeviceErrors { devid } for a
+    //   recognized, present pool member whose btrfs device stats row carries
+    //   non-zero error counters, and the saved alert latch reloads to that same
+    //   AlertState.
+    // Why it exists: this is monitor's most fundamental detection path -- a
+    //   real disk logging read/corruption errors -> beep. monitor.rs's own
+    //   suite pins only the NEGATIVE device-error cases
+    //   (stale_mapper_row_no_longer_latches_computation_error,
+    //   stale_mapper_row_with_errors_does_not_latch_or_loop, both asserting
+    //   Ok/no-latch) plus the other cause families. The positive path is
+    //   exercised only incidentally as Phase-1 setup of ack.rs's
+    //   ack_baseline_suppresses_then_refires_btrfs_device_errors; a refactor of
+    //   that ack test that seeds its latch directly would erase monitor's only
+    //   positive coverage, and a regression that inverted the recognized-devid
+    //   filter would pass both monitor negatives. The latch reload-compare also
+    //   pins a round-trip the ack test never makes (it only asserts the latch
+    //   file exists).
+    // Scenario: a mounted, recognized 2-disk pool; btrfs device stats reports
+    //   non-zero read_io_errs/corruption_errs on devid 1 (present member
+    //   /dev/mapper/braid-vdb) and clean counters on devid 2. monitor must
+    //   latch exactly BtrfsDeviceErrors { devid: 1 } and persist it so
+    //   alert-latch.json reloads to the returned state.
+    #[test]
+    fn cmd_monitor_latches_btrfs_device_errors_for_recognized_devid() {
+        // Non-zero counters on recognized devid 1 (/dev/mapper/braid-vdb in
+        // BTRFS_SHOW_2DISK); devid 2 clean. The healthy/stale fixtures only
+        // zero recognized devids, so supply the payload via with_stats_payload.
+        const STATS_DEVID1_ERRORS: &str = r#"{
+    "__header": {"version": "1"},
+    "device-stats": [
+        {"device": "/dev/mapper/braid-vdb", "devid": 1, "write_io_errs": 0, "read_io_errs": 3, "flush_io_errs": 0, "corruption_errs": 1, "generation_errs": 0},
+        {"device": "/dev/mapper/braid-vdc", "devid": 2, "write_io_errs": 0, "read_io_errs": 0, "flush_io_errs": 0, "corruption_errs": 0, "generation_errs": 0}
+    ]
+}"#;
+
+        let (_dir, paths) = isolated_paths();
+        let runner = MonitorTestRunner::with_stats_payload(STATS_DEVID1_ERRORS);
+
+        let result = cmd_monitor(&runner, &monitor_fs_btrfs(), &monitor_mp(), &paths);
+
+        // Exactly one cause, the right devid: proves the clean devid-2 row
+        // contributed nothing and no spurious ComputationError was folded in.
+        let state = alert_state(&result);
+        assert_eq!(
+            state.causes,
+            vec![AlertCause::BtrfsDeviceErrors {
+                devid: Devid::new(1),
+            }],
+            "recognized devid 1 with non-zero counters must latch exactly its btrfs error"
+        );
+
+        // The saved latch must round-trip to the same AlertState -- ack.rs's
+        // Phase 1 only asserts the file exists, never reloads it for a
+        // BtrfsDeviceErrors cause.
+        let saved = alert::load_alert_latch(&paths).unwrap().unwrap();
+        assert_eq!(
+            &saved, state,
+            "saved latch must match returned monitor alert"
+        );
+    }
+
     // Intent: cmd_monitor returns MonitorResult::Alert with exactly one
     //   ComputationError cause whose detail names "acked-stats" when
     //   acked-stats.json is unreadable / unparseable, and the corrupt
