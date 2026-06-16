@@ -428,14 +428,26 @@ struct DiscoverArgs {
     /// Write discovered membership to pool.json
     #[arg(long)]
     write: bool,
-    /// Fail closed unless discovery produces exactly N members.
+    /// Fail closed unless discovery produces exactly N (N >= 1) members.
     /// Use as a guard for any discover --write rebuild where the
     /// expected member count is known ahead of time, so a momentarily
     /// detached disk (loose cable, USB power glitch, udev race) or
     /// extra braid-labeled disk cannot silently produce the wrong
     /// pool.json.
     /// Requires --write.
-    #[arg(long = "expect-count", value_name = "N", requires = "write")]
+    // A count is naturally usize because it is compared against members.len().
+    // clap implements ValueParserFactory for fixed-width ints but not usize,
+    // so value_parser!(usize) yields a FromStr parser with no .range(); name
+    // the ranged parser directly. Rejecting 0 closes the gap where
+    // --expect-count 0 could never succeed: a 0-member scan is intercepted by
+    // NoMembersDiscovered before the count check, so every count is honored
+    // except 0, which is dead.
+    #[arg(
+        long = "expect-count",
+        value_name = "N",
+        requires = "write",
+        value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..)
+    )]
     expect_count: Option<usize>,
 }
 
@@ -1945,6 +1957,22 @@ mod tests {
         };
         assert!(args.write);
         assert_eq!(args.expect_count, Some(3));
+    }
+
+    // Intent: `discover --write --expect-count 0` is rejected at parse time with
+    //   a value-validation error, not silently accepted into a guard that can
+    //   never pass.
+    // Why it exists: expect_count 0 is degenerate -- a 0-member scan is refused
+    //   by NoMembersDiscovered before the count check, so every count is honored
+    //   except 0, which is unreachable. The range(1..) guard turns that silent
+    //   dead value into an explicit, immediate parse error.
+    // Scenario: operator fat-fingers `--expect-count 0` during a rebuild and
+    //   gets a clear refusal instead of a confusing runtime failure.
+    #[test]
+    fn discover_expect_count_zero_rejected() {
+        let err = Cli::try_parse_from(["braid", "discover", "--write", "--expect-count", "0"])
+            .expect_err("expect-count must be >= 1");
+        assert_eq!(err.kind(), ErrorKind::ValueValidation);
     }
 
     // Intent: `discover --expect-count N` without `--write` is rejected at parse

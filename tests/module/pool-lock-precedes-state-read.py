@@ -104,12 +104,14 @@ with subtest("discover --write acquires before pending-op and probe reads"):
     # braid-labeled LUKS2 members, and discover --write prints the empty-scan
     # refusal, exiting at the is_empty gate before writing anything. This positive
     # half is what makes the negative probe sentinel under contention meaningful.
-    # --expect-count 0 keeps the baseline fail-closed against fixture drift: if a
-    # discoverable member ever appears, write_discovered_membership refuses with
-    # ExpectCountUnmet (count != 0) before save_membership -- so no pool.json is
-    # written, and base_out carries that error instead of the refusal, tripping
-    # the "precondition broken" assertion below rather than silently writing state.
-    base_rc, base_out = machine.execute("braid discover --write --expect-count 0 2>&1")
+    # --expect-count 9999 keeps the baseline fail-closed against fixture drift:
+    # if a discoverable member ever appears, write_discovered_membership refuses
+    # with ExpectCountUnmet (count != 9999) before save_membership -- so no
+    # pool.json is written, and base_out carries that error instead of the
+    # refusal, tripping the "precondition broken" assertion below rather than
+    # silently writing state. The positive-impossible count matters because
+    # --expect-count 0 is rejected at parse time before lock acquire and probe.
+    base_rc, base_out = machine.execute("braid discover --write --expect-count 9999 2>&1")
     assert base_rc != 0, "baseline should exit nonzero (empty-scan refusal); out=" + base_out
     assert refusal in base_out, (
         "precondition broken: expected the empty-scan refusal without contention "
@@ -117,7 +119,7 @@ with subtest("discover --write acquires before pending-op and probe reads"):
         "out=" + base_out
     )
     machine.succeed("printf '{\"op\":\"placeholder\"}' > /var/lib/braid/pending-op.json")
-    rc, out = with_holder("braid discover --write --expect-count 0")
+    rc, out = with_holder("braid discover --write --expect-count 9999")
     machine.succeed("rm -f /var/lib/braid/pending-op.json")
     assert rc != 0, "discover --write should fail under contention; out=" + out
     assert "another braid operation is already in progress" in out, (

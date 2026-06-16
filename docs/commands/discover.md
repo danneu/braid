@@ -62,7 +62,7 @@ sudo braid discover --write --expect-count 3
 | Flag | Effect |
 | --- | --- |
 | `--write` | Persist the discovered membership to `pool.json` |
-| `--expect-count <N>` | With `--write`, refuse to write if the discovered member count is not exactly `N` |
+| `--expect-count <N>` | With `--write`, refuse to write if the discovered member count is not exactly `N` (`N >= 1`; `--expect-count 0` is rejected at parse time) |
 
 ## What happens under the hood
 
