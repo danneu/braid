@@ -3106,22 +3106,19 @@ fn close_old_mapper_best_effort<R, S>(
     runner: &R,
     sleeper: &S,
     mapper: &crate::types::MapperName,
+    disk_label: &DiskName,
     old_uuid: &LuksUuid,
 ) where
     R: CommandRunner,
     S: Sleeper + ?Sized,
 {
     let color_enabled = color_enabled_for_stderr();
-    let old_label = mapper
-        .as_str()
-        .strip_prefix("braid-")
-        .unwrap_or(mapper.as_str());
     // Recovery mirrors the execute path's UUID authority. A transient probe
     // failure can leak this old dm slot until `braid lock` or reboot, but it
     // does not block later resize and journal-clear steps.
     match probe_observed_mapper_uuid(runner, mapper, old_uuid) {
         MapperOwnership::Owned => {
-            if close_mapper_best_effort(runner, sleeper, mapper, old_label, color_enabled) {
+            if close_mapper_best_effort(runner, sleeper, mapper, disk_label, color_enabled) {
                 eprintln!(
                     "Old device closed. If repurposing the physical disk, wipe it separately."
                 );
@@ -3197,10 +3194,13 @@ where
     };
 
     if let journal::ReplaceJournalSource::Live { old_mapper, .. } = source {
-        let journal::OpKind::Replace { old_uuid, .. } = &journal.op else {
+        let journal::OpKind::Replace {
+            old_uuid, old_name, ..
+        } = &journal.op
+        else {
             unreachable!("post-maintenance recovery runs only for Replace journals");
         };
-        close_old_mapper_best_effort(runner, sleeper, old_mapper, old_uuid);
+        close_old_mapper_best_effort(runner, sleeper, old_mapper, old_name, old_uuid);
     }
 
     let Some(dev) = pool.devices.iter().find(|d| &d.luks_uuid == new_uuid) else {
@@ -10947,6 +10947,124 @@ mod tests {
         assert!(
             captured.contains("[ok]   disk old: locked"),
             "missing terminal ok row after retry: {captured:?}"
+        );
+    }
+
+    // Intent: recover labels the replace old-mapper close trailer with the
+    //   journaled operator name even when the observed mapper has drifted.
+    // Why it exists: recovery mirrors live replace's post-commit close; the
+    //   target remains the observed mapper, but display must join through the
+    //   journaled DiskName instead of stripping the mapper basename.
+    // Scenario: a replace journal records old disk2, recovery finds its old
+    //   mapper active as braid-WRONG with the expected UUID, closes it, and
+    //   finishes post-maintenance.
+    #[test]
+    fn recover_replace_old_close_labels_drifted_mapper_with_disk_name() {
+        let f = PoolFixture::empty();
+        let mut journal = replace_post_maintenance_journal(
+            false,
+            journal::ReplaceJournalSource::Live {
+                old_devid: Devid::new(2),
+                old_mapper: MapperName::from_basename("braid-WRONG".into()),
+            },
+        );
+        let old_uuid = uuid_for_name("disk2");
+        journal
+            .pre_membership
+            .remove_by_uuid(&old_uuid)
+            .expect("replace fixture has old disk member");
+        journal
+            .pre_membership
+            .insert(
+                old_uuid.clone(),
+                DiskMember {
+                    name: disk_name("disk2"),
+                    by_id: by_id_path("/dev/disk/by-id/virtio-disk2"),
+                    devid: Some(Devid::new(2)),
+                    added_at: None,
+                },
+            )
+            .expect("insert renamed old disk member");
+        let OpKind::Replace { old_name, .. } = &mut journal.op else {
+            unreachable!("replace_post_maintenance_journal returns Replace");
+        };
+        *old_name = disk_name("disk2");
+        journal::write_journal(&f.paths, &journal).unwrap();
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName::from_basename("braid-WRONG".into()),
+                },
+                cryptsetup_status_active("braid-WRONG", "/dev/disk/by-id/virtio-disk2"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/virtio-disk2",
+                    "22222222-2222-2222-2222-222222222222",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: MapperName::from_basename("braid-WRONG".into()),
+                },
+                ok_raw_empty("cryptsetup close braid-WRONG"),
+            )
+            .with_output(
+                CmdRequest::BtrfsFilesystemResize {
+                    devid: Devid::new(2),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
+                },
+                ok_raw_empty("btrfs filesystem resize"),
+            );
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdc", "virtio-new")]);
+        let params = f
+            .recover_params()
+            .passphrase_file(None)
+            .sleep_inhibitor(&f.inhibitor)
+            .build();
+        let OpKind::Replace { source, .. } = &journal.op else {
+            unreachable!("replace_post_maintenance_journal returns Replace");
+        };
+
+        let captured = crate::status_tag::testing::capture_with_color(false, || {
+            execute_replace_post_maintenance_recovery(
+                &runner,
+                &progress::NoopSleeper,
+                &resolver,
+                &params,
+                &journal,
+                pool_state_disk1_and_new(),
+                &uuid_for_name("new"),
+                &disk_name("new"),
+                source,
+                false,
+                false,
+            )
+            .expect("drifted old mapper should close and finish recovery");
+        });
+
+        let close_count = runner
+            .requests()
+            .iter()
+            .filter(|request| {
+                matches!(request, CmdRequest::CryptsetupClose { mapper } if mapper.as_str() == "braid-WRONG")
+            })
+            .count();
+        assert_eq!(close_count, 1, "observed drifted mapper must close");
+        let wait = "[wait] disk disk2: locking...";
+        let ok = "[ok]   disk disk2: locked";
+        assert!(captured.contains(wait), "missing wait row: {captured:?}");
+        assert!(captured.contains(ok), "missing ok row: {captured:?}");
+        assert!(
+            captured.find(wait) < captured.find(ok),
+            "wait must precede ok, got: {captured:?}"
+        );
+        assert!(
+            !captured.contains("WRONG"),
+            "recover close trailer must not echo drifted mapper basename: {captured:?}"
         );
     }
 

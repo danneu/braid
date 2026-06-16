@@ -158,8 +158,8 @@ with subtest("Redundancy-reducing remove with --yes succeeds"):
     assert rm2_err.find(bal_wait) < rm2_err.find(bal_ok), (
         f"balance wait must precede balance ok, got: {rm2_err!r}"
     )
-    rm_wait = "[wait] pool: removing braid-disk2..."
-    rm_ok = "[ok]   pool: braid-disk2 removed"
+    rm_wait = "[wait] pool: removing disk2..."
+    rm_ok = "[ok]   pool: disk2 removed"
     assert rm_wait in rm2_err and rm_ok in rm2_err, (
         f"expected device-remove wait/ok pair, got: {rm2_err!r}"
     )

@@ -19,7 +19,7 @@ use crate::probe_mapper_uuid::{
 use crate::progress::{self, ProgressOutput};
 use crate::repair_hint;
 use crate::state_paths::StatePaths;
-use crate::status_tag::{StatusTag, color_enabled_for_stderr, status_line};
+use crate::status_tag::{StatusTag, color_enabled_for_stderr, emit_status, status_line};
 use crate::types::*;
 use std::collections::BTreeMap;
 
@@ -416,49 +416,36 @@ impl RemovePlan {
         // we don't tear down a foreign dm slot an operator opened under
         // the same mapper between plan and execute.
         let color_enabled = color_enabled_for_stderr();
-        let mapper_str = work_plan.target_mapper.as_str();
         if work_plan.remaining == 1 {
-            eprint!(
-                "{}",
-                status_line(
-                    StatusTag::Wait,
-                    color_enabled,
-                    "pool: balancing RAID1 to single profile...",
-                )
-            );
-            pool_balance_single(runner, &work_plan.mount_point, params.progress)?;
-            eprint!(
-                "{}",
-                status_line(
-                    StatusTag::Ok,
-                    color_enabled,
-                    "pool: balanced to single profile",
-                )
-            );
-        }
-        let device_path = work_plan.target_mapper.dev_path();
-        eprint!(
-            "{}",
-            status_line(
+            emit_status(&status_line(
                 StatusTag::Wait,
                 color_enabled,
-                &format!("pool: removing {mapper_str}..."),
-            )
-        );
+                "pool: balancing RAID1 to single profile...",
+            ));
+            pool_balance_single(runner, &work_plan.mount_point, params.progress)?;
+            emit_status(&status_line(
+                StatusTag::Ok,
+                color_enabled,
+                "pool: balanced to single profile",
+            ));
+        }
+        let device_path = work_plan.target_mapper.dev_path();
+        emit_status(&status_line(
+            StatusTag::Wait,
+            color_enabled,
+            &format!("pool: removing {}...", work_plan.name),
+        ));
         pool_remove_device(
             runner,
             &device_path,
             &work_plan.mount_point,
             params.progress,
         )?;
-        eprint!(
-            "{}",
-            status_line(
-                StatusTag::Ok,
-                color_enabled,
-                &format!("pool: {mapper_str} removed"),
-            )
-        );
+        emit_status(&status_line(
+            StatusTag::Ok,
+            color_enabled,
+            &format!("pool: {} removed", work_plan.name),
+        ));
 
         // Defense-in-depth: probe the journaled identity at the
         // observed mapper before close. On mismatch or unverifiable
@@ -466,14 +453,13 @@ impl RemovePlan {
         // tear down a foreign dm slot that the operator opened under
         // the same mapper between plan and this point. Inactive is a
         // distinct caller-classified outcome.
-        let close_label = mapper_str.strip_prefix("braid-").unwrap_or(mapper_str);
         match probe_observed_mapper_uuid(runner, &work_plan.target_mapper, &work_plan.target_uuid) {
             MapperOwnership::Owned => {
                 close_mapper_best_effort(
                     runner,
                     params.sleeper,
                     &work_plan.target_mapper,
-                    close_label,
+                    &work_plan.name,
                     color_enabled,
                 );
             }
@@ -3165,9 +3151,9 @@ mod tests {
     //   reconstructing it from the disk name re-opens the same drift hazard
     //   the lock.rs migration closes.
     //
-    // Scenario: membership has U_R -> { name: "right", devid: 2 }. PoolState
+    // Scenario: membership has U_R -> { name: "disk2", devid: 2 }. PoolState
     //   reports a PoolDevice for U_R with mapper = "braid-WRONG" (drifted).
-    //   Plan and execute remove name = "right"; the post-commit close
+    //   Plan and execute remove name = "disk2"; the post-commit close
     //   request must be CryptsetupClose { mapper: "braid-WRONG" }.
     #[test]
     fn drifted_member_remove_closes_observed_mapper() {
@@ -3185,8 +3171,8 @@ mod tests {
         m.insert(
             u_r.clone(),
             membership::DiskMember {
-                name: DiskName::parse("right").unwrap(),
-                by_id: ByIdPath::parse("/dev/disk/by-id/virtio-right").unwrap(),
+                name: DiskName::parse("disk2").unwrap(),
+                by_id: ByIdPath::parse("/dev/disk/by-id/virtio-disk2").unwrap(),
                 devid: Some(Devid::new(2)),
                 added_at: None,
             },
@@ -3263,7 +3249,7 @@ mod tests {
             }
         });
         let fs = MockFs::storage(vec![]);
-        let params = f.remove_params().name("right").yes(true).build();
+        let params = f.remove_params().name("disk2").yes(true).build();
 
         // Plan first to assert target_mapper preservation directly.
         let plan = plan_remove(&runner, &fs, &params).expect("plan succeeds");
@@ -3274,8 +3260,10 @@ mod tests {
         );
 
         // Now execute; the post-commit close must target "braid-WRONG".
-        plan.execute(&runner, &fs, &params)
-            .expect("remove succeeds");
+        let captured = crate::status_tag::testing::capture_with_color(false, || {
+            plan.execute(&runner, &fs, &params)
+                .expect("remove succeeds");
+        });
         let calls = runner.requests();
         let close_calls: Vec<&CmdRequest> = calls
             .iter()
@@ -3296,6 +3284,30 @@ mod tests {
             }
             other => panic!("unexpected: {other:?}"),
         }
+        let remove_wait = "[wait] pool: removing disk2...";
+        let remove_ok = "[ok]   pool: disk2 removed";
+        let close_wait = "[wait] disk disk2: locking...";
+        let close_ok = "[ok]   disk disk2: locked";
+        assert!(
+            captured.contains(remove_wait) && captured.contains(remove_ok),
+            "remove progress must use the disk name: {captured:?}"
+        );
+        assert!(
+            captured.contains(close_wait) && captured.contains(close_ok),
+            "close trailer must use the disk name: {captured:?}"
+        );
+        assert!(
+            captured.find(remove_wait) < captured.find(remove_ok),
+            "remove wait must precede ok, got: {captured:?}"
+        );
+        assert!(
+            captured.find(close_wait) < captured.find(close_ok),
+            "close wait must precede ok, got: {captured:?}"
+        );
+        assert!(
+            !captured.contains("WRONG"),
+            "remove output must not echo drifted mapper basename: {captured:?}"
+        );
     }
 
     // Intent: post-commit close UUID-probe demotes to a skip when the

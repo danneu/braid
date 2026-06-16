@@ -897,17 +897,13 @@ impl ReplacePlan {
             ..
         } = &journal.op
         {
-            let old_label = mapper
-                .as_str()
-                .strip_prefix("braid-")
-                .unwrap_or(mapper.as_str());
             match probe_observed_mapper_uuid(runner, mapper, journaled_old_uuid) {
                 MapperOwnership::Owned => {
                     if close_mapper_best_effort(
                         runner,
                         params.sleeper,
                         mapper,
-                        old_label,
+                        &old_name,
                         color_enabled,
                     ) {
                         eprintln!(
@@ -4204,6 +4200,82 @@ mod tests {
         assert!(
             captured.contains("[ok]   disk disk2: locked"),
             "missing terminal ok row after retry: {captured:?}"
+        );
+    }
+
+    // Intent: live replace labels the post-commit close trailer with the
+    //   journaled operator name even when the observed old mapper has drifted.
+    // Why it exists: decision 024 forbids deriving user-facing disk labels
+    //   from a mapper basename; the close target stays the observed mapper,
+    //   but the status row must say 'disk2', not 'WRONG'.
+    // Scenario: disk2 is live under braid-WRONG, replace commits, the
+    //   close-time UUID probe confirms ownership, and the old mapper closes
+    //   successfully.
+    #[test]
+    fn live_replace_old_close_labels_drifted_mapper_with_disk_name() {
+        let f = PoolFixture::two_disk_healthy();
+        let fs = MockFs::storage(vec![
+            "/dev/disk/by-id/virtio-disk3".into(),
+            "/dev/mapper/braid-disk3".into(),
+        ]);
+        let replace_done = Arc::new(AtomicBool::new(false));
+        let runner = ReplacementPool::two_disk_healthy()
+            .install(MockRunner::default(), replace_done.clone())
+            .with_handler({
+                let replace_done = replace_done.clone();
+                move |req| match req {
+                    CmdRequest::BtrfsFilesystemShow { mount_point }
+                        if !replace_done.load(Ordering::Relaxed) =>
+                    {
+                        Some(Ok(mock_ok(
+                            &format!("btrfs filesystem show {mount_point}"),
+                            &btrfs_show_pool_text(
+                                REPLACE_TEST_FSID,
+                                &[("braid-disk1", 1), ("braid-WRONG", 2)],
+                            ),
+                        )))
+                    }
+                    CmdRequest::BtrfsReplaceStart { .. } => {
+                        replace_done.store(true, Ordering::Relaxed);
+                        Some(Ok(mock_ok("btrfs replace start", "")))
+                    }
+                    CmdRequest::CryptsetupStatus { mapper } if mapper.as_str() == "braid-WRONG" => {
+                        Some(Ok(mock_status_active("braid-WRONG", "/dev/vdc")))
+                    }
+                    CmdRequest::CryptsetupClose { mapper } if mapper.as_str() == "braid-WRONG" => {
+                        Some(Ok(mock_ok("cryptsetup close braid-WRONG", "")))
+                    }
+                    CmdRequest::BtrfsFilesystemResize { .. } => {
+                        Some(Ok(mock_ok("btrfs filesystem resize", "")))
+                    }
+                    _ => None,
+                }
+            });
+
+        let captured = crate::status_tag::testing::capture_with_color(false, || {
+            cmd_replace(&runner, &fs, &f.replace_params().build())
+                .expect("drifted old mapper should close after replace");
+        });
+
+        let close_count = runner
+            .requests()
+            .iter()
+            .filter(|request| {
+                matches!(request, CmdRequest::CryptsetupClose { mapper } if mapper.as_str() == "braid-WRONG")
+            })
+            .count();
+        assert_eq!(close_count, 1, "observed drifted mapper must close");
+        let wait = "[wait] disk disk2: locking...";
+        let ok = "[ok]   disk disk2: locked";
+        assert!(captured.contains(wait), "missing wait row: {captured:?}");
+        assert!(captured.contains(ok), "missing ok row: {captured:?}");
+        assert!(
+            captured.find(wait) < captured.find(ok),
+            "wait must precede ok, got: {captured:?}"
+        );
+        assert!(
+            !captured.contains("WRONG"),
+            "close trailer must not echo drifted mapper basename: {captured:?}"
         );
     }
 

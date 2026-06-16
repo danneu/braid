@@ -1,7 +1,7 @@
 use crate::cmd::{CmdError, CmdRequest, CommandRunner};
 use crate::progress::Sleeper;
 use crate::status_tag::{StatusTag, emit_status, status_line};
-use crate::types::MapperName;
+use crate::types::{DiskName, MapperName};
 use std::time::Duration;
 
 pub(crate) const CLOSE_RETRY_ATTEMPTS: u32 = 3;
@@ -67,11 +67,13 @@ pub(crate) fn close_mapper_with_retry<R: CommandRunner, S: Sleeper + ?Sized>(
 
 /// Best-effort mapper close used by pool maintenance paths that must warn
 /// instead of failing after btrfs has already committed the topology change.
+/// `disk_label` is the journaled operator name, never derived from a mapper
+/// basename, so mapper drift cannot leak into user-facing disk status rows.
 pub(crate) fn close_mapper_best_effort<R, S>(
     runner: &R,
     sleeper: &S,
     mapper: &MapperName,
-    disk_label: &str,
+    disk_label: &DiskName,
     color_enabled: bool,
 ) -> bool
 where
@@ -134,12 +136,13 @@ mod tests {
 
     fn run_best_effort(runner: &MockRunner) -> (bool, String) {
         let mut closed = false;
+        let disk_label = DiskName::parse("disk2").unwrap();
         let captured = crate::status_tag::testing::capture_with_color(false, || {
             closed = close_mapper_best_effort(
                 runner,
                 &NoopSleeper,
                 &MapperName::from_basename("braid-disk2".into()),
-                "disk2",
+                &disk_label,
                 false,
             );
         });
