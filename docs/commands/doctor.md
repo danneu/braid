@@ -52,6 +52,16 @@ The SMART self-test check emits one row per pool drive. If a drive has no recent
 
 The hint uses the stable by-id path: braid's own diagnostic read prefers the member's live backing device, but a `smartctl -t short` you run later should use by-id, which survives reboots and controller reordering.
 
+When the pool is mounted, the `declared disks` check also confirms each member
+is assembled into the live btrfs pool. A member that passes its LUKS identity
+checks but is missing from the live device set -- e.g. after a degraded mount or
+an interrupted reconciliation -- warns as `offline` rather than counting as
+present:
+
+```
+[warn] declared disks  1/3 disks have problems: 1 present but not in the live pool: disk2 (/dev/disk/by-id/...)
+```
+
 To test the real alert sound:
 
 ```
