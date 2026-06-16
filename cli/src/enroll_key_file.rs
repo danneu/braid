@@ -3855,6 +3855,125 @@ mod tests {
         );
     }
 
+    // Intent: the execute-time UUID re-probe covers EVERY present member,
+    //   including a candidate that plan_enrollment would classify
+    //   AlreadyEnrolled. A disk swapped to a foreign LUKS container that
+    //   shares the pool passphrase and already holds the keyfile in slot 1 is
+    //   still rejected at the mutation boundary -- before any mutation, and
+    //   before the keyfile probe even runs.
+    // Why it exists: the re-probe loop in EnrollPlan::execute iterates
+    //   `self.candidates` and runs BEFORE plan_enrollment classifies them.
+    //   Two refactors would drop the swap check on an already-enrolled disk:
+    //     (A) relocating the loop to run AFTER plan_enrollment (over all
+    //         actions) -- the keyfile probe would then test a credential
+    //         against the foreign container before the swap is caught;
+    //     (B) filtering the loop to NeedsEnroll actions only -- the swap on an
+    //         AlreadyEnrolled disk would go entirely undetected and execute
+    //         would report success.
+    //   The sibling swap tests both drive NeedsEnroll candidates and seed no
+    //   passphrase/keyfile-probe mocks, so under (A)/(B) they fail only
+    //   indirectly: plan_enrollment's verify_credential_for_targets hits
+    //   MissingMock before any UUID mismatch can surface, and neither test
+    //   exercises the AlreadyEnrolled classification nor pins that the
+    //   re-probe runs before the keyfile probe. This test seeds those mocks
+    //   (UNCONSUMED in correct code, since the re-probe rejects first) so that
+    //   under (A)/(B) plan_enrollment fully classifies the disk AlreadyEnrolled
+    //   and the regression surfaces as a clean failed assertion here, not a
+    //   MissingMock error. No VM test -- an in-window physical swap during the
+    //   passphrase prompt is not deterministically reproducible in a NixOS VM;
+    //   tests/cli/enroll-uuid-mismatch.py covers the pre-command discovery case.
+    // Scenario: 1-disk pool, existing braid.key on the USB, idempotent re-run.
+    //   disk1's by-id slot matches at discovery but is swapped to a foreign
+    //   LUKS volume (whose slot 1 already holds the keyfile and shares the
+    //   passphrase) before execute re-probes it.
+    #[test]
+    fn execute_rejects_swapped_already_enrolled_disk_before_mutation() {
+        let (tmp, paths) = isolated_paths();
+        let (kf, kf_str) = enroll_make_existing_keyfile(&tmp);
+        let pass = "testpass";
+        let pass_path = tmp.path().join("pass");
+        std::fs::write(&pass_path, format!("{pass}\n")).unwrap();
+
+        let d1 = "/dev/disk/by-id/d1";
+        let foreign = "ffffffff-ffff-ffff-ffff-ffffffffffff";
+
+        // Mapper closed => discovery issues exactly one luksUUID for d1, so the
+        // 2nd sequence element is consumed by the execute-time re-probe.
+        let (_, d1_match) = enroll_luks_uuid_ok(d1, test_uuid(500).as_str());
+        let (_, d1_swapped) = enroll_luks_uuid_ok(d1, foreign);
+
+        // Regression bait: if the re-probe were moved after plan_enrollment (A)
+        // or filtered to NeedsEnroll (B), plan_enrollment would verify the
+        // passphrase and authenticate the keyfile probe -> AlreadyEnrolled.
+        // In correct code these are never consumed (re-probe rejects first).
+        let (tp_req, tp_stdin, tp_out) = enroll_test_passphrase_ok(d1, pass);
+        let (tkf_req, tkf_out) = enroll_test_keyfile_ok(d1, &kf_str);
+
+        let runner = MockRunner::default()
+            .with_output_sequence(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: d1.to_owned(),
+                },
+                vec![d1_match, d1_swapped],
+            )
+            .with_luks_dump_text_luks2(d1)
+            .with_mappers_closed(&["braid-disk1"])
+            .with_output_stdin(tp_req, tp_stdin, tp_out)
+            .with_output(tkf_req, tkf_out);
+        // No mountpoint mock: existing-keyfile mode skips the generate-only gate.
+
+        let fs = enroll_fs(&[d1]);
+        let membership = enroll_make_membership(&[("disk1", d1)]);
+
+        let params = EnrollKeyFileParams {
+            membership: &membership,
+            key_file_path: &kf,
+            generate: false,
+            passphrase_stdin: false,
+            passphrase_file: Some(&pass_path),
+            dry_run: false,
+            paths: &paths,
+            backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(),
+        };
+
+        let plan = plan_enroll(&runner, &fs, &params)
+            .expect("discovery must succeed with the matching UUID");
+        let err = plan
+            .execute(&runner, &params)
+            .expect_err("execute re-probe must reject the swap even on an already-enrolled disk")
+            .to_string();
+
+        assert!(
+            err.contains("LUKS UUID mismatch"),
+            "expected mismatch error: {err}"
+        );
+        assert!(
+            err.contains("disk1"),
+            "error should name the swapped disk: {err}"
+        );
+
+        let reqs = runner.requests();
+        assert!(
+            !reqs
+                .iter()
+                .any(|r| matches!(r, CmdRequest::CryptsetupLuksAddKeyFile { .. })),
+            "no keyfile may be enrolled after a swap is detected: {reqs:?}"
+        );
+        // Candidate-driven, not action-driven: the swap is caught before the
+        // keyfile probe runs. A re-probe relocated after plan_enrollment (A)
+        // would issue this probe before failing.
+        assert!(
+            !reqs
+                .iter()
+                .any(|r| matches!(r, CmdRequest::CryptsetupTestKeyFile { .. })),
+            "the swap must be caught before any keyfile probe runs: {reqs:?}"
+        );
+        assert!(
+            kf.exists(),
+            "the existing user keyfile must be left untouched"
+        );
+    }
+
     // ---- generate_key_file tests ----
 
     /*
