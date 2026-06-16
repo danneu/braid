@@ -5609,6 +5609,176 @@ mod tests {
         );
     }
 
+    #[test]
+    // Intent: missing-path replace skips the soft-balance runtime step
+    //   when the replacement does not clear the last missing device.
+    //
+    // Why it exists: the shared restore-RAID1 predicate must gate the
+    //   runtime maybe_restore_raid1 call, not merely rely on the runtime
+    //   re-probe to veto a still-degraded pool.
+    //
+    // Scenario: pool has disk1 live, devid 2 missing, and devid 4
+    //   missing. Replacing devid 2 with already-open disk3 still leaves
+    //   devid 4 missing, so resize completes without a post-resize
+    //   BtrfsFilesystemShow or soft balance.
+    fn cmd_replace_missing_path_skips_soft_balance_when_not_last_missing() {
+        let f = PoolFixture::one_live_two_missing();
+        let fs = MockFs::storage(vec![
+            "/dev/disk/by-id/virtio-disk3".into(),
+            "/dev/mapper/braid-disk3".into(),
+        ]);
+        let replace_done = Arc::new(AtomicBool::new(false));
+        let runner = ReplacementPool::one_live_two_missing()
+            .install(MockRunner::default(), replace_done.clone())
+            .with_handler({
+                let replace_done = replace_done.clone();
+                move |req| match req {
+                    CmdRequest::BtrfsReplaceStart { .. } => {
+                        replace_done.store(true, std::sync::atomic::Ordering::Relaxed);
+                        Some(Ok(mock_ok("btrfs replace start", "")))
+                    }
+                    CmdRequest::BtrfsFilesystemResize { .. } => {
+                        Some(Ok(mock_ok("btrfs filesystem resize", "")))
+                    }
+                    _ => None,
+                }
+            });
+        let result = cmd_replace(
+            &runner,
+            &fs,
+            &f.replace_params()
+                .old("disk2")
+                .new_disk("disk3=/dev/disk/by-id/virtio-disk3")
+                .missing_id(Some(Devid::new(2)))
+                .build(),
+        );
+
+        assert!(
+            matches!(result, Ok(())),
+            "expected Ok(()) from successful multi-missing replace, got: {result:?}"
+        );
+        assert!(
+            journal::load_journal(&f.paths).unwrap().is_none(),
+            "pending-op.json must be cleared on successful completion"
+        );
+        assert_eq!(
+            f.inhibitor.acquire_count(),
+            1,
+            "sleep inhibitor must be acquired exactly once on the way in"
+        );
+
+        let log = runner.requests();
+        assert!(
+            !log.iter()
+                .any(|r| matches!(r, CmdRequest::BtrfsBalanceRaid1Soft { .. })),
+            "soft balance must not run when another missing device remains: {log:?}"
+        );
+        let resize_idx = log
+            .iter()
+            .position(|r| {
+                matches!(r, CmdRequest::BtrfsFilesystemResize { devid, .. } if *devid == Devid::new(2))
+            })
+            .expect("btrfs filesystem resize on devid 2 must be issued");
+        // The metadata-enrichment probe after BtrfsReplaceStart is
+        // unconditional. After resize, the only BtrfsFilesystemShow
+        // would be the gated maybe_restore_raid1 re-probe.
+        assert!(
+            !log.iter().enumerate().any(|(idx, r)| {
+                idx > resize_idx && matches!(r, CmdRequest::BtrfsFilesystemShow { .. })
+            }),
+            "plan gate must suppress post-resize BtrfsFilesystemShow re-probe; log: {log:?}"
+        );
+    }
+
+    #[test]
+    // Intent: missing-path replace persists restore_raid1_after_commit=false
+    //   when another missing device remains after the replacement.
+    //
+    // Why it exists: recover replays the post-replace journal flag, so
+    //   the recovery contract must preserve the plan gate decision.
+    //
+    // Scenario: the same two-missing replacement reaches
+    //   PostReplaceMaintenance, then btrfs filesystem resize fails. The
+    //   surviving journal must record a Missing source and a closed
+    //   restore flag.
+    fn cmd_replace_missing_path_not_last_missing_persists_restore_raid1_false() {
+        let f = PoolFixture::one_live_two_missing();
+        let fs = MockFs::storage(vec![
+            "/dev/disk/by-id/virtio-disk3".into(),
+            "/dev/mapper/braid-disk3".into(),
+        ]);
+        let replace_done = Arc::new(AtomicBool::new(false));
+        let runner = ReplacementPool::one_live_two_missing()
+            .install(MockRunner::default(), replace_done.clone())
+            .with_handler({
+                let replace_done = replace_done.clone();
+                move |req| match req {
+                    CmdRequest::BtrfsReplaceStart { .. } => {
+                        replace_done.store(true, std::sync::atomic::Ordering::Relaxed);
+                        Some(Ok(mock_ok("btrfs replace start", "")))
+                    }
+                    CmdRequest::BtrfsFilesystemResize { .. } => Some(Ok(RawCommandOutput {
+                        cmd: "btrfs filesystem resize".into(),
+                        stdout: String::new(),
+                        stderr: "ERROR: unable to resize".into(),
+                        exit_status: 1,
+                    })),
+                    _ => None,
+                }
+            });
+        let result = cmd_replace(
+            &runner,
+            &fs,
+            &f.replace_params()
+                .old("disk2")
+                .new_disk("disk3=/dev/disk/by-id/virtio-disk3")
+                .missing_id(Some(Devid::new(2)))
+                .build(),
+        );
+
+        match &result {
+            Err(ReplaceError::Pool(crate::pool::PoolError::Failed(msg))) => {
+                assert!(
+                    msg.contains("btrfs filesystem resize failed"),
+                    "expected typed PoolError::Failed carrying resize message, got: {msg}"
+                );
+            }
+            other => {
+                panic!("expected Err(ReplaceError::Pool(PoolError::Failed(..))), got: {other:?}")
+            }
+        }
+
+        let journal = journal::load_journal(&f.paths)
+            .unwrap()
+            .expect("journal should remain after post-replace resize failure");
+        match journal.op {
+            journal::OpKind::Replace {
+                phase,
+                source,
+                restore_raid1_after_commit,
+                ..
+            } => {
+                assert_eq!(
+                    phase,
+                    journal::ReplacePhase::PostReplaceMaintenance,
+                    "journal should advance after btrfs replace commits"
+                );
+                assert_eq!(
+                    source,
+                    journal::ReplaceJournalSource::Missing {
+                        old_devid: Devid::new(2)
+                    },
+                    "journal source must preserve the missing devid"
+                );
+                assert!(
+                    !restore_raid1_after_commit,
+                    "multi-missing replace journal must keep restore flag false"
+                );
+            }
+            other => panic!("expected Replace journal, got: {other:?}"),
+        }
+    }
+
     /// Override handler for the keyfile-ordering tests: marks disk3
     /// (the raw replacement) as not-LUKS and answers the LUKS init
     /// chain (Format/AddKeyFile/HeaderBackup) successfully. LuksOpen is

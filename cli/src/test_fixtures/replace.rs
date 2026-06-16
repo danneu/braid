@@ -2,8 +2,8 @@
 //! and the replace-only `PoolFixture` constructors.
 
 use super::shared::{
-    DeviceUsageSpec, PoolFixture, device_usage_raw_body, mock_ok,
-    mock_virtio_offset_backing_path_resolver,
+    DeviceUsageSpec, PoolFixture, canonical_luks_uuid, device_usage_raw_body, disk_member_with,
+    mock_ok, mock_virtio_offset_backing_path_resolver,
 };
 use crate::btrfs_ioctl::tests_support::MockBtrfsDevInfo;
 use crate::cmd::{CmdError, CmdRequest, LsblkFieldKind, MockRunner, RawCommandOutput};
@@ -31,10 +31,24 @@ const PRE_SHOW_ONE_LIVE_MISSING: &str = "Label: none  uuid: cc86845b-aec3-408e-b
      \tdevid    2 size 0 used 0 path MISSING\n\
      \t*** Some devices missing\n";
 
+const PRE_SHOW_ONE_LIVE_TWO_MISSING: &str = "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\
+     \tTotal devices 3 FS bytes used 16.17MiB\n\
+     \tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\
+     \tdevid    2 size 0 used 0 path MISSING\n\
+     \tdevid    4 size 0 used 0 path MISSING\n\
+     \t*** Some devices missing\n";
+
 const POST_SHOW_DISK1_DISK3: &str = "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\
      \tTotal devices 2 FS bytes used 16.17MiB\n\
      \tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\
      \tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk3\n";
+
+const POST_SHOW_DISK1_DISK3_ONE_MISSING: &str = "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\
+     \tTotal devices 3 FS bytes used 16.17MiB\n\
+     \tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\
+     \tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk3\n\
+     \tdevid    4 size 0 used 0 path MISSING\n\
+     \t*** Some devices missing\n";
 
 const REPLACE_FIXTURE_MAPPER_SIZE: u64 = 520_093_696;
 const REPLACE_FIXTURE_RAW_SIZE: u64 = 536_870_912;
@@ -59,10 +73,26 @@ fn pre_usage_raw_one_live_missing() -> String {
     ])
 }
 
+fn pre_usage_raw_one_live_two_missing() -> String {
+    device_usage_raw_body(&[
+        replace_usage_live_device("/dev/mapper/braid-disk1", 1),
+        DeviceUsageSpec::missing(2, &[("Data", "RAID1", 469_762_048)], 0),
+        DeviceUsageSpec::missing(4, &[("Data", "RAID1", 469_762_048)], 0),
+    ])
+}
+
 fn post_usage_raw_disk1_disk3() -> String {
     device_usage_raw_body(&[
         replace_usage_live_device("/dev/mapper/braid-disk1", 1),
         replace_usage_live_device("/dev/mapper/braid-disk3", 2),
+    ])
+}
+
+fn post_usage_raw_disk1_disk3_one_missing() -> String {
+    device_usage_raw_body(&[
+        replace_usage_live_device("/dev/mapper/braid-disk1", 1),
+        replace_usage_live_device("/dev/mapper/braid-disk3", 2),
+        DeviceUsageSpec::missing(4, &[("Data", "RAID1", 469_762_048)], 0),
     ])
 }
 
@@ -175,6 +205,22 @@ impl ReplacementPool {
             post_show: POST_SHOW_DISK1_DISK3,
             pre_usage_raw: pre_usage_raw_one_live_missing(),
             post_usage_raw: post_usage_raw_disk1_disk3(),
+            mapper_to_dev: Self::canonical_mapper_to_dev(),
+            dev_to_uuid: Self::canonical_dev_to_uuid(),
+            closed_mappers: HashSet::new(),
+            fail_post_replace_probe: false,
+        }
+    }
+
+    /// Live disk1 + missing devids 2 and 4; replacing devid 2 leaves
+    /// the pool degraded so the shared restore-RAID1 gate must stay
+    /// closed on the missing path.
+    pub(crate) fn one_live_two_missing() -> Self {
+        Self {
+            pre_show: PRE_SHOW_ONE_LIVE_TWO_MISSING,
+            post_show: POST_SHOW_DISK1_DISK3_ONE_MISSING,
+            pre_usage_raw: pre_usage_raw_one_live_two_missing(),
+            post_usage_raw: post_usage_raw_disk1_disk3_one_missing(),
             mapper_to_dev: Self::canonical_mapper_to_dev(),
             dev_to_uuid: Self::canonical_dev_to_uuid(),
             closed_mappers: HashSet::new(),
@@ -307,6 +353,40 @@ impl ReplacementPool {
 }
 
 impl PoolFixture {
+    /// pool.json: disk1 live, disk2 missing target, disk4 still
+    /// missing. Replacing disk2 must retain disk4 in target membership
+    /// so the post-commit recovery journal models a still-degraded
+    /// pool.
+    pub(crate) fn one_live_two_missing() -> Self {
+        let base = Self::empty_inner();
+        let mut m = PoolMembership::empty();
+        for (n, name, devid) in [
+            (1u64, "disk1", None),
+            (2, "disk2", Some(2)),
+            (4, "disk4", Some(4)),
+        ] {
+            let (_, member) = disk_member_with(
+                n,
+                name,
+                &format!("/dev/disk/by-id/virtio-{name}"),
+                devid.map(Devid::new),
+                None,
+            );
+            m.insert(canonical_luks_uuid(n), member)
+                .expect("seed replace two-missing membership");
+        }
+        membership::save_membership(&m, &base.paths).expect("save_membership");
+        Self {
+            _state_tmp: base.state_tmp,
+            paths: base.paths,
+            _config_tmp: base.config_tmp,
+            config: base.config,
+            pass_path: base.pass_path,
+            inhibitor: RecordingInhibitor::new(),
+            confirm: RecordingConfirm::new(),
+        }
+    }
+
     /// pool.json: disk1 (devid=1) only -- absent-old-name typo scenario
     /// for `cmd_replace_missing_path_rejects_old_name_absent_from_membership`.
     /// btrfs still reports devid 2 missing; pool.json doesn't record it.

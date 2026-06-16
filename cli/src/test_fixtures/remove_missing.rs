@@ -32,6 +32,19 @@ const THREE_DISK_POST_SHOW: &str = "Label: none  uuid: cc86845b-aec3-408e-bef5-5
      \tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\
      \tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk2\n";
 
+const FOUR_DISK_TWO_MISSING_PRE_SHOW: &str = "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\
+     \tTotal devices 4 FS bytes used 16.17MiB\n\
+     \tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\
+     \tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk2\n\
+     \tdevid    3 size 0 used 0 path MISSING\n\
+     \tdevid    4 size 0 used 0 path MISSING\n";
+
+const FOUR_DISK_TWO_MISSING_POST_SHOW: &str = "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\
+     \tTotal devices 3 FS bytes used 16.17MiB\n\
+     \tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\
+     \tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk2\n\
+     \tdevid    4 size 0 used 0 path MISSING\n";
+
 const TWO_DISK_PRE_SHOW: &str = "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\
      \tTotal devices 2 FS bytes used 16.17MiB\n\
      \tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\
@@ -46,6 +59,15 @@ fn usage_raw_three_disk_one_missing() -> String {
         remove_missing_usage_live_device(1),
         remove_missing_usage_live_device(2),
         DeviceUsageSpec::missing(3, &[("Data", "RAID1", 67_108_864)], 0),
+    ])
+}
+
+fn usage_raw_four_disk_two_missing() -> String {
+    device_usage_raw_body(&[
+        remove_missing_usage_live_device(1),
+        remove_missing_usage_live_device(2),
+        DeviceUsageSpec::missing(3, &[("Data", "RAID1", 67_108_864)], 0),
+        DeviceUsageSpec::missing(4, &[("Data", "RAID1", 67_108_864)], 0),
     ])
 }
 
@@ -91,6 +113,18 @@ impl RemoveMissingPool {
             pre_show: THREE_DISK_PRE_SHOW,
             post_show: THREE_DISK_POST_SHOW,
             usage_raw: usage_raw_three_disk_one_missing(),
+            still_degraded_after: false,
+        }
+    }
+
+    /// 4-disk pool with two missing devids. Removing devid 3 still
+    /// leaves devid 4 missing, so production planning must keep the
+    /// restore-RAID1 gate closed before runtime re-probe.
+    pub(crate) fn four_disk_two_missing() -> Self {
+        Self {
+            pre_show: FOUR_DISK_TWO_MISSING_PRE_SHOW,
+            post_show: FOUR_DISK_TWO_MISSING_POST_SHOW,
+            usage_raw: usage_raw_four_disk_two_missing(),
             still_degraded_after: false,
         }
     }
@@ -191,6 +225,40 @@ impl PoolFixture {
         let base = Self::empty_inner();
         let mut m = PoolMembership::empty();
         for (seed, name, devid) in [(1u64, "disk1", 1u64), (2, "disk2", 2), (3, "disk3", 3)] {
+            let (uuid, member) = disk_member_with(
+                seed,
+                name,
+                &format!("/dev/disk/by-id/virtio-{name}"),
+                Some(Devid::new(devid)),
+                None,
+            );
+            m.insert(uuid, member).expect("fixture insert");
+        }
+        membership::save_membership(&m, &base.paths).expect("save_membership");
+        Self {
+            _state_tmp: base.state_tmp,
+            paths: base.paths,
+            _config_tmp: base.config_tmp,
+            config: base.config,
+            pass_path: base.pass_path,
+            inhibitor: RecordingInhibitor::new(),
+            confirm: RecordingConfirm::new(),
+        }
+    }
+
+    /// pool.json: disk1 (devid=1) + disk2 (devid=2) + disk3
+    /// (devid=3) + disk4 (devid=4). Used for multi-missing
+    /// remove-missing tests where devid 3 is the removal target and
+    /// devid 4 must remain in target membership.
+    pub(crate) fn four_disk_devids_pinned() -> Self {
+        let base = Self::empty_inner();
+        let mut m = PoolMembership::empty();
+        for (seed, name, devid) in [
+            (1u64, "disk1", 1u64),
+            (2, "disk2", 2),
+            (3, "disk3", 3),
+            (4, "disk4", 4),
+        ] {
             let (uuid, member) = disk_member_with(
                 seed,
                 name,

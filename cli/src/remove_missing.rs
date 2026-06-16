@@ -1877,11 +1877,14 @@ mod tests {
     }
 
     #[test]
-    // Intent: 3-disk pool, 2 missing, targeting 1 -> NO rebalance (still degraded).
-    // Why: running a balance while still degraded is pointless.
-    // Scenario: 3-disk NAS, 2 drives die. Operator removes 1 missing entry.
-    // Pool still has 1 missing device -> no rebalance.
-    fn three_device_two_missing_no_rebalance() {
+    // Intent: a runtime re-probe vetoes the queued soft rebalance when
+    //   the pool is still degraded after remove-missing commits.
+    // Why: the plan gate is advisory; the post-mutation btrfs state is
+    //   authoritative before restoring RAID1.
+    // Scenario: a 3-disk pool reports one missing devid before removal,
+    //   so the plan queues the soft balance. The post-remove probe still
+    //   reports a missing device, so maybe_restore_raid1 skips it.
+    fn runtime_reprobe_vetoes_rebalance_when_pool_still_degraded() {
         let f = PoolFixture::three_disk_devids_pinned();
         let (runner, _remove_done) = RemoveMissingPool::three_disk_one_missing()
             .still_degraded_after(true)
@@ -1900,6 +1903,20 @@ mod tests {
                 .any(|c| matches!(c, CmdRequest::BtrfsBalanceRaid1Soft { .. })),
             "should NOT call BtrfsBalanceRaid1Soft when still degraded; calls: {calls:?}"
         );
+        let remove_pos = calls
+            .iter()
+            .position(|c| matches!(c, CmdRequest::BtrfsDeviceRemove { .. }))
+            .expect("expected BtrfsDeviceRemove");
+        // The only BtrfsFilesystemShow after device remove is the gated
+        // maybe_restore_raid1 re-probe; this proves the runtime veto ran
+        // rather than the plan gate suppressing the runtime step entirely.
+        let post_remove_show_pos = calls.iter().enumerate().find_map(|(idx, c)| {
+            (idx > remove_pos && matches!(c, CmdRequest::BtrfsFilesystemShow { .. })).then_some(idx)
+        });
+        assert!(
+            post_remove_show_pos.is_some(),
+            "expected post-remove BtrfsFilesystemShow runtime re-probe; calls: {calls:?}"
+        );
         // Even when no soft balance runs, the inhibitor must still be acquired
         // unconditionally before journal::write_journal -- the rule is "acquire
         // before journal", not "acquire when slow phase will run".
@@ -1909,6 +1926,107 @@ mod tests {
             "sleep inhibitor must be acquired exactly once before journal::write_journal, \
              even when no soft balance runs"
         );
+    }
+
+    #[test]
+    // Intent: the plan gate skips restore-RAID1 when removing one of
+    //   multiple missing devices.
+    // Why: if another missing devid remains, the runtime restore step is
+    //   unowed and must not even re-probe.
+    // Scenario: a 4-disk pool has devids 3 and 4 missing. Removing devid
+    //   3 leaves devid 4 missing, so no soft balance or gated SHOW runs.
+    fn two_missing_plan_gate_skips_rebalance_without_reprobe() {
+        let f = PoolFixture::four_disk_devids_pinned();
+        let (runner, _remove_done) =
+            RemoveMissingPool::four_disk_two_missing().install(MockRunner::default());
+        cmd_remove_missing(
+            &runner,
+            &MockFs::storage(vec![]),
+            &f.remove_missing_params().build(),
+        )
+        .expect("remove-missing should succeed");
+
+        let calls = runner.requests();
+        assert!(
+            !calls
+                .iter()
+                .any(|c| matches!(c, CmdRequest::BtrfsBalanceRaid1Soft { .. })),
+            "should NOT call BtrfsBalanceRaid1Soft when another missing device remains; \
+             calls: {calls:?}"
+        );
+        let remove_pos = calls
+            .iter()
+            .position(|c| matches!(c, CmdRequest::BtrfsDeviceRemove { .. }))
+            .expect("expected BtrfsDeviceRemove");
+        // The only BtrfsFilesystemShow after device remove is the gated
+        // maybe_restore_raid1 re-probe; absence proves the plan-time
+        // restore_raid1_after_commit flag kept that runtime step closed.
+        assert!(
+            !calls.iter().enumerate().any(|(idx, c)| {
+                idx > remove_pos && matches!(c, CmdRequest::BtrfsFilesystemShow { .. })
+            }),
+            "plan gate must suppress post-remove BtrfsFilesystemShow re-probe; calls: {calls:?}"
+        );
+        assert_eq!(
+            f.inhibitor.acquire_count(),
+            1,
+            "sleep inhibitor must be acquired exactly once before journal::write_journal, \
+             even when no soft balance runs"
+        );
+    }
+
+    #[test]
+    // Intent: the surviving remove-missing journal records
+    //   restore_raid1_after_commit=false for the multi-missing path.
+    // Why: recover replays the persisted flag, not an in-memory plan.
+    // Scenario: removing devid 3 from a pool that also has devid 4
+    //   missing fails during btrfs device remove. The PoolMutation
+    //   journal must survive with the restore flag closed.
+    fn two_missing_journal_persists_restore_raid1_false() {
+        let f = PoolFixture::four_disk_devids_pinned();
+        let (runner, _remove_done) =
+            RemoveMissingPool::four_disk_two_missing().install(MockRunner::default());
+        let runner = runner.with_handler(|req| match req {
+            CmdRequest::BtrfsDeviceRemove { .. } => Some(Ok(RawCommandOutput {
+                cmd: "btrfs device remove 3 /mnt/storage".into(),
+                stdout: String::new(),
+                stderr: "ERROR: error removing device: No space left on device".into(),
+                exit_status: 1,
+            })),
+            _ => None,
+        });
+        let result = cmd_remove_missing(
+            &runner,
+            &MockFs::storage(vec![]),
+            &f.remove_missing_params().build(),
+        );
+
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("btrfs device remove failed (exit 1)"),
+            "remove-missing should fail from the device-remove step: {err}"
+        );
+        let journal = journal::load_journal(&f.paths)
+            .unwrap()
+            .expect("pending-op.json must survive device-remove failure");
+        match journal.op {
+            journal::OpKind::RemoveMissing {
+                phase,
+                restore_raid1_after_commit,
+                ..
+            } => {
+                assert_eq!(
+                    phase,
+                    journal::RemoveMissingPhase::PoolMutation,
+                    "journal must remain in PoolMutation until btrfs device remove commits"
+                );
+                assert!(
+                    !restore_raid1_after_commit,
+                    "multi-missing remove-missing journal must keep restore flag false"
+                );
+            }
+            other => panic!("expected RemoveMissing journal, got: {other:?}"),
+        }
     }
 
     /*
