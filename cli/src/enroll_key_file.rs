@@ -1011,6 +1011,77 @@ mod tests {
         );
     }
 
+    // Intent: discovery aborts at the first UUID-mismatched member and
+    //   probes no later member.
+    // Why it exists: decision-024 requires fail-closed identity re-checks
+    //   at the mutation boundary. Without this position pin, discovery
+    //   could collect errors after a mismatch and issue extra probes
+    //   against later members while still passing broader mismatch tests.
+    // Scenario: disk1's by-id path now points at a foreign LUKS container,
+    //   while disk2 and disk3 are healthy. Discovery must fail on disk1
+    //   without touching disk2 or disk3.
+    #[test]
+    fn discover_stops_at_first_uuid_mismatch_without_probing_later_members() {
+        let d1 = "/dev/disk/by-id/d1";
+        let d2 = "/dev/disk/by-id/d2";
+        let d3 = "/dev/disk/by-id/d3";
+        let observed_d1 = "ffffffff-ffff-ffff-ffff-ffffffffffff";
+
+        let (u1, o1) = enroll_luks_uuid_ok(d1, observed_d1);
+        let (u2, o2) = enroll_luks_uuid_ok(d2, test_uuid(501).as_str());
+        let (u3, o3) = enroll_luks_uuid_ok(d3, test_uuid(502).as_str());
+        let runner = MockRunner::default()
+            .with_output(u1, o1)
+            .with_output(u2, o2)
+            .with_output(u3, o3)
+            .with_luks_dump_text_luks2(d1)
+            .with_luks_dump_text_luks2(d2)
+            .with_luks_dump_text_luks2(d3)
+            .with_mappers_closed(&["braid-disk1", "braid-disk2", "braid-disk3"]);
+        let fs = enroll_fs(&[d1, d2, d3]);
+        let membership = enroll_make_membership(&[("disk1", d1), ("disk2", d2), ("disk3", d3)]);
+
+        let (notes, result) = discover_enrollment_candidates(
+            &runner,
+            &fs,
+            &membership,
+            crate::test_fixtures::mock_virtio_backing_path_resolver(),
+        );
+
+        assert!(notes.is_empty(), "unexpected notes: {notes:?}");
+        let err = result.expect_err("first-member UUID mismatch must reject discovery");
+        assert!(
+            matches!(&err, EnrollKeyFileError::Validation(msg) if msg.contains("disk1")
+                && msg.contains("LUKS UUID mismatch")),
+            "error should be the disk1 UUID-mismatch refusal: {err:?}"
+        );
+
+        let requests = runner.requests();
+        assert!(
+            requests
+                .iter()
+                .any(|r| matches!(r, CmdRequest::CryptsetupLuksUuid { device } if device == d1)),
+            "disk1 must be probed: {requests:?}"
+        );
+        let touches = |device: &str| {
+            requests.iter().any(|r| match r {
+                CmdRequest::CryptsetupLuksUuid { device: dev }
+                | CmdRequest::CryptsetupLuksDumpText { device: dev }
+                | CmdRequest::CryptsetupLuksDump { device: dev }
+                | CmdRequest::CryptsetupLuksAddKeyFile { device: dev, .. } => dev == device,
+                _ => false,
+            })
+        };
+        assert!(
+            !touches(d2),
+            "discovery must not probe disk2 after the first mismatch: {requests:?}"
+        );
+        assert!(
+            !touches(d3),
+            "discovery must not probe disk3 after the first mismatch: {requests:?}"
+        );
+    }
+
     // Intent: preserved-context discovery failures return accumulated
     //   notes in DiskName order, not UUID order.
     // Why it exists: this function used to iterate membership.iter() and
