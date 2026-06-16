@@ -89,6 +89,14 @@ with subtest("browse smart health detail"):
     # disk1 is a present, unlocked member, so the SMART detail/footer dispatches
     # against the live backing node (decision 024), not the persisted by-id
     # handle. `/dev/vd` matches whichever virtio node cryptsetup reports.
+    #
+    # The complementary offline-member -> by-id fallback is deliberately not
+    # exercised here: it would need a degraded pool, while this canary pins a
+    # healthy mount. Both halves are unit-pinned and route through one shared
+    # model.rs#smart_query_device, so the two SMART surfaces cannot diverge:
+    # state.rs#smartctl_picker_resolves_present_member_to_live_path (picker
+    # by-id fallback) and probe.rs#smartctl_health_for_present_member_uses_live_underlying
+    # (probe omits the offline member from disk_underlying).
     machine.wait_until_tty_matches("2", r"/dev/vd")
     press("esc")
     machine.wait_until_tty_matches("2", r"disk1")
