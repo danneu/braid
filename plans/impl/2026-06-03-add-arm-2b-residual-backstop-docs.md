@@ -1,5 +1,11 @@
 # Plan: clarify and properly cover `assert_target_uuid_unique` arm 2b
 
+> **Superseded** by `plans/impl/2026-06-16-slim-add-uuid-assert-freshluks-guard.md`,
+> which removed arm 2b entirely: `assert_target_uuid_unique` is now identity-only,
+> and the FreshLuks live-pool guard this plan documented moved into its own
+> `assert_fresh_uuid_absent_from_live_pool` helper. The doc/comment scaffolding
+> added here no longer exists in the code.
+
 ## Context
 
 A review finding flagged that `assert_target_uuid_unique`'s live-pool arm

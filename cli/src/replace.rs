@@ -1562,8 +1562,15 @@ where
 /// `ReplaceError::DuplicateUuid`. Membership scope wins ordering ties
 /// because the membership-side collision is the more common operator
 /// failure mode (a foreign disk attached and discovered between
-/// command invocations). Mirrors `add.rs::assert_target_uuid_unique`
-/// at the same defense-in-depth seam.
+/// command invocations). The mirror with `add` is intentionally
+/// asymmetric: `add` splits the identity- and live-pool concerns across
+/// `assert_target_uuid_unique` and per-caller live-pool guards (its
+/// live-pool check is caller-dependent -- backing-aware classify for a
+/// returned PresentLuks disk vs. a plain scan for a freshly-minted
+/// FreshLuks UUID). `replace` keeps one uniform scan here because its new
+/// disk is always distinct hardware -- there is no same-backing returned-disk
+/// no-op to disambiguate -- so bundling both axes in one function is
+/// right-sized for replace's semantics.
 fn assert_new_uuid_unique(
     new_uuid: &LuksUuid,
     old_uuid: &LuksUuid,

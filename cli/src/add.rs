@@ -2144,14 +2144,19 @@ fn build_add_work_plan<R: CommandRunner>(
                         .map(|p| KeyFilePath::new(p.to_path_buf())),
                     header_backup_path,
                 };
+                // Identity scopes first (in-flight + membership), then the
+                // live-pool guard -- the same order the old single assert
+                // used, so a generated UUID that collides with a known member
+                // still reports the informative `DuplicateUuid` (both real
+                // parties), not the scope-only `DuplicateUuidLivePool`.
                 assert_target_uuid_unique(
                     &luks_uuid,
                     input.pool_membership,
-                    input.pool,
                     &initial_journal_targets,
                     name,
                     by_id,
                 )?;
+                assert_fresh_uuid_absent_from_live_pool(&luks_uuid, input.pool, name, by_id)?;
                 initial_journal_targets
                     .insert(luks_uuid, fresh_journal_target(&target))
                     .map_err(|conflict| target_uuid_map_conflict_to_validation(&conflict))?;
@@ -2178,13 +2183,12 @@ fn build_add_work_plan<R: CommandRunner>(
                     match identity {
                         AddLuksBtrfsProbe::SamePool => {
                             // Two-tier defense, mirroring the closed branch: the
-                            // backing-aware `classify_live_pool_match` below proves
-                            // same-backing no-ops and rejects different-backing
-                            // clones, so the subsequent `assert_target_uuid_unique`
-                            // only catches in-flight (arm 1) and membership (arm 2a)
-                            // collisions -- its live-pool arm (2b) is dead here (a
-                            // `NoMatch` fall-through means no live device carries
-                            // this UUID).
+                            // backing-aware `classify_live_pool_match` below owns
+                            // the live-pool concern (proving same-backing no-ops,
+                            // rejecting different-backing clones), so the
+                            // subsequent `assert_target_uuid_unique` is left to
+                            // catch only in-flight and membership identity
+                            // collisions.
                             match classify_live_pool_match(
                                 uuid,
                                 by_id,
@@ -2218,7 +2222,6 @@ fn build_add_work_plan<R: CommandRunner>(
                             assert_target_uuid_unique(
                                 &target.luks_uuid,
                                 input.pool_membership,
-                                input.pool,
                                 &initial_journal_targets,
                                 name,
                                 by_id,
@@ -2263,7 +2266,6 @@ fn build_add_work_plan<R: CommandRunner>(
                     assert_target_uuid_unique(
                         uuid,
                         input.pool_membership,
-                        input.pool,
                         &initial_journal_targets,
                         name,
                         by_id,
@@ -2298,40 +2300,37 @@ fn build_add_work_plan<R: CommandRunner>(
     })
 }
 
-/// Pre-journal-write per-target UUID uniqueness assert. Runs once per
+/// Pre-journal-write per-target identity-collision assert. Runs once per
 /// target inside `build_add_work_plan` after the target's UUID is
 /// generated (FreshLuks) or probed (PresentLuks /
-/// RecoverableBraidLabeled). Order per plan section "`add.rs`" / "Gate
-/// ordering vs in-flight `targets` map":
+/// RecoverableBraidLabeled). Both arms refuse a UUID that already belongs
+/// to a real, braid-resolved identity, so both name both `(name, by_id)`
+/// pairs explicitly:
 ///   1. If the UUID is already in the in-flight `targets` map under a
 ///      different by-id, raise `AddError::DuplicateUuid` naming both
 ///      `(name, by_id)` pairs (the cloned-disk-across-targets case).
-///   2. Otherwise, check membership keys and live `pool.devices` UUIDs.
-///      A membership-key collision raises `AddError::DuplicateUuid`
-///      naming the in-flight target plus the colliding member's real
-///      `(name, by_id)`. A live `pool.devices` collision raises
-///      `AddError::DuplicateUuidLivePool` naming only the add target,
-///      reporting the colliding foreign device by scope (ADR 024: no
-///      invented identity for the clone).
+///   2. Otherwise, if the UUID matches a membership key, raise
+///      `AddError::DuplicateUuid` naming the in-flight target plus the
+///      colliding member's real `(name, by_id)`.
 ///
-/// Arm (2b) is a fail-closed residual backstop, not an operationally
-/// reachable guard: both `PresentLuks` callers in `build_add_work_plan`
-/// pre-reject live-pool UUID collisions via the stronger backing-aware
-/// `classify_live_pool_match` before this assert runs, so reaching it on
-/// a `PresentLuks` path implies `NoMatch` -- no live device carries this
-/// UUID -- and arm (2b)'s scan is necessarily empty. The only other
-/// caller, `FreshLuks`, would trip it only on an astronomically unlikely
-/// `LuksUuid::new_v4()` collision with a live-but-unmembered device.
+/// Live-pool collisions -- a UUID matching a device live in the btrfs pool
+/// but absent from membership (a foreign/cloned disk) -- are NOT this
+/// gate's concern. They are owned by the per-caller live-pool guards:
+/// `classify_live_pool_match` for the `PresentLuks` arms (backing-aware,
+/// telling a same-backing returned-disk no-op apart from a
+/// different-backing clone) and `assert_fresh_uuid_absent_from_live_pool`
+/// for `FreshLuks` (a plain `pool.devices` scan, right-sized for a
+/// freshly-minted UUID that has no legitimate same-backing match). Both
+/// route their refusal through `duplicate_live_pool_uuid_error`, so this
+/// assert never needs to invent an identity for the foreign device.
 ///
 /// `LuksUuidMap::insert` fail-closed and `PoolMembership::insert` are
 /// the defense-in-depth backstops; this gate is the pre-write refusal
-/// so the operator gets a structured collision message (naming the real
-/// parties, or the add target plus scope for the live-pool arm) rather
-/// than falling through to a generic conflict error.
+/// so the operator gets a structured collision message naming the real
+/// parties rather than falling through to a generic conflict error.
 fn assert_target_uuid_unique(
     uuid: &LuksUuid,
     membership: &PoolMembership,
-    live_pool: &PoolState,
     in_flight: &LuksUuidMap<journal::AddJournalTarget>,
     this_name: &DiskName,
     this_by_id: &ByIdPath,
@@ -2346,7 +2345,7 @@ fn assert_target_uuid_unique(
             &prior.by_id,
         ));
     }
-    // (2a) Membership-key collision.
+    // (2) Membership-key collision.
     if let Some(existing) = membership.by_uuid(uuid) {
         return Err(duplicate_uuid_error(
             uuid.clone(),
@@ -2356,16 +2355,25 @@ fn assert_target_uuid_unique(
             &existing.by_id,
         ));
     }
-    // (2b) Live-pool collision -- a fail-closed residual backstop, not an
-    // operationally reachable guard: `PresentLuks` callers are intercepted
-    // upstream by `classify_live_pool_match`, so this fires only for the
-    // `FreshLuks` caller, and only on a random `new_v4()` collision with a
-    // live device. The colliding device is a foreign btrfs member absent
-    // from membership. Per ADR 024 braid does not invent an identity for it,
-    // so the refusal names only the add target and reports the colliding
-    // side by scope -- nothing derived from the foreign mapper.
+    Ok(())
+}
+
+/// FreshLuks's plan-time live-pool guard. A freshly-generated `new_v4()`
+/// UUID has no legitimate same-backing live match (unlike a returned
+/// PresentLuks disk), so a plain `pool.devices` scan is the right-sized
+/// check -- backing-path classification is unnecessary. Fail closed on
+/// the astronomically unlikely collision before journal write; refuse by
+/// scope per ADR 024 (braid invents no identity for the foreign device),
+/// routing through `duplicate_live_pool_uuid_error` so the variant and
+/// message are byte-identical to the `PresentLuks` gates' refusal.
+fn assert_fresh_uuid_absent_from_live_pool(
+    uuid: &LuksUuid,
+    live_pool: &PoolState,
+    name: &DiskName,
+    by_id: &ByIdPath,
+) -> Result<(), AddError> {
     if live_pool.devices.iter().any(|d| d.luks_uuid == *uuid) {
-        return Err(duplicate_live_pool_uuid_error(uuid, this_name, this_by_id));
+        return Err(duplicate_live_pool_uuid_error(uuid, name, by_id));
     }
     Ok(())
 }
@@ -11335,11 +11343,12 @@ mod tests {
     // `braid-braid-foreign` under the old mapper-synthesis path. The refusal
     // here fires at the open branch's `classify_live_pool_match`
     // `DifferentBacking` arm (the candidate by-id resolves to a different
-    // backing than the live row), not at `assert_target_uuid_unique` arm (2b);
-    // arm (2b)'s direct coverage lives in
-    // `assert_target_uuid_unique_live_pool_collision_omits_foreign_mapper`.
-    // Both arms render via the same `duplicate_live_pool_uuid_error`, so this
-    // pins the message contract at the planner-integration level.
+    // backing than the live row), the `PresentLuks`-owned live-pool gate.
+    // The complementary FreshLuks-owned gate
+    // (`assert_fresh_uuid_absent_from_live_pool`) gets direct unit coverage in
+    // `fresh_uuid_live_pool_collision_omits_foreign_mapper`. Both gates render
+    // via the same `duplicate_live_pool_uuid_error`, so this pins the message
+    // contract at the planner-integration level.
     // Scenario: an open braid-labeled disk probes to the same LUKS UUID as an
     // unrecognized live `PoolDevice` whose mapper is `braid-foreign`, at a
     // different backing path. `build_add_work_plan` refuses with
@@ -11433,37 +11442,33 @@ mod tests {
         );
     }
 
-    // Intent: a live-pool UUID collision whose colliding device carries a
-    // non-braid mapper (`clone-foreign`) renders a refusal that names only
-    // the real add target and reports the colliding side by scope -- nothing
+    // Intent: FreshLuks's live-pool guard refuses a UUID colliding with a
+    // device whose mapper is non-braid (`clone-foreign`) by naming only the
+    // real add target and reporting the colliding side by scope -- nothing
     // derived from the foreign mapper.
-    // Why it exists: the prior code synthesized a `DiskName` from the live
-    // device's mapper, leaking `braid-clone-foreign` into the message (and
-    // double-prefixing `braid-`-prefixed mappers). ADR 024 forbids inventing
-    // an identity for the clone; this pins that a non-`braid-` foreign mapper
-    // never reaches the operator-facing text (the complement of the
-    // `braid-foreign` double-prefix regression above).
-    // Scenario: an add target's probed LUKS UUID matches a live `PoolDevice`
-    // an operator opened by hand under the mapper `clone-foreign`, absent from
-    // membership.
+    // Why it exists: this guard (`assert_fresh_uuid_absent_from_live_pool`)
+    // owns the FreshLuks live-pool refusal -- the only plan-time caller that
+    // reaches a `pool.devices` scan, since the `PresentLuks` arms are
+    // intercepted upstream by the backing-aware `classify_live_pool_match`.
+    // The prior code synthesized a `DiskName` from the live device's mapper,
+    // leaking `braid-clone-foreign` into the message (and double-prefixing
+    // `braid-`-prefixed mappers). ADR 024 forbids inventing an identity for
+    // the clone; this pins that a non-`braid-` foreign mapper never reaches
+    // the operator-facing text (the complement of the `braid-foreign`
+    // double-prefix regression above).
+    // Scenario: a freshly-formatted add target's minted LUKS UUID matches a
+    // live `PoolDevice` an operator opened by hand under the mapper
+    // `clone-foreign`, absent from membership.
     #[test]
-    fn assert_target_uuid_unique_live_pool_collision_omits_foreign_mapper() {
+    fn fresh_uuid_live_pool_collision_omits_foreign_mapper() {
         let uuid = LuksUuid::parse("66666666-6666-6666-6666-666666666666").unwrap();
         let name = DiskName::parse("disk2").unwrap();
         let by_id = ByIdPath::parse("/dev/disk/by-id/virtio-disk2").unwrap();
         let live_pool =
             pool_with_live_devices(vec![live_pool_device("clone-foreign", &uuid, "/dev/vde")]);
-        let in_flight: LuksUuidMap<journal::AddJournalTarget> = LuksUuidMap::new();
 
-        let err = assert_target_uuid_unique(
-            &uuid,
-            &PoolMembership::empty(),
-            &live_pool,
-            &in_flight,
-            &name,
-            &by_id,
-        )
-        .unwrap_err();
+        let err =
+            assert_fresh_uuid_absent_from_live_pool(&uuid, &live_pool, &name, &by_id).unwrap_err();
 
         let body = err.to_string();
         match err {

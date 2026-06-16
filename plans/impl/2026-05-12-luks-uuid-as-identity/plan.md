@@ -1666,7 +1666,16 @@ them.
   step in the same function so the "before X, before Y" ordering
   is locally verifiable.
 
-  **Gate ordering vs in-flight `targets` map (pinned).** The pre-write
+  **Gate ordering vs in-flight `targets` map (pinned).**
+  > **Superseded** by `plans/impl/2026-06-16-slim-add-uuid-assert-freshluks-guard.md`:
+  > `assert_target_uuid_unique` no longer checks the live `pool.devices` scope.
+  > That live-pool axis now lives in per-caller guards
+  > (`classify_live_pool_match` for `PresentLuks`,
+  > `assert_fresh_uuid_absent_from_live_pool` for `FreshLuks`); the assert is
+  > identity-only (in-flight + membership). The two-scope description below
+  > records the original design.
+
+  The pre-write
   uniqueness assert checks two scopes: (1) membership keys, (2) live
   `pool.devices` UUID set. It does NOT check the in-flight `targets`
   map -- that scope is the cloned-disk-across-targets case, and it
