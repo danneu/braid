@@ -1544,13 +1544,24 @@ impl AddPlan {
                  journal_targets.is_empty() short-circuits earlier, and \
                  journal_targets and needs_pool_add are populated in lockstep",
             );
-            // Reuse the last per-target probe before saving pool.json.
+            // End-state post-condition over every journaled member against
+            // the final pool probe. The per-target loop above proves each add
+            // in its own immediate probe and extracts the devid for ghost
+            // cleanup; it does not prove an earlier add is still present after
+            // a later add. Fail before save_membership: enrich_from_pool_state
+            // skips missing members, which would persist a vanished disk with
+            // no devid and then balance a degraded pool. This shares
+            // PostAddProbeFailed per docs/dev/safety-heuristics.md: same
+            // post-commit lifecycle point and same braid recover remediation,
+            // regardless of detection site.
             for (uuid, target) in journal_targets.iter() {
                 if find_added_device_by_uuid(&pool_after, uuid).is_none() {
-                    return Err(AddError::Validation(format!(
-                        "disk '{}' was not found in the live pool after add",
-                        target.name
-                    )));
+                    return Err(AddError::PostAddProbeFailed {
+                        detail: format!(
+                            "{}: no longer present in the live pool after all disks were added",
+                            target.name
+                        ),
+                    });
                 }
             }
             let mut final_membership = journal.target_membership.clone();
@@ -5347,6 +5358,7 @@ mod tests {
         fail_post_add_probe: bool,
         fail_luks_format: bool,
         omit_new_mapper_from_probe: bool,
+        vanished_after_later_add: Option<String>,
         added_mapper_drift: Option<String>,
         disk2_devid: u64,
     }
@@ -5364,6 +5376,7 @@ mod tests {
                 fail_post_add_probe: false,
                 fail_luks_format: false,
                 omit_new_mapper_from_probe: false,
+                vanished_after_later_add: None,
                 added_mapper_drift: None,
                 disk2_devid: 2,
             }
@@ -5403,6 +5416,11 @@ mod tests {
 
         fn with_new_mapper_omitted_from_probe(mut self) -> Self {
             self.omit_new_mapper_from_probe = true;
+            self
+        }
+
+        fn with_mapper_vanished_after_later_add(mut self, mapper: &str) -> Self {
+            self.vanished_after_later_add = Some(mapper.to_owned());
             self
         }
 
@@ -5506,8 +5524,18 @@ mod tests {
 
         fn pool_show(&self) -> String {
             let mut mappers = vec!["braid-disk1".to_owned()];
+            let added = self.added.lock().unwrap();
             if !self.omit_new_mapper_from_probe {
-                mappers.extend(self.added.lock().unwrap().iter().cloned());
+                mappers.extend(added.iter().cloned());
+            }
+            if let Some(vanished) = &self.vanished_after_later_add {
+                if added
+                    .last()
+                    .map(|mapper| mapper != vanished)
+                    .unwrap_or(false)
+                {
+                    mappers.retain(|mapper| mapper != vanished);
+                }
             }
             let mut out = format!(
                 "Label: none  uuid: {POOL_FSID}\n\
@@ -6372,6 +6400,84 @@ mod tests {
                 "{label}: pool.json must not list disk2 -- save_membership was never reached"
             );
         }
+    }
+
+    // Intent: the live-pool add end-state sweep is fatal when an earlier
+    //   successfully-added disk vanishes before the final pool probe.
+    // Why it exists: the per-target probe only proves each disk was present
+    //   immediately after its own `btrfs device add`; without the final sweep,
+    //   a later disappearance could be persisted to pool.json with no devid.
+    // Scenario: disk2 and disk3 are added to an existing disk1 pool. Disk2 is
+    //   present after its own add, then disappears from the final probe after
+    //   disk3 is added. The command must stop with recovery guidance, keep the
+    //   journal, and avoid saving either new disk to pool.json.
+    #[test]
+    fn cmd_add_earlier_disk_vanishing_before_final_probe_is_fatal() {
+        let (_state_tmp, paths, _tmp, config_path, pass_path) = add_test_setup();
+        let fs = AddMockFs(vec![
+            "/dev/disk/by-id/virtio-disk2".into(),
+            "/dev/disk/by-id/virtio-disk3".into(),
+        ]);
+        let runner = AddFullPathRunner::live().with_mapper_vanished_after_later_add("braid-disk2");
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let confirm = crate::confirm::RecordingConfirm::new();
+
+        let result = cmd_add(
+            &runner,
+            &fs,
+            &AddParams {
+                config: &read_test_config(&config_path),
+                disk_specs: &[
+                    "disk2=/dev/disk/by-id/virtio-disk2".into(),
+                    "disk3=/dev/disk/by-id/virtio-disk3".into(),
+                ],
+                dry_run: false,
+                yes: true,
+                passphrase_stdin: false,
+                passphrase_file: Some(pass_path.as_path()),
+                enroll_key_file: None,
+                luks_format_extra_opts: &[],
+                progress: ProgressOutput::Off,
+                paths: &paths,
+                sleep_inhibitor: &inhibitor,
+                confirm: &confirm,
+                passphrase_reader: &RealTty,
+                backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(),
+            },
+        );
+
+        let err = result.expect_err("final probe disappearance should fail closed");
+        let rendered = err.to_string();
+        match err {
+            AddError::PostAddProbeFailed { .. } => {}
+            other => panic!("expected PostAddProbeFailed, got {other:?}"),
+        }
+        assert!(
+            rendered.contains("braid recover"),
+            "post-add failure must point at recovery, got: {rendered}"
+        );
+        assert_eq!(
+            runner.added_mappers(),
+            vec!["braid-disk2", "braid-disk3"],
+            "both device adds must commit before the end-state sweep fails"
+        );
+        assert!(
+            journal::load_journal(&paths).unwrap().is_some(),
+            "journal must survive so `braid recover` can replay it"
+        );
+        let membership = membership::load_membership(&paths).unwrap();
+        assert!(
+            membership
+                .by_name(&DiskName::parse("disk2").unwrap())
+                .is_none(),
+            "pool.json must not list disk2 before save_membership"
+        );
+        assert!(
+            membership
+                .by_name(&DiskName::parse("disk3").unwrap())
+                .is_none(),
+            "pool.json must not list disk3 before save_membership"
+        );
     }
 
     #[test]
