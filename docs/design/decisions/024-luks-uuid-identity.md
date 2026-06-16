@@ -228,7 +228,13 @@ warns rather than claiming every declared member is assembled.
 - `cli/src/doctor.rs` unit tests pin that `declared_disks` renders verified
   members absent from the live pool as cause-neutral `Warn`, keeps UUID
   mismatches as `Fail`, preserves offline-pool identity-only behavior, and warns
-  when mounted-pool topology cannot be probed.
+  when mounted-pool topology cannot be probed. They also pin that `declared_disks`
+  issues its LUKS-identity probe against the persisted by-id handle -- not the
+  live backing path -- even for an assembled member in a mounted pool, so a disk
+  swapped or reformatted at the stable hardware handle is detected (`Fail`) while
+  the live device still carries the matching UUID. This is the deliberate
+  counterpart to the live-backing-path SMART and TUI bullets below: doctor's swap
+  detection must read the stable handle the live path would mask.
 - `tests/cli/braid-status-rust.py` pins that present disks' rendered
   `luks_uuid` equals the real cryptsetup UUID and the `pool.json` membership
   key, and that `name` is the operator name, in intact and degraded states.

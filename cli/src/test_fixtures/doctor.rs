@@ -102,8 +102,15 @@ pub(crate) fn ups_ctx<'a, R: CommandRunner>(
 
 /// Strict doctor filesystem mock for live-pool checks that must prove
 /// `probe_pool` reads mountinfo through doctor's injected filesystem.
+///
+/// `block_devices` and `existing_paths` model `classify_disk_state`'s by-id
+/// gate: a registered block device proceeds to the LUKS probe, a registered
+/// existing-but-not-block path renders `NotBlock`, and an unregistered path
+/// renders `Missing` -- the same two-set idiom as `probe::tests::MockFs`.
 pub(crate) struct DoctorMockFs {
     mountinfo: String,
+    block_devices: Vec<String>,
+    existing_paths: Vec<String>,
 }
 
 impl DoctorMockFs {
@@ -113,6 +120,8 @@ impl DoctorMockFs {
             mountinfo:
                 "36 35 0:32 / /mnt/storage rw,noatime shared:1 - btrfs /dev/mapper/braid-disk1 rw\n"
                     .into(),
+            block_devices: vec![],
+            existing_paths: vec![],
         }
     }
 
@@ -121,17 +130,34 @@ impl DoctorMockFs {
     pub(crate) fn empty() -> Self {
         Self {
             mountinfo: String::new(),
+            block_devices: vec![],
+            existing_paths: vec![],
         }
+    }
+
+    /// Register `path` as a block device so `classify_disk_state` proceeds to
+    /// the LUKS identity probe (the gate's "proceed" branch).
+    pub(crate) fn with_block_device(mut self, path: &str) -> Self {
+        self.block_devices.push(path.to_owned());
+        self
+    }
+
+    /// Register `path` as existing but not a block device so
+    /// `classify_disk_state` renders `NotBlock` without touching the runner.
+    pub(crate) fn with_existing_path(mut self, path: &str) -> Self {
+        self.existing_paths.push(path.to_owned());
+        self
     }
 }
 
 impl Filesystem for DoctorMockFs {
-    fn exists(&self, _path: &str) -> bool {
-        false
+    fn exists(&self, path: &str) -> bool {
+        let path = path.to_owned();
+        self.existing_paths.contains(&path) || self.block_devices.contains(&path)
     }
 
-    fn is_block_device(&self, _path: &str) -> bool {
-        false
+    fn is_block_device(&self, path: &str) -> bool {
+        self.block_devices.contains(&path.to_owned())
     }
 
     fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {

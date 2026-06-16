@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::os::unix::fs::{FileTypeExt, MetadataExt};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -327,27 +327,33 @@ enum LiveTopology {
 
 /// Probe a single declared disk to figure out its `DiskState`.
 ///
-/// This is the impure half of `check_declared_disks`: it touches the filesystem
-/// (`std::fs::metadata`) and the runner. It is intentionally tiny so the only
-/// untested code path is the unavoidable filesystem gate; the rendering logic
+/// This is the impure half of `check_declared_disks`: the block-device gate runs
+/// through the injected `Filesystem` seam (not a direct `std::fs::metadata`
+/// call) so the whole classifier is reachable from doctor's filesystem mocks,
+/// and the LUKS identity probe runs through the runner. The rendering logic
 /// lives in `summarize_declared_disks`, which is pure and unit-tested.
+///
+/// The probe deliberately targets the persisted by-id `path` rather than the
+/// live backing device: doctor must read the stable hardware handle so a disk
+/// swapped or reformatted at that handle is detected (ADR-024 swap detection).
 ///
 /// The LUKS-specific probe sequence is delegated to `luks::probe_luks_header`
 /// so that `doctor` and `unlock` share the same classification (and the same
 /// remediation message strings downstream).
 fn classify_disk_state<R: CommandRunner>(
     runner: &R,
+    fs: &dyn Filesystem,
     path: &Path,
     expected_uuid: &LuksUuid,
 ) -> DiskState {
-    match std::fs::metadata(path) {
-        Err(_) => return DiskState::Missing,
-        Ok(meta) if !meta.file_type().is_block_device() => return DiskState::NotBlock,
-        Ok(_) => {}
+    let device = path.to_string_lossy();
+    if fs.is_block_device(&device) {
+        classify_luks_identity(runner, &device, expected_uuid)
+    } else if fs.exists(&device) {
+        DiskState::NotBlock
+    } else {
+        DiskState::Missing
     }
-
-    let device = path.to_string_lossy().into_owned();
-    classify_luks_identity(runner, &device, expected_uuid)
 }
 
 /// Runner-only LUKS identity classifier so unit tests can cover the UUID
@@ -593,7 +599,7 @@ fn check_declared_disks<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> Che
         .into_iter()
         .map(|(uuid, member)| {
             let by_id = member.by_id.as_str().to_owned();
-            let base = classify_disk_state(ctx.runner, Path::new(&by_id), uuid);
+            let base = classify_disk_state(ctx.runner, ctx.fs, Path::new(&by_id), uuid);
             let state = reconcile_with_live_pool(uuid, base, &topology);
             (member.name.as_str().to_owned(), by_id, state)
         })
@@ -2757,6 +2763,112 @@ mod tests {
         // Hint cites the stable by-id path and never leaks the live /dev/vdb node.
         assert!(r.message.contains("/dev/disk/by-id/disk1"), "{}", r.message);
         assert!(!r.message.contains("/dev/vdb"), "{}", r.message);
+    }
+
+    // Intent: declared_disks issues its LUKS-identity probe against the persisted
+    //   by-id handle, not the live backing path, even when the member is
+    //   assembled in a mounted pool.
+    // Why it exists: ADR-024 deliberately keeps declared_disks on the stable
+    //   by-id handle (unlike smart_self_test, which reads the live device) so a
+    //   disk swapped/reformatted at the hardware slot is detected. A future
+    //   "unify device selection with smart's underlying_for_uuid" refactor would
+    //   silently route this probe to the live backing path and still pass every
+    //   other declared_disks test; this pins the by-id selection under a mounted
+    //   pool where a live backing path exists.
+    // Scenario: disk1 is assembled at /dev/vdb (live UUID still matches), but its
+    //   stable by-id handle now points at a foreign LUKS volume carrying a
+    //   different UUID -- a swap at the slot that the live path cannot reveal.
+    #[test]
+    fn check_declared_disks_present_member_probes_by_id_not_live() {
+        let (dir, paths) = isolated_paths();
+        save_doctor_membership(
+            &paths,
+            &[(1, "disk1", "/dev/disk/by-id/disk1", Some(Devid::new(1)))],
+        );
+        let expected = test_uuid(1);
+        let observed = test_uuid(2);
+        // by-id handle carries the swapped (mismatched) identity.
+        let (by_id_isluks_req, by_id_isluks_out) = is_luks_ok("/dev/disk/by-id/disk1");
+        let (by_id_uuid_req, by_id_uuid_out) =
+            luks_uuid_ok("/dev/disk/by-id/disk1", observed.as_str());
+        // Counterfactual anchor: the live backing path /dev/vdb carries the
+        // MATCHING UUID (registered by pool_state_runner's luksUUID), so if a
+        // refactor wrongly routed this probe through underlying_for_uuid the
+        // check would pass Ok -- asserting Fail pins the by-id selection.
+        let (live_isluks_req, live_isluks_out) = is_luks_ok("/dev/vdb");
+        let runner = pool_state_runner(vec![("braid-disk1", 1, "/dev/vdb", expected.clone())], &[])
+            .with_output(by_id_isluks_req, by_id_isluks_out)
+            .with_output(by_id_uuid_req, by_id_uuid_out)
+            .with_output(live_isluks_req, live_isluks_out);
+        let fs = DoctorMockFs::mounted_btrfs_only()
+            .with_block_device("/dev/disk/by-id/disk1")
+            .with_block_device("/dev/vdb");
+        let mut ctx =
+            DoctorContext::for_test_parsed_with_fs(&runner, &fs, &paths, valid_config_json());
+
+        let check = check_declared_disks(&mut ctx);
+        drop(dir);
+
+        // Fail can only arise from reading the mismatched by-id handle; the live
+        // /dev/vdb carries the matching UUID -- that divergence is the pin.
+        assert_eq!(check.status, CheckStatus::Fail);
+        let msg = &check.message;
+        assert!(msg.contains("disk1"), "missing disk name: {msg}");
+        assert!(
+            msg.contains(&format!("expected {expected}")),
+            "missing expected UUID: {msg}"
+        );
+        assert!(
+            msg.contains(&format!("observed {observed}")),
+            "missing swapped observed UUID: {msg}"
+        );
+    }
+
+    // Intent: classify_disk_state's by-id gate renders an existing-but-not-block
+    //   path as NotBlock through the injected Filesystem seam, never touching the
+    //   runner.
+    // Why it exists: routing the block-device gate through ctx.fs (replacing the
+    //   direct std::fs::metadata call) made all three gate outcomes reachable in
+    //   a hermetic unit test; this pins the middle outcome. The runner has no
+    //   cryptsetup outputs, so reaching the LUKS probe would error -- a green
+    //   NotBlock proves the gate short-circuits first.
+    // Scenario: a declared member's by-id path resolves to a regular file or
+    //   directory rather than a block device.
+    #[test]
+    fn classify_disk_state_existing_non_block_renders_not_block() {
+        let runner = MockRunner::default();
+        let fs = DoctorMockFs::empty().with_existing_path("/dev/disk/by-id/diskX");
+
+        let state = classify_disk_state(
+            &runner,
+            &fs,
+            Path::new("/dev/disk/by-id/diskX"),
+            &test_uuid(1),
+        );
+
+        assert!(matches!(state, DiskState::NotBlock), "got {state:?}");
+    }
+
+    // Intent: classify_disk_state's by-id gate renders an absent path as Missing
+    //   through the injected Filesystem seam, never touching the runner.
+    // Why it exists: completes the three-outcome gate coverage the ctx.fs routing
+    //   unlocked. The runner has no cryptsetup outputs, so a green Missing proves
+    //   the gate short-circuits before any LUKS probe.
+    // Scenario: a declared member's by-id symlink target is gone -- the disk was
+    //   detached from the enclosure slot.
+    #[test]
+    fn classify_disk_state_absent_path_renders_missing() {
+        let runner = MockRunner::default();
+        let fs = DoctorMockFs::empty();
+
+        let state = classify_disk_state(
+            &runner,
+            &fs,
+            Path::new("/dev/disk/by-id/diskX"),
+            &test_uuid(1),
+        );
+
+        assert!(matches!(state, DiskState::Missing), "got {state:?}");
     }
 
     /* Intent: valid custom config files skip canonical permission enforcement.
