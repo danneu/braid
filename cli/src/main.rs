@@ -76,7 +76,7 @@ enum Commands {
     ScrubResumeOrStart(ScrubMountArgs),
     /// Check disk health: exit 0 = ok/offline/lock-contended, exit 1 = alert (incl. probe/compute failure latched as ComputationError), exit 2 = setup error (e.g. pool-lock I/O, config load)
     Monitor,
-    /// Acknowledge current alerts and silence notifications
+    /// Acknowledge current alerts and silence notifications: exit 0 = acknowledged or nothing to ack, exit 1 = lock contention or ack failure, exit 2 = setup error (config load, pool-lock I/O)
     Ack,
     /// Interactive terminal dashboard
     Tui(TuiArgs),
@@ -916,7 +916,7 @@ fn main() {
             }
         }
         Commands::Ack => {
-            let config = load_config_or_exit(Path::new(&config_path), 1);
+            let config = load_config_or_exit(Path::new(&config_path), 2);
             let runner = RealRunner;
             let fs = RealFilesystem;
             if let Err(e) = braid_cli::ack::cmd_ack(&runner, &fs, config.mount_point(), &paths) {
@@ -1149,8 +1149,13 @@ fn acquire_pool_with_timeout_or_exit(
     match pool_lock.acquire_with_timeout(timeout) {
         Ok(guard) => guard,
         Err(e) => {
+            let exit_code = if matches!(&e, PoolLockError::Io(_)) {
+                2
+            } else {
+                1
+            };
             handle_pool_lock_error(e);
-            std::process::exit(1);
+            std::process::exit(exit_code);
         }
     }
 }

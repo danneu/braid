@@ -33,6 +33,14 @@ If there's nothing to acknowledge:
 no active alerts
 ```
 
+## Exit codes
+
+| Exit code | Meaning |
+|---|---|
+| **0** | Alerts acknowledged, or nothing to acknowledge |
+| **1** | Lock contention (retry once the other operation finishes), or an ack failure (offline btrfs-error refusal, probe/fstype error, cleanup I/O) |
+| **2** | Setup error -- config could not be read, or pool-lock I/O error |
+
 ## What happens under the hood
 
 1. Reads the alert latch to determine how many alerts are active.
@@ -54,7 +62,7 @@ When the pool is offline (no mount at the configured mount point), `braid ack` c
 - A smartd alert -- a latched smartd cause, a bare `smartd-alert` flag present at ack entry, or both -- clears any latch and removes the `smartd-alert` flag; no `acked-stats.json` write is needed.
 - A latched computation error clears the latch; it re-fires on the next monitor cycle only if the underlying computation still fails.
 - A latched missing device is recorded as acknowledged in `acked-stats.json` (so the next monitor cycle stays quiet) and the latch is cleared, without querying btrfs.
-- A latched btrfs device error is refused: ack exits non-zero with `cannot ack btrfs device errors while pool is offline -- unlock the pool first` and leaves all alert state untouched, because re-baselining the error counters needs live `btrfs device stats`, which requires the pool mounted. The refusal is all-or-nothing -- a co-latched missing device is not partially acknowledged, so unlock and re-run to clear everything.
+- A latched btrfs device error is refused: ack exits 1 with `cannot ack btrfs device errors while pool is offline -- unlock the pool first` and leaves all alert state untouched, because re-baselining the error counters needs live `btrfs device stats`, which requires the pool mounted. The refusal is all-or-nothing -- a co-latched missing device is not partially acknowledged, so unlock and re-run to clear everything.
 
 If that mount point is occupied by a non-btrfs filesystem, `braid ack` returns a probe error naming the fstype and preserves `alert-latch.json`, `smartd-alert`, and `acked-stats.json`.
 

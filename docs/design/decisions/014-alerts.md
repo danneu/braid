@@ -86,6 +86,15 @@ Exit codes:
 
 Fail closed: any failure inside `cmd_monitor` that leaves pool state indeterminate latches a `ComputationError` cause and reports exit 1, so the systemd wrapper starts the beeper. Exit 2 means the monitor never ran -- a beep would be meaningless because there is no `AlertState` to report.
 
+### `braid ack` acknowledges current alerts
+
+Exit codes:
+- **0** -- current alerts acknowledged, or no active alerts needed acknowledgment
+- **1** -- pool-lock contention, or `cmd_ack` attempted acknowledgment and failed (for example offline btrfs-error refusal, probe/fstype error, or cleanup I/O)
+- **2** -- pre-`cmd_ack` setup failure (config load failure or pool-lock I/O). Reserved for "could not even attempt to acknowledge"; never emitted by `cmd_ack` itself.
+
+Ack uses the same setup-failure convention as monitor but treats contention differently: ack is interactive, so a missed acknowledgment run reports failure with exit 1 instead of monitor's harmless exit-0 timer skip.
+
 Alert-state mutators are serialized by `/run/braid-pool.lock`. Every command that writes `acked-stats.json` or `alert-latch.json` (`monitor`, `ack`, `add`, `remove`, `remove-missing`) acquires `/run/braid-pool.lock` in Rust dispatch (see [ADR 026](026-pool-lock-rust-owned.md)) before reading state or running probes. This is intentionally the same lock used by pool mutators: monitor and ack perform read-modify-write cycles around subprocess I/O, while add/remove/remove-missing prune acked baselines as membership changes. Sharing one lock keeps "baseline and latch clear" authoritative and prevents stale monitor snapshots from resurrecting acknowledged alerts.
 
 Mount presence is read from `/proc/self/mountinfo` via `mount_check::fstype_at_mount_via_fs`, not from `findmnt`. A readable, well-formed mountinfo file with no entry for the configured mount point is legitimate `PoolOffline` and exits 0. Any mountinfo I/O failure, malformed line, or duplicate target entry is indeterminate state: it surfaces as `ProbeError::MountInfo`, latches `ComputationError`, exits 1, and starts the beeper.

@@ -76,6 +76,28 @@ with subtest("braid monitor exits 2 on config-load failure (setup error, not loc
     assert status == 2, f"missing config must exit 2, got {status}: {output}"
     assert "/tmp/nonexistent.json" in output, f"exit 2 must be config-load (not lock), got: {output}"
 
+with subtest("braid ack exits 2 on config-load failure (setup error, not ack failure)"):
+    # ack takes the pool lock before loading config. The healthy monitor run
+    # above proves the lock is acquirable, so the only changed variable is
+    # --config. Assert the error names the config path to distinguish this
+    # from clap usage errors, which also exit 2.
+    status, output = machine.execute("braid ack --config /tmp/bad.json 2>&1")
+    assert status == 2, f"unparseable config must exit 2, got {status}: {output}"
+    assert "/tmp/bad.json" in output, f"exit 2 must be config-load, got: {output}"
+    status, output = machine.execute("braid ack --config /tmp/nonexistent.json 2>&1")
+    assert status == 2, f"missing config must exit 2, got {status}: {output}"
+    assert "/tmp/nonexistent.json" in output, f"exit 2 must be config-load, got: {output}"
+
+with subtest("braid ack exits 2 on pool-lock I/O failure"):
+    machine.succeed("rm -f /run/braid-pool.lock")
+    machine.succeed("mkdir /run/braid-pool.lock")
+    status, output = machine.execute("braid ack 2>&1")
+    machine.succeed("rmdir /run/braid-pool.lock")
+    assert status == 2, f"pool-lock I/O must exit 2, got {status}: {output}"
+    assert "directory" in output.lower(), (
+        f"expected directory-shaped lock I/O diagnostic, got: {output}"
+    )
+
 with subtest("Healthy pool: status has no ALERT"):
     output = machine.succeed("braid status")
     assert "ALERT" not in output, f"Expected no ALERT in healthy status, got: {output}"

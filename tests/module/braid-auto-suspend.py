@@ -245,4 +245,15 @@ with subtest("braid wol-ready fails when overridden ethtool reports disabled"):
     rc, out = machine.execute("braid wol-ready")
     assert rc == 1, f"wol-ready should fail with Wake-on: d, got {rc}: {out}"
 
+with subtest("braid wol-ready exits 2 on config-load failure"):
+    # Intent: Pin the hidden autosuspend gate's setup-error exit code.
+    # Why it exists: autosuspend needs a broken config to fail closed
+    #   distinctly from a live WoL-not-ready result.
+    # Scenario: wol-ready is invoked with an unreadable config before it can
+    #   inspect the configured interface.
+    machine.succeed("echo 'not json {{{' > /tmp/bad.json")
+    rc, out = machine.execute("braid wol-ready --config /tmp/bad.json 2>&1")
+    assert rc == 2, f"wol-ready config-load failure should exit 2, got {rc}: {out}"
+    assert "/tmp/bad.json" in out, f"expected config path in diagnostic, got: {out}"
+
 machine.shutdown()
