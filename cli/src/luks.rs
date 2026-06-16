@@ -24,7 +24,11 @@ use zeroize::Zeroizing;
 /// Slot 0 is the interactive passphrase.
 pub const LUKS_SLOT_KEYFILE: u8 = 1;
 
-/// Canonical keyfile filename, hardcoded to match the NixOS auto-unlock module.
+/// Canonical keyfile filename, hardcoded to match the NixOS auto-unlock
+/// module. The name is also written as a literal in three clap help strings
+/// -- `add --enroll` (`AddArgs`), `replace --enroll` (`ReplaceArgs`), and the
+/// `enroll` DIR positional (`EnrollKeyFileArgs`) in main.rs -- which cannot
+/// interpolate this const; keep them in sync on any rename.
 pub const KEYFILE_NAME: &str = "braid.key";
 /// Keyfile size in bytes: 4096 bytes of random data from /dev/urandom.
 pub const KEYFILE_SIZE: usize = 4096;

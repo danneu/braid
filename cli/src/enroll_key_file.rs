@@ -5,8 +5,8 @@ use crate::credential_verify::{
     verify_credential_for_targets,
 };
 use crate::luks::{
-    self, BackingPathResolver, KEYFILE_SIZE, KeySlotState, LUKS_SLOT_KEYFILE, LuksError,
-    VerifyOutcome,
+    self, BackingPathResolver, KEYFILE_NAME, KEYFILE_SIZE, KeySlotState, LUKS_SLOT_KEYFILE,
+    LuksError, VerifyOutcome,
 };
 use crate::membership::PoolMembership;
 use crate::parse::parse_cryptsetup_luks_uuid;
@@ -647,7 +647,7 @@ fn key_file_directory(key_file_path: &Path) -> &Path {
 fn format_keyfile_already_exists(key_file_path: &Path) -> String {
     let dir = key_file_directory(key_file_path);
     format!(
-        "braid.key already exists at {}.\n\
+        "{KEYFILE_NAME} already exists at {}.\n\
          If a prior `--generate` run was interrupted, drop `--generate` and re-run \
          `braid enroll {}` to finish enrolling the existing keyfile.\n\
          Otherwise remove it manually if you want to generate a new one.",
