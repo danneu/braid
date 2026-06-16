@@ -76,9 +76,13 @@ pub enum RecoverError {
 
 /// Recover-local snapshot-walk errors raised by `live_pool_matches_membership`
 /// when `journal.pre_membership` / `journal.target_membership` corruption
-/// prevents the gate from evaluating its predicate. Bridged into the
-/// matching `RecoverError::*` variant at each call site so the per-site
-/// topology-mismatch wording stays distinct from corruption wording.
+/// prevents the gate from evaluating its predicate. A dedicated type -- rather
+/// than returning `RecoverError` directly -- keeps these corruption signals
+/// type-distinct from the `Ok(false)` topology-mismatch case, which each call
+/// site reports with its own `RecoverError::Failed` wording. The
+/// `From<JournaledSnapshotError>` impl below bridges the two corruption variants
+/// into `RecoverError::{DuplicateDevidDuringReplay, NoMemberForJournaledDevid}`
+/// so `?` carries them across each call site.
 #[derive(Debug)]
 enum JournaledSnapshotError {
     DuplicateDevid {
@@ -88,6 +92,19 @@ enum JournaledSnapshotError {
     NoMemberForDevid {
         devid: Devid,
     },
+}
+
+impl From<JournaledSnapshotError> for RecoverError {
+    fn from(value: JournaledSnapshotError) -> Self {
+        match value {
+            JournaledSnapshotError::DuplicateDevid { devid, members } => {
+                RecoverError::DuplicateDevidDuringReplay { devid, members }
+            }
+            JournaledSnapshotError::NoMemberForDevid { devid } => {
+                RecoverError::NoMemberForJournaledDevid { devid }
+            }
+        }
+    }
 }
 
 /// Recovery-local passphrase holder that preserves zeroizing ownership.
@@ -2661,20 +2678,11 @@ fn execute_remove_missing_pool_mutation_recovery<R: CommandRunner + Sync>(
     restore_raid1_after_commit: bool,
 ) -> Result<(), RecoverError> {
     if pool.missing_devids.contains(&devid) {
-        match live_pool_matches_membership(&pool, &journal.pre_membership) {
-            Ok(true) => {}
-            Ok(false) => {
-                return Err(RecoverError::Failed(format!(
-                    "remove-missing recovery found devid {devid} still missing, but live pool \
+        if !live_pool_matches_membership(&pool, &journal.pre_membership)? {
+            return Err(RecoverError::Failed(format!(
+                "remove-missing recovery found devid {devid} still missing, but live pool \
                  topology does not match the pre-operation membership"
-                )));
-            }
-            Err(JournaledSnapshotError::DuplicateDevid { devid, members }) => {
-                return Err(RecoverError::DuplicateDevidDuringReplay { devid, members });
-            }
-            Err(JournaledSnapshotError::NoMemberForDevid { devid }) => {
-                return Err(RecoverError::NoMemberForJournaledDevid { devid });
-            }
+            )));
         }
         membership::save_membership(&journal.pre_membership, params.paths)?;
         journal::clear_journal(params.paths).map_err(|e| RecoverError::Journal(e.to_string()))?;
@@ -2685,20 +2693,11 @@ fn execute_remove_missing_pool_mutation_recovery<R: CommandRunner + Sync>(
         return Ok(());
     }
 
-    match live_pool_matches_membership(&pool, &journal.target_membership) {
-        Ok(true) => {}
-        Ok(false) => {
-            return Err(RecoverError::Failed(format!(
-                "remove-missing recovery found devid {devid} gone, but live pool topology \
+    if !live_pool_matches_membership(&pool, &journal.target_membership)? {
+        return Err(RecoverError::Failed(format!(
+            "remove-missing recovery found devid {devid} gone, but live pool topology \
              does not match the target membership"
-            )));
-        }
-        Err(JournaledSnapshotError::DuplicateDevid { devid, members }) => {
-            return Err(RecoverError::DuplicateDevidDuringReplay { devid, members });
-        }
-        Err(JournaledSnapshotError::NoMemberForDevid { devid }) => {
-            return Err(RecoverError::NoMemberForJournaledDevid { devid });
-        }
+        )));
     }
 
     let recovered = recover_membership_matching_expected(
@@ -2757,19 +2756,10 @@ fn execute_remove_missing_post_maintenance_recovery<R: CommandRunner + Sync>(
              but btrfs still reports it missing"
         )));
     }
-    match live_pool_matches_membership(&pool, &journal.target_membership) {
-        Ok(true) => {}
-        Ok(false) => {
-            return Err(RecoverError::Failed(
-                "post-remove-missing recovery live pool does not match target membership".into(),
-            ));
-        }
-        Err(JournaledSnapshotError::DuplicateDevid { devid, members }) => {
-            return Err(RecoverError::DuplicateDevidDuringReplay { devid, members });
-        }
-        Err(JournaledSnapshotError::NoMemberForDevid { devid }) => {
-            return Err(RecoverError::NoMemberForJournaledDevid { devid });
-        }
+    if !live_pool_matches_membership(&pool, &journal.target_membership)? {
+        return Err(RecoverError::Failed(
+            "post-remove-missing recovery live pool does not match target membership".into(),
+        ));
     }
 
     let prior = membership::load_membership(params.paths).ok();
@@ -3051,32 +3041,16 @@ fn execute_replace_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem
     validate_live_members_allowed(&pool, union)?;
     let live = live_member_uuids(&pool);
     let committed = live.contains(new_uuid) && !live.contains(old_uuid);
-    let pre_topology = match live_pool_matches_membership(&pool, &journal.pre_membership) {
-        Ok(matches) => matches && !live.contains(new_uuid),
-        Err(JournaledSnapshotError::DuplicateDevid { devid, members }) => {
-            return Err(RecoverError::DuplicateDevidDuringReplay { devid, members });
-        }
-        Err(JournaledSnapshotError::NoMemberForDevid { devid }) => {
-            return Err(RecoverError::NoMemberForJournaledDevid { devid });
-        }
-    };
+    let pre_topology =
+        live_pool_matches_membership(&pool, &journal.pre_membership)? && !live.contains(new_uuid);
 
     if committed {
-        match live_pool_matches_membership(&pool, &journal.target_membership) {
-            Ok(true) => {}
-            Ok(false) => {
-                return Err(RecoverError::Failed(
-                    "replace recovery found the new disk live, but live pool topology \
+        if !live_pool_matches_membership(&pool, &journal.target_membership)? {
+            return Err(RecoverError::Failed(
+                "replace recovery found the new disk live, but live pool topology \
                  does not match the target membership"
-                        .into(),
-                ));
-            }
-            Err(JournaledSnapshotError::DuplicateDevid { devid, members }) => {
-                return Err(RecoverError::DuplicateDevidDuringReplay { devid, members });
-            }
-            Err(JournaledSnapshotError::NoMemberForDevid { devid }) => {
-                return Err(RecoverError::NoMemberForJournaledDevid { devid });
-            }
+                    .into(),
+            ));
         }
         let recovered = recover_membership_matching_expected(
             &pool,
@@ -3178,19 +3152,10 @@ where
     R: CommandRunner + Sync,
     S: Sleeper + ?Sized,
 {
-    match live_pool_matches_membership(&pool, &journal.target_membership) {
-        Ok(true) => {}
-        Ok(false) => {
-            return Err(RecoverError::Failed(
-                "post-replace recovery live pool does not match target membership".into(),
-            ));
-        }
-        Err(JournaledSnapshotError::DuplicateDevid { devid, members }) => {
-            return Err(RecoverError::DuplicateDevidDuringReplay { devid, members });
-        }
-        Err(JournaledSnapshotError::NoMemberForDevid { devid }) => {
-            return Err(RecoverError::NoMemberForJournaledDevid { devid });
-        }
+    if !live_pool_matches_membership(&pool, &journal.target_membership)? {
+        return Err(RecoverError::Failed(
+            "post-replace recovery live pool does not match target membership".into(),
+        ));
     }
     let prior = membership::load_membership(params.paths).ok();
     let recovered = recover_membership_matching_expected(
