@@ -805,31 +805,35 @@ fn check_pool_missing_devices<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) 
             CheckResult::ok("pool_missing_devices", "no missing devices")
         }
         Ok(pool) => {
-            let devids: Vec<String> = pool.missing_devids.iter().map(|d| d.to_string()).collect();
             let n = pool.missing_devids.len();
-            let repair_command = repair_hint::missing_replace_command(None);
-            let cross_check = match pool.missing_devids.as_slice() {
-                [devid] => format!(
-                    "Optional cross-check: `{}`.",
-                    repair_hint::missing_replace_command_with_devid(None, *devid)
+            let (suffix, cross_check, cross_check_target) = match pool.missing_devids.as_slice() {
+                [devid] => (
+                    "",
+                    format!(
+                        "Optional cross-check: `{}`.",
+                        repair_hint::missing_replace_command_with_devid(None, *devid)
+                    ),
+                    "Use the listed ID.",
                 ),
-                _ => repair_hint::optional_missing_id_cross_check_phrase(),
+                _ => (
+                    "s",
+                    repair_hint::optional_missing_id_cross_check_phrase(),
+                    "Use one of the listed IDs.",
+                ),
             };
-            let cross_check_target = if n == 1 {
-                "Use the listed ID."
-            } else {
-                "Use one of the listed IDs."
-            };
+            let repair_command = repair_hint::missing_replace_command(None);
+            let devids = pool
+                .missing_devids
+                .iter()
+                .map(|d| d.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
             CheckResult::warn(
                 "pool_missing_devices",
                 format!(
-                    "pool has {} missing device{} (devid{}: {}); replace with: \
+                    "pool has {n} missing device{suffix} (devid{suffix}: {devids}); replace with: \
                      `{repair_command}`; {cross_check} {cross_check_target} \
                      Use `braid status` to see the missing disk's name",
-                    n,
-                    if n == 1 { "" } else { "s" },
-                    if n == 1 { "" } else { "s" },
-                    devids.join(", "),
                 ),
             )
         }
@@ -5520,6 +5524,13 @@ mod tests {
             check.message
         );
         assert!(
+            check
+                .message
+                .contains("pool has 1 missing device (devid: 2)"),
+            "expected singular devid list: {}",
+            check.message
+        );
+        assert!(
             check.message.contains("braid replace"),
             "expected replace recommendation: {}",
             check.message
@@ -5539,6 +5550,19 @@ mod tests {
         assert!(
             check.message.contains("devid"),
             "expected devid in message: {}",
+            check.message
+        );
+        assert!(
+            check.message.contains(
+                "Optional cross-check: `braid replace --old <missing-name> --new \
+                 <new-name>=/dev/disk/by-id/<...> --missing-id 2`."
+            ),
+            "expected concrete missing-id cross-check: {}",
+            check.message
+        );
+        assert!(
+            check.message.contains("Use the listed ID."),
+            "expected single-missing cross-check target: {}",
             check.message
         );
     }
