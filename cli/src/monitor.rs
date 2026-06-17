@@ -99,9 +99,8 @@ pub fn cmd_monitor<R: CommandRunner, F: Filesystem + ?Sized>(
         // 6. Reconcile stale ack state: prune orphan devids and self-heal
         //    missing_acked for devices that are present again.
         let present_devids: BTreeSet<_> = pool.present_devids.iter().copied().collect();
-        let still_relevant_devids: BTreeSet<_> = devids.recognized.iter().copied().collect();
         let ack_changed =
-            alert::reconcile_acked_stats(&mut acked, &still_relevant_devids, &present_devids);
+            alert::reconcile_acked_stats(&mut acked, &devids.recognized, &present_devids);
         if ack_changed {
             save_acked_stats(&acked, paths)
                 .map_err(|e| format!("acked-stats unwritable -- {e}"))?;

@@ -108,14 +108,12 @@ pub fn compute_alert_state(
     smartd_alert_active: bool,
 ) -> AlertState {
     let mut causes = Vec::new();
-    let recognized: BTreeSet<Devid> = devids.recognized.iter().copied().collect();
-    let missing: BTreeSet<Devid> = devids.missing.iter().copied().collect();
 
     for dev in &current_stats.devices {
-        if missing.contains(&dev.devid) {
+        if devids.missing.contains(&dev.devid) {
             continue;
         }
-        if !recognized.contains(&dev.devid) {
+        if !devids.recognized.contains(&dev.devid) {
             continue;
         }
         let devid = dev.devid;
@@ -176,10 +174,9 @@ pub fn snapshot_current(
     devids: &AlertDevids,
 ) -> AckedStats {
     let mut map = BTreeMap::new();
-    let recognized: BTreeSet<Devid> = devids.recognized.iter().copied().collect();
 
     for dev in &current_stats.devices {
-        if !recognized.contains(&dev.devid) {
+        if !devids.recognized.contains(&dev.devid) {
             continue;
         }
         let key = dev.devid.to_string();
@@ -1026,8 +1023,8 @@ mod tests {
             &stats,
             &acked,
             &AlertDevids {
-                recognized: vec![Devid::new(1)],
-                missing: vec![],
+                recognized: BTreeSet::from([Devid::new(1)]),
+                missing: BTreeSet::new(),
             },
             false,
         );
@@ -1046,8 +1043,8 @@ mod tests {
             &stats,
             &acked,
             &AlertDevids {
-                recognized: vec![Devid::new(1)],
-                missing: vec![],
+                recognized: BTreeSet::from([Devid::new(1)]),
+                missing: BTreeSet::new(),
             },
             false,
         );
@@ -1069,8 +1066,8 @@ mod tests {
             &stats,
             &acked,
             &AlertDevids {
-                recognized: vec![Devid::new(1), Devid::new(2)],
-                missing: vec![Devid::new(2)],
+                recognized: BTreeSet::from([Devid::new(1), Devid::new(2)]),
+                missing: BTreeSet::from([Devid::new(2)]),
             },
             false,
         );
@@ -1092,8 +1089,8 @@ mod tests {
             &stats,
             &acked,
             &AlertDevids {
-                recognized: vec![Devid::new(1)],
-                missing: vec![],
+                recognized: BTreeSet::from([Devid::new(1)]),
+                missing: BTreeSet::new(),
             },
             true,
         );
@@ -1124,8 +1121,8 @@ mod tests {
             &stats,
             &acked,
             &AlertDevids {
-                recognized: vec![Devid::new(1)],
-                missing: vec![],
+                recognized: BTreeSet::from([Devid::new(1)]),
+                missing: BTreeSet::new(),
             },
             false,
         );
@@ -1168,8 +1165,8 @@ mod tests {
             &stats,
             &acked,
             &AlertDevids {
-                recognized: vec![Devid::new(1)],
-                missing: vec![],
+                recognized: BTreeSet::from([Devid::new(1)]),
+                missing: BTreeSet::new(),
             },
             false,
         );
@@ -1192,8 +1189,8 @@ mod tests {
             &stats,
             &acked,
             &AlertDevids {
-                recognized: vec![Devid::new(1), Devid::new(2)],
-                missing: vec![Devid::new(2)],
+                recognized: BTreeSet::from([Devid::new(1), Devid::new(2)]),
+                missing: BTreeSet::from([Devid::new(2)]),
             },
             false,
         );
@@ -1210,8 +1207,8 @@ mod tests {
             &stats,
             &acked,
             &AlertDevids {
-                recognized: vec![Devid::new(1), Devid::new(2)],
-                missing: vec![Devid::new(2)],
+                recognized: BTreeSet::from([Devid::new(1), Devid::new(2)]),
+                missing: BTreeSet::from([Devid::new(2)]),
             },
             true,
         );
@@ -1228,8 +1225,8 @@ mod tests {
         let snapshot = snapshot_current(
             &stats,
             &AlertDevids {
-                recognized: vec![Devid::new(1), Devid::new(2)],
-                missing: vec![Devid::new(2)],
+                recognized: BTreeSet::from([Devid::new(1), Devid::new(2)]),
+                missing: BTreeSet::from([Devid::new(2)]),
             },
         );
 
@@ -1261,8 +1258,8 @@ mod tests {
         let snapshot = snapshot_current(
             &stats,
             &AlertDevids {
-                recognized: vec![Devid::new(2)],
-                missing: vec![Devid::new(2)],
+                recognized: BTreeSet::from([Devid::new(2)]),
+                missing: BTreeSet::from([Devid::new(2)]),
             },
         );
 
@@ -1297,8 +1294,8 @@ mod tests {
             &stats,
             &acked,
             &AlertDevids {
-                recognized: vec![Devid::new(1)],
-                missing: vec![],
+                recognized: BTreeSet::from([Devid::new(1)]),
+                missing: BTreeSet::new(),
             },
             false,
         );
@@ -1327,8 +1324,8 @@ mod tests {
             &stats,
             &acked,
             &AlertDevids {
-                recognized: vec![Devid::new(99)],
-                missing: vec![],
+                recognized: BTreeSet::from([Devid::new(99)]),
+                missing: BTreeSet::new(),
             },
             false,
         );
@@ -1353,8 +1350,8 @@ mod tests {
             &stats,
             &acked,
             &AlertDevids {
-                recognized: vec![],
-                missing: vec![],
+                recognized: BTreeSet::new(),
+                missing: BTreeSet::new(),
             },
             false,
         );
@@ -1381,8 +1378,8 @@ mod tests {
             &stats,
             &acked,
             &AlertDevids {
-                recognized: vec![Devid::new(1), Devid::new(2)],
-                missing: vec![Devid::new(2)],
+                recognized: BTreeSet::from([Devid::new(1), Devid::new(2)]),
+                missing: BTreeSet::from([Devid::new(2)]),
             },
             false,
         );
@@ -1409,8 +1406,8 @@ mod tests {
             &stats,
             &acked,
             &AlertDevids {
-                recognized: vec![Devid::new(1), Devid::new(2)],
-                missing: vec![Devid::new(2)],
+                recognized: BTreeSet::from([Devid::new(1), Devid::new(2)]),
+                missing: BTreeSet::from([Devid::new(2)]),
             },
             false,
         );
@@ -1439,8 +1436,8 @@ mod tests {
         let snapshot = snapshot_current(
             &stats,
             &AlertDevids {
-                recognized: vec![Devid::new(1), Devid::new(2)],
-                missing: vec![Devid::new(2)],
+                recognized: BTreeSet::from([Devid::new(1), Devid::new(2)]),
+                missing: BTreeSet::from([Devid::new(2)]),
             },
         );
         assert!(snapshot.0.contains_key("1"));
@@ -1880,8 +1877,8 @@ mod tests {
         let stats = make_stats(vec![zero_device(Devid::new(1)), zero_device(Devid::new(2))]);
         let acked = AckedStats::default();
         // Alert-local missing devids includes the null-underlying device's devid
-        let alert_missing = vec![Devid::new(2)];
-        let recognized = vec![Devid::new(1), Devid::new(2)];
+        let alert_missing = BTreeSet::from([Devid::new(2)]);
+        let recognized = BTreeSet::from([Devid::new(1), Devid::new(2)]);
         let alert = compute_alert_state(
             &stats,
             &acked,

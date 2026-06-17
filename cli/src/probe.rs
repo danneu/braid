@@ -292,12 +292,14 @@ pub struct AlertPoolState {
 pub struct AlertDevids {
     /// All devids the alert pipeline recognizes as pool members (present +
     /// null-underlying + btrfs-MISSING). Stats rows outside this set are stale
-    /// identities and are skipped.
-    pub recognized: Vec<Devid>,
+    /// identities and are skipped. The `BTreeSet` type carries the dedup/order
+    /// invariant so consumers can membership-test without rebuilding a set.
+    pub recognized: BTreeSet<Devid>,
     /// Devids that must fire `MissingDevice` alerts: btrfs-MISSING union
-    /// null-underlying, deduplicated. These skip `BtrfsDeviceErrors` because
-    /// they are already alerted as missing.
-    pub missing: Vec<Devid>,
+    /// null-underlying. These skip `BtrfsDeviceErrors` because they are already
+    /// alerted as missing. The `BTreeSet` type carries the dedup/order
+    /// invariant.
+    pub missing: BTreeSet<Devid>,
 }
 
 impl AlertPoolState {
@@ -311,17 +313,13 @@ impl AlertPoolState {
             .copied()
             .chain(self.null_underlying.iter().map(|d| d.devid))
             .chain(self.missing_devids.iter().copied())
-            .collect::<BTreeSet<Devid>>()
-            .into_iter()
-            .collect();
+            .collect::<BTreeSet<Devid>>();
         let missing = self
             .missing_devids
             .iter()
             .copied()
             .chain(self.null_underlying.iter().map(|d| d.devid))
-            .collect::<BTreeSet<Devid>>()
-            .into_iter()
-            .collect();
+            .collect::<BTreeSet<Devid>>();
         AlertDevids {
             recognized,
             missing,
@@ -2222,7 +2220,7 @@ mod tests {
 
         assert_eq!(
             state.alert_devids().missing,
-            vec![Devid::new(2), Devid::new(3), Devid::new(4)]
+            BTreeSet::from([Devid::new(2), Devid::new(3), Devid::new(4)])
         );
     }
 
@@ -2253,7 +2251,7 @@ mod tests {
 
         assert_eq!(
             state.alert_devids().recognized,
-            vec![Devid::new(1), Devid::new(2), Devid::new(3), Devid::new(4)]
+            BTreeSet::from([Devid::new(1), Devid::new(2), Devid::new(3), Devid::new(4)])
         );
     }
 
@@ -2293,12 +2291,12 @@ mod tests {
         // recognized must contain all three origins; missing must exclude present.
         assert_eq!(
             devids.recognized,
-            vec![Devid::new(1), Devid::new(2), Devid::new(3)],
+            BTreeSet::from([Devid::new(1), Devid::new(2), Devid::new(3)]),
             "recognized must be present union null-underlying union btrfs-MISSING"
         );
         assert_eq!(
             devids.missing,
-            vec![Devid::new(2), Devid::new(3)],
+            BTreeSet::from([Devid::new(2), Devid::new(3)]),
             "missing must be btrfs-MISSING union null-underlying"
         );
 
