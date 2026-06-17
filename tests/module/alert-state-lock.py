@@ -324,9 +324,9 @@ with subtest("ack re-acquires promptly when holder releases mid-wait"):
         # and reach acquire_with_timeout, then prove it is blocked on
         # the held lock -- no timing assertion involved. Config load
         # for `Commands::Ack` happens *after* the lock is acquired
-        # (cli/src/main.rs:489 takes the pool lock at dispatch before
-        # the match arm runs), per ADR 026, so it is not part of the
-        # pre-acquire startup gap.
+        # (cli/src/main.rs#acquire_per_policy takes the pool lock at
+        # dispatch before the match arm runs), per ADR 026, so it is
+        # not part of the pre-acquire startup gap.
         time.sleep(2)
         rc, _ = machine.execute("test -e /tmp/ack.done")
         assert rc != 0, "ack completed while pool lock was still held"

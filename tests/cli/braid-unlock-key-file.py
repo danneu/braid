@@ -129,7 +129,7 @@ with subtest("Test 2c: wrong-size keyfile rejected with clear error"):
 #
 # Intent: --key-file with a missing pool member and no --allow-degraded must
 #   exit 2 and print the --allow-degraded hint. This is the exact contract
-#   braid-auto-unlock.service consumes at storage.nix:265.
+#   braid-auto-unlock.service consumes (modules/braid/storage.nix#braid-auto-unlock).
 # Why it exists: Existing DegradedRefused tests all run via passphrase
 #   (braid-unlock.py Tests 4a/4a_dry/7). A future refactor that routes
 #   keyfile DegradedRefused through a different exit code would break the

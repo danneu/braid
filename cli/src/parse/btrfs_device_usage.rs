@@ -307,8 +307,9 @@ mod tests {
     //   (REQUIRE_FIXTURES = false); a refactor back to `parse_u64` would
     //   regress silently. This synthetic test fails immediately under
     //   `just test-rust` with no VM fixture round-trip.
-    // Scenario: the transient state captured by
-    //   `tests/progress-monitoring.py:164` -- a device shedding block groups
+    // Scenario: the transient state captured by the
+    //   `device remove progress observed` subtest in
+    //   `tests/progress-monitoring.py` -- a device shedding block groups
     //   reports its full size as slack and a negative Unallocated.
     fn device_usage_clamps_negative_unallocated() {
         let raw = RawCommandOutput {

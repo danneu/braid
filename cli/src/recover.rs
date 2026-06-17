@@ -16428,11 +16428,11 @@ mod tests {
     // Intent: RecoverWorkAction::WaitForKernelReplace.execute returns
     // Ok(false) without touching the runner when state.just_mounted is false.
     //
-    // Why it exists: The `if state.just_mounted` gate at recover.rs:440 is
-    // defense-in-depth on top of plan_recover's already-mounted refusal
-    // (recover.rs:1310, pinned by
-    // plan_recover_refuses_replace_on_externally_mounted_pool) and its
-    // `open_plan.is_some()` push gate (recover.rs:1381). Without this test, a
+    // Why it exists: The `if state.just_mounted` gate in
+    // `RecoverWorkAction::execute` is defense-in-depth on top of
+    // `plan_recover`'s already-mounted refusal (pinned by
+    // `plan_recover_refuses_replace_on_externally_mounted_pool`) and its
+    // `open_plan.is_some()` push gate. Without this test, a
     // regression that flips the gate (`if !state.just_mounted`) or removes it
     // would compile and pass `just test-rust`, leaving production safety
     // dependent solely on the planner refusal.
@@ -16532,10 +16532,10 @@ mod tests {
     // without touching the runner when state.just_mounted is false.
     //
     // Why it exists: Same defense-in-depth pattern as
-    // WaitForKernelReplace -- the `if state.just_mounted` gate at
-    // recover.rs:451 guards relock_and_remount (umount + scan-forget +
-    // LUKS close+reopen + remount), all backstopped by the planner's
-    // `open_plan.is_some()` push gate at recover.rs:1406. A regression
+    // WaitForKernelReplace -- the `if state.just_mounted` gate in
+    // `RecoverWorkAction::execute` guards relock_and_remount (umount +
+    // scan-forget + LUKS close+reopen + remount), all backstopped by
+    // `plan_recover`'s `open_plan.is_some()` push gate. A regression
     // here would attempt to umount a foreign mount session.
     //
     // Scenario: Same TOCTOU window as the WaitForKernelReplace no-op

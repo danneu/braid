@@ -584,11 +584,11 @@ golden_test!(
         // presence.
         //
         // Allocation rows must survive parsing for every type
-        // check_raid1_relocation_space sums independently:
-        // `for alloc_type in ["Data", "Metadata", "System"] { ... }`
-        // at preflight.rs:327. `bytes_on_target == 0` silently
-        // skips that type's ENOSPC check (preflight.rs:333-335),
-        // so dropping or renaming any one row -- not just Data --
+        // `cli/src/preflight.rs#check_raid1_relocation_space` sums
+        // independently:
+        // `for alloc_type in ["Data", "Metadata", "System"] { ... }`.
+        // `bytes_on_target == 0` silently skips that type's ENOSPC
+        // check, so dropping or renaming any one row -- not just Data --
         // would let production undercount relocation demand while
         // the parser still parses. A freshly-mkfs'd RAID1 pool with
         // a 16 MiB write allocates all three chunk types on both
