@@ -1373,7 +1373,10 @@ mod tests {
         let result = RawCommandOutput {
             cmd: String::new(),
             stdout: String::new(),
-            stderr: "ERROR: error removing device '/dev/mapper/braid-disk2': unable to go below two devices on raid1".to_owned(),
+            stderr: crate::test_fixtures::btrfs_remove_path_error(
+                "/dev/mapper/braid-disk2",
+                "unable to go below two devices on raid1",
+            ),
             exit_status: 1,
         };
 
@@ -1411,7 +1414,10 @@ mod tests {
         let result = RawCommandOutput {
             cmd: String::new(),
             stdout: String::new(),
-            stderr: "ERROR: error removing device '/dev/mapper/braid-disk2': unable to go below three devices on raid1c3".to_owned(),
+            stderr: crate::test_fixtures::btrfs_remove_path_error(
+                "/dev/mapper/braid-disk2",
+                "unable to go below three devices on raid1c3",
+            ),
             exit_status: 1,
         };
 
@@ -1445,8 +1451,10 @@ mod tests {
         let result = RawCommandOutput {
             cmd: String::new(),
             stdout: String::new(),
-            stderr: "ERROR: error removing device '2': unable to go below three devices on raid1c3"
-                .to_owned(),
+            stderr: crate::test_fixtures::btrfs_remove_devid_error(
+                2,
+                "unable to go below three devices on raid1c3",
+            ),
             exit_status: 1,
         };
 
@@ -1538,7 +1546,10 @@ mod tests {
             RawCommandOutput {
                 cmd: String::new(),
                 stdout: String::new(),
-                stderr: "ERROR: error removing device '/dev/mapper/braid-disk2': unable to go below two devices on raid1".to_owned(),
+                stderr: crate::test_fixtures::btrfs_remove_path_error(
+                    "/dev/mapper/braid-disk2",
+                    "unable to go below two devices on raid1",
+                ),
                 exit_status: 1,
             },
         );
@@ -1586,9 +1597,10 @@ mod tests {
             RawCommandOutput {
                 cmd: String::new(),
                 stdout: String::new(),
-                stderr:
-                    "ERROR: error removing device '2': unable to go below three devices on raid1c3"
-                        .to_owned(),
+                stderr: crate::test_fixtures::btrfs_remove_devid_error(
+                    2,
+                    "unable to go below three devices on raid1c3",
+                ),
                 exit_status: 1,
             },
         );

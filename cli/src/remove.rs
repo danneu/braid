@@ -868,8 +868,8 @@ mod tests {
     use crate::membership::PoolMembership;
     use crate::state_paths::StatePaths;
     use crate::test_fixtures::{
-        DeviceUsageSpec, MockFs, PoolFixture, RemovalPool, canonical_luks_uuid,
-        device_usage_raw_body, mock_ok, overcommitted_survivor_df_json,
+        DeviceUsageSpec, MockFs, PoolFixture, RemovalPool, btrfs_remove_path_error,
+        canonical_luks_uuid, device_usage_raw_body, mock_ok, overcommitted_survivor_df_json,
         overcommitted_survivor_usage_stdout, target_device, valid_three_disk_df_json,
         valid_three_disk_usage_stdout, valid_two_disk_df_json, valid_two_disk_usage_stdout,
         with_lsblk_hw_info,
@@ -1242,7 +1242,10 @@ mod tests {
                 CmdRequest::BtrfsDeviceRemove { .. } => Some(Ok(RawCommandOutput {
                     cmd: "btrfs device remove".into(),
                     stdout: String::new(),
-                    stderr: "ERROR: error removing device".into(),
+                    stderr: btrfs_remove_path_error(
+                        "/dev/mapper/braid-disk2",
+                        "No space left on device",
+                    ),
                     exit_status: 1,
                 })),
                 _ => None,
@@ -1571,7 +1574,10 @@ mod tests {
                 CmdRequest::BtrfsDeviceRemove { .. } => Some(Ok(RawCommandOutput {
                     cmd: "btrfs device remove".into(),
                     stdout: String::new(),
-                    stderr: "ERROR: error removing device".into(),
+                    stderr: btrfs_remove_path_error(
+                        "/dev/mapper/braid-disk2",
+                        "No space left on device",
+                    ),
                     exit_status: 1,
                 })),
                 _ => None,
@@ -3115,7 +3121,10 @@ mod tests {
             CmdRequest::BtrfsDeviceRemove { .. } => Some(Ok(RawCommandOutput {
                 cmd: "btrfs device remove".into(),
                 stdout: String::new(),
-                stderr: "ERROR: error removing device".into(),
+                stderr: btrfs_remove_path_error(
+                    "/dev/mapper/braid-disk2",
+                    "No space left on device",
+                ),
                 exit_status: 1,
             })),
             _ => None,

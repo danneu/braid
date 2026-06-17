@@ -112,6 +112,23 @@ pub(crate) fn mock_ok(cmd: &str, stdout: &str) -> RawCommandOutput {
     }
 }
 
+/// Render a `btrfs device remove` failure stderr line in btrfs-progs' by-id
+/// shape. A bare numeric devid takes the `string_is_numerical` ->
+/// `BTRFS_DEVICE_SPEC_BY_ID` arm in `reference/btrfs-progs/cmds/device.c`,
+/// printing `error removing devid <n>` -- the word "devid", no quotes. braid's
+/// `remove-missing` always removes by devid, so its failure fixtures use this.
+pub(crate) fn btrfs_remove_devid_error(devid: u64, msg: &str) -> String {
+    format!("ERROR: error removing devid {devid}: {msg}")
+}
+
+/// Render a `btrfs device remove` failure stderr line in btrfs-progs' by-path
+/// shape: a block-device argument prints `error removing device '<path>'`
+/// (quoted), per the non-`is_devid` arm in `reference/btrfs-progs/cmds/device.c`.
+/// braid's live `remove` removes by mapper path, so its failure fixtures use this.
+pub(crate) fn btrfs_remove_path_error(path: &str, msg: &str) -> String {
+    format!("ERROR: error removing device '{path}': {msg}")
+}
+
 /// Register `lsblk` Model/Serial/Size outputs for `device` so a confirm
 /// prompt's hw line resolves only when the probe is routed to THIS path.
 /// Lets routing tests pin that a present-disk prompt queries the live
@@ -619,6 +636,63 @@ mod tests {
              \x20  Data,RAID1:            67108864\n\
              \x20  Unallocated:                  0\n\n"
         );
+    }
+
+    // Intent: pin both `btrfs device remove` failure-stderr builders byte-for-byte
+    //   to btrfs-progs' two arms -- by-id (`devid <n>`, no quotes) and by-path
+    //   (`device '<path>'`, quoted) -- per `reference/btrfs-progs/cmds/device.c`.
+    // Why it exists: the only consumer, `device_remove_error`, keys solely on the
+    //   `"unable to go below"` substring (`pool.rs`), so the prefix shape is NOT
+    //   load-bearing for behavior -- which is exactly why per-fixture literals had
+    //   already drifted into the wrong arm. This pin is the only guard on the shape.
+    // Scenario: a fixture author writes a remove-failure stderr by hand and reaches
+    //   for the wrong arm (a quoted path for a by-devid removal, say); the builders
+    //   make the correct shape the only one on offer, and this test locks them.
+    #[test]
+    fn btrfs_remove_error_builders_render_canonical_devid_and_path_arms() {
+        assert_eq!(
+            btrfs_remove_devid_error(3, "unable to go below three devices on raid1c3"),
+            "ERROR: error removing devid 3: unable to go below three devices on raid1c3"
+        );
+        assert_eq!(
+            btrfs_remove_path_error("/dev/mapper/braid-disk2", "No space left on device"),
+            "ERROR: error removing device '/dev/mapper/braid-disk2': No space left on device"
+        );
+    }
+
+    // Intent: reject any inline `btrfs device remove` failure-stderr literal at a
+    //   call site, forcing every such fixture through btrfs_remove_devid_error /
+    //   btrfs_remove_path_error.
+    // Why it exists: the output pin above protects only the builders; nothing else
+    //   stops a future author from hardcoding `stderr: "ERROR: error removing
+    //   device ...".into()` at a call site, and behavioral tests would not catch it
+    //   (they key on `"unable to go below"`, not the prefix). This source scan is
+    //   the enforcement that closes that gap and keeps all fixtures honest.
+    // Scenario: someone adds a new remove-failure test and pastes a raw stderr
+    //   string instead of calling the builder; this test fails and names the file.
+    //
+    // Limitation: the scan list is explicit. A future command that adds
+    //   device-remove failure fixtures in a NEW module must be added here -- a
+    //   `cli/src/**` glob is not available to a unit test without a build script,
+    //   and the explicit list is the simple, fail-loud choice (a moved/renamed file
+    //   breaks `include_str!` at compile time). `shared.rs` is deliberately NOT
+    //   scanned, so the builder bodies and this test's own needle never self-trip;
+    //   `include_str!` resolves relative to this file (`cli/src/test_fixtures/`), so
+    //   the call-site files are one dir up.
+    #[test]
+    fn no_inline_btrfs_remove_failure_literals_at_call_sites() {
+        for (name, src) in [
+            ("pool.rs", include_str!("../pool.rs")),
+            ("remove.rs", include_str!("../remove.rs")),
+            ("remove_missing.rs", include_str!("../remove_missing.rs")),
+        ] {
+            assert!(
+                !src.contains("ERROR: error removing devi"),
+                "{name}: inline `btrfs device remove` failure literal found -- route it \
+                 through btrfs_remove_devid_error / btrfs_remove_path_error in \
+                 test_fixtures::shared instead of hardcoding the stderr shape"
+            );
+        }
     }
 
     // Intent: canonical_luks_uuid(n) yields the exact repeated-digit literal for

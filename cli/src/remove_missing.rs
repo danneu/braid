@@ -737,7 +737,8 @@ mod tests {
     use crate::config::mapper_name;
     use crate::membership::PoolMembership;
     use crate::test_fixtures::{
-        DeviceUsageSpec, MockFs, PoolFixture, RemoveMissingPool, device_usage_raw_body, mock_ok,
+        DeviceUsageSpec, MockFs, PoolFixture, RemoveMissingPool, btrfs_remove_devid_error,
+        device_usage_raw_body, mock_ok,
     };
     use crate::types::{Fsid, NullUnderlyingDevice, PoolDevice};
 
@@ -1990,7 +1991,7 @@ mod tests {
             CmdRequest::BtrfsDeviceRemove { .. } => Some(Ok(RawCommandOutput {
                 cmd: "btrfs device remove 3 /mnt/storage".into(),
                 stdout: String::new(),
-                stderr: "ERROR: error removing device: No space left on device".into(),
+                stderr: btrfs_remove_devid_error(3, "No space left on device"),
                 exit_status: 1,
             })),
             _ => None,
@@ -2118,7 +2119,7 @@ mod tests {
             CmdRequest::BtrfsDeviceRemove { .. } => Some(Ok(RawCommandOutput {
                 cmd: "btrfs device remove 3 /mnt/storage".into(),
                 stdout: String::new(),
-                stderr: "ERROR: error removing device: No space left on device".into(),
+                stderr: btrfs_remove_devid_error(3, "No space left on device"),
                 exit_status: 1,
             })),
             _ => None,
@@ -2219,9 +2220,7 @@ mod tests {
             CmdRequest::BtrfsDeviceRemove { .. } => Some(Ok(RawCommandOutput {
                 cmd: "btrfs device remove 3 /mnt/storage".into(),
                 stdout: String::new(),
-                stderr:
-                    "ERROR: error removing device '3': unable to go below three devices on raid1c3"
-                        .into(),
+                stderr: btrfs_remove_devid_error(3, "unable to go below three devices on raid1c3"),
                 exit_status: 1,
             })),
             _ => None,
