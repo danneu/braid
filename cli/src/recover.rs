@@ -15735,27 +15735,37 @@ mod tests {
             restore_raid1_after_commit: false,
         };
 
+        // Literal, not format!(...{:?}...) -- the quotes ARE the contract;
+        // re-deriving them with the impl's own expression would let a
+        // {:?}->{} cleanup pass. The `add` literal is byte-identical to
+        // docs/commands/recover.md.
         let cases = [
-            (add_op, "add"),
-            (remove_op, "remove"),
-            (remove_missing_op, "remove-missing"),
-            (replace_op, "replace"),
+            (
+                add_op,
+                "Recovering from interrupted \"add\" operation (started 2026-03-15T14:30:00Z)...",
+            ),
+            (
+                remove_op,
+                "Recovering from interrupted \"remove\" operation (started 2026-03-15T14:30:00Z)...",
+            ),
+            (
+                remove_missing_op,
+                "Recovering from interrupted \"remove-missing\" operation (started 2026-03-15T14:30:00Z)...",
+            ),
+            (
+                replace_op,
+                "Recovering from interrupted \"replace\" operation (started 2026-03-15T14:30:00Z)...",
+            ),
         ];
 
-        for (op, label) in cases {
+        for (op, expected) in cases {
             let journal = journal::Journal {
                 started_at: started_at.to_owned(),
                 op,
                 pre_membership: PoolMembership::empty(),
                 target_membership: PoolMembership::empty(),
             };
-            assert_eq!(
-                format_recover_entry(&journal),
-                format!(
-                    "Recovering from interrupted {:?} operation (started {})...",
-                    label, started_at
-                )
-            );
+            assert_eq!(format_recover_entry(&journal), expected);
         }
     }
 
