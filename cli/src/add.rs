@@ -1469,11 +1469,11 @@ impl AddPlan {
         if !self.pool.mounted {
             if mapper_paths.len() >= 2 {
                 // Bootstrap with mkfs.btrfs RAID1
-                pool_bootstrap_mount_raid1(runner, &mapper_paths, mount_point)?;
+                pool_bootstrap_mount_raid1(runner, fs, &mapper_paths, mount_point)?;
                 eprintln!("Pool created (RAID1) and mounted at {}", mount_point);
             } else {
                 // Single disk bootstrap
-                pool_bootstrap_mount(runner, &mapper_paths[0], mount_point)?;
+                pool_bootstrap_mount(runner, fs, &mapper_paths[0], mount_point)?;
                 eprintln!(
                     "Pool created (data single; metadata/system DUP -- no RAID1 disk redundancy) and mounted at {}",
                     mount_point
@@ -2591,6 +2591,11 @@ mod tests {
             }
             fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
                 Ok(vec![])
+            }
+            fn create_dir_all(&self, _path: &str) -> Result<(), std::io::Error> {
+                unreachable!(
+                    "add::MockFs: read-only dry-run fixture; create_dir_all must never be called"
+                )
             }
         }
 
@@ -5140,6 +5145,9 @@ mod tests {
         fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
             Ok(vec![])
         }
+        fn create_dir_all(&self, _path: &str) -> Result<(), std::io::Error> {
+            Ok(())
+        }
     }
 
     struct AddOfflineMockFs(Vec<String>);
@@ -5161,6 +5169,9 @@ mod tests {
         }
         fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
             Ok(vec![])
+        }
+        fn create_dir_all(&self, _path: &str) -> Result<(), std::io::Error> {
+            Ok(())
         }
     }
 
@@ -5601,6 +5612,10 @@ mod tests {
 
         fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
             Ok(vec![])
+        }
+
+        fn create_dir_all(&self, _path: &str) -> Result<(), std::io::Error> {
+            Ok(())
         }
     }
 
@@ -8315,6 +8330,10 @@ mod tests {
         fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
             panic!("planner-boundary test: fs.read_to_string must not be called; got: {path}");
         }
+
+        fn create_dir_all(&self, path: &str) -> Result<(), std::io::Error> {
+            panic!("planner-boundary test: fs.create_dir_all must not be called; got: {path}");
+        }
     }
 
     // Intent: `braid add --enroll` rejects a missing braid.key during
@@ -10325,6 +10344,9 @@ mod tests {
         }
         fn list_dir(&self, path: &str) -> Result<Vec<String>, std::io::Error> {
             self.inner.list_dir(path)
+        }
+        fn create_dir_all(&self, path: &str) -> Result<(), std::io::Error> {
+            self.inner.create_dir_all(path)
         }
     }
 

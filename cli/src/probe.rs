@@ -22,6 +22,13 @@ pub trait Filesystem {
     fn is_block_device(&self, path: &str) -> bool;
     fn list_dir(&self, path: &str) -> Result<Vec<String>, std::io::Error>;
     fn read_to_string(&self, path: &str) -> Result<String, std::io::Error>;
+    /// Create `path` and any missing parents -- the mount/pool execute layer's
+    /// one filesystem mutation, kept behind this seam (a direct `std::fs`
+    /// syscall, not a subprocess; cf. ADR 016) so the mount path is mockable
+    /// and the failure surfaces fail-closed. No default: every impl declares
+    /// its behavior, and read-only doubles `unreachable!` here so an accidental
+    /// mutation on a read-only path fails loudly instead of passing silently.
+    fn create_dir_all(&self, path: &str) -> Result<(), std::io::Error>;
 }
 
 pub struct RealFilesystem;
@@ -54,6 +61,10 @@ impl Filesystem for RealFilesystem {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(vec![]),
             Err(e) => Err(e),
         }
+    }
+
+    fn create_dir_all(&self, path: &str) -> Result<(), std::io::Error> {
+        std::fs::create_dir_all(path)
     }
 }
 
@@ -620,6 +631,10 @@ mod tests {
 
         fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
             Ok(vec![])
+        }
+
+        fn create_dir_all(&self, _path: &str) -> Result<(), std::io::Error> {
+            unreachable!("probe::MockFs: read-only fixture; create_dir_all must never be called")
         }
     }
 

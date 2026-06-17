@@ -256,6 +256,10 @@ impl Filesystem for MonitorFs {
     fn list_dir(&self, path: &str) -> Result<Vec<String>, std::io::Error> {
         panic!("unexpected monitor fs list_dir probe: {path}");
     }
+
+    fn create_dir_all(&self, path: &str) -> Result<(), std::io::Error> {
+        panic!("unexpected monitor fs create_dir_all probe: {path}");
+    }
 }
 
 /// Canonical monitor-test mount point shared by the promoted runners.

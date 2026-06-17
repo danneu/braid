@@ -581,8 +581,9 @@ pub fn pool_resize_device<R: CommandRunner + Sync>(
 }
 
 /// Bootstrap the pool: mkfs.btrfs, then mount.
-pub fn pool_bootstrap_mount<R: CommandRunner + Sync>(
+pub fn pool_bootstrap_mount<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     runner: &R,
+    fs: &F,
     device: &str,
     mount_point: &MountPoint,
 ) -> Result<(), PoolError> {
@@ -598,7 +599,7 @@ pub fn pool_bootstrap_mount<R: CommandRunner + Sync>(
     }
 
     // Create mount point directory if needed
-    let _ = std::fs::create_dir_all(mount_point.as_str());
+    crate::util::ensure_mount_point_dir(fs, mount_point).map_err(PoolError::Failed)?;
 
     let mount = runner.run(&CmdRequest::Mount {
         device: device.to_owned(),
@@ -616,8 +617,9 @@ pub fn pool_bootstrap_mount<R: CommandRunner + Sync>(
 
 /// Bootstrap the pool with multiple devices in RAID1: mkfs.btrfs -d raid1
 /// -m raid1, then mount.
-pub fn pool_bootstrap_mount_raid1<R: CommandRunner + Sync>(
+pub fn pool_bootstrap_mount_raid1<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     runner: &R,
+    fs: &F,
     devices: &[String],
     mount_point: &MountPoint,
 ) -> Result<(), PoolError> {
@@ -632,7 +634,7 @@ pub fn pool_bootstrap_mount_raid1<R: CommandRunner + Sync>(
         )));
     }
 
-    let _ = std::fs::create_dir_all(mount_point.as_str());
+    crate::util::ensure_mount_point_dir(fs, mount_point).map_err(PoolError::Failed)?;
 
     let mount = runner.run(&CmdRequest::Mount {
         device: devices[0].clone(),
@@ -697,7 +699,7 @@ mod tests {
                 ok_raw(),
             );
 
-        pool_bootstrap_mount(&runner, device, &mount_point).unwrap();
+        pool_bootstrap_mount(&runner, &RestoreFs, device, &mount_point).unwrap();
 
         assert_eq!(
             runner.requests(),
@@ -741,7 +743,7 @@ mod tests {
                 ok_raw(),
             );
 
-        pool_bootstrap_mount_raid1(&runner, &devices, &mount_point).unwrap();
+        pool_bootstrap_mount_raid1(&runner, &RestoreFs, &devices, &mount_point).unwrap();
 
         assert_eq!(
             runner.requests(),
@@ -754,6 +756,87 @@ mod tests {
                     mount_point,
                 },
             ]
+        );
+    }
+
+    #[test]
+    // Intent: a mount-point mkdir failure aborts single-device bootstrap with a
+    // named PoolError::Failed("could not create mount point ...") and no mount.
+    // Why it exists: bootstrap formats the disk before creating the mount
+    // point; the swallowed `let _ = create_dir_all(...)` used to resurface as
+    // an opaque kernel `mount` failure a step later. Routing through the
+    // Filesystem seam is only worthwhile if that failure is fail-closed.
+    // Scenario: a fresh single-disk pool whose mount-point parent is a
+    // non-directory, so create_dir_all cannot create the directory.
+    fn pool_bootstrap_mount_surfaces_mkdir_failure_before_mount() {
+        let device = "/dev/mapper/braid-disk1";
+        let mount_point = mp();
+        // mkfs runs before the mkdir; Mount is intentionally NOT wired.
+        let runner = MockRunner::default().with_output(
+            CmdRequest::MkfsBtrfs {
+                device: device.into(),
+            },
+            ok_raw(),
+        );
+        let fs = crate::test_fixtures::MockFs::unmounted(vec![])
+            .with_create_dir_error(std::io::ErrorKind::PermissionDenied);
+
+        let err = pool_bootstrap_mount(&runner, &fs, device, &mount_point)
+            .expect_err("mkdir failure must abort bootstrap");
+        match err {
+            PoolError::Failed(msg) => assert!(
+                msg.contains("could not create mount point"),
+                "unexpected message: {msg}"
+            ),
+            other => panic!("expected PoolError::Failed, got {other:?}"),
+        }
+        assert!(
+            !runner
+                .requests()
+                .iter()
+                .any(|r| matches!(r, CmdRequest::Mount { .. })),
+            "no mount must be attempted after a mkdir failure"
+        );
+    }
+
+    #[test]
+    // Intent: a mount-point mkdir failure aborts RAID1 bootstrap with a named
+    // PoolError::Failed("could not create mount point ...") and no mount.
+    // Why it exists: the RAID1 bootstrap path has the same swallowed-mkdir
+    // defect as the single-device path; both must surface the failure
+    // fail-closed through the Filesystem seam.
+    // Scenario: a fresh two-disk RAID1 pool whose mount-point parent is a
+    // non-directory, so create_dir_all cannot create the directory.
+    fn pool_bootstrap_mount_raid1_surfaces_mkdir_failure_before_mount() {
+        let devices = vec![
+            "/dev/mapper/braid-disk1".to_owned(),
+            "/dev/mapper/braid-disk2".to_owned(),
+        ];
+        let mount_point = mp();
+        let runner = MockRunner::default().with_output(
+            CmdRequest::MkfsBtrfsRaid1 {
+                devices: devices.clone(),
+            },
+            ok_raw(),
+        );
+        let fs = crate::test_fixtures::MockFs::unmounted(vec![])
+            .with_create_dir_error(std::io::ErrorKind::PermissionDenied);
+
+        let err = pool_bootstrap_mount_raid1(&runner, &fs, &devices, &mount_point)
+            .expect_err("mkdir failure must abort RAID1 bootstrap");
+        match err {
+            PoolError::Failed(msg) => assert!(
+                msg.contains("could not create mount point"),
+                "unexpected message: {msg}"
+            ),
+            other => panic!("expected PoolError::Failed, got {other:?}"),
+        }
+        assert!(
+            !runner
+                .requests()
+                .iter()
+                .any(|r| matches!(r, CmdRequest::Mount { .. })),
+            "no mount must be attempted after a mkdir failure"
         );
     }
 
@@ -1111,6 +1194,10 @@ mod tests {
 
         fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
             Ok(vec![])
+        }
+
+        fn create_dir_all(&self, _path: &str) -> Result<(), std::io::Error> {
+            Ok(())
         }
     }
 

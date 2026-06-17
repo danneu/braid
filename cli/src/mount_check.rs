@@ -641,6 +641,9 @@ mod tests {
                 .clone()
                 .map_err(|kind| std::io::Error::new(kind, "mock mountinfo read failed"))
         }
+        fn create_dir_all(&self, _: &str) -> Result<(), std::io::Error> {
+            unreachable!("MockMountInfoFs: read-only fixture; create_dir_all must never be called")
+        }
     }
 
     /* Intent: the IO-shimmed helper returns the target fstype when
@@ -750,6 +753,9 @@ mod tests {
                     std::io::ErrorKind::PermissionDenied,
                     "test: read denied",
                 ))
+            }
+            fn create_dir_all(&self, _: &str) -> Result<(), std::io::Error> {
+                unreachable!("FailingFs: read-only fixture; create_dir_all must never be called")
             }
         }
         let result = is_btrfs_mounted(&FailingFs, TARGET);

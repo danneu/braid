@@ -221,6 +221,10 @@ pub(crate) struct MockFs {
     mountinfo: String,
     excl_op: String,
     dev_mapper: DevMapperListing,
+    /// When `Some`, `create_dir_all` fails with this error kind instead of
+    /// succeeding, so mount/pool failure tests can exercise the fail-closed
+    /// mount-point-creation path without touching a real filesystem.
+    create_dir_error: Option<std::io::ErrorKind>,
 }
 
 /// `/dev/mapper` listing behavior, kept explicit so tests can distinguish
@@ -241,6 +245,7 @@ impl MockFs {
                 .into(),
             excl_op: "none\n".into(),
             dev_mapper: DevMapperListing::Empty,
+            create_dir_error: None,
         }
     }
 
@@ -253,6 +258,7 @@ impl MockFs {
             mountinfo: "26 25 0:23 / / rw shared:1 - ext4 /dev/sda1 rw\n".into(),
             excl_op: "none\n".into(),
             dev_mapper: DevMapperListing::Empty,
+            create_dir_error: None,
         }
     }
 
@@ -284,6 +290,13 @@ impl MockFs {
         self.dev_mapper = DevMapperListing::Error(std::io::ErrorKind::PermissionDenied);
         self
     }
+
+    /// Make `create_dir_all` fail with `kind` so mount/pool tests can drive
+    /// the fail-closed mount-point-creation path. Default is success.
+    pub(crate) fn with_create_dir_error(mut self, kind: std::io::ErrorKind) -> Self {
+        self.create_dir_error = Some(kind);
+        self
+    }
 }
 
 impl Filesystem for MockFs {
@@ -313,6 +326,12 @@ impl Filesystem for MockFs {
             }
         } else {
             Ok(vec![])
+        }
+    }
+    fn create_dir_all(&self, _path: &str) -> Result<(), std::io::Error> {
+        match self.create_dir_error {
+            Some(kind) => Err(std::io::Error::new(kind, "mock create_dir_all failure")),
+            None => Ok(()),
         }
     }
 }

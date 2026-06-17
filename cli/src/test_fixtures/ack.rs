@@ -52,6 +52,10 @@ impl Filesystem for AckPanicFilesystem {
     fn list_dir(&self, path: &str) -> Result<Vec<String>, std::io::Error> {
         panic!("sentinel-only retry must not touch the filesystem; got list_dir({path})");
     }
+
+    fn create_dir_all(&self, path: &str) -> Result<(), std::io::Error> {
+        panic!("sentinel-only retry must not touch the filesystem; got create_dir_all({path})");
+    }
 }
 
 struct AckMountinfoFs {
@@ -74,6 +78,10 @@ impl Filesystem for AckMountinfoFs {
 
     fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
         Ok(vec![])
+    }
+
+    fn create_dir_all(&self, _path: &str) -> Result<(), std::io::Error> {
+        unreachable!("AckMountinfoFs: read-only fixture; create_dir_all must never be called")
     }
 }
 
@@ -99,6 +107,12 @@ impl Filesystem for OfflineFsThatTouchesSmartd<'_> {
     fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
         Ok(vec![])
     }
+
+    fn create_dir_all(&self, _path: &str) -> Result<(), std::io::Error> {
+        unreachable!(
+            "OfflineFsThatTouchesSmartd: read-only fixture; create_dir_all must never be called"
+        )
+    }
 }
 
 struct MountedFsThatTouchesSmartd<'a> {
@@ -122,6 +136,12 @@ impl Filesystem for MountedFsThatTouchesSmartd<'_> {
 
     fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
         Ok(vec![])
+    }
+
+    fn create_dir_all(&self, _path: &str) -> Result<(), std::io::Error> {
+        unreachable!(
+            "MountedFsThatTouchesSmartd: read-only fixture; create_dir_all must never be called"
+        )
     }
 }
 

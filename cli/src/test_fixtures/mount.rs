@@ -424,12 +424,12 @@ pub(crate) fn open_and_mount_for_test<R: CommandRunner, F: Filesystem + ?Sized>(
         None => return Ok(false),
     };
     if plan.to_unlock.is_empty() {
-        execute_mount_only(runner, config, &plan)
+        execute_mount_only(runner, fs, config, &plan)
     } else {
         let credential = credential
             .as_ref()
             .expect("test passed empty credential with non-empty plan");
-        execute_unlock_and_mount(runner, config, &plan, backing_path_resolver, credential)
+        execute_unlock_and_mount(runner, fs, config, &plan, backing_path_resolver, credential)
             .map_err(|failure: UnlockAndMountFailure| failure.error)
     }
 }

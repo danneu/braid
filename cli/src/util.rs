@@ -1,5 +1,8 @@
 use std::io::{self, IsTerminal};
 
+use crate::probe::Filesystem;
+use crate::types::MountPoint;
+
 fn require_tty_inner(cmd: &str, stdin_tty: bool, stdout_tty: bool) -> io::Result<()> {
     if stdin_tty && stdout_tty {
         return Ok(());
@@ -44,6 +47,23 @@ pub(crate) fn detail_suffix(detail: &str) -> String {
     } else {
         format!(": {detail}")
     }
+}
+
+/// Create the pool mount-point directory through the `Filesystem` seam,
+/// surfacing a mkdir failure as a named operator message instead of letting it
+/// resurface as a confusing kernel `mount` failure a step later. Idempotent:
+/// `create_dir_all` returns Ok when the directory already exists (the NixOS
+/// tmpfiles / sealed-dir case) and errors when the directory or a missing
+/// parent cannot be created -- for example a path component is a non-directory,
+/// or the parent is unwritable or full. (Per std's docs this list is not
+/// exhaustive, and some parent directories may have been created before the
+/// error.) Returns the message so each caller wraps it in its own error enum.
+pub(crate) fn ensure_mount_point_dir<F: Filesystem + ?Sized>(
+    fs: &F,
+    mount_point: &MountPoint,
+) -> Result<(), String> {
+    fs.create_dir_all(mount_point.as_str())
+        .map_err(|e| format!("could not create mount point {mount_point}: {e}"))
 }
 
 #[cfg(test)]

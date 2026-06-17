@@ -2209,6 +2209,10 @@ mod tests {
         fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
             panic!("planner-boundary test: fs.read_to_string must not be called; got: {path}");
         }
+
+        fn create_dir_all(&self, path: &str) -> Result<(), std::io::Error> {
+            panic!("planner-boundary test: fs.create_dir_all must not be called; got: {path}");
+        }
     }
 
     /*

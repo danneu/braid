@@ -610,8 +610,9 @@ fn open_disks_with_credential<R: CommandRunner>(
 ///
 /// Returns `Ok(true)` once the mount succeeds. (Callers detect the
 /// already-mounted case earlier, by `plan_open_pool` returning `None`.)
-pub fn execute_mount_only<R: CommandRunner>(
+pub fn execute_mount_only<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
+    fs: &F,
     config: &Config,
     plan: &OpenPlan,
 ) -> Result<bool, MountError> {
@@ -621,7 +622,7 @@ pub fn execute_mount_only<R: CommandRunner>(
         ));
     }
     let color_enabled = color_enabled_for_stderr();
-    scan_and_mount(runner, config, plan, color_enabled)
+    scan_and_mount(runner, fs, config, plan, color_enabled)
 }
 
 /// Execute a pre-built `OpenPlan` that has disks to unlock.
@@ -638,8 +639,9 @@ pub fn execute_mount_only<R: CommandRunner>(
 /// caller invokes first. This function does NOT plan; it only executes.
 ///
 /// Returns `Ok(true)` once the mount succeeds.
-pub fn execute_unlock_and_mount<R: CommandRunner>(
+pub fn execute_unlock_and_mount<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
+    fs: &F,
     config: &Config,
     plan: &OpenPlan,
     backing_path_resolver: &dyn BackingPathResolver,
@@ -670,7 +672,7 @@ pub fn execute_unlock_and_mount<R: CommandRunner>(
         opened_mappers: opened_mappers.clone(),
     })?;
 
-    scan_and_mount(runner, config, plan, color_enabled).map_err(|error| UnlockAndMountFailure {
+    scan_and_mount(runner, fs, config, plan, color_enabled).map_err(|error| UnlockAndMountFailure {
         error,
         opened_mappers,
     })
@@ -774,8 +776,9 @@ where
 /// Shared tail for both execute entry points: btrfs device scan, ensure the
 /// mount point exists, then mount (with `degraded` when any membership disk
 /// is missing).
-fn scan_and_mount<R: CommandRunner>(
+fn scan_and_mount<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
+    fs: &F,
     config: &Config,
     plan: &OpenPlan,
     color_enabled: bool,
@@ -800,7 +803,7 @@ fn scan_and_mount<R: CommandRunner>(
         )));
     }
 
-    let _ = std::fs::create_dir_all(mount_point.as_str());
+    crate::util::ensure_mount_point_dir(fs, mount_point).map_err(MountError::Failed)?;
 
     let mount_result = if plan.any_missing_member {
         runner.run(&CmdRequest::MountWithOptions {
@@ -898,6 +901,7 @@ mod tests {
         let cred = test_passphrase();
         let res = execute_unlock_and_mount(
             &runner,
+            &direct_two_disk_fs_with_mappers(),
             &config,
             &plan,
             crate::test_fixtures::mock_virtio_backing_path_resolver(),
@@ -951,7 +955,7 @@ mod tests {
             mount_device: "/dev/mapper/braid-disk1".to_owned(),
         };
 
-        let res = execute_mount_only(&runner, &config, &plan);
+        let res = execute_mount_only(&runner, &direct_two_disk_fs_with_mappers(), &config, &plan);
         match res {
             Err(MountError::Failed(msg)) => {
                 assert!(
@@ -2650,6 +2654,7 @@ pool already mounted at /mnt/storage
 
         let failure = execute_unlock_and_mount(
             &runner,
+            &fs,
             &config,
             &plan,
             crate::test_fixtures::mock_virtio_backing_path_resolver(),
@@ -2708,6 +2713,7 @@ pool already mounted at /mnt/storage
             .with_path("/dev/disk/by-id/virtio-disk1", "/dev/vdb");
         let failure = execute_unlock_and_mount(
             &runner,
+            &direct_two_disk_fs_with_mappers(),
             &config,
             &plan,
             &backing_path_resolver,
@@ -2804,6 +2810,7 @@ pool already mounted at /mnt/storage
             .with_path("/dev/disk/by-id/virtio-disk1", "/dev/vdb");
         let failure = execute_unlock_and_mount(
             &runner,
+            &fs,
             &config,
             &plan,
             &backing_path_resolver,
@@ -2864,6 +2871,7 @@ pool already mounted at /mnt/storage
 
         let failure = execute_unlock_and_mount(
             &runner,
+            &fs,
             &config,
             &plan,
             crate::test_fixtures::mock_virtio_backing_path_resolver(),
@@ -2960,6 +2968,7 @@ pool already mounted at /mnt/storage
 
         let failure = execute_unlock_and_mount(
             &runner,
+            &fs,
             &config,
             &plan,
             crate::test_fixtures::mock_virtio_backing_path_resolver(),
@@ -3019,6 +3028,7 @@ pool already mounted at /mnt/storage
 
         let failure = execute_unlock_and_mount(
             &runner,
+            &direct_two_disk_fs_with_mappers(),
             &config,
             &plan,
             crate::test_fixtures::mock_virtio_backing_path_resolver(),
@@ -3124,6 +3134,7 @@ pool already mounted at /mnt/storage
 
         let failure = execute_unlock_and_mount(
             &runner,
+            &fs,
             &config,
             &plan,
             crate::test_fixtures::mock_virtio_backing_path_resolver(),
@@ -3173,6 +3184,135 @@ pool already mounted at /mnt/storage
                 (forget_pos + 2, "braid-disk2"),
             ],
             "cleanup should forget the opened mapper paths before closing both mappers"
+        );
+    }
+
+    // Intent: a mount-point mkdir failure on the mount-only path surfaces a
+    // named MountError::Failed("could not create mount point ...") and aborts
+    // before any mount is attempted.
+    // Why it exists: routing mount-point creation through the Filesystem seam
+    // is pointless unless its failure is fail-closed; the swallowed `let _ =
+    // create_dir_all(...)` used to resurface a step later as an opaque kernel
+    // `mount` failure that never named the real cause.
+    // Scenario: a standalone install where the pool mount-point's parent is a
+    // non-directory (or unwritable), so create_dir_all cannot create it.
+    #[test]
+    fn mount_only_mkdir_failure_surfaces_named_error_before_mount() {
+        let config = test_config();
+        let plan = OpenPlan {
+            to_unlock: Vec::new(),
+            any_open: true,
+            any_missing_member: false,
+            mount_device: "/dev/mapper/braid-disk1".to_owned(),
+        };
+        // The scan runs before the mkdir; Mount is intentionally NOT wired so a
+        // regression that skips the mkdir guard fails loudly on MissingMock.
+        let runner = MockRunner::default()
+            .with_output(CmdRequest::BtrfsDeviceScanAll, ok_raw("btrfs device scan"));
+        let fs = direct_two_disk_fs_with_mappers()
+            .with_create_dir_error(std::io::ErrorKind::PermissionDenied);
+
+        let err = execute_mount_only(&runner, &fs, &config, &plan)
+            .expect_err("mkdir failure must abort the mount-only path");
+        match err {
+            MountError::Failed(msg) => assert!(
+                msg.contains("could not create mount point"),
+                "unexpected message: {msg}"
+            ),
+            other => panic!("expected MountError::Failed, got {other:?}"),
+        }
+        assert!(
+            !runner.requests().iter().any(|r| matches!(
+                r,
+                CmdRequest::Mount { .. } | CmdRequest::MountWithOptions { .. }
+            )),
+            "no mount must be attempted after a mkdir failure"
+        );
+    }
+
+    // Intent: a mount-point mkdir failure AFTER both LUKS opens reports
+    // MountError::Failed("could not create mount point ...") and still carries
+    // both opened mappers in the fail-closed cleanup set, with no mount
+    // attempted.
+    // Why it exists: the mount-only test proves "no mount requested" but not
+    // that a post-open mkdir failure preserves the opened-mapper cleanup set;
+    // without that, a mkdir failure between the LUKS opens and the mount would
+    // strand the newly-opened mappers.
+    // Scenario: both RAID1 members unlock cleanly and the btrfs scan succeeds,
+    // then create_dir_all fails on a non-directory / unwritable mount-point
+    // parent.
+    #[test]
+    fn unlock_mkdir_failure_after_two_opens_reports_named_error_and_cleanup_set() {
+        let config = test_config();
+        let fs = direct_two_disk_fs_with_mappers()
+            .with_create_dir_error(std::io::ErrorKind::PermissionDenied);
+        let plan = direct_two_disk_plan();
+        // Both opens and the pre-mkdir scan are wired; Mount is NOT (the mkdir
+        // guard must abort first). The forget/close outputs feed the cleanup
+        // assertion below.
+        let runner = direct_two_disk_open_runner()
+            .with_output(CmdRequest::BtrfsDeviceScanAll, ok_raw("btrfs device scan"))
+            .with_output(
+                CmdRequest::BtrfsDeviceScanForget {
+                    devices: vec![
+                        "/dev/mapper/braid-disk1".into(),
+                        "/dev/mapper/braid-disk2".into(),
+                    ],
+                },
+                ok_raw("btrfs device scan --forget"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: MapperName::from_basename("braid-disk1".into()),
+                },
+                ok_raw("cryptsetup close"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: MapperName::from_basename("braid-disk2".into()),
+                },
+                ok_raw("cryptsetup close"),
+            );
+
+        let failure = execute_unlock_and_mount(
+            &runner,
+            &fs,
+            &config,
+            &plan,
+            crate::test_fixtures::mock_virtio_backing_path_resolver(),
+            &test_passphrase(),
+        )
+        .expect_err("mkdir failure must abort the unlock-and-mount path");
+        match &failure.error {
+            MountError::Failed(msg) => assert!(
+                msg.contains("could not create mount point"),
+                "unexpected message: {msg}"
+            ),
+            other => panic!("expected MountError::Failed, got {other:?}"),
+        }
+        assert_eq!(
+            failure.opened_mappers,
+            vec![
+                MapperName::from_basename("braid-disk1".into()),
+                MapperName::from_basename("braid-disk2".into()),
+            ],
+            "both opened mappers must be cleanup-owned when mkdir fails after opens"
+        );
+        assert!(
+            !runner.requests().iter().any(|r| matches!(
+                r,
+                CmdRequest::Mount { .. } | CmdRequest::MountWithOptions { .. }
+            )),
+            "no mount must be attempted after a mkdir failure"
+        );
+
+        let captured = crate::status_tag::testing::capture_with_color(false, || {
+            close_opened_mappers(&runner, &NoopSleeper, &fs, &failure.opened_mappers, false)
+                .unwrap();
+        });
+        assert!(
+            captured.contains("cleanup: closed LUKS mappers opened by this command."),
+            "missing cleanup success summary: {captured:?}"
         );
     }
 

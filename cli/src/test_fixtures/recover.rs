@@ -167,6 +167,9 @@ impl Filesystem for RemountFs {
     fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
         Ok(vec![])
     }
+    fn create_dir_all(&self, _path: &str) -> Result<(), std::io::Error> {
+        Ok(())
+    }
 }
 
 /// Wraps a `MockRunner` and removes `/dev/mapper/<mapper>` from a

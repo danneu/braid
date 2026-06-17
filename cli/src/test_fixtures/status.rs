@@ -62,6 +62,10 @@ impl Filesystem for MockFs {
     fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
         Ok(vec![])
     }
+
+    fn create_dir_all(&self, _path: &str) -> Result<(), std::io::Error> {
+        unreachable!("status::MockFs: read-only fixture; create_dir_all must never be called")
+    }
 }
 
 /// Mounted-btrfs mountinfo fixture with caller-supplied existing paths.

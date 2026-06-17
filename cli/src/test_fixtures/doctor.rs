@@ -174,6 +174,10 @@ impl Filesystem for DoctorMockFs {
     fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
         Ok(vec![])
     }
+
+    fn create_dir_all(&self, _path: &str) -> Result<(), std::io::Error> {
+        unreachable!("DoctorMockFs: read-only fixture; create_dir_all must never be called")
+    }
 }
 
 // ---------------------------------------------------------------------------

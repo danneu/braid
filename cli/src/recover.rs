@@ -996,7 +996,7 @@ fn execute_recover_initial_open<R: CommandRunner + Sync, F: Filesystem + ?Sized>
     }
 
     let res: Result<bool, InitialOpenFailure> = if open_plan.to_unlock.is_empty() {
-        mount::execute_mount_only(runner, params.config, open_plan)
+        mount::execute_mount_only(runner, fs, params.config, open_plan)
             .map_err(InitialOpenFailure::MountOnly)
     } else {
         if state.credential.is_none() {
@@ -1015,6 +1015,7 @@ fn execute_recover_initial_open<R: CommandRunner + Sync, F: Filesystem + ?Sized>
             .expect("credential resolved above for this branch");
         mount::execute_unlock_and_mount(
             runner,
+            fs,
             params.config,
             open_plan,
             params.backing_path_resolver,
@@ -3519,6 +3520,7 @@ fn relock_and_remount<R: CommandRunner, F: Filesystem + ?Sized>(
         })?;
     match mount::execute_unlock_and_mount(
         runner,
+        fs,
         config,
         &cycle_plan,
         backing_path_resolver,
@@ -3798,6 +3800,10 @@ mod tests {
 
         fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
             Ok(vec![])
+        }
+
+        fn create_dir_all(&self, _path: &str) -> Result<(), std::io::Error> {
+            Ok(())
         }
     }
 

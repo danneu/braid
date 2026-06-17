@@ -161,6 +161,10 @@ impl Filesystem for IdleMockFs {
             )),
         }
     }
+
+    fn create_dir_all(&self, _path: &str) -> Result<(), std::io::Error> {
+        unreachable!("IdleMockFs: read-only fixture; create_dir_all must never be called")
+    }
 }
 
 /// Canonical idle-test mount point used by scrub requests and `cmd_idle` calls.

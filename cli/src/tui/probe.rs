@@ -899,6 +899,10 @@ mod tests {
             }
             Err(std::io::Error::new(std::io::ErrorKind::NotFound, "stub"))
         }
+
+        fn create_dir_all(&self, _path: &str) -> Result<(), std::io::Error> {
+            unreachable!("tui::StubFs: read-only fixture; create_dir_all must never be called")
+        }
     }
 
     fn ok_raw(cmd: &str, stdout: &str) -> RawCommandOutput {
