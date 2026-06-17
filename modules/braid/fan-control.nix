@@ -148,8 +148,9 @@ in
     #
     # Defined directly rather than via the nixpkgs services.hddfancontrol
     # module. No hddtemp daemon dependency: hddfancontrol tries drivetemp
-    # first in its probe chain (src/probe/mod.rs:84 in 2.0.6), and drivetemp
-    # is loaded via boot.kernelModules above.
+    # first in its probe chain -- hddfancontrol 2.1.1, src/probe/mod.rs
+    # (fn `prober`) lists drivetemp::Method first in the methods array.
+    # drivetemp is loaded via boot.kernelModules above.
     #
     # disks = "ata" monitors ALL visible SATA devices, not only braid pool
     # members. Fan control is a chassis safety loop -- drives generate heat

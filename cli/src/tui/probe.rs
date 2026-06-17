@@ -589,9 +589,9 @@ fn read_fan_hardware(pwm_dir: &Path, n: u8) -> Option<FanReading> {
 
 /// Find the RPM tach file for the given PWM channel.
 ///
-/// Mirrors hddfancontrol's `resolve_rpm_path`
-/// (`reference/hddfancontrol/src/fan.rs:118-143`) in its sole-candidate
-/// branch: if the PWM sysfs dir contains exactly one `fan*_input`, use it
+/// Mirrors the sole-candidate branch of hddfancontrol 2.1.1,
+/// src/fan/pwm_fan.rs (fn `resolve_rpm_path`): if the PWM sysfs dir
+/// contains exactly one `fan*_input`, use it
 /// regardless of numeric suffix. On boards where the user's PWM channel
 /// does not correspond to the tach file's numeric suffix (e.g. pwm2 paired
 /// with only fan1_input), this is what makes the TUI agree with the
@@ -623,9 +623,9 @@ fn resolve_rpm_path(pwm_dir: &Path, n: u8) -> Option<PathBuf> {
     }
 }
 
-/// Mirror of hddfancontrol's `-d ata` selector
-/// (`reference/hddfancontrol/src/cl.rs:117-135`): enumerate
-/// `<dev_root>/disk/by-id/` entries whose name starts with `ata-` and
+/// Mirror of hddfancontrol's `-d ata` selector -- hddfancontrol 2.1.1,
+/// src/cl.rs (fn `to_drive_paths`): enumerate `<dev_root>/disk/by-id/`
+/// entries whose name starts with `ata-` and
 /// does NOT end in `-partN`, canonicalize the symlink, keep only
 /// targets under `dev_root` with `sdX`-shaped file names. Broken
 /// symlinks and anything that canonicalizes outside `dev_root` are
@@ -649,7 +649,8 @@ fn enumerate_ata_drives(dev_root: &Path) -> Vec<String> {
             continue;
         }
         // Partition exclusion: strip trailing digits and check for `-part`.
-        // Matches `reference/hddfancontrol/src/cl.rs:128`.
+        // Matches hddfancontrol 2.1.1, src/cl.rs (fn `to_drive_paths`):
+        // `!f.trim_end_matches(char::is_numeric).ends_with("-part")`.
         if name_str
             .trim_end_matches(|c: char| c.is_ascii_digit())
             .ends_with("-part")
@@ -682,8 +683,8 @@ fn is_sd_shaped(name: &str) -> bool {
     !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_alphabetic())
 }
 
-/// Mirror `reference/hddfancontrol/src/probe/drivetemp.rs:20-46`: walk
-/// `<sysfs_root>/block/<sdX>/../../hwmon/` looking for a subdir whose
+/// Mirror hddfancontrol 2.1.1, src/probe/drivetemp.rs (fn `prober`):
+/// walk `<sysfs_root>/block/<sdX>/../../hwmon/` looking for a subdir whose
 /// `name` file equals `drivetemp`, then read sibling `temp1_input`
 /// (millidegrees). The traversal via `../../` resolves through the
 /// `/sys/block/sdX` symlink into the drive-specific device subtree,

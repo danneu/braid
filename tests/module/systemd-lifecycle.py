@@ -157,8 +157,10 @@ with subtest("Concurrent unlocks: one wins, the other fast-fails or sees mounted
     machine.fail("mountpoint -q /mnt/storage")
 
     # Launch two concurrent unlocks, capture per-process exit codes.
-    # NixOS test driver wraps every command with `set -euo pipefail`
-    # (see test_driver/machine/__init__.py:858), so a bare
+    # NixOS test driver wraps every command with `set -euo pipefail` --
+    # nixpkgs b51242d7, nixos/lib/test-driver/src/test_driver/machine/__init__.py
+    # (fn `QemuMachine._execute`): `command = f"set -euo pipefail; {command}"` --
+    # so a bare
     # `wait $pid_loser` returning non-zero would abort the chain
     # before the exit-file writes. The `wait $pid || ec=$?` idiom
     # consumes the non-zero return into a variable so errexit does

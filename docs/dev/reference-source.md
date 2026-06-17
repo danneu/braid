@@ -27,7 +27,7 @@ Before searching the web for tool behavior, consult local resources first. `refe
   - **Source:** `reference/smartmontools/smartmontools/` — flat layout. `smartctl` output format, SMART attribute definitions, exit codes.
   - **Docs:** No separate docs dir. Man-page sources are inline alongside the code: `smartctl.8.in`, `smartd.8.in`, `smartd.conf.5.in`.
 - **hddfancontrol** — [desbma/hddfancontrol](https://github.com/desbma/hddfancontrol)
-  - **Source:** `reference/hddfancontrol/src/` — Rust daemon. `device/` (drivetemp, hddtemp, smartctl probing), `probe/` (pwm-test ramp logic), `fan.rs` (PWM control), `pwm.rs` (sysfs PWM I/O), `cl.rs` (CLI args).
+  - **Source:** `reference/hddfancontrol/src/` — Rust daemon. `device/` (drivetemp, hddtemp, smartctl probing), `probe/` (pwm-test ramp logic), `fan/` (PWM control -- `pwm_fan.rs`), `pwm.rs` (sysfs PWM I/O), `cl.rs` (CLI args).
   - **Docs:** No separate docs dir. `reference/hddfancontrol/README.md` and `reference/hddfancontrol/systemd/hddfancontrol.service` — the upstream unit we intentionally don't use (see `modules/braid/fan-control.nix`).
 - **nut** — [networkupstools/nut](https://github.com/networkupstools/nut)
   - **Source:** `reference/nut/clients/` (`upsmon.c` -- shutdown-on-LB daemon, `upsc.c` -- status query, `upscmd.c`, `upssched.c`, `upsrw.c`), `reference/nut/server/` (`upsd.c` and net protocol handlers), `reference/nut/drivers/` (`usbhid-ups.c` and per-vendor `*-hid.c` for the USB HID path v1 targets).
