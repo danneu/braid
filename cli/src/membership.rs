@@ -657,18 +657,6 @@ pub enum DiskSpecParseError {
 // enrich_from_pool_state -- UUID-correlated live enrichment
 // ---------------------------------------------------------------------------
 
-/// Per-call summary of live state observed during `enrich_from_pool_state`.
-/// `foreign` lists every UUID present in the live pool that membership did
-/// NOT admit. The pure helper `foreign_luks_uuids` exposes the same join
-/// without mutating; `braid doctor`'s `foreign_luks_uuid` check renders it
-/// as Fail when non-empty.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct EnrichmentReport {
-    /// Live pool UUIDs that were not admitted into membership, keyed by UUID
-    /// with the observed mapper for diagnostics.
-    pub foreign: BTreeMap<LuksUuid, MapperName>,
-}
-
 /// Read-only foreign-live-device join shared by enrichment and doctor so
 /// diagnostics can report foreign UUIDs without mutating `pool.json` or
 /// emitting transient warnings.
@@ -685,19 +673,23 @@ pub fn foreign_luks_uuids(
 
 /// Update `membership` in place from a freshly probed `PoolState`,
 /// correlating by `LuksUuid` only. UUIDs present in `pool.devices` but
-/// absent from membership are surfaced as `foreign` -- they are NOT
-/// admitted into the in-memory membership, and the existing entries are
-/// NOT silently dropped for missing them. The function is best-effort
-/// only in that it tolerates partial live state; the foreign-admission
+/// absent from membership are surfaced via a transient `eprintln!` warning
+/// -- they are NOT admitted into the in-memory membership, and existing
+/// entries are NOT silently dropped for missing them. The foreign-admission
 /// policy is fail-closed by construction (no insert, only update).
 ///
-/// See plan section "`membership.rs`" / "Foreign-UUID plumbing" for the
-/// rationale on returning the report alongside the mutation rather than
-/// routing it through a thread-local.
-pub fn enrich_from_pool_state(
-    membership: &mut PoolMembership,
-    pool: &PoolState,
-) -> Result<EnrichmentReport, MembershipError> {
+/// Infallible by construction, so it returns nothing and is safe to call
+/// best-effort post-commit without `?`: it does no pool probing, output
+/// parsing, or state-file I/O -- those fallible steps live in `probe_pool`
+/// and `save_membership` at the call sites -- and it never inserts into
+/// membership. It only emits transient foreign-UUID warnings and refreshes
+/// in-memory `devid` / `added_at`. If a future editor ever gives it a real
+/// error path, restoring `Result` forces the compiler to surface every call
+/// site for an explicit handling decision.
+///
+/// Foreign UUIDs are surfaced transiently here; `braid doctor` surfaces them
+/// persistently via the shared `foreign_luks_uuids` join.
+pub fn enrich_from_pool_state(membership: &mut PoolMembership, pool: &PoolState) {
     let foreign = foreign_luks_uuids(membership, pool);
 
     for (uuid, mapper) in &foreign {
@@ -718,7 +710,6 @@ pub fn enrich_from_pool_state(
             }
         }
     }
-    Ok(EnrichmentReport { foreign })
 }
 
 // ---------------------------------------------------------------------------
@@ -1256,10 +1247,10 @@ mod tests {
     // ----- enrich_from_pool_state ------------------------------------------
     //
     // These tests cover the UUID-correlated enrichment contract: known UUIDs
-    // update devid in place, foreign UUIDs are surfaced in the report but
-    // NOT admitted, and membership is otherwise untouched. The eprintln
+    // update devid in place, foreign UUIDs are surfaced by foreign_luks_uuids
+    // but NOT admitted, and membership is otherwise untouched. The eprintln
     // wording is not captured here -- the equivalent contract is pinned by
-    // the report content (which the doctor downstream renders) and a
+    // the foreign_luks_uuids join (which the doctor downstream renders) and a
     // separate forthcoming doctor test pins the rendered substring.
 
     use crate::types::{Fsid, MapperName, PoolDevice, PoolState};
@@ -1294,11 +1285,11 @@ mod tests {
             devid: Devid::new(99),
             underlying: "/dev/vdb".into(),
         }]);
-        let report = enrich_from_pool_state(&mut m, &pool).expect("enrichment succeeds");
+        enrich_from_pool_state(&mut m, &pool);
         assert!(
-            report.foreign.is_empty(),
+            foreign_luks_uuids(&m, &pool).is_empty(),
             "known UUID must not surface as foreign; got: {:?}",
-            report.foreign
+            foreign_luks_uuids(&m, &pool)
         );
         let updated = m.by_uuid(&u_k).expect("known UUID still present");
         assert_eq!(
@@ -1331,11 +1322,11 @@ mod tests {
             devid: Devid::new(2),
             underlying: "/dev/vdb".into(),
         }]);
-        let report = enrich_from_pool_state(&mut m, &pool).expect("enrichment succeeds");
+        enrich_from_pool_state(&mut m, &pool);
         assert!(
-            report.foreign.is_empty(),
+            foreign_luks_uuids(&m, &pool).is_empty(),
             "known UUID must not surface as foreign; got: {:?}",
-            report.foreign
+            foreign_luks_uuids(&m, &pool)
         );
         let updated = m.by_uuid(&u_k).expect("known UUID still present");
         assert_eq!(
@@ -1380,10 +1371,11 @@ mod tests {
             devid: Devid::new(7),
             underlying: "/dev/vdz".into(),
         }]);
-        let report = enrich_from_pool_state(&mut m, &pool).expect("enrichment succeeds");
-        assert_eq!(report.foreign.len(), 1, "exactly one foreign UUID expected");
+        enrich_from_pool_state(&mut m, &pool);
+        let foreign = foreign_luks_uuids(&m, &pool);
+        assert_eq!(foreign.len(), 1, "exactly one foreign UUID expected");
         assert_eq!(
-            report.foreign.get(&u_foreign),
+            foreign.get(&u_foreign),
             Some(&foreign_mapper),
             "foreign UUID must map to its observed mapper"
         );

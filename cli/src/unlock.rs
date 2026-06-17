@@ -136,7 +136,7 @@ impl UnlockPlan {
         //   * `Err(_)` from probe_pool itself (e.g. a parser drift in
         //     `btrfs filesystem show`) -- a Warning line is emitted,
         //     and pool.json is not rewritten.
-        //   * enrich/save failure -- a Warning line is emitted and unlock
+        //   * save failure -- a Warning line is emitted and unlock
         //     still succeeds because the mount has already completed.
         // Correctness never depends on this enrichment (see contract above).
         // Pinned by unlock_tolerates_post_mount_probe_mounted_false and
@@ -144,19 +144,11 @@ impl UnlockPlan {
         match probe::probe_pool(runner, fs, mount_point) {
             Ok(pool_after) => {
                 let mut enriched = params.membership.clone();
-                match membership::enrich_from_pool_state(&mut enriched, &pool_after) {
-                    Ok(_report) => {
-                        if let Err(e) = membership::save_membership(&enriched, params.paths) {
-                            crate::status_tag::emit_status(&format!(
-                                "Warning: failed to save enriched membership: {e}\n"
-                            ));
-                        }
-                    }
-                    Err(e) => {
-                        crate::status_tag::emit_status(&format!(
-                            "Warning: failed to enrich pool membership: {e}\n"
-                        ));
-                    }
+                membership::enrich_from_pool_state(&mut enriched, &pool_after);
+                if let Err(e) = membership::save_membership(&enriched, params.paths) {
+                    crate::status_tag::emit_status(&format!(
+                        "Warning: failed to save enriched membership: {e}\n"
+                    ));
                 }
             }
             Err(e) => crate::status_tag::emit_status(&format!(
