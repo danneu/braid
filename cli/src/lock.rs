@@ -1,5 +1,5 @@
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, Step};
-use crate::config::{Config, name_from_mapper};
+use crate::config::{Config, braid_disk_name};
 use crate::mapper_close::{CloseMapperError, close_mapper_with_retry};
 use crate::membership::{MembershipError, PoolMembership};
 use crate::online_state::{OnlineError, OnlineStateOps, RealOnlineStateOps, mark_offline};
@@ -276,9 +276,7 @@ fn classify_candidate_mapper<R: CommandRunner>(
             display_name: member.name.clone(),
         }),
         None => Ok(LockMapperCloseKind::Orphan {
-            disk_name: name_from_mapper(mapper.as_str())
-                .unwrap_or(mapper.as_str())
-                .to_owned(),
+            disk_name: orphan_disk_label(mapper),
         }),
     }
 }
@@ -293,7 +291,11 @@ fn scan_braid_mapper_candidates<F: Filesystem + ?Sized>(
     let entries = fs.list_dir("/dev/mapper")?;
     let mut candidates = Vec::new();
     for entry in entries {
-        if name_from_mapper(&entry).is_none() {
+        // Keep only `braid-<name>` mappers with a non-empty disk name. A
+        // bare `braid-` is never braid-created (DiskName is never empty),
+        // so it is not a cleanup candidate; ownership stays UUID-gated
+        // downstream.
+        if braid_disk_name(&entry).is_none() {
             continue;
         }
         if already_observed.contains(entry.as_str()) {
@@ -306,6 +308,16 @@ fn scan_braid_mapper_candidates<F: Filesystem + ?Sized>(
         candidates.push(mapper);
     }
     Ok(candidates)
+}
+
+/// Display label for an orphan mapper close: the braid disk name when
+/// present, else the full mapper basename. Guarantees an orphan status row
+/// (`disk <label>: locking (orphan)...`) never renders a blank label, even
+/// for a degenerate bare `braid-` mapper.
+fn orphan_disk_label(mapper: &MapperName) -> String {
+    braid_disk_name(mapper.as_str())
+        .unwrap_or(mapper.as_str())
+        .to_owned()
 }
 
 /// Message body (no `[warn]` prefix) for a failed /dev/mapper scan.
@@ -973,9 +985,7 @@ fn build_close_sets_full<R: CommandRunner, F: Filesystem + ?Sized>(
                 },
             });
         } else {
-            let disk_name = name_from_mapper(dev.mapper.as_str())
-                .unwrap_or(dev.mapper.as_str())
-                .to_owned();
+            let disk_name = orphan_disk_label(&dev.mapper);
             push_orphan_close(
                 &mut acc.notes,
                 &mut orphan_mappers,
@@ -998,9 +1008,7 @@ fn build_close_sets_full<R: CommandRunner, F: Filesystem + ?Sized>(
                 });
             }
             Ok(None) => {
-                let disk_name = name_from_mapper(nu.mapper.as_str())
-                    .unwrap_or(nu.mapper.as_str())
-                    .to_owned();
+                let disk_name = orphan_disk_label(&nu.mapper);
                 push_orphan_close(
                     &mut acc.notes,
                     &mut orphan_mappers,
@@ -4829,6 +4837,91 @@ mod tests {
             acc.notes
         );
         assert!(!acc.cleanup.is_uncertain());
+    }
+
+    // Intent: scan_braid_mapper_candidates keeps named `braid-<name>`
+    //   mappers but excludes a bare `braid-` (empty disk name).
+    // Why it exists: a bare `braid-` is never braid-created (DiskName is
+    //   never empty), so it must not be a cleanup candidate; pins the
+    //   candidacy fix that routes the filter through braid_disk_name.
+    // Scenario: an operator hand-created a dm device literally named
+    //   `braid-` alongside real braid mappers; lock's scan must skip it.
+    #[test]
+    fn scan_excludes_bare_braid_mapper() {
+        let fs = lock_fs(&[
+            "/dev/mapper/braid-aaa",
+            "/dev/mapper/braid-",
+            "/dev/mapper/braid-bbb",
+        ]);
+        let candidates = scan_braid_mapper_candidates(&fs, &HashSet::new()).unwrap();
+        let names: Vec<&str> = candidates.iter().map(|m| m.as_str()).collect();
+        assert_eq!(names, vec!["braid-aaa", "braid-bbb"]);
+    }
+
+    // Intent: a Pass 1 PoolDevice with a bare `braid-` mapper and a
+    //   non-member LUKS UUID renders its orphan label as the full mapper
+    //   basename (`braid-`), never a blank.
+    // Why it exists: pins the orphan_disk_label reroute at the Pass 1
+    //   site so a degenerate bare-`braid-` mapper can never emit a blank
+    //   disk label in the orphan status row.
+    // Scenario: a btrfs pool is backed by a dm device literally named
+    //   `braid-` whose backing UUID is not a member -- the most
+    //   degenerate orphan path that still reaches a label site.
+    #[test]
+    fn full_arm_pass1_bare_braid_orphan_label_is_not_blank() {
+        use crate::types::{LuksUuid, MapperName, PoolDevice, PoolState};
+
+        let fs = lock_fs(&["/dev/mapper/braid-"]);
+        let membership = lock_test_membership();
+        let pool = PoolState {
+            mounted: true,
+            devices: vec![PoolDevice {
+                mapper: MapperName::from_basename("braid-".into()),
+                luks_uuid: LuksUuid::parse(ORPHAN_UUID).unwrap(),
+                devid: Devid::new(99),
+                underlying: "/dev/disk/by-id/leftover".into(),
+            }],
+            missing_count: 0,
+            total_devices: 1,
+            fsid: Some(Fsid::parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").unwrap()),
+            missing_devids: vec![],
+            null_underlying: vec![],
+        };
+        let runner = MockRunner::default();
+        let mut acc = CloseSetAccumulator::default();
+
+        let close_set = build_close_sets_full(&runner, &fs, &pool, &membership, &mut acc);
+
+        assert!(member_summaries(&close_set).is_empty());
+        assert_eq!(
+            orphan_summaries(&close_set),
+            vec![("braid-".to_owned(), "braid-".to_owned())]
+        );
+    }
+
+    // Intent: a Pass 2 null_underlying entry with a bare `braid-` mapper
+    //   and a non-member devid renders its orphan label as the full
+    //   mapper basename (`braid-`), never a blank.
+    // Why it exists: pins the orphan_disk_label reroute at the Pass 2
+    //   site so the degenerate bare-`braid-` mapper can never emit a
+    //   blank disk label there either.
+    // Scenario: a null-underlying mapper literally named `braid-` carries
+    //   a devid that never landed in pool.json.
+    #[test]
+    fn full_arm_pass2_bare_braid_orphan_label_is_not_blank() {
+        let fs = lock_fs(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-"]);
+        let membership = lock_test_membership();
+        let pool = synthetic_pool_state_with_null_underlying("braid-aaa", "braid-", Devid::new(99));
+        let runner = MockRunner::default();
+        let mut acc = CloseSetAccumulator::default();
+
+        let close_set = build_close_sets_full(&runner, &fs, &pool, &membership, &mut acc);
+
+        assert!(
+            orphan_summaries(&close_set).contains(&("braid-".to_owned(), "braid-".to_owned())),
+            "bare braid- must be an orphan with a non-blank label: {:?}",
+            orphan_summaries(&close_set)
+        );
     }
 
     // Intent: a null_underlying entry whose devid is claimed by two

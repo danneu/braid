@@ -121,8 +121,24 @@ pub fn luks_label_for(name: &DiskName) -> LuksLabel {
 
 /// Display-only mapper parser for diagnostics and explicit carve-outs.
 /// Identity decisions must use LUKS UUID/devid membership instead.
+///
+/// A bare `braid-` returns `Some("")`, not `None`: this is intentional
+/// and load-bearing for `discover`, which strips with this helper and
+/// then runs `DiskName::parse`, so an empty suffix surfaces a helpful
+/// `InvalidDiskName` warning instead of a silent skip. Do not collapse
+/// the empty-suffix case to `None`. Consumers that need a usable disk
+/// name (lock's candidacy filter and orphan labels) use `braid_disk_name`.
 pub fn name_from_mapper(mapper: &str) -> Option<&str> {
     mapper.strip_prefix("braid-")
+}
+
+/// The usable disk name of a braid mapper: the `braid-` suffix when it is
+/// non-empty, else `None`. Unlike `name_from_mapper` (raw strip, which keeps
+/// the empty suffix for discover's invalid-name warning), a bare `braid-` has
+/// no disk name -- braid never creates one (`DiskName` is never empty), so it
+/// is neither a cleanup candidate nor a renderable label.
+pub(crate) fn braid_disk_name(mapper: &str) -> Option<&str> {
+    name_from_mapper(mapper).filter(|name| !name.is_empty())
 }
 
 #[derive(Deserialize)]
@@ -246,6 +262,35 @@ mod tests {
     fn name_from_mapper_returns_none_for_non_braid() {
         assert_eq!(name_from_mapper("luks-something"), None);
         assert_eq!(name_from_mapper(""), None);
+    }
+
+    // Intent: `name_from_mapper("braid-")` returns `Some("")`, not `None`.
+    // Why it exists: the empty suffix is load-bearing for `discover`,
+    // which strips with this helper then runs `DiskName::parse` to
+    // surface an `InvalidDiskName` warning; collapsing it to `None` would
+    // turn that warning into a silent skip. Characterizes the hinge so a
+    // future reviewer cannot "simplify" the empty-suffix case away.
+    // Scenario: an operator left a dm device named exactly `braid-`;
+    // discover must still flag it as an invalid disk name.
+    #[test]
+    fn name_from_mapper_keeps_empty_suffix() {
+        assert_eq!(name_from_mapper("braid-"), Some(""));
+    }
+
+    // Intent: `braid_disk_name` yields the suffix only when non-empty,
+    // and `None` for a bare `braid-`, a non-braid mapper, and the empty
+    // string.
+    // Why it exists: pins the "usable braid disk name" notion that lock's
+    // candidacy filter and orphan labels route through, so a bare
+    // `braid-` is never a cleanup candidate nor a blank label.
+    // Scenario: lock scans `/dev/mapper` and must distinguish a usable
+    // disk name (`braid-aaa` -> `aaa`) from the degenerate empty cases.
+    #[test]
+    fn braid_disk_name_requires_non_empty_suffix() {
+        assert_eq!(braid_disk_name("braid-aaa"), Some("aaa"));
+        assert_eq!(braid_disk_name("braid-"), None);
+        assert_eq!(braid_disk_name("luks-x"), None);
+        assert_eq!(braid_disk_name(""), None);
     }
 
     // Intent: Config deserializes when fan_control is absent from JSON.
