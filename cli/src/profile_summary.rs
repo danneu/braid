@@ -1,24 +1,6 @@
 use serde::{Deserialize, Serialize};
 
 use crate::parse::types::{BtrfsBgType, BtrfsDfEntry};
-use crate::status::AllocationEntry;
-
-/// Per-block-group-type redundancy summary for `braid status`.
-/// One classifier feeds the human and JSON status surfaces; rendering is per-caller.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProfileSummary {
-    pub data: TypeProfile,
-    pub metadata: TypeProfile,
-    pub system: TypeProfile,
-}
-
-/// One block-group-type's redundancy classification plus the raw profile
-/// names that produced it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TypeProfile {
-    pub profiles: Vec<String>,
-    pub class: Redundancy,
-}
 
 /// Coarse redundancy category used to choose human status render suffixes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,23 +12,13 @@ pub enum Redundancy {
     Unknown,
 }
 
-/// Per-block-group-type profile payload for `braid status --json`.
-/// Carries raw btrfs profile names, not braid's human-facing classification.
+/// Per-block-group-type profile payload for `braid status`.
+/// Carries canonical raw btrfs profile names shared by JSON and human surfaces.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProfileJson {
     pub data: Vec<String>,
     pub metadata: Vec<String>,
     pub system: Vec<String>,
-}
-
-impl From<&ProfileSummary> for ProfileJson {
-    fn from(summary: &ProfileSummary) -> Self {
-        Self {
-            data: summary.data.profiles.clone(),
-            metadata: summary.metadata.profiles.clone(),
-            system: summary.system.profiles.clone(),
-        }
-    }
 }
 
 #[cfg(test)]
@@ -77,7 +49,7 @@ fn profile_display_order(profile: &str) -> u8 {
     }
 }
 
-fn summarize_profiles<I>(profiles: I) -> TypeProfile
+fn normalize_profiles<I>(profiles: I) -> Vec<String>
 where
     I: IntoIterator<Item = String>,
 {
@@ -90,13 +62,11 @@ where
     }
 
     unique.sort_by_key(|(profile, first_seen)| (profile_display_order(profile), *first_seen));
-    let profiles: Vec<String> = unique.into_iter().map(|(profile, _)| profile).collect();
-    let class = classify_profiles(&profiles);
-
-    TypeProfile { profiles, class }
+    unique.into_iter().map(|(profile, _)| profile).collect()
 }
 
-fn classify_profiles(profiles: &[String]) -> Redundancy {
+/// Classify canonical profile names for the human `braid status` renderer.
+pub(crate) fn classify_profiles(profiles: &[String]) -> Redundancy {
     if profiles.is_empty() {
         return Redundancy::Unknown;
     }
@@ -112,50 +82,26 @@ fn classify_profiles(profiles: &[String]) -> Redundancy {
     }
 }
 
-/// Build the shared profile summary from parsed btrfs df entries.
-pub fn from_df_entries(entries: &[BtrfsDfEntry]) -> ProfileSummary {
-    ProfileSummary {
-        data: summarize_profiles(
+/// Build the canonical profile-name vectors from parsed btrfs df entries.
+pub fn from_df_entries(entries: &[BtrfsDfEntry]) -> ProfileJson {
+    ProfileJson {
+        data: normalize_profiles(
             entries
                 .iter()
                 .filter(|entry| entry.bg_type == BtrfsBgType::Data)
                 .map(|entry| entry.bg_profile.to_string()),
         ),
-        metadata: summarize_profiles(
+        metadata: normalize_profiles(
             entries
                 .iter()
                 .filter(|entry| entry.bg_type == BtrfsBgType::Metadata)
                 .map(|entry| entry.bg_profile.to_string()),
         ),
-        system: summarize_profiles(
+        system: normalize_profiles(
             entries
                 .iter()
                 .filter(|entry| entry.bg_type == BtrfsBgType::System)
                 .map(|entry| entry.bg_profile.to_string()),
-        ),
-    }
-}
-
-/// Build the shared profile summary from serialized status allocation rows.
-pub fn from_allocation(entries: &[AllocationEntry]) -> ProfileSummary {
-    ProfileSummary {
-        data: summarize_profiles(
-            entries
-                .iter()
-                .filter(|entry| entry.bg_type == "Data")
-                .map(|entry| entry.profile.clone()),
-        ),
-        metadata: summarize_profiles(
-            entries
-                .iter()
-                .filter(|entry| entry.bg_type == "Metadata")
-                .map(|entry| entry.profile.clone()),
-        ),
-        system: summarize_profiles(
-            entries
-                .iter()
-                .filter(|entry| entry.bg_type == "System")
-                .map(|entry| entry.profile.clone()),
         ),
     }
 }
@@ -174,46 +120,106 @@ mod tests {
         }
     }
 
-    // Intent: a clean three-disk RAID1 pool classifies every block-group type
-    // as mirrored.
+    fn names(names: &[&str]) -> Vec<String> {
+        names.iter().map(|name| (*name).to_owned()).collect()
+    }
+
+    // Intent: btrfs mirror profiles classify as mirrored for human status.
+    // Why it exists: the human renderer adds no warning suffix for profiles
+    // that provide cross-disk redundancy.
+    // Scenario: a pool reports any btrfs mirror-family profile.
+    #[test]
+    fn classify_mirrored_profiles() {
+        for profile in ["RAID1", "RAID1C3", "RAID1C4", "RAID10"] {
+            assert_eq!(classify_profiles(&names(&[profile])), Redundancy::Mirrored);
+        }
+    }
+
+    // Intent: DUP classifies as same-disk copies.
+    // Why it exists: DUP is protected against block corruption but not disk
+    // loss, so the human renderer must choose the specific no-disk-redundancy suffix.
+    // Scenario: a single-disk pool reports DUP metadata or system chunks.
+    #[test]
+    fn classify_same_disk_profile() {
+        assert_eq!(classify_profiles(&names(&["DUP"])), Redundancy::SameDisk);
+    }
+
+    // Intent: unmirrored profiles classify as no redundancy.
+    // Why it exists: single and RAID0 must surface as unprotected in human status.
+    // Scenario: btrfs reports data chunks that cannot survive a disk loss.
+    #[test]
+    fn classify_no_redundancy_profiles() {
+        for profile in ["single", "RAID0"] {
+            assert_eq!(
+                classify_profiles(&names(&[profile])),
+                Redundancy::NoRedundancy
+            );
+        }
+    }
+
+    // Intent: multiple profile names classify as mixed.
+    // Why it exists: human status needs the warning suffix whenever a block
+    // group type spans more than one redundancy story.
+    // Scenario: degraded writes created single data chunks before RAID1 was restored.
+    #[test]
+    fn classify_mixed_profiles() {
+        assert_eq!(
+            classify_profiles(&names(&["single", "RAID1"])),
+            Redundancy::Mixed
+        );
+    }
+
+    // Intent: missing profile data classifies as unknown.
+    // Why it exists: no df row is distinct from a known no-redundancy profile.
+    // Scenario: status asks for a per-type label before btrfs df data exists.
+    #[test]
+    fn classify_empty_profiles_as_unknown() {
+        assert_eq!(classify_profiles(&[]), Redundancy::Unknown);
+    }
+
+    // Intent: unrecognized profile names classify as unknown.
+    // Why it exists: future btrfs profile strings should render verbatim
+    // without braid inventing a redundancy promise.
+    // Scenario: btrfs introduces a profile string this braid build does not know.
+    #[test]
+    fn classify_unrecognized_profile_as_unknown() {
+        assert_eq!(classify_profiles(&names(&["RAID5"])), Redundancy::Unknown);
+        assert_eq!(classify_profiles(&names(&["foo"])), Redundancy::Unknown);
+    }
+
+    // Intent: a clean three-disk RAID1 pool reports RAID1 for every block-group type.
     // Why it exists: the healthy RAID1 baseline is the reference state every
-    // status surface reports; misclassifying it would mislabel a normal pool.
+    // status surface reports; dropping or renaming it would mislabel a normal pool.
     // Scenario: a normal fully-balanced pool reports RAID1 Data, Metadata, and System rows.
     #[test]
-    fn summary_for_3disk_raid1_pool() {
-        let summary = from_df_entries(&[
+    fn profile_json_for_3disk_raid1_pool() {
+        let profile = from_df_entries(&[
             entry(BtrfsBgType::Data, BtrfsProfile::Raid1),
             entry(BtrfsBgType::Metadata, BtrfsProfile::Raid1),
             entry(BtrfsBgType::System, BtrfsProfile::Raid1),
         ]);
 
-        assert_eq!(summary.data.class, Redundancy::Mirrored);
-        assert_eq!(summary.metadata.class, Redundancy::Mirrored);
-        assert_eq!(summary.system.class, Redundancy::Mirrored);
-        assert_eq!(summary.data.profiles, ["RAID1"]);
-        assert_eq!(summary.metadata.profiles, ["RAID1"]);
-        assert_eq!(summary.system.profiles, ["RAID1"]);
+        assert_eq!(profile.data, ["RAID1"]);
+        assert_eq!(profile.metadata, ["RAID1"]);
+        assert_eq!(profile.system, ["RAID1"]);
     }
 
-    // Intent: a single-disk bootstrap reports data as unprotected while
-    // metadata and system are same-disk DUP.
+    // Intent: a single-disk bootstrap reports data as single while metadata
+    // and system report DUP.
     // Why it exists: a scalar "single" profile hides the DUP rows' actual but
     // non-disk-redundant protection story.
     // Scenario: the first `braid add` creates data=single plus metadata/system=DUP.
     #[test]
-    fn summary_for_single_disk_pool() {
-        let summary = from_df_entries(&[
+    fn profile_json_for_single_disk_pool() {
+        let profile = from_df_entries(&[
             entry(BtrfsBgType::Data, BtrfsProfile::Single),
             entry(BtrfsBgType::Metadata, BtrfsProfile::Dup),
             entry(BtrfsBgType::System, BtrfsProfile::Dup),
         ]);
 
-        assert_eq!(summary.data.class, Redundancy::NoRedundancy);
-        assert_eq!(summary.metadata.class, Redundancy::SameDisk);
-        assert_eq!(summary.system.class, Redundancy::SameDisk);
-        assert_eq!(summary.data.profiles, ["single"]);
-        assert_eq!(summary.metadata.profiles, ["DUP"]);
-        assert_eq!(summary.system.profiles, ["DUP"]);
+        assert_eq!(profile.data, ["single"]);
+        assert_eq!(profile.metadata, ["DUP"]);
+        assert_eq!(profile.system, ["DUP"]);
     }
 
     // Intent: mixed data profiles retain canonical domain order.
@@ -221,29 +227,27 @@ mod tests {
     // make human and JSON surfaces disagree with the intended examples.
     // Scenario: degraded writes created single data chunks before RAID1 was restored.
     #[test]
-    fn summary_for_mixed_data_profile() {
-        let summary = from_df_entries(&[
+    fn profile_json_for_mixed_data_profile() {
+        let profile = from_df_entries(&[
             entry(BtrfsBgType::Data, BtrfsProfile::Raid1),
             entry(BtrfsBgType::Data, BtrfsProfile::Single),
         ]);
 
-        assert_eq!(summary.data.class, Redundancy::Mixed);
-        assert_eq!(summary.data.profiles, ["single", "RAID1"]);
+        assert_eq!(profile.data, ["single", "RAID1"]);
     }
 
-    // Intent: mixed metadata profiles are detected independently of data.
+    // Intent: mixed metadata profile names are normalized independently of data.
     // Why it exists: metadata and data have separate btrfs profile state and
     // status must not infer one from the other.
     // Scenario: an interrupted metadata balance leaves both DUP and RAID1 chunks.
     #[test]
-    fn summary_for_mixed_metadata_profile() {
-        let summary = from_df_entries(&[
+    fn profile_json_for_mixed_metadata_profile() {
+        let profile = from_df_entries(&[
             entry(BtrfsBgType::Metadata, BtrfsProfile::Dup),
             entry(BtrfsBgType::Metadata, BtrfsProfile::Raid1),
         ]);
 
-        assert_eq!(summary.metadata.class, Redundancy::Mixed);
-        assert_eq!(summary.metadata.profiles, ["DUP", "RAID1"]);
+        assert_eq!(profile.metadata, ["DUP", "RAID1"]);
     }
 
     // Intent: GlobalReserve rows never appear in the per-type profile summary.
@@ -251,55 +255,50 @@ mod tests {
     // a Data, Metadata, or System block-group type.
     // Scenario: btrfs df includes its normal GlobalReserve single row.
     #[test]
-    fn summary_omits_global_reserve() {
-        let summary = from_df_entries(&[
+    fn profile_json_omits_global_reserve() {
+        let profile = from_df_entries(&[
             entry(BtrfsBgType::Data, BtrfsProfile::Raid1),
             entry(BtrfsBgType::GlobalReserve, BtrfsProfile::Single),
         ]);
 
-        assert_eq!(summary.data.profiles, ["RAID1"]);
-        assert!(summary.metadata.profiles.is_empty());
-        assert!(summary.system.profiles.is_empty());
+        assert_eq!(profile.data, ["RAID1"]);
+        assert!(profile.metadata.is_empty());
+        assert!(profile.system.is_empty());
     }
 
-    // Intent: empty df data reports Unknown with empty profile vectors.
+    // Intent: empty df data reports empty profile vectors.
     // Why it exists: renderers need to distinguish "no probe data" from a
     // non-empty unclassified profile name such as RAID5.
     // Scenario: status asks for a summary before df rows are available.
     #[test]
-    fn summary_for_empty_df() {
-        let summary = from_df_entries(&[]);
+    fn profile_json_for_empty_df() {
+        let profile = from_df_entries(&[]);
 
-        assert_eq!(summary.data.class, Redundancy::Unknown);
-        assert_eq!(summary.metadata.class, Redundancy::Unknown);
-        assert_eq!(summary.system.class, Redundancy::Unknown);
-        assert!(summary.data.profiles.is_empty());
-        assert!(summary.metadata.profiles.is_empty());
-        assert!(summary.system.profiles.is_empty());
+        assert!(profile.data.is_empty());
+        assert!(profile.metadata.is_empty());
+        assert!(profile.system.is_empty());
     }
 
-    // Intent: RAID0 is classified as no redundancy.
+    // Intent: RAID0 is preserved as a profile name.
     // Why it exists: RAID0 is not produced by braid, but callers must not
-    // render it as mirrored or unknown if btrfs reports it.
+    // lose the raw profile if btrfs reports it.
     // Scenario: an operator inspects a pool whose data chunks are RAID0.
     #[test]
-    fn summary_for_raid0_data() {
-        let summary = from_df_entries(&[entry(BtrfsBgType::Data, BtrfsProfile::Raid0)]);
+    fn profile_json_for_raid0_data() {
+        let profile = from_df_entries(&[entry(BtrfsBgType::Data, BtrfsProfile::Raid0)]);
 
-        assert_eq!(summary.data.class, Redundancy::NoRedundancy);
-        assert_eq!(summary.data.profiles, ["RAID0"]);
+        assert_eq!(profile.data, ["RAID0"]);
     }
 
-    // Intent: RAID5 is surfaced verbatim but left unclassified.
+    // Intent: RAID5 is surfaced verbatim.
     // Why it exists: parity profiles have a different redundancy story than
     // braid's RAID1-only policy, so status must not over- or under-promise.
     // Scenario: a non-braid-created pool reports Data=RAID5.
     #[test]
-    fn summary_for_raid5_data_is_unknown() {
-        let summary = from_df_entries(&[entry(BtrfsBgType::Data, BtrfsProfile::Raid5)]);
+    fn profile_json_for_raid5_data() {
+        let profile = from_df_entries(&[entry(BtrfsBgType::Data, BtrfsProfile::Raid5)]);
 
-        assert_eq!(summary.data.class, Redundancy::Unknown);
-        assert_eq!(summary.data.profiles, ["RAID5"]);
+        assert_eq!(profile.data, ["RAID5"]);
     }
 
     // Intent: unparsed future profile names are preserved exactly.
@@ -307,14 +306,13 @@ mod tests {
     // instead of a braid-invented replacement token.
     // Scenario: btrfs introduces a profile string this braid build does not know.
     #[test]
-    fn summary_for_unparsed_profile_is_unknown() {
-        let summary = from_df_entries(&[entry(
+    fn profile_json_for_unparsed_profile() {
+        let profile = from_df_entries(&[entry(
             BtrfsBgType::Data,
             BtrfsProfile::Unknown("foo".to_owned()),
         )]);
 
-        assert_eq!(summary.data.class, Redundancy::Unknown);
-        assert_eq!(summary.data.profiles, ["foo"]);
+        assert_eq!(profile.data, ["foo"]);
     }
 
     // Intent: unknown profile names keep btrfs report order after known names.
@@ -322,8 +320,8 @@ mod tests {
     // make JSON arrays unstable relative to the source report.
     // Scenario: btrfs reports RAID1, then two unknown profile names, then RAID1 again.
     #[test]
-    fn summary_preserves_unknown_tail_order() {
-        let summary = from_df_entries(&[
+    fn profile_json_preserves_unknown_tail_order() {
+        let profile = from_df_entries(&[
             entry(BtrfsBgType::Data, BtrfsProfile::Raid1),
             entry(BtrfsBgType::Data, BtrfsProfile::Unknown("XENO".to_owned())),
             entry(
@@ -333,57 +331,6 @@ mod tests {
             entry(BtrfsBgType::Data, BtrfsProfile::Raid1),
         ]);
 
-        assert_eq!(summary.data.class, Redundancy::Mixed);
-        assert_eq!(summary.data.profiles, ["RAID1", "XENO", "FOOBAR"]);
-    }
-
-    // Intent: allocation rows and parsed df entries feed the same classifier.
-    // Why it exists: status classifies parsed df entries when building its
-    // report and serialized allocation when rendering the human form; both
-    // must tell the same profile story.
-    // Scenario: status builds its report from df, then renders from the allocation field.
-    #[test]
-    fn from_allocation_matches_from_df_entries() {
-        let entries = vec![
-            entry(BtrfsBgType::Data, BtrfsProfile::Single),
-            entry(BtrfsBgType::Data, BtrfsProfile::Raid1),
-            entry(BtrfsBgType::Metadata, BtrfsProfile::Raid1),
-            entry(BtrfsBgType::System, BtrfsProfile::Raid1),
-            entry(BtrfsBgType::GlobalReserve, BtrfsProfile::Single),
-        ];
-        let allocation = vec![
-            AllocationEntry {
-                bg_type: "Data".to_owned(),
-                profile: "single".to_owned(),
-                used_bytes: 1,
-                allocated_bytes: 2,
-            },
-            AllocationEntry {
-                bg_type: "Data".to_owned(),
-                profile: "RAID1".to_owned(),
-                used_bytes: 1,
-                allocated_bytes: 2,
-            },
-            AllocationEntry {
-                bg_type: "Metadata".to_owned(),
-                profile: "RAID1".to_owned(),
-                used_bytes: 1,
-                allocated_bytes: 2,
-            },
-            AllocationEntry {
-                bg_type: "System".to_owned(),
-                profile: "RAID1".to_owned(),
-                used_bytes: 1,
-                allocated_bytes: 2,
-            },
-            AllocationEntry {
-                bg_type: "GlobalReserve".to_owned(),
-                profile: "single".to_owned(),
-                used_bytes: 1,
-                allocated_bytes: 2,
-            },
-        ];
-
-        assert_eq!(from_allocation(&allocation), from_df_entries(&entries));
+        assert_eq!(profile.data, ["RAID1", "XENO", "FOOBAR"]);
     }
 }

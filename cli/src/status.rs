@@ -18,7 +18,7 @@ use crate::parse::{
     parse_btrfs_filesystem_usage, parse_btrfs_scrub_status, parse_smartctl,
 };
 use crate::probe::{Filesystem, ProbeError, probe_config_disk, probe_pool};
-use crate::profile_summary::{self, ProfileJson, ProfileSummary, Redundancy, TypeProfile};
+use crate::profile_summary::{self, ProfileJson, Redundancy};
 use crate::progress::pct_from_bytes;
 use crate::repair_hint;
 use crate::state_paths::StatePaths;
@@ -594,9 +594,7 @@ fn build_status<R: CommandRunner, F: Filesystem>(
         total_devices: Some(pool.total_devices),
         present_count: Some(present_count),
         missing_count: Some(pool.missing_count),
-        profile: df_summary
-            .as_ref()
-            .map(|summary| ProfileJson::from(&summary.profile_summary)),
+        profile: df_summary.as_ref().map(|summary| summary.profile.clone()),
         fsid: pool.fsid.clone(),
         capacity,
         last_scrub: Some(last_scrub),
@@ -708,7 +706,7 @@ pub(crate) fn resolve_alert_state(paths: &StatePaths) -> AlertState {
 // ---------------------------------------------------------------------------
 
 struct DfSummary {
-    profile_summary: ProfileSummary,
+    profile: ProfileJson,
     allocation: Vec<AllocationEntry>,
 }
 
@@ -741,7 +739,7 @@ fn summarize_df(df: &BtrfsDfOutput) -> DfSummary {
         .collect();
 
     DfSummary {
-        profile_summary: profile_summary::from_df_entries(&df.entries),
+        profile: profile_summary::from_df_entries(&df.entries),
         allocation,
     }
 }
@@ -1316,18 +1314,20 @@ fn devid_to_name(devid_names: Option<&HashMap<Devid, String>>, devid: Devid) -> 
         .unwrap_or_else(|| format!("devid {devid}"))
 }
 
-fn format_type_profile_human(profile: &TypeProfile) -> String {
-    if profile.profiles.is_empty() {
+fn format_type_profile_human(names: &[String]) -> String {
+    if names.is_empty() {
         return "unknown".to_owned();
     }
 
-    let names = profile.profiles.join(", ");
-    match profile.class {
-        Redundancy::Mirrored => names,
-        Redundancy::SameDisk => format!("{names} (same-disk copies; no disk redundancy)"),
-        Redundancy::NoRedundancy => format!("{names} (no redundancy)"),
-        Redundancy::Mixed => format!("{names} (not fully redundant)"),
-        Redundancy::Unknown => names,
+    let rendered_names = names.join(", ");
+    match profile_summary::classify_profiles(names) {
+        Redundancy::Mirrored => rendered_names,
+        Redundancy::SameDisk => {
+            format!("{rendered_names} (same-disk copies; no disk redundancy)")
+        }
+        Redundancy::NoRedundancy => format!("{rendered_names} (no redundancy)"),
+        Redundancy::Mixed => format!("{rendered_names} (not fully redundant)"),
+        Redundancy::Unknown => rendered_names,
     }
 }
 
@@ -1425,19 +1425,20 @@ fn format_status_human(
         return out;
     }
 
-    if let Some(ref alloc) = report.allocation
-        && !alloc.is_empty()
+    if let Some(ref profile) = report.profile
+        && [&profile.data, &profile.metadata, &profile.system]
+            .iter()
+            .any(|names| !names.is_empty())
     {
-        let summary = profile_summary::from_allocation(alloc);
         out.push_str("Profile:\n");
-        for (label, profile) in [
-            ("Data:    ", &summary.data),
-            ("Metadata:", &summary.metadata),
-            ("System:  ", &summary.system),
+        for (label, names) in [
+            ("Data:    ", profile.data.as_slice()),
+            ("Metadata:", profile.metadata.as_slice()),
+            ("System:  ", profile.system.as_slice()),
         ] {
             out.push_str(&format!(
                 "  {label}  {}\n",
-                format_type_profile_human(profile)
+                format_type_profile_human(names)
             ));
         }
     }
@@ -1928,7 +1929,7 @@ mod tests {
             total_devices: Some(3),
             present_count: Some(3),
             missing_count: Some(0),
-            profile: Some(ProfileJson::from(&df_summary.profile_summary)),
+            profile: Some(df_summary.profile.clone()),
             fsid: Some(Fsid::parse(TEST_FSID).unwrap()),
             capacity: Some(capacity),
             last_scrub: Some(last_scrub),
@@ -2688,6 +2689,77 @@ mod tests {
             "got:\n{human}"
         );
         assert!(human.contains("Metadata:  RAID1"), "got:\n{human}");
+    }
+
+    // Intent: the human Profile block follows `report.profile`, not the
+    // allocation rows.
+    // Why it exists: allocation rows are only the size table; rebuilding
+    // profile order from them can desynchronize the human and JSON surfaces.
+    // Scenario: parsed df profile order disagrees with the sorted allocation
+    // order for two future profile names.
+    #[test]
+    fn status_human_profile_block_uses_report_profile() {
+        let report = StatusReport {
+            mount_point: MountPoint::new("/mnt/storage".to_owned()),
+            status: StatusCode::Intact,
+            total_devices: Some(2),
+            present_count: Some(2),
+            missing_count: Some(0),
+            profile: Some(profile_json(
+                &["RAID1", "XENO", "FOOBAR"],
+                &["RAID1"],
+                &["RAID1"],
+            )),
+            fsid: Some(Fsid::parse(TEST_FSID).unwrap()),
+            capacity: None,
+            last_scrub: Some(ScrubReport::Never),
+            balance: None,
+            allocation: Some(vec![
+                AllocationEntry {
+                    bg_type: "Data".to_owned(),
+                    profile: "FOOBAR".to_owned(),
+                    used_bytes: 1,
+                    allocated_bytes: 2,
+                },
+                AllocationEntry {
+                    bg_type: "Data".to_owned(),
+                    profile: "RAID1".to_owned(),
+                    used_bytes: 1,
+                    allocated_bytes: 2,
+                },
+                AllocationEntry {
+                    bg_type: "Data".to_owned(),
+                    profile: "XENO".to_owned(),
+                    used_bytes: 1,
+                    allocated_bytes: 2,
+                },
+                AllocationEntry {
+                    bg_type: "Metadata".to_owned(),
+                    profile: "RAID1".to_owned(),
+                    used_bytes: 1,
+                    allocated_bytes: 2,
+                },
+                AllocationEntry {
+                    bg_type: "System".to_owned(),
+                    profile: "RAID1".to_owned(),
+                    used_bytes: 1,
+                    allocated_bytes: 2,
+                },
+            ]),
+            disks: vec![],
+            advisories: vec![],
+            alert_active: false,
+            alert_causes: vec![],
+            missing_devids: vec![],
+        };
+
+        let human = format_status_human(&report, None, None, None);
+
+        assert!(
+            human.contains("Data:      RAID1, XENO, FOOBAR (not fully redundant)"),
+            "got:\n{human}"
+        );
+        assert!(!human.contains("RAID1, FOOBAR, XENO"), "got:\n{human}");
     }
 
     // Intent: the human renderer prints non-empty Unknown profiles verbatim.
