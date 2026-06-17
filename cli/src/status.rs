@@ -1712,9 +1712,8 @@ mod tests {
         DeviceUsageSpec, device_usage_raw_body, disk_member_with, test_uuid,
     };
     use crate::test_fixtures::{
-        err_raw as status_err_raw, isolated_paths, mock_ok, status_btrfs_device_stats_3disk,
-        status_btrfs_device_usage_raw_1disk, status_btrfs_df_raid1, status_btrfs_df_single,
-        status_btrfs_scrub_aborted, status_btrfs_scrub_finished,
+        err_raw as status_err_raw, isolated_paths, mock_ok, status_btrfs_device_usage_raw_1disk,
+        status_btrfs_df_single, status_btrfs_scrub_aborted, status_btrfs_scrub_finished,
         status_btrfs_scrub_finished_with_errors, status_btrfs_scrub_interrupted,
         status_btrfs_scrub_never, status_btrfs_show_1disk, status_btrfs_show_3disk_1missing,
         status_btrfs_show_3disk_1null_underlying_1missing, status_btrfs_show_3disk_missing_devid3,
@@ -4872,104 +4871,91 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    /*
+     * Intent: build_status classifies a genuinely degraded pool -- 3 configured
+     * members, 1 absent from the live array -- as StatusCode::Degraded with
+     * 2-present / 1-missing counts, and renders the absent member as a single
+     * Offline disk row carrying its persisted identity (operator name, by-id
+     * path, derived mapper).
+     *
+     * Why it exists: the degraded StatusCode and degraded counts were pinned
+     * only by the slow VM lane (tests/cli/braid-status-rust.py Phase 3); no fast
+     * test asserted them. The sibling status_json_degraded / status_human_degraded
+     * tests hand-build a StatusReport literal, setting status/present_count/
+     * missing_count directly, so they exercise serialization and the human
+     * formatter but cannot catch a build_status misclassification. This is that
+     * lane's deterministic unit mirror: it pins the 2/1 counts AND the persisted
+     * member identity (toshiba3 / disk3 / braid-toshiba3) that an Offline
+     * regression could drop while keeping the counts.
+     *
+     * Scenario: a healthy 3-disk pool loses disk3. btrfs filesystem show lists
+     * devids 1 and 2 plus the "*** Some devices missing" sentinel; membership
+     * still records toshiba1/2/3. disk3's by-id path probes PresentLuks with the
+     * recorded UUID but is absent from the live array, so the config-disk arm of
+     * build_disk_views classifies it Offline (decision 024 verified-but-unpooled).
+     */
     #[test]
-    fn cmd_status_degraded_ok() {
-        let runner = MockRunner::default()
+    fn build_status_degraded_3disk_1missing_classifies_offline_member() {
+        let runner = status_runner_healthy_3disk_verbose(status_runner_healthy_3disk_base())
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
-                    mount_point: MountPoint::new("/mnt/storage".to_owned()),
+                    mount_point: status_mp(),
                 },
                 status_btrfs_show_3disk_1missing(),
             )
-            .with_output(
-                CmdRequest::CryptsetupStatus {
-                    mapper: MapperName::from_basename("disk1".into()),
-                },
-                status_cryptsetup_status_active("disk1", "/dev/vda"),
-            )
-            .with_output(
-                CmdRequest::CryptsetupLuksUuid {
-                    device: "/dev/vda".into(),
-                },
-                status_cryptsetup_uuid_ok("/dev/vda", "11111111-1111-1111-1111-111111111111"),
-            )
-            .with_output(
-                CmdRequest::CryptsetupStatus {
-                    mapper: MapperName::from_basename("disk2".into()),
-                },
-                status_cryptsetup_status_active("disk2", "/dev/vdb"),
-            )
-            .with_output(
-                CmdRequest::CryptsetupLuksUuid {
-                    device: "/dev/vdb".into(),
-                },
-                status_cryptsetup_uuid_ok("/dev/vdb", "22222222-2222-2222-2222-222222222222"),
-            )
-            .with_output(
-                CmdRequest::BtrfsFilesystemDfJson {
-                    mount_point: MountPoint::new("/mnt/storage".to_owned()),
-                },
-                status_btrfs_df_raid1(),
-            )
-            .with_output(
-                CmdRequest::BtrfsFilesystemUsageRaw {
-                    mount_point: MountPoint::new("/mnt/storage".to_owned()),
-                },
-                status_btrfs_usage_raw(),
-            )
-            .with_output(
-                CmdRequest::BtrfsScrubStatus {
-                    mount_point: MountPoint::new("/mnt/storage".to_owned()),
-                },
-                status_btrfs_scrub_never(),
-            )
-            .with_output(
-                CmdRequest::BtrfsDeviceStatsJson {
-                    mount_point: MountPoint::new("/mnt/storage".to_owned()),
-                },
-                status_btrfs_device_stats_3disk(),
-            )
-            // probe_config_disk for each config disk (by-id path)
-            .with_output(
-                CmdRequest::CryptsetupLuksUuid {
-                    device: "/dev/disk/by-id/disk1".into(),
-                },
-                status_cryptsetup_uuid_ok(
-                    "/dev/disk/by-id/disk1",
-                    "11111111-1111-1111-1111-111111111111",
-                ),
-            )
-            .with_output(
-                CmdRequest::CryptsetupLuksUuid {
-                    device: "/dev/disk/by-id/disk2".into(),
-                },
-                status_cryptsetup_uuid_ok(
-                    "/dev/disk/by-id/disk2",
-                    "22222222-2222-2222-2222-222222222222",
-                ),
-            )
-            .with_output(
-                CmdRequest::CryptsetupLuksUuid {
-                    device: "/dev/disk/by-id/disk3".into(),
-                },
-                status_cryptsetup_uuid_ok(
-                    "/dev/disk/by-id/disk3",
-                    "33333333-3333-3333-3333-333333333333",
-                ),
-            );
+            .with_luks_dump_text_luks2_for(&[
+                "/dev/disk/by-id/disk1",
+                "/dev/disk/by-id/disk2",
+                "/dev/disk/by-id/disk3",
+            ])
+            .with_mappers_closed(&["braid-toshiba1", "braid-toshiba2", "braid-toshiba3"]);
         let fs = status_fs_three_disk();
         let config = status_config();
-
         let (_tmp, paths) = isolated_paths();
-        let result = cmd_status(
+        membership::save_membership(&status_membership_3disk(), &paths).unwrap();
+
+        let built = build_status(
             &runner,
             &fs,
             &config,
-            false,
             &paths,
             crate::test_fixtures::mock_virtio_backing_path_resolver(),
-        );
-        assert!(result.is_ok());
+        )
+        .expect("degraded membership-populated status should build");
+
+        assert_eq!(built.report.status, StatusCode::Degraded);
+        assert_eq!(built.report.total_devices, Some(3));
+        assert_eq!(built.report.present_count, Some(2));
+        assert_eq!(built.report.missing_count, Some(1));
+
+        // Filter by status rather than indexing, so a row-order change cannot
+        // silently re-target these assertions.
+        let present = built
+            .report
+            .disks
+            .iter()
+            .filter(|d| d.status == DiskStatus::Present)
+            .count();
+        let offline: Vec<_> = built
+            .report
+            .disks
+            .iter()
+            .filter(|d| d.status == DiskStatus::Offline)
+            .collect();
+        assert_eq!(present, 2, "disks: {:?}", built.report.disks);
+        assert_eq!(offline.len(), 1, "disks: {:?}", built.report.disks);
+
+        // The sole Offline row keeps the persisted member identity VM Phase 3
+        // pins: a regression that keeps the 2/1 counts but loses the member's
+        // name/by-id/mapper would still trip here. mapper is mapper_name(toshiba3)
+        // = braid-toshiba3; luks_uuid is blank for the Offline arm (the on-disk
+        // UUID is surfaced only on a mismatch).
+        let offline = offline[0];
+        assert_eq!(offline.name, "toshiba3");
+        assert_eq!(offline.by_id, "/dev/disk/by-id/disk3");
+        assert_eq!(offline.mapper, "braid-toshiba3");
+        assert_eq!(offline.devid, None);
+        assert_eq!(offline.luks_uuid, "");
     }
 
     /*
