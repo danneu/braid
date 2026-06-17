@@ -3212,6 +3212,7 @@ mod tests {
     use crate::membership::{self, PoolMembership};
     use crate::test_fixtures::{
         MockFs, PoolFixture, ReplacementPool, mock_ok, replace_dev_info_sufficient,
+        with_lsblk_hw_info,
     };
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -3344,6 +3345,113 @@ mod tests {
                     name: "disk3",
                     by_id: "/dev/disk/by-id/virtio-disk3",
                     hw: &confirm::DiskHwInfo::default(),
+                    needs_luks_format: true,
+                    is_rebuild: false,
+                },
+                1,
+            )
+        );
+        expected.push_str("WARNING: This replace leaves only 1 disk -- no redundancy.\n\n");
+        assert_eq!(f.confirm.prompts(), vec![expected]);
+    }
+
+    // Intent: a live (present old) -> fresh (not-present new) replace confirm
+    //   resolves the OLD hw line from the live backing path (/dev/test-2) and
+    //   the NEW hw line from the by-id handle (/dev/disk/by-id/virtio-disk3),
+    //   per decision 024 -- and never transposes the two device args.
+    // Why it exists: replace hands `query_disk_hw_info` two different device
+    //   sources (`pool.underlying_for_uuid` for the present old disk, `new_by_id`
+    //   for the not-yet-present new disk), but nothing pinned that routing
+    //   through execute(): the sibling confirm test builds both prompts from
+    //   `DiskHwInfo::default()` against a runner with no LsblkField handler, so
+    //   `get_lsblk_field`'s `.ok()?` swallow of `MissingMock` blanks both lines
+    //   no matter which path is queried. Distinct old/new values plus a
+    //   byte-exact assertion make this both path-sensitive (wrong path -> blank
+    //   line -> mismatch) and swap-sensitive (old/new args transposed -> old
+    //   line shows NEW_MODEL -> mismatch), the most plausible replace regression.
+    // Scenario: replacing the only live disk2 with fresh disk3 leaves a
+    //   single-disk pool; the operator's prompt shows disk2's hardware probed
+    //   from /dev/test-2 and disk3's from its by-id handle.
+    #[test]
+    fn cmd_replace_confirm_hw_lines_route_old_to_live_new_to_by_id() {
+        const OLD_MODEL: &str = "WD Red Plus WD60EFPX";
+        const OLD_SERIAL: &str = "OLDDISK2SERIAL";
+        const OLD_SIZE: u64 = 6_000_000_000_000;
+        const NEW_MODEL: &str = "Seagate IronWolf ST8000VN004";
+        const NEW_SERIAL: &str = "NEWDISK3SERIAL";
+        const NEW_SIZE: u64 = 8_000_000_000_000;
+
+        let f = PoolFixture::empty();
+        f.confirm.accept();
+        let new_by_id = ByIdPath::parse("/dev/disk/by-id/virtio-disk3").unwrap();
+        let new_probed = PresentConfigDisk {
+            name: disk_name("disk3"),
+            by_id_path: new_by_id.clone(),
+            state: PresentConfigDiskState::PresentNotLuks,
+        };
+        let source = ReplaceSource::Live {
+            mapper: MapperName::from_basename("braid-disk2".into()),
+            devid: Devid::new(2),
+        };
+        let plan = ReplacePlan {
+            notes: vec![],
+            work_plan: replace_work_plan_for_test(&ReplaceWorkPlanTestInput {
+                new_name: "disk3",
+                new_by_id: &new_by_id,
+                new_probed: &new_probed,
+                replace_source: &source,
+                mount_point: &MountPoint::new("/mnt/storage".into()),
+                will_clear_last_missing: false,
+                total_devices: 1,
+                paths: &f.paths,
+                enroll_key_file: None,
+                luks_format_extra_opts: &[],
+            }),
+        };
+        let fs = MockFs::unmounted(vec![]);
+        // Old disk2's live backing is /dev/test-2 (replace_work_plan_test_pool
+        // sets the live source's `underlying` to /dev/test-{devid}); the fresh
+        // new disk is probed via its by-id handle.
+        let runner = with_lsblk_hw_info(
+            with_lsblk_hw_info(
+                MockRunner::default(),
+                "/dev/test-2",
+                OLD_MODEL,
+                OLD_SERIAL,
+                OLD_SIZE,
+            ),
+            "/dev/disk/by-id/virtio-disk3",
+            NEW_MODEL,
+            NEW_SERIAL,
+            NEW_SIZE,
+        );
+
+        // execute() fails downstream on this minimal runner, but the prompt is
+        // already recorded at the confirm gate -- the assertion target.
+        let _ = plan.execute(&runner, &fs, &f.replace_params().yes(false).build());
+
+        let old_hw = confirm::DiskHwInfo {
+            model: Some(OLD_MODEL.into()),
+            serial: Some(OLD_SERIAL.into()),
+            size: Some(OLD_SIZE),
+        };
+        let new_hw = confirm::DiskHwInfo {
+            model: Some(NEW_MODEL.into()),
+            serial: Some(NEW_SERIAL.into()),
+            size: Some(NEW_SIZE),
+        };
+        let mut expected = format!(
+            "{}\n",
+            format_replace_confirm(
+                &ReplaceConfirmOld {
+                    name: "disk2",
+                    hw: Some(&old_hw),
+                    source: &source,
+                },
+                &ReplaceConfirmNew {
+                    name: "disk3",
+                    by_id: "/dev/disk/by-id/virtio-disk3",
+                    hw: &new_hw,
                     needs_luks_format: true,
                     is_rebuild: false,
                 },

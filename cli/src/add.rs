@@ -4371,20 +4371,44 @@ mod tests {
         /// and the degraded-add skip test models reality instead of leaning
         /// only on the planned `PoolState.missing_count`.
         degraded: bool,
+        /// When set, answer `LsblkField` for the disk2 by-id target with the
+        /// canonical `HW_*` model/serial/size so the confirm-prompt routing
+        /// test can pin that hw is probed via the by-id handle (decision 024).
+        /// Default off so the shared `::new()`/`::degraded()` callers keep the
+        /// `MissingMock` -> blank-hw contract their byte-exact prompts assume.
+        report_hw: bool,
     }
 
     impl RecoverableAddRunner {
+        /// Canonical hardware the by-id probe reports when `report_hw` is set.
+        /// Shared between the gated `LsblkField` arm and the confirm-routing
+        /// test's `expected`, so the two cannot drift apart.
+        const HW_MODEL: &'static str = "Samsung SSD 870 QVO";
+        const HW_SERIAL: &'static str = "ADD2SERIAL";
+        const HW_SIZE: u64 = 8_000_000_000_000;
+
         fn new() -> Self {
             Self {
                 disk2_added: std::sync::atomic::AtomicBool::new(false),
                 disk2_opened: std::sync::atomic::AtomicBool::new(false),
                 degraded: false,
+                report_hw: false,
             }
         }
 
         fn degraded() -> Self {
             Self {
                 degraded: true,
+                ..Self::new()
+            }
+        }
+
+        /// Like `new()`, but answers the disk2 by-id `LsblkField` probe so the
+        /// confirm prompt's hw line resolves. Isolated behind its own
+        /// constructor so the many `::new()` callers keep blank-hw prompts.
+        fn with_hw_info() -> Self {
+            Self {
+                report_hw: true,
                 ..Self::new()
             }
         }
@@ -4482,6 +4506,16 @@ mod tests {
                     "btrfs balance status",
                     "No balance found on '/mnt/storage'\n",
                 )),
+                CmdRequest::LsblkField { device, field }
+                    if self.report_hw && device == "/dev/disk/by-id/virtio-disk2" =>
+                {
+                    let value = match field {
+                        crate::cmd::LsblkFieldKind::Model => Self::HW_MODEL.to_owned(),
+                        crate::cmd::LsblkFieldKind::Serial => Self::HW_SERIAL.to_owned(),
+                        crate::cmd::LsblkFieldKind::Size => Self::HW_SIZE.to_string(),
+                    };
+                    Ok(mock_ok("lsblk", &value))
+                }
                 _ => Err(CmdError::MissingMock),
             }
         }
@@ -4971,17 +5005,26 @@ mod tests {
         );
     }
 
-    // Intent: accepted add confirmation records the exact assembled prompt.
+    // Intent: accepted add confirmation records the exact assembled prompt,
+    //   with the target's hw line resolved from the by-id handle
+    //   (/dev/disk/by-id/virtio-disk2) -- the not-yet-present add target's
+    //   only valid probe path per decision 024.
     // Why it exists: the confirm seam must receive the formatter output plus
-    //   its trailing newline exactly once for the planned fresh target.
+    //   its trailing newline exactly once for the planned fresh target. Until
+    //   this used `with_hw_info()`, the prompt was built from
+    //   `DiskHwInfo::default()` against a runner that returns `MissingMock`
+    //   for `LsblkField`, so `get_lsblk_field`'s `.ok()?` swallow blanked the
+    //   hw line no matter which device was queried -- the routing was unpinned.
+    //   The populated `DiskHwInfo` now matches only if the probe hit the by-id
+    //   path; a regression to any other path leaves the line blank and fails.
     // Scenario: adding a fresh disk to a mounted pool prompts for the disk
-    //   that will be LUKS-formatted.
+    //   that will be LUKS-formatted, showing its model/serial/size.
     #[test]
     fn add_accepted_confirm_records_prompt() {
         const BY_ID: &str = "/dev/disk/by-id/virtio-disk2";
         let plan = fresh_add_confirm_plan();
         let (_state_tmp, paths, _tmp, pass_path) = execute_fixture();
-        let runner = RequestRecordingRunner::new(RecoverableAddRunner::new());
+        let runner = RequestRecordingRunner::new(RecoverableAddRunner::with_hw_info());
         let fs = AddMockFs(vec![BY_ID.into()]);
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
         let confirm = crate::confirm::RecordingConfirm::new();
@@ -5016,7 +5059,11 @@ mod tests {
             format_add_confirm(&[AddConfirmDisk {
                 name: "disk2",
                 by_id: BY_ID,
-                hw: crate::confirm::DiskHwInfo::default(),
+                hw: crate::confirm::DiskHwInfo {
+                    model: Some(RecoverableAddRunner::HW_MODEL.into()),
+                    serial: Some(RecoverableAddRunner::HW_SERIAL.into()),
+                    size: Some(RecoverableAddRunner::HW_SIZE),
+                },
                 needs_luks_format: true,
             }])
         );

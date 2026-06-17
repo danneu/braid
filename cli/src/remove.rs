@@ -894,6 +894,7 @@ mod tests {
         device_usage_raw_body, mock_ok, overcommitted_survivor_df_json,
         overcommitted_survivor_usage_stdout, target_device, valid_three_disk_df_json,
         valid_three_disk_usage_stdout, valid_two_disk_df_json, valid_two_disk_usage_stdout,
+        with_lsblk_hw_info,
     };
     use std::collections::BTreeMap;
 
@@ -1081,6 +1082,57 @@ mod tests {
         assert!(
             prompt.contains("2 disks -> 1 disk"),
             "prompt must show the 2->1 pool transition: {prompt:?}"
+        );
+    }
+
+    // Intent: a 2->1 remove confirm resolves its hw line from the present
+    //   target's LIVE backing path (/dev/vdc for disk2), never a persisted
+    //   by-id handle, the mapper path, or an empty string.
+    // Why it exists: decision 024 ("Present-device probes use live paths")
+    //   governs which device `query_disk_hw_info` is handed, but nothing pinned
+    //   the routing through execute() -- the only hw-line tests were pure
+    //   formatter tests, and the other execute-level confirm tests run against
+    //   runners with no LsblkField handler, so `get_lsblk_field`'s `.ok()?`
+    //   swallow of `MissingMock` silently blanks the line regardless of which
+    //   device was queried. Registering hw ONLY on /dev/vdc makes the model and
+    //   serial appear iff the probe hit the live backing path; a regression to
+    //   the mapper path or a by-id handle leaves the line blank and fails.
+    // Scenario: removing disk2 from a two-disk pool, the operator's confirm
+    //   prompt shows disk2's real model and serial -- queried from /dev/vdc.
+    #[test]
+    fn cmd_remove_confirm_hw_line_resolves_from_live_backing_path() {
+        const MODEL: &str = "Toshiba MN07ACA12T";
+        const SERIAL: &str = "REMOVE2SERIAL";
+        const SIZE: u64 = 12_000_138_625_024;
+
+        let f = PoolFixture::two_disk_healthy();
+        f.confirm.accept();
+        let runner = with_lsblk_hw_info(
+            RemovalPool::two_disk().install(MockRunner::default()),
+            "/dev/vdc",
+            MODEL,
+            SERIAL,
+            SIZE,
+        );
+        let fs = MockFs::storage(vec![]);
+
+        cmd_remove(&runner, &fs, &f.remove_params().yes(false).build())
+            .expect("accepted confirm should proceed");
+
+        let prompts = f.confirm.prompts();
+        assert_eq!(
+            prompts.len(),
+            1,
+            "confirm must be invoked exactly once: {prompts:?}"
+        );
+        let prompt = &prompts[0];
+        assert!(
+            prompt.contains(MODEL),
+            "hw line must show the model probed from /dev/vdc: {prompt:?}"
+        );
+        assert!(
+            prompt.contains(&format!("serial {SERIAL}")),
+            "hw line must show the serial probed from /dev/vdc: {prompt:?}"
         );
     }
 

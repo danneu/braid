@@ -1,7 +1,7 @@
 //! Cross-scope fixture core: `mock_ok`, `MockFs`, and the `PoolFixture`
 //! struct + ctors shared by every command scope.
 
-use crate::cmd::RawCommandOutput;
+use crate::cmd::{CmdRequest, LsblkFieldKind, MockRunner, RawCommandOutput};
 use crate::config::Config;
 use crate::confirm::RecordingConfirm;
 use crate::inhibit::RecordingInhibitor;
@@ -110,6 +110,49 @@ pub(crate) fn mock_ok(cmd: &str, stdout: &str) -> RawCommandOutput {
         stderr: String::new(),
         exit_status: 0,
     }
+}
+
+/// Register `lsblk` Model/Serial/Size outputs for `device` so a confirm
+/// prompt's hw line resolves only when the probe is routed to THIS path.
+/// Lets routing tests pin that a present-disk prompt queries the live
+/// backing path (decision 024) and a target prompt queries the by-id handle:
+/// `query_disk_hw_info` swallows a `MissingMock` to `None`, so a probe sent
+/// to any other path leaves the hw line blank and fails the assertion.
+///
+/// Emits exit-0 outputs via `mock_ok`; `get_lsblk_field` trims them and
+/// parses `Size` with `parse::<u64>()`, so `size` is rendered as its integer.
+/// `.with_output` resolves only after a fixture's `with_handler` closures
+/// return `None` for `LsblkField`, so wrapping a fixture-installed runner
+/// falls through to these cleanly.
+pub(crate) fn with_lsblk_hw_info(
+    runner: MockRunner,
+    device: &str,
+    model: &str,
+    serial: &str,
+    size: u64,
+) -> MockRunner {
+    runner
+        .with_output(
+            CmdRequest::LsblkField {
+                device: device.to_owned(),
+                field: LsblkFieldKind::Model,
+            },
+            mock_ok("lsblk", model),
+        )
+        .with_output(
+            CmdRequest::LsblkField {
+                device: device.to_owned(),
+                field: LsblkFieldKind::Serial,
+            },
+            mock_ok("lsblk", serial),
+        )
+        .with_output(
+            CmdRequest::LsblkField {
+                device: device.to_owned(),
+                field: LsblkFieldKind::Size,
+            },
+            mock_ok("lsblk", &format!("{size}")),
+        )
 }
 
 /// Device stanza spec for faithful `btrfs device usage --raw` fixture output.

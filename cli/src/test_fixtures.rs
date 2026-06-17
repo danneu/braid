@@ -204,7 +204,7 @@ pub(crate) use shared::{
     DeviceUsageSpec, MockBackingPathResolver, MockFs, PoolFixture, RecordingSleeper,
     TEST_PASSPHRASE_BYTES, canonical_luks_uuid, device_usage_raw_body, disk_member,
     disk_member_with, mock_ok, mock_virtio_backing_path_resolver,
-    mock_virtio_offset_backing_path_resolver, test_uuid,
+    mock_virtio_offset_backing_path_resolver, test_uuid, with_lsblk_hw_info,
 };
 #[allow(unused_imports)]
 pub(crate) use status::{
