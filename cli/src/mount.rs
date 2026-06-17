@@ -88,8 +88,6 @@ fn format_degraded_refused(missing: &[(String, MissingReason)], command_hint: &s
 pub struct OpenPlan {
     /// Disks that need LUKS open (name, by_id pairs).
     pub to_unlock: Vec<(DiskName, ByIdPath)>,
-    /// At least one mapper was already open.
-    pub any_open: bool,
     /// At least one membership disk was absent/damaged.
     pub any_missing_member: bool,
     /// Device path to use for mount (e.g. "/dev/mapper/braid-disk1").
@@ -215,7 +213,6 @@ fn plan_open_pool_inner<R: CommandRunner, F: Filesystem + ?Sized>(
 
     // 2. Probe each membership disk
     let mut to_unlock = Vec::new();
-    let mut any_open = false;
     let mut first_open_mapper: Option<DiskName> = None;
     let mut missing: Vec<(String, MissingReason)> = Vec::new();
 
@@ -268,7 +265,6 @@ fn plan_open_pool_inner<R: CommandRunner, F: Filesystem + ?Sized>(
                     events.push(ProbeEvent::DiskAlreadyOpen {
                         name: display_name.to_owned(),
                     });
-                    any_open = true;
                     if first_open_mapper.is_none() {
                         first_open_mapper = Some(disk_name.clone());
                     }
@@ -283,7 +279,7 @@ fn plan_open_pool_inner<R: CommandRunner, F: Filesystem + ?Sized>(
     }
 
     // 3. If no disks to unlock AND none already open → error
-    if to_unlock.is_empty() && !any_open {
+    if to_unlock.is_empty() && first_open_mapper.is_none() {
         return Err(MountError::Failed("no unlockable disks found".into()));
     }
 
@@ -310,7 +306,6 @@ fn plan_open_pool_inner<R: CommandRunner, F: Filesystem + ?Sized>(
 
     Ok(Some(OpenPlan {
         to_unlock,
-        any_open,
         any_missing_member,
         mount_device,
     }))
@@ -893,7 +888,6 @@ mod tests {
 
         let plan = OpenPlan {
             to_unlock: Vec::new(),
-            any_open: true,
             any_missing_member: false,
             mount_device: "/dev/mapper/braid-disk1".to_owned(),
         };
@@ -950,7 +944,6 @@ mod tests {
                 disk("disk1"),
                 ByIdPath::parse("/dev/disk/by-id/virtio-disk1").unwrap(),
             )],
-            any_open: false,
             any_missing_member: false,
             mount_device: "/dev/mapper/braid-disk1".to_owned(),
         };
@@ -1752,8 +1745,8 @@ mod tests {
     ///
     /// Why: This is the primary regression test for the
     /// `membership.disks.keys().next()` fallback bug. With `to_unlock` empty
-    /// and `any_open == true`, the old code picked the BTreeMap's first key
-    /// (e.g. "disk1") with no state filter, producing
+    /// and at least one mapper already open, the old code picked the
+    /// BTreeMap's first key (e.g. "disk1") with no state filter, producing
     /// `/dev/mapper/braid-disk1` even when disk1 was `Absent`. The mount
     /// then failed with a confusing "no such device" instead of mounting
     /// degraded via a mapper that actually existed. If this fix is reverted
@@ -1825,7 +1818,6 @@ mod tests {
             "to_unlock must be empty (all surviving mappers already open): {:?}",
             plan.to_unlock
         );
-        assert!(plan.any_open, "any_open must be true");
         assert!(
             plan.any_missing_member,
             "any_missing_member must be true (disk1 absent)"
@@ -3201,7 +3193,6 @@ pool already mounted at /mnt/storage
         let config = test_config();
         let plan = OpenPlan {
             to_unlock: Vec::new(),
-            any_open: true,
             any_missing_member: false,
             mount_device: "/dev/mapper/braid-disk1".to_owned(),
         };

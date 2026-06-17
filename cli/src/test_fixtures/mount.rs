@@ -329,7 +329,6 @@ pub(crate) fn direct_two_disk_plan() -> OpenPlan {
                 ByIdPath::parse("/dev/disk/by-id/virtio-disk2").unwrap(),
             ),
         ],
-        any_open: false,
         any_missing_member: false,
         mount_device: "/dev/mapper/braid-disk1".to_owned(),
     }

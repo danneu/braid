@@ -16448,7 +16448,6 @@ mod tests {
         let mut plan = recover_work_plan_for_journal(replace_journal());
         plan.open_plan = Some(OpenPlan {
             to_unlock: Vec::new(),
-            any_open: false,
             any_missing_member: false,
             mount_device: String::new(),
         });
@@ -16487,7 +16486,6 @@ mod tests {
         let mut plan = recover_work_plan_for_journal(replace_journal());
         plan.open_plan = Some(OpenPlan {
             to_unlock: Vec::new(),
-            any_open: false,
             any_missing_member: false,
             mount_device: String::new(),
         });
@@ -16547,7 +16545,6 @@ mod tests {
         let mut plan = recover_work_plan_for_journal(replace_journal());
         plan.open_plan = Some(OpenPlan {
             to_unlock: Vec::new(),
-            any_open: false,
             any_missing_member: false,
             mount_device: String::new(),
         });
