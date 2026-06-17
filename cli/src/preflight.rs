@@ -686,19 +686,12 @@ pub fn require_lock_preflight<F: Filesystem + ?Sized>(fs: &F, fsid: &Fsid) -> Re
     check_exclusive_op_with_policy(fs, fsid, ExclusiveOpPolicy::RejectAnyBusy).map(|_| ())
 }
 
-/// Guard for the systemd shutdown stop path.
-///
-/// Permits a running or paused btrfs balance because the shutdown path can
-/// pause a running balance before unmount and then resume it during recover.
-pub fn require_systemd_stop_lock_preflight<F: Filesystem + ?Sized>(
-    fs: &F,
-    fsid: &Fsid,
-) -> Result<(), String> {
-    check_exclusive_op_with_policy(fs, fsid, ExclusiveOpPolicy::AllowBalanceElseReject).map(|_| ())
-}
-
 /// Tell the systemd-stop executor whether a running balance needs an
 /// explicit pause request before unmount.
+///
+/// This is the sole systemd-stop exclusive-op preflight gate; the pause bool
+/// is a side product of the single sysfs read, so there is no parallel
+/// `require_*` guard to keep in sync.
 ///
 /// Returns false for idle and already-paused balance states; rejects every
 /// non-balance exclusive operation with the same message as lock preflight.
@@ -1790,23 +1783,6 @@ mod tests {
         );
     }
 
-    // Intent: systemd-stop lock preflight permits idle and balance states.
-    // Why it exists: shutdown teardown must pause a running balance and then
-    //   reach ordered umount and LUKS close instead of falling back to generic
-    //   systemd teardown.
-    // Scenario: ExecStop observes no exclusive op, a running balance, or a
-    //   paused balance while shutting down the pool.
-    #[test]
-    fn systemd_stop_lock_preflight_allows_none_and_balance() {
-        for body in ["none\n", "balance\n", "balance paused\n"] {
-            let fs = MockFs::with_sysfs(FSID, body);
-            assert!(
-                require_systemd_stop_lock_preflight(&fs, &fsid()).is_ok(),
-                "expected systemd-stop preflight to allow {body:?}"
-            );
-        }
-    }
-
     // Intent: systemd-stop preflight reports only running balance as needing pause.
     // Why it exists: ExecStop must request pause before unmount for a running
     //   balance, but idle and already-paused states should not issue a pause ioctl.
@@ -1830,6 +1806,10 @@ mod tests {
     // Intent: systemd-stop lock preflight rejects non-balance exclusive ops.
     // Why it exists: only btrfs balance has a verified safe quiesce path
     //   through umount; other exclusive ops remain unsafe for shutdown lock.
+    //   This is the only direct preflight-boundary test of the full non-balance
+    //   op matrix and the exact `cannot lock ... in progress` wording; the
+    //   command-level `cli/src/lock.rs#systemd_stop_rejects_non_balance_op` test
+    //   drives only the `device remove` case, so do not delete this as redundant.
     // Scenario: ExecStop observes a device add/remove/replace, resize, or
     //   swap activation in progress and must fail before unmounting.
     #[test]
@@ -1842,7 +1822,7 @@ mod tests {
             "swap activate",
         ] {
             let fs = MockFs::with_sysfs(FSID, &format!("{op}\n"));
-            let err = require_systemd_stop_lock_preflight(&fs, &fsid()).unwrap_err();
+            let err = systemd_stop_lock_requires_balance_pause(&fs, &fsid()).unwrap_err();
             assert!(
                 err.contains(op) && err.contains("cannot lock") && err.contains("in progress"),
                 "expected systemd-stop refusal naming {op:?}, got: {err}"
