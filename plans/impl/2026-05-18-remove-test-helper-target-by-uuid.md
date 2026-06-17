@@ -134,3 +134,19 @@ resolution.
   membership UUID and then live pool UUID.
 - Do not change `RemoveWorkPlan::new`; it already accepts the resolved
   target UUID plus the observed live `PoolDevice`.
+
+## Superseded
+
+Superseded by `plan-the-ideal-pivot-sunny-cocke` ("route remove render
+tests through the production planner"). The `#[cfg(test)]` helper this
+plan hardened, `remove_present_work_plan_for_test`, has been deleted: it
+was a second `RemoveWorkPlan` construction path kept in step with the
+production planner by hand, and the test added here
+(`dry_run_render_helper_targets_by_uuid`) only proved the helper's *own*
+copy of find-by-uuid -- test scaffolding guarding test scaffolding.
+
+The identity-flow intent survives on the production path. The drift case
+is now proved by `plan_remove_renders_observed_mapper_under_drift`, which
+drives a drifted observed mapper through `plan_remove(...).preview()` and
+asserts the rendered device-remove/close target the observed mapper, not
+a reconstruction from the persisted name.

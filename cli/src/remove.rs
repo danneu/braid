@@ -825,28 +825,6 @@ fn check_single_survivor<R: CommandRunner>(
     preflight::check_single_survivor_capacity(&df, survivor).map_err(RemoveError::Validation)
 }
 
-#[cfg(test)]
-fn remove_present_work_plan_for_test(
-    name: DiskName,
-    target_uuid: &LuksUuid,
-    pool: &PoolState,
-    mount_point: &MountPoint,
-) -> Result<RemoveWorkPlan, RemoveError> {
-    let target = pool
-        .devices
-        .iter()
-        .find(|device| &device.luks_uuid == target_uuid)
-        .cloned()
-        .expect("test pool must contain target UUID");
-    RemoveWorkPlan::new(
-        name,
-        target_uuid.clone(),
-        &target,
-        &pool.devices,
-        mount_point.clone(),
-    )
-}
-
 // ---------------------------------------------------------------------------
 // Confirmation formatter
 // ---------------------------------------------------------------------------
@@ -1629,114 +1607,18 @@ mod tests {
     }
 
     #[test]
-    // Intent: dry-run output shows exact commands for a 3->2 removal.
-    // Why: verifies the Step/CmdRequest integration produces correct shell strings.
-    // Scenario: 3-disk pool, removing one disk (remaining=2, no balance to single).
-    fn dry_run_render_3disk_removal() {
-        let name = DiskName::parse("disk2").unwrap();
-        let target_uuid = LuksUuid::parse("22222222-2222-2222-2222-222222222222").unwrap();
-        let pool = PoolState {
-            mounted: true,
-            devices: vec![
-                PoolDevice {
-                    devid: Devid::new(1),
-                    mapper: MapperName::from_basename("braid-disk1".into()),
-                    luks_uuid: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
-                    underlying: "/dev/vda".into(),
-                },
-                PoolDevice {
-                    devid: Devid::new(2),
-                    mapper: MapperName::from_basename("braid-disk2".into()),
-                    luks_uuid: target_uuid.clone(),
-                    underlying: "/dev/vdb".into(),
-                },
-                PoolDevice {
-                    devid: Devid::new(3),
-                    mapper: MapperName::from_basename("braid-disk3".into()),
-                    luks_uuid: LuksUuid::parse("33333333-3333-3333-3333-333333333333").unwrap(),
-                    underlying: "/dev/vdc".into(),
-                },
-            ],
-            missing_count: 0,
-            missing_devids: vec![],
-            total_devices: 3,
-            fsid: Some(Fsid::parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").unwrap()),
-            null_underlying: vec![],
-        };
-        let mount_point = MountPoint::new("/mnt/storage".into());
-        let steps = remove_present_work_plan_for_test(name, &target_uuid, &pool, &mount_point)
-            .unwrap()
-            .render_steps();
-        let output = Step::render_dry_run(&steps);
-        let lines: Vec<&str> = output.lines().collect();
-
-        // 2 steps (device remove + close), each with 1 command line = 4 lines
-        assert_eq!(lines.len(), 4, "expected 4 lines, got:\n{output}");
-        assert!(lines[0].contains("[long]"));
-        assert!(lines[0].contains("btrfs device remove"));
-        assert_eq!(
-            lines[1],
-            "$ btrfs device remove --enqueue /dev/mapper/braid-disk2 /mnt/storage"
-        );
-        assert!(lines[2].contains("[safe]"));
-        assert!(lines[2].contains("cryptsetup close"));
-        assert_eq!(lines[3], "$ cryptsetup close braid-disk2");
-    }
-
-    #[test]
-    // Intent: dry-run output includes balance-to-single when 2->1 removal.
-    // Why: verifies the conditional balance step renders with its command.
-    // Scenario: 2-disk pool, removing one disk leaves no redundancy.
-    fn dry_run_render_2disk_removal_includes_balance() {
-        let name = DiskName::parse("disk2").unwrap();
-        let target_uuid = LuksUuid::parse("22222222-2222-2222-2222-222222222222").unwrap();
-        let pool = PoolState {
-            mounted: true,
-            devices: vec![
-                PoolDevice {
-                    devid: Devid::new(1),
-                    mapper: MapperName::from_basename("braid-disk1".into()),
-                    luks_uuid: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
-                    underlying: "/dev/vda".into(),
-                },
-                PoolDevice {
-                    devid: Devid::new(2),
-                    mapper: MapperName::from_basename("braid-disk2".into()),
-                    luks_uuid: target_uuid.clone(),
-                    underlying: "/dev/vdb".into(),
-                },
-            ],
-            missing_count: 0,
-            missing_devids: vec![],
-            total_devices: 2,
-            fsid: Some(Fsid::parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").unwrap()),
-            null_underlying: vec![],
-        };
-        let mount_point = MountPoint::new("/mnt/storage".into());
-        let steps = remove_present_work_plan_for_test(name, &target_uuid, &pool, &mount_point)
-            .unwrap()
-            .render_steps();
-        let output = Step::render_dry_run(&steps);
-        let lines: Vec<&str> = output.lines().collect();
-
-        // 3 steps (balance + device remove + close), each with 1 command = 6 lines
-        assert_eq!(lines.len(), 6, "expected 6 lines, got:\n{output}");
-        assert!(lines[0].contains("RAID1 -> single"));
-        assert_eq!(
-            lines[1],
-            "$ btrfs balance start --enqueue '-dconvert=single' '-mconvert=dup' -f /mnt/storage"
-        );
-    }
-
-    #[test]
     // Intent: the 2->1 dry-run preview flows through
-    //   `plan_remove(...).preview().render()`, and the confirmation-only
-    //   1-disk `WARNING:` line must never leak into `--dry-run` stdout.
+    //   `plan_remove(...).preview().render()`, pins the exact balance /
+    //   device-remove / close command strings it renders, and keeps the
+    //   confirmation-only 1-disk `WARNING:` line out of `--dry-run` stdout.
     //
     // Why it exists: `braid remove --dry-run` routes through
     //   `RemovePlan::preview()` instead of `Step::print_dry_run(&steps)`.
     //   A regression that surfaces the confirmation-only `WARNING:` line as
-    //   a `PreviewNote` would change the bytes an operator sees.
+    //   a `PreviewNote` would change the bytes an operator sees. The exact
+    //   argv of `BtrfsBalanceSingle` / `BtrfsDeviceRemove` / `CryptsetupClose`
+    //   -- including the `shell_words` quoting of the balance args -- is
+    //   pinned only here on the production path; no `cmd.rs` test covers it.
     //
     // Scenario: operator previews removing disk2 from a healthy 2-disk
     //   pool. The preview must show the RAID1 -> single balance step, while
@@ -1770,65 +1652,137 @@ mod tests {
             !rendered.contains("WARNING:"),
             "2->1 dry-run preview must not leak confirmation-only WARNING lines, got:\n{rendered}",
         );
+
+        // Exact command strings on the production preview path: the 2->1
+        // case is the only place the balance argv (with its shell_words
+        // quoting) plus the device-remove and close argv are pinned
+        // end-to-end. Subsumes the deleted
+        // `dry_run_render_2disk_removal_includes_balance`.
+        let lines: Vec<&str> = rendered.lines().collect();
+        assert_eq!(
+            lines.len(),
+            6,
+            "2->1 preview must render balance + device-remove + close (6 lines), got:\n{rendered}",
+        );
+        assert_eq!(
+            lines[1],
+            "$ btrfs balance start --enqueue '-dconvert=single' '-mconvert=dup' -f /mnt/storage",
+        );
+        assert_eq!(
+            lines[3],
+            "$ btrfs device remove --enqueue /dev/mapper/braid-disk2 /mnt/storage",
+        );
+        assert_eq!(lines[5], "$ cryptsetup close braid-disk2");
     }
 
     #[test]
-    // Intent: remove render-test helper selects the live target by LUKS UUID.
+    // Intent: a clean 3->2 dry-run preview through `plan_remove(...)` emits
+    //   exactly the device-remove + close steps -- no RAID1 -> single balance
+    //   and no preflight notes.
     //
-    // Why it exists: the helper is render-only, but a mapper-keyed fixture
-    //   helper preserves the old identity model and can hide regressions in
-    //   command rendering tests.
+    // Why it exists: the balance step is conditional on `remaining == 1`. A
+    //   regression that emitted it on a 3->2 removal (still redundant after
+    //   eviction) would scare operators with a needless single-profile
+    //   conversion. Pairs with the 2->1 test that pins the balance present;
+    //   together they cover both arms of `render_steps`' `remaining == 1`
+    //   branch through the production planner. Subsumes the deleted
+    //   `dry_run_render_3disk_removal`.
     //
-    // Scenario: pool.json names the target "disk1", while the live pool row
-    //   for that UUID is observed as mapper "braid-renamed" after an unrelated
-    //   decoy row. The rendered remove and close commands must use the matched
-    //   UUID row's observed mapper.
-    fn dry_run_render_helper_targets_by_uuid() {
-        let name = DiskName::parse("disk1").unwrap();
-        let decoy_uuid = LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap();
-        let target_uuid = LuksUuid::parse("22222222-2222-2222-2222-222222222222").unwrap();
-        let pool = PoolState {
-            mounted: true,
-            devices: vec![
-                PoolDevice {
-                    devid: Devid::new(1),
-                    mapper: MapperName::from_basename("braid-decoy".into()),
-                    luks_uuid: decoy_uuid,
-                    underlying: "/dev/vda".into(),
-                },
-                PoolDevice {
-                    devid: Devid::new(2),
-                    mapper: MapperName::from_basename("braid-renamed".into()),
-                    luks_uuid: target_uuid.clone(),
-                    underlying: "/dev/vdb".into(),
-                },
-            ],
-            missing_count: 0,
-            missing_devids: vec![],
-            total_devices: 2,
-            fsid: Some(Fsid::parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").unwrap()),
-            null_underlying: vec![],
-        };
-        let mount_point = MountPoint::new("/mnt/storage".into());
+    // Scenario: operator previews removing disk2 from a healthy 3-disk pool;
+    //   two survivors keep RAID1, so no balance is needed.
+    fn plan_remove_3to2_preview_omits_balance_step() {
+        let f = PoolFixture::three_disk_healthy();
+        let runner = RemovalPool::three_disk().install(MockRunner::default());
+        let fs = MockFs::storage(vec![]);
+        let params = f.remove_params().dry_run(true).build(); // removes disk2
+        let plan = plan_remove(&runner, &fs, &params).expect("clean 3->2 plan");
 
-        let steps = remove_present_work_plan_for_test(name, &target_uuid, &pool, &mount_point)
-            .unwrap()
-            .render_steps();
-        let output = Step::render_dry_run(&steps);
-        let lines: Vec<&str> = output.lines().collect();
+        assert!(
+            plan.notes.is_empty(),
+            "healthy 3->2 preflight must produce zero notes; got {:?}",
+            plan.notes,
+        );
 
+        let preview = plan.preview();
         assert_eq!(
-            lines[3],
-            "$ btrfs device remove --enqueue /dev/mapper/braid-renamed /mnt/storage"
+            preview.steps.len(),
+            2,
+            "3->2 remove must emit device-remove + close only; got {:?}",
+            preview.steps,
         );
-        assert_eq!(lines[5], "$ cryptsetup close braid-renamed");
+        let rendered = preview.render();
+        let lines: Vec<&str> = rendered.lines().collect();
         assert!(
-            !output.contains("braid-decoy"),
-            "helper must not select the decoy mapper:\n{output}"
+            !rendered.contains("RAID1 -> single"),
+            "3->2 preview must NOT render the balance-to-single step, got:\n{rendered}",
+        );
+        assert_eq!(
+            lines[1],
+            "$ btrfs device remove --enqueue /dev/mapper/braid-disk2 /mnt/storage",
+        );
+        assert_eq!(lines[3], "$ cryptsetup close braid-disk2");
+    }
+
+    #[test]
+    // Intent: the dry-run preview renders the target's OBSERVED mapper, never
+    //   one reconstructed from the persisted disk name -- the "close observed,
+    //   NEVER reconstructed via `mapper_name(&name)`" doctrine
+    //   (`RemoveWorkPlan.target_mapper`) carried all the way into
+    //   `render_steps`.
+    //
+    // Why it exists: every other production remove test has observed mapper ==
+    //   name-derived mapper (RemovalPool hardcodes `braid-disk{n}`), so none of
+    //   them can catch a `render_steps` that rebuilds the mapper from the name.
+    //   The execute-time `drifted_member_remove_closes_observed_mapper` pins
+    //   `target_mapper` and the executor's close request under drift, but never
+    //   reaches the preview-only `render_steps`. This is the sole test proving
+    //   the PREVIEW honors the observed mapper.
+    //
+    // Scenario: pool.json names the target "disk1" -> uuid1; the live pool
+    //   observes that uuid under a drifted mapper "braid-renamed" (devid 1).
+    //   The previewed device-remove and close must target braid-renamed, with
+    //   no trace of the name-derived braid-disk1.
+    fn plan_remove_renders_observed_mapper_under_drift() {
+        let f = PoolFixture::two_disk_healthy(); // pool.json: disk1->uuid1, disk2->uuid2
+        let runner = RemovalPool::two_disk()
+            .install(MockRunner::default())
+            .with_handler(|req| match req {
+                // Rename only devid 1's observed mapper: braid-disk1 -> braid-renamed.
+                CmdRequest::BtrfsFilesystemShow { .. } => Some(Ok(mock_ok(
+                    "btrfs filesystem show",
+                    "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\
+                     \tTotal devices 2 FS bytes used 16.17MiB\n\
+                     \tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-renamed\n\
+                     \tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk2\n",
+                ))),
+                // The renamed mapper resolves to /dev/vdb; the default
+                // RemovalPool handler already maps /dev/vdb -> uuid1 via
+                // luks_uuid_for_device, so CryptsetupLuksUuid needs no override.
+                CmdRequest::CryptsetupStatus { mapper } if mapper.as_str() == "braid-renamed" => {
+                    Some(Ok(mock_ok(
+                        "cryptsetup status braid-renamed",
+                        "braid-renamed is active and is in use.\n  type:    LUKS2\n  device:  /dev/vdb\n  mode:    read/write\n",
+                    )))
+                }
+                _ => None, // everything else falls through to RemovalPool::install
+            });
+        let fs = MockFs::storage(vec![]);
+        let params = f.remove_params().name("disk1").dry_run(true).build();
+        let plan = plan_remove(&runner, &fs, &params).expect("drift must not block planning");
+        let rendered = plan.preview().render();
+
+        assert!(
+            rendered
+                .contains("$ btrfs device remove --enqueue /dev/mapper/braid-renamed /mnt/storage"),
+            "device-remove must target the observed mapper, got:\n{rendered}",
         );
         assert!(
-            !output.contains("braid-disk1"),
-            "helper must not synthesize mapper from persisted name:\n{output}"
+            rendered.contains("$ cryptsetup close braid-renamed"),
+            "close must target the observed mapper, got:\n{rendered}",
+        );
+        assert!(
+            !rendered.contains("braid-disk1"),
+            "preview must never reconstruct the name-derived mapper braid-disk1, got:\n{rendered}",
         );
     }
 
