@@ -394,17 +394,32 @@ pub fn probe_pool_for_tui<R: CommandRunner, F: Filesystem + ?Sized>(
                     unpooled_by_name.insert(disk_name.clone(), UnpooledDiskRender::MapperHijacked);
                     continue;
                 }
-                // Exhaustive residual arm: future ProbeError variants must be
-                // classified here rather than silently swallowed. PoolDevice,
-                // NotBtrfs, and MountInfo are unreachable from
-                // probe_config_disk today, but listing them keeps this gate in
-                // lockstep with the other diagnostic surfaces.
+                // Reachable from probe_config_disk, but the disk's true state is
+                // genuinely indeterminate. Leave it unclassified -- do NOT
+                // insert an unpooled_by_name entry. unpooled_disk_status_cell
+                // then returns None for this disk and the caller's
+                // unwrap_or_else renders the default yellow "missing" cell (its
+                // documented fallback "for disks the unpooled probe couldn't
+                // classify"). Cmd/Parse are environmental (spawn failure, output
+                // drift). MapperBackingResolveError fires when braid-<name> is
+                // open but a backing path won't canonicalize, so NO ownership
+                // conflict was ever established: it must not be classified as
+                // MapperHijacked (the red "mapper conflict" cell asserts a
+                // conflict we never confirmed), and its recovery differs --
+                // replug the disk / let udev settle, not close the mapper
+                // (status's config_probe_advisory keeps the same distinction).
                 Err(
                     ProbeError::Cmd(_)
                     | ProbeError::Parse(_)
-                    | ProbeError::PoolDevice { .. }
+                    | ProbeError::MapperBackingResolveError { .. },
+                ) => continue,
+                // Unreachable from probe_config_disk today -- these arise only
+                // on the pool-probing paths -- but enumerated so a newly-wired
+                // variant cannot reach this gate without a compile error forcing
+                // a classification decision here.
+                Err(
+                    ProbeError::PoolDevice { .. }
                     | ProbeError::NotBtrfs { .. }
-                    | ProbeError::MapperBackingResolveError { .. }
                     | ProbeError::MountInfo(_),
                 ) => continue,
             };
@@ -2770,6 +2785,100 @@ mod tests {
         assert_eq!(
             pool.unpooled_disks.get("ironwolf"),
             Some(&UnpooledDiskRender::MapperHijacked)
+        );
+    }
+
+    // Intent: probe_pool_for_tui leaves a declared disk whose open mapper's
+    // backing path fails to canonicalize OUT of unpooled_disks (no entry), so
+    // the view layer falls back to its default "missing" cell -- it is NOT
+    // classified as MapperHijacked.
+    //
+    // Why it exists: ProbeError::MapperBackingResolveError is reachable from
+    // probe_config_disk but is deliberately routed to the catch-all `continue`
+    // (no unpooled_disks entry -> unpooled_disk_status_cell None-fallback):
+    // canonicalization fails before any ownership conflict can be established,
+    // and its recovery (replug / let udev settle) differs from a hijack's (close
+    // the mapper). This pins that decision so a refactor cannot silently fold it
+    // into the red "mapper conflict" cell, and matches status's
+    // config_probe_advisory, which keeps the resolve-error remediation distinct.
+    //
+    // Scenario: 1-disk live pool. Second declared disk exists and is LUKS2 and
+    // braid-ironwolf is active, but the configured by-id path cannot be
+    // canonicalized (udev has not populated /dev/disk/by-id, or the disk was
+    // unplugged mid-probe).
+    #[test]
+    fn unpooled_disk_mapper_backing_resolve_error_uses_missing_fallback() {
+        let runner = one_disk_mounted_pool_runner()
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/braid-ironwolf".into(),
+                },
+                ok_raw(
+                    "cryptsetup luksUUID",
+                    "22222222-2222-2222-2222-222222222222\n",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksDumpText {
+                    device: "/dev/disk/by-id/braid-ironwolf".into(),
+                },
+                ok_raw(
+                    "cryptsetup luksDump",
+                    "LUKS header information\nVersion:       \t2\n",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName::from_basename("braid-ironwolf".into()),
+                },
+                ok_raw(
+                    "cryptsetup status braid-ironwolf",
+                    "/dev/mapper/braid-ironwolf is active and is in use.\n\
+                     \ttype:    LUKS2\n\
+                     \tdevice:  /dev/vdz\n",
+                ),
+            );
+        let fs = StubFs::with_paths(&[
+            "/dev/disk/by-id/braid-toshiba",
+            "/dev/disk/by-id/braid-ironwolf",
+        ]);
+
+        let disk_by_id = HashMap::from([
+            (
+                "toshiba".to_owned(),
+                "/dev/disk/by-id/braid-toshiba".to_owned(),
+            ),
+            (
+                "ironwolf".to_owned(),
+                "/dev/disk/by-id/braid-ironwolf".to_owned(),
+            ),
+        ]);
+
+        // Open mapper, but the configured by-id path will not canonicalize.
+        let resolver = crate::test_fixtures::MockBackingPathResolver::default().with_error(
+            "/dev/disk/by-id/braid-ironwolf",
+            std::io::ErrorKind::NotFound,
+        );
+
+        let pool = expect_pool(
+            probe_pool_for_tui(
+                &runner,
+                &fs,
+                &MountPoint::new("/mnt/storage".into()),
+                &tui_disks_with_by_id(disk_by_id),
+                &test_paths().1,
+                &resolver,
+            )
+            .unwrap(),
+        );
+
+        // The catch-all `continue` inserts no entry; the disk is left to the
+        // view's None-fallback (yellow "missing"). A Some(MapperHijacked) here
+        // would mean the resolve error was wrongly classified as a conflict.
+        assert!(
+            !pool.unpooled_disks.contains_key("ironwolf"),
+            "resolve error must stay unclassified (view-layer missing fallback), \
+             not be rendered as a mapper conflict"
         );
     }
 
