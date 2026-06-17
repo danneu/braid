@@ -134,51 +134,79 @@ enum ErrorReport<'a> {
     InvocationFailed { detail: &'a str },
 }
 
+/// Public entry for `braid ups status`; keeps main.rs's call site simple while
+/// routing through a writer-injected core for fast boundary tests.
 pub fn cmd_ups_status<R: CommandRunner>(
     runner: &R,
     config_path: &Path,
     json: bool,
 ) -> Result<UpsStatusOutcome, UpsError> {
+    let mut out = std::io::stdout();
+    cmd_ups_status_to(runner, config_path, json, &mut out)
+}
+
+/// Writer-injected core so tests can assert the user-facing `--json` dispatch
+/// without capturing process stdout.
+fn cmd_ups_status_to<R: CommandRunner>(
+    runner: &R,
+    config_path: &Path,
+    json: bool,
+    out: &mut dyn std::io::Write,
+) -> Result<UpsStatusOutcome, UpsError> {
     let config = config_read(config_path)?;
     let Some(ups_cfg) = config.ups() else {
-        return print_not_enabled(json);
+        return print_not_enabled(json, out);
     };
     let parsed = match query_ups(runner, &ups_cfg.name) {
         Ok(q) => q.parsed,
         Err(UpsQueryError::InvocationFailed(e)) => {
-            return emit_invocation_failed(json, e);
+            return emit_invocation_failed(json, e, out);
         }
         Err(UpsQueryError::QueryFailed { exit_code, stderr }) => {
-            return emit_query_failed(json, format!("exit {exit_code}{}", detail_suffix(&stderr)));
+            return emit_query_failed(
+                json,
+                format!("exit {exit_code}{}", detail_suffix(&stderr)),
+                out,
+            );
         }
     };
     if json {
-        emit_json(&JsonReport::success(&parsed))?;
+        emit_json(&JsonReport::success(&parsed), out)?;
     } else {
-        print!("{}", format_human(&ups_cfg.name, &parsed));
+        write!(out, "{}", format_human(&ups_cfg.name, &parsed)).ok();
     }
     Ok(UpsStatusOutcome::Done)
 }
 
-fn print_not_enabled(json: bool) -> Result<UpsStatusOutcome, UpsError> {
+fn print_not_enabled(
+    json: bool,
+    out: &mut dyn std::io::Write,
+) -> Result<UpsStatusOutcome, UpsError> {
     if json {
         let payload = JsonReport::Error(ErrorReport::NotEnabled);
-        emit_json(&payload)?;
+        emit_json(&payload, out)?;
     } else {
-        println!(
+        writeln!(
+            out,
             "UPS support is not enabled. Set `braid.enable = true` and\n\
              `braid.ups.enable = true` in your NixOS configuration and rebuild\n\
              to enable preflight safety and low-battery shutdown."
-        );
+        )
+        .ok();
     }
     Ok(UpsStatusOutcome::Done)
 }
 
-fn emit_query_failed(json: bool, detail: String) -> Result<UpsStatusOutcome, UpsError> {
+fn emit_query_failed(
+    json: bool,
+    detail: String,
+    out: &mut dyn std::io::Write,
+) -> Result<UpsStatusOutcome, UpsError> {
     if json {
-        emit_json(&JsonReport::Error(ErrorReport::QueryFailed {
-            detail: &detail,
-        }))?;
+        emit_json(
+            &JsonReport::Error(ErrorReport::QueryFailed { detail: &detail }),
+            out,
+        )?;
         return Ok(UpsStatusOutcome::JsonErrorReported);
     }
     Err(UpsError::QueryFailed { detail })
@@ -186,20 +214,25 @@ fn emit_query_failed(json: bool, detail: String) -> Result<UpsStatusOutcome, Ups
 
 /// Keep invocation failures distinct in `--json` and human mode while
 /// preserving shared exit-code wiring.
-fn emit_invocation_failed(json: bool, error: CmdError) -> Result<UpsStatusOutcome, UpsError> {
+fn emit_invocation_failed(
+    json: bool,
+    error: CmdError,
+    out: &mut dyn std::io::Write,
+) -> Result<UpsStatusOutcome, UpsError> {
     let detail = error.to_string();
     if json {
-        emit_json(&JsonReport::Error(ErrorReport::InvocationFailed {
-            detail: &detail,
-        }))?;
+        emit_json(
+            &JsonReport::Error(ErrorReport::InvocationFailed { detail: &detail }),
+            out,
+        )?;
         return Ok(UpsStatusOutcome::JsonErrorReported);
     }
     Err(UpsError::InvocationFailed { detail })
 }
 
-fn emit_json(payload: &JsonReport<'_>) -> Result<(), UpsError> {
+fn emit_json(payload: &JsonReport<'_>, out: &mut dyn std::io::Write) -> Result<(), UpsError> {
     let text = serde_json::to_string_pretty(payload).map_err(UpsError::Serialize)?;
-    println!("{}", text);
+    writeln!(out, "{text}").ok();
     Ok(())
 }
 
@@ -303,6 +336,7 @@ mod tests {
     use crate::test_fixtures::{
         ups_query_connection_refused_no_newline, ups_query_connection_refused_with_newline,
         ups_query_empty_stderr_exit_1, ups_query_healthy_minimal, ups_write_config,
+        ups_write_config_without_ups,
     };
 
     /// Baseline `UpscOutput` for render-branch tests: status OL, every
@@ -321,6 +355,22 @@ mod tests {
             device: DeviceFields::default(),
             extra: std::collections::BTreeMap::new(),
         }
+    }
+
+    macro_rules! snap {
+        ($value:expr) => {
+            insta::with_settings!({ prepend_module_to_snapshot => false }, {
+                insta::assert_snapshot!($value);
+            });
+        };
+    }
+
+    macro_rules! snap_json {
+        ($value:expr) => {
+            insta::with_settings!({ prepend_module_to_snapshot => false }, {
+                insta::assert_json_snapshot!($value);
+            });
+        };
     }
 
     // Intent: format_status renders OL verbatim when the UPS is on utility power.
@@ -789,6 +839,67 @@ mod tests {
         );
     }
 
+    // Intent: cmd_ups_status_to selects the human or JSON success body from
+    // the caller's `json` flag and returns Done in both modes.
+    // Why it exists: the `--json` contract lives at the command boundary, so
+    // helper-only tests would miss a swapped or ignored flag.
+    // Scenario: `braid ups status` against a healthy configured UPS.
+    #[test]
+    fn cmd_ups_status_healthy_selects_mode_and_returns_done() {
+        let (request, output) = ups_query_healthy_minimal();
+        let runner = MockRunner::default().with_output(request, output);
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = ups_write_config(&dir, "ups");
+        let parsed = query_ups(&runner, "ups").unwrap().parsed;
+
+        let mut buf = Vec::new();
+        let outcome = cmd_ups_status_to(&runner, &cfg, false, &mut buf).unwrap();
+        assert_eq!(outcome, UpsStatusOutcome::Done);
+        assert_eq!(
+            String::from_utf8(buf).unwrap(),
+            format_human("ups", &parsed)
+        );
+
+        let mut buf = Vec::new();
+        let outcome = cmd_ups_status_to(&runner, &cfg, true, &mut buf).unwrap();
+        assert_eq!(outcome, UpsStatusOutcome::Done);
+        assert_eq!(
+            String::from_utf8(buf).unwrap(),
+            format!(
+                "{}\n",
+                serde_json::to_string_pretty(&JsonReport::success(&parsed)).unwrap()
+            )
+        );
+    }
+
+    // Intent: cmd_ups_status_to selects the human or JSON not-enabled body
+    // from the caller's `json` flag and returns Done in both modes.
+    // Why it exists: hosts without a UPS still have a user-facing status
+    // contract, and the fast lane should pin both exact bodies.
+    // Scenario: `braid ups status` on a config with no `ups` block.
+    #[test]
+    fn cmd_ups_status_not_enabled_selects_mode_and_returns_done() {
+        let runner = MockRunner::default();
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = ups_write_config_without_ups(&dir);
+
+        let mut buf = Vec::new();
+        let outcome = cmd_ups_status_to(&runner, &cfg, false, &mut buf).unwrap();
+        assert_eq!(outcome, UpsStatusOutcome::Done);
+        snap!(String::from_utf8(buf).unwrap());
+
+        let mut buf = Vec::new();
+        let outcome = cmd_ups_status_to(&runner, &cfg, true, &mut buf).unwrap();
+        assert_eq!(outcome, UpsStatusOutcome::Done);
+        assert_eq!(
+            String::from_utf8(buf).unwrap(),
+            format!(
+                "{}\n",
+                serde_json::to_string_pretty(&JsonReport::Error(ErrorReport::NotEnabled)).unwrap()
+            )
+        );
+    }
+
     // Intent: cmd_ups_status routes invocation failure to
     // UpsError::InvocationFailed with a PATH hint.
     // Why it exists: CLI shell at main.rs prints e.to_string() to stderr for
@@ -895,8 +1006,9 @@ mod tests {
     // outcome variant choice, not detail formatting.
     #[test]
     fn emit_query_failed_json_returns_json_error_reported() {
-        let outcome =
-            emit_query_failed(true, "exit 1: dummy".into()).expect("json branch returns Ok");
+        let mut out = Vec::new();
+        let outcome = emit_query_failed(true, "exit 1: dummy".into(), &mut out)
+            .expect("json branch returns Ok");
         assert_eq!(outcome, UpsStatusOutcome::JsonErrorReported);
     }
 
@@ -911,8 +1023,9 @@ mod tests {
     // formatting.
     #[test]
     fn emit_invocation_failed_json_returns_json_error_reported() {
-        let outcome =
-            emit_invocation_failed(true, CmdError::MissingMock).expect("json branch returns Ok");
+        let mut out = Vec::new();
+        let outcome = emit_invocation_failed(true, CmdError::MissingMock, &mut out)
+            .expect("json branch returns Ok");
         assert_eq!(outcome, UpsStatusOutcome::JsonErrorReported);
     }
 
@@ -933,22 +1046,6 @@ mod tests {
 
     fn parse_fixture(stdout: &str) -> UpscOutput {
         crate::parse::parse_upsc(stdout)
-    }
-
-    macro_rules! snap {
-        ($value:expr) => {
-            insta::with_settings!({ prepend_module_to_snapshot => false }, {
-                insta::assert_snapshot!($value);
-            });
-        };
-    }
-
-    macro_rules! snap_json {
-        ($value:expr) => {
-            insta::with_settings!({ prepend_module_to_snapshot => false }, {
-                insta::assert_json_snapshot!($value);
-            });
-        };
     }
 
     // Intent: online fixture renders the steady-state summary with OL,

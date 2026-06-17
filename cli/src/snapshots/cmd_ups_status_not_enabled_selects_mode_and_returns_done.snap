@@ -1,0 +1,8 @@
+---
+source: cli/src/ups.rs
+assertion_line: 890
+expression: "String::from_utf8(buf).unwrap()"
+---
+UPS support is not enabled. Set `braid.enable = true` and
+`braid.ups.enable = true` in your NixOS configuration and rebuild
+to enable preflight safety and low-battery shutdown.

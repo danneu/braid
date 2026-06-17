@@ -21,6 +21,14 @@ pub(crate) fn ups_write_config(dir: &TempDir, name: &str) -> PathBuf {
     path
 }
 
+/// Config without a `ups` block so status tests drive the not-enabled branch
+/// through the on-disk boundary.
+pub(crate) fn ups_write_config_without_ups(dir: &TempDir) -> PathBuf {
+    let path = dir.path().join("config.json");
+    std::fs::write(&path, r#"{"mount_point":"/mnt/storage"}"#).unwrap();
+    path
+}
+
 /// Minimal healthy `upsc` response that proves OL status and 100% charge parse.
 pub(crate) fn ups_query_healthy_minimal() -> (CmdRequest, RawCommandOutput) {
     (
