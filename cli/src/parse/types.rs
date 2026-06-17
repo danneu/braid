@@ -704,11 +704,10 @@ impl UpsStatusFlag {
     /// Is this flag by itself a critical UPS state?
     ///
     /// "Critical" means: braid refuses to start pool-mutating commands
-    /// when this flag is present, and the TUI colors it red. Used by
-    /// both `preflight::check_ups_not_on_battery` and
-    /// `tui::view::ups_severity_color` so the two surfaces stay in
-    /// sync -- if a new driver-reported token lands, classification
-    /// lives in exactly one place.
+    /// when this flag is present, colors it red in the TUI, and renders
+    /// it as a failure in the human UPS status line. This predicate is
+    /// the primitive consumed by `UpsSeverity`, which owns the full
+    /// cross-surface severity ladder.
     ///
     /// - `Lb` -- low battery, shutdown imminent.
     /// - `TestFail` -- battery self-test failed.
@@ -722,7 +721,41 @@ impl UpsStatusFlag {
     }
 }
 
+/// Shared UPS severity classifier for preflight, the TUI, and the human CLI
+/// render. Classification lives in the parse domain so every surface consumes
+/// the same fail-closed ladder, while presentation choices stay at the caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpsSeverity {
+    Online,
+    OnBattery,
+    Critical,
+    Indeterminate,
+}
+
+impl UpsSeverity {
+    /// Classify the raw `ups.status` flag set. The worst condition wins:
+    /// critical flags first, then on-battery, then affirmative utility power,
+    /// then indeterminate for empty or unproven states.
+    pub fn classify(flags: &[UpsStatusFlag]) -> Self {
+        if flags.iter().any(UpsStatusFlag::is_critical) {
+            return Self::Critical;
+        }
+        if flags.contains(&UpsStatusFlag::Ob) {
+            return Self::OnBattery;
+        }
+        if flags.contains(&UpsStatusFlag::Ol) {
+            return Self::Online;
+        }
+        Self::Indeterminate
+    }
+}
+
 impl UpscOutput {
+    /// Shared severity verdict for this parsed UPS output.
+    pub fn severity(&self) -> UpsSeverity {
+        UpsSeverity::classify(&self.status_flags)
+    }
+
     /// True when the UPS is reporting any critical state. See
     /// `UpsStatusFlag::is_critical` for the token list.
     pub fn is_critical(&self) -> bool {
@@ -938,6 +971,40 @@ mod tests {
         ] {
             assert!(!flag.is_critical(), "{flag:?} must not be critical");
         }
+    }
+
+    // Intent: UpsSeverity::classify owns the cross-surface severity ladder.
+    // Why: preflight, the TUI, and the human UPS status line must agree about
+    //   which condition wins when NUT reports contradictory or advisory flags.
+    // Scenario: representative critical, on-battery, online, advisory, empty,
+    //   and unknown-only status sets.
+    #[test]
+    fn ups_severity_classifies_status_flags() {
+        assert_eq!(
+            UpsSeverity::classify(&[UpsStatusFlag::Ol, UpsStatusFlag::TestFail]),
+            UpsSeverity::Critical
+        );
+        assert_eq!(
+            UpsSeverity::classify(&[UpsStatusFlag::Ol, UpsStatusFlag::Ob]),
+            UpsSeverity::OnBattery
+        );
+        assert_eq!(
+            UpsSeverity::classify(&[UpsStatusFlag::Ob]),
+            UpsSeverity::OnBattery
+        );
+        assert_eq!(
+            UpsSeverity::classify(&[UpsStatusFlag::Ol]),
+            UpsSeverity::Online
+        );
+        assert_eq!(
+            UpsSeverity::classify(&[UpsStatusFlag::Ol, UpsStatusFlag::Rb]),
+            UpsSeverity::Online
+        );
+        assert_eq!(UpsSeverity::classify(&[]), UpsSeverity::Indeterminate);
+        assert_eq!(
+            UpsSeverity::classify(&[UpsStatusFlag::Unknown("WEIRD".into())]),
+            UpsSeverity::Indeterminate
+        );
     }
 
     // Intent: a healthy NVMe drive produces an empty `concerns()` set, and its

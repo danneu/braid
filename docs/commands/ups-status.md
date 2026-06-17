@@ -24,7 +24,7 @@ Output:
 
 ```
 UPS: ups
-Status: OL
+Status: OL  [ok] on utility power
 Battery: 100%
 Runtime: 30m 0s
 Load: 17% (56 W estimated)
@@ -33,6 +33,10 @@ Device: APC Back-UPS ES 550G
 Battery manufactured: 2023/04/12
 Last test: Done and passed
 ```
+
+The human `Status:` line preserves the raw NUT tokens and adds a severity tag:
+`[ok]`, `[warn]`, `[fail]`, or `[skip]`. Tags are colored on an interactive TTY
+and plain under `NO_COLOR` or when output is piped.
 
 ## JSON output
 

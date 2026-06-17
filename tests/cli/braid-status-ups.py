@@ -21,7 +21,9 @@ machine.wait_until_succeeds("upsc ups@localhost ups.status", timeout=60)
 
 # --- Human output ---
 human = machine.succeed("braid ups status")
-assert "Status: OL" in human, f"expected `Status: OL` in human output, got:\n{human}"
+assert "Status: OL  [ok] on utility power" in human.splitlines(), (
+    f"expected tagged online status in human output, got:\n{human}"
+)
 assert "Battery: 100%" in human, f"expected `Battery: 100%` in human output, got:\n{human}"
 # Runtime 1800s = 30m 0s.
 assert "Runtime: 30m 0s" in human, f"expected `Runtime: 30m 0s`, got:\n{human}"

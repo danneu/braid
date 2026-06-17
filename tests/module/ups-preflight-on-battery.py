@@ -67,8 +67,8 @@ with subtest("Preflight refusal leaves no pending-op journal"):
 
 with subtest("braid ups status shows the same OB set the preflight saw"):
     out = machine.succeed("braid ups status")
-    assert "OB" in out, (
-        f"braid ups status should report OB; got:\n{out}"
+    assert "Status: OB  [warn] on battery" in out.splitlines(), (
+        f"braid ups status should report tagged OB severity; got:\n{out}"
     )
 
 machine.shutdown()

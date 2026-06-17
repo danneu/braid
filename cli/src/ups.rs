@@ -12,7 +12,8 @@
 use crate::cmd::{CmdError, CmdRequest, CommandRunner};
 use crate::config::{ConfigError, config_read};
 use crate::parse::parse_upsc;
-use crate::parse::types::{UpsStatusFlag, UpscOutput};
+use crate::parse::types::{UpsSeverity, UpsStatusFlag, UpscOutput};
+use crate::status_tag::{self, StatusTag};
 use crate::util::detail_suffix;
 use std::path::Path;
 
@@ -173,7 +174,16 @@ fn cmd_ups_status_to<R: CommandRunner>(
     if json {
         emit_json(&JsonReport::success(&parsed), out)?;
     } else {
-        write!(out, "{}", format_human(&ups_cfg.name, &parsed)).ok();
+        write!(
+            out,
+            "{}",
+            format_human(
+                &ups_cfg.name,
+                &parsed,
+                status_tag::color_enabled_for_stdout()
+            )
+        )
+        .ok();
     }
     Ok(UpsStatusOutcome::Done)
 }
@@ -242,11 +252,23 @@ fn emit_json(payload: &JsonReport<'_>, out: &mut dyn std::io::Write) -> Result<(
 /// Returns the rendered text with a trailing newline so the caller can
 /// `print!` it without trimming; the string shape is stable so tests
 /// can snapshot it without touching stdout.
-fn format_human(name: &str, parsed: &UpscOutput) -> String {
+fn format_human(name: &str, parsed: &UpscOutput, color_enabled: bool) -> String {
     use std::fmt::Write;
     let mut out = String::new();
     let _ = writeln!(out, "UPS: {}", name);
-    let _ = writeln!(out, "Status: {}", format_status(&parsed.status_flags));
+    let status = format_status(&parsed.status_flags);
+    if parsed.status_flags.is_empty() {
+        let _ = writeln!(out, "Status: {status}");
+    } else {
+        let (tag, gloss) = severity_tag_and_gloss(parsed.severity());
+        let _ = writeln!(
+            out,
+            "Status: {}  {} {}",
+            status,
+            status_tag::render_status_tag(tag, color_enabled),
+            gloss
+        );
+    }
     line(
         &mut out,
         "Battery",
@@ -293,6 +315,16 @@ fn format_human(name: &str, parsed: &UpscOutput) -> String {
         let _ = writeln!(out, "Last test: {}", result);
     }
     out
+}
+
+/// Maps shared UPS severity to the human status tag and plain-language gloss.
+fn severity_tag_and_gloss(severity: UpsSeverity) -> (StatusTag, &'static str) {
+    match severity {
+        UpsSeverity::Online => (StatusTag::Ok, "on utility power"),
+        UpsSeverity::OnBattery => (StatusTag::Warn, "on battery"),
+        UpsSeverity::Critical => (StatusTag::Fail, "critical"),
+        UpsSeverity::Indeterminate => (StatusTag::Skip, "utility power not confirmed"),
+    }
 }
 
 fn line<W: std::fmt::Write>(out: &mut W, label: &str, value: Option<impl std::fmt::Display>) {
@@ -581,7 +613,7 @@ mod tests {
     #[test]
     fn format_human_renders_sentinels_and_omits_absent_provenance() {
         let parsed = base_output();
-        let rendered = format_human("ups", &parsed);
+        let rendered = format_human("ups", &parsed, false);
         let lines: Vec<&str> = rendered.lines().collect();
         assert!(lines.contains(&"Battery: --"), "got: {rendered}");
         assert!(lines.contains(&"Runtime: --"), "got: {rendered}");
@@ -604,7 +636,7 @@ mod tests {
             load_pct: Some(50),
             ..base_output()
         };
-        let rendered = format_human("ups", &parsed);
+        let rendered = format_human("ups", &parsed, false);
         let lines: Vec<&str> = rendered.lines().collect();
         assert!(lines.contains(&"Load: 50%"), "got: {rendered}");
         assert!(!rendered.contains("estimated"), "got: {rendered}");
@@ -635,6 +667,7 @@ mod tests {
                     input,
                     ..base_output()
                 },
+                false,
             );
             assert!(
                 rendered.lines().any(|line| line == "Input: 120.0 V"),
@@ -659,7 +692,7 @@ mod tests {
             ..base_output()
         };
         assert!(
-            format_human("ups", &model_only)
+            format_human("ups", &model_only, false)
                 .lines()
                 .any(|line| line == "Device: Back-UPS ES 550G")
         );
@@ -672,13 +705,13 @@ mod tests {
             ..base_output()
         };
         assert!(
-            format_human("ups", &mfr_only)
+            format_human("ups", &mfr_only, false)
                 .lines()
                 .any(|line| line == "Device: APC")
         );
 
         assert!(
-            !format_human("ups", &base_output()).contains("Device:"),
+            !format_human("ups", &base_output(), false).contains("Device:"),
             "neither field should omit Device line"
         );
     }
@@ -697,11 +730,48 @@ mod tests {
             status_flags: Vec::new(),
             ..base_output()
         };
-        let rendered = format_human("ups", &parsed);
+        let rendered = format_human("ups", &parsed, false);
         let lines: Vec<&str> = rendered.lines().collect();
         assert!(
             lines.contains(&"Status: (unknown -- ups.status missing)"),
             "got: {rendered}"
+        );
+    }
+
+    // Intent: a non-empty but unproven UPS status gets the skip tag and
+    // utility-power-not-confirmed gloss.
+    // Why it exists: fixture snapshots cover OL/OB/RB/LB states only, so
+    // unknown-only status needs a direct guard on the indeterminate arm.
+    // Scenario: a newer UPS driver emits a token braid has not classified yet.
+    #[test]
+    fn format_human_indeterminate_status_renders_skip_gloss() {
+        let parsed = UpscOutput {
+            status_flags: vec![UpsStatusFlag::Unknown("WEIRD".into())],
+            ..base_output()
+        };
+        let rendered = format_human("ups", &parsed, false);
+        let lines: Vec<&str> = rendered.lines().collect();
+        assert!(
+            lines.contains(&"Status: WEIRD  [skip] utility power not confirmed"),
+            "got: {rendered}"
+        );
+    }
+
+    // Intent: color-enabled human status wraps only the severity tag in ANSI.
+    // Why it exists: `cmd_ups_status` enables color at the stdout boundary; this
+    // pins the rendered bytes without relying on a TTY in the test process.
+    // Scenario: an interactive terminal renders a critical UPS status.
+    #[test]
+    fn format_human_colored_critical_status_wraps_tag() {
+        let parsed = UpscOutput {
+            status_flags: vec![UpsStatusFlag::Ob, UpsStatusFlag::Lb],
+            ..base_output()
+        };
+        let rendered = format_human("ups", &parsed, true);
+        let lines: Vec<&str> = rendered.lines().collect();
+        assert!(
+            lines.contains(&"Status: OB LB  \x1b[31m[fail]\x1b[0m critical"),
+            "got: {rendered:?}"
         );
     }
 
@@ -853,11 +923,16 @@ mod tests {
         let parsed = query_ups(&runner, "ups").unwrap().parsed;
 
         let mut buf = Vec::new();
-        let outcome = cmd_ups_status_to(&runner, &cfg, false, &mut buf).unwrap();
+        let mut outcome = None;
+        let captured = crate::status_tag::testing::capture_with_color(false, || {
+            outcome = Some(cmd_ups_status_to(&runner, &cfg, false, &mut buf));
+        });
+        assert_eq!(captured, "");
+        let outcome = outcome.unwrap().unwrap();
         assert_eq!(outcome, UpsStatusOutcome::Done);
         assert_eq!(
             String::from_utf8(buf).unwrap(),
-            format_human("ups", &parsed)
+            format_human("ups", &parsed, false)
         );
 
         let mut buf = Vec::new();
@@ -1060,7 +1135,7 @@ mod tests {
         let parsed = parse_fixture(include_str!(
             "../tests/fixtures/nixos-26.05/upsc/upsc-online.txt"
         ));
-        snap!(format_human("ups", &parsed));
+        snap!(format_human("ups", &parsed, false));
     }
 
     // Intent: online fixture JSON shape round-trips the rich typed
@@ -1107,7 +1182,7 @@ mod tests {
         let parsed = parse_fixture(include_str!(
             "../tests/fixtures/nixos-26.05/upsc/upsc-onbattery.txt"
         ));
-        snap!(format_human("ups", &parsed));
+        snap!(format_human("ups", &parsed, false));
     }
 
     // Intent: lowbattery fixture renders Status: OB LB.
@@ -1121,7 +1196,7 @@ mod tests {
         let parsed = parse_fixture(include_str!(
             "../tests/fixtures/nixos-26.05/upsc/upsc-lowbattery.txt"
         ));
-        snap!(format_human("ups", &parsed));
+        snap!(format_human("ups", &parsed, false));
     }
 
     // Intent: replace-battery fixture renders OL + RB without triggering
@@ -1136,7 +1211,7 @@ mod tests {
         let parsed = parse_fixture(include_str!(
             "../tests/fixtures/nixos-26.05/upsc/upsc-replace-battery.txt"
         ));
-        snap!(format_human("ups", &parsed));
+        snap!(format_human("ups", &parsed, false));
     }
 
     // Intent: sparse success JSON keeps every nullable typed key present

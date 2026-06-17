@@ -1,9 +1,9 @@
 ---
 source: cli/src/ups.rs
-expression: "format_human(\"ups\", &parsed)"
+expression: "format_human(\"ups\", &parsed, false)"
 ---
 UPS: ups
-Status: OB
+Status: OB  [warn] on battery
 Battery: 72%
 Runtime: 19m 0s
 Load: 23% (76 W estimated)

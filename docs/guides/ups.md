@@ -71,7 +71,7 @@ Example human output:
 
 ```
 UPS: ups
-Status: OL
+Status: OL  [ok] on utility power
 Battery: 100%
 Runtime: 30m 0s
 Load: 17% (56 W estimated)
@@ -80,6 +80,11 @@ Device: APC Back-UPS ES 550G
 Battery manufactured: 2023/04/12
 Last test: Done and passed
 ```
+
+The human `Status:` line preserves the raw NUT tokens and adds the same
+severity model used by the TUI UPS panel: `[ok]`, `[warn]`, `[fail]`, or
+`[skip]`. Tags are colored on an interactive TTY and plain under `NO_COLOR` or
+when output is piped.
 
 The watts line is labeled `estimated` and omitted entirely if the UPS
 does not report both `ups.load` and `ups.realpower.nominal`.
@@ -98,7 +103,7 @@ sentinels are emitted for the common non-OK cases:
 ## TUI UPS panel
 
 `braid tui`'s Data tab gains a UPS row when UPS support is enabled.
-Status text is color-coded by severity:
+Status text is color-coded by the shared UPS severity model:
 
 - **Green** -- OL (on utility power).
 - **Yellow** -- OB (on battery, not yet critical).

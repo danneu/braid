@@ -11,7 +11,9 @@ use crate::luks::LUKS2_DEFAULT_HDR_SIZE;
 use crate::membership::PoolMembership;
 use crate::mount_check::{self, mount_entry_at_via_fs};
 use crate::parse::parse_cryptsetup_luks_dump;
-use crate::parse::types::{BtrfsBgType, BtrfsDeviceUsageEntry, BtrfsDfOutput, Luks2SegmentSize};
+use crate::parse::types::{
+    BtrfsBgType, BtrfsDeviceUsageEntry, BtrfsDfOutput, Luks2SegmentSize, UpsSeverity,
+};
 use crate::preview::PreviewNote;
 use crate::probe::Filesystem;
 use crate::repair_hint;
@@ -594,12 +596,10 @@ fn mapper_capacity_from_dynamic_segment(
 /// proof (`OL`), not merely the absence of a known blocker. Caller
 /// passes `None` when no UPS is configured, which makes this a no-op.
 ///
-/// Critical-state classification is shared with the TUI via
-/// `UpsStatusFlag::is_critical` so the two surfaces stay in sync: any
-/// token the UI paints red (LB, TESTFAIL, COMMBAD, FSD) also blocks
-/// mutations here. `OB` alone is yellow in the UI but still refused
-/// here -- starting a long mutation while the pool is on battery
-/// widens the mid-mutation recovery surface.
+/// Severity classification is shared with the TUI and the human UPS status
+/// render via `UpsSeverity`, so every surface uses the same ordering: critical
+/// tokens block first, `OB` blocks next, `OL` passes, and everything else
+/// remains untrusted.
 ///
 /// Wire into `add`, `remove`, `remove-missing`, `replace` before journal
 /// write. See docs/design/decisions/020-ups-integration.md for the safety
@@ -630,16 +630,14 @@ pub fn check_ups_not_on_battery<R: CommandRunner>(
     if parsed.status_flags.is_empty() {
         return refuse("ups.status is empty or missing");
     }
-    if parsed.is_critical() {
-        return refuse("UPS reports a critical state (LB / TESTFAIL / COMMBAD / FSD)");
+    match parsed.severity() {
+        UpsSeverity::Online => Ok(()),
+        UpsSeverity::Critical => {
+            refuse("UPS reports a critical state (LB / TESTFAIL / COMMBAD / FSD)")
+        }
+        UpsSeverity::OnBattery => refuse("UPS reports on-battery"),
+        UpsSeverity::Indeterminate => refuse("UPS does not report utility power (OL missing)"),
     }
-    if parsed.is_on_battery() {
-        return refuse("UPS reports on-battery");
-    }
-    if !parsed.reports_utility_power() {
-        return refuse("UPS does not report utility power (OL missing)");
-    }
-    Ok(())
 }
 
 /// Guard for mutating pool commands (add, remove, remove-missing, replace).
@@ -1986,8 +1984,20 @@ mod tests {
     fn ups_on_battery_refuses() {
         let runner = upsc_mock("ups", "ups.status: OB\n", 0);
         let err = check_ups_not_on_battery(&runner, Some("ups"), "remove").unwrap_err();
-        assert!(err.contains("utility power"), "got: {err}");
+        assert!(err.contains("on-battery"), "got: {err}");
         assert!(err.contains("remove"), "op name should appear in: {err}");
+    }
+
+    #[test]
+    // Intent: OB wins over OL when both flags are present.
+    // Why: contradictory UPS status must not pass as online merely because
+    // affirmative utility power is also reported.
+    // Scenario: a driver emits the contradictory pair `OL OB` during a power
+    // transition while an operator tries to start a mutation.
+    fn ups_on_battery_with_ol_refuses() {
+        let runner = upsc_mock("ups", "ups.status: OL OB\n", 0);
+        let err = check_ups_not_on_battery(&runner, Some("ups"), "add").unwrap_err();
+        assert!(err.contains("on-battery"), "got: {err}");
     }
 
     #[test]
@@ -1999,10 +2009,8 @@ mod tests {
     fn ups_low_battery_refuses() {
         let runner = upsc_mock("ups", "ups.status: OL LB\n", 0);
         let err = check_ups_not_on_battery(&runner, Some("ups"), "add").unwrap_err();
-        assert!(
-            err.contains("critical") || err.contains("on-battery"),
-            "got: {err}"
-        );
+        assert!(err.contains("critical"), "got: {err}");
+        assert!(!err.contains("on-battery"), "got: {err}");
     }
 
     #[test]
@@ -2088,7 +2096,7 @@ mod tests {
     fn ups_empty_status_refuses() {
         let runner = upsc_mock("ups", "battery.charge: 100\n", 0);
         let err = check_ups_not_on_battery(&runner, Some("ups"), "remove-missing").unwrap_err();
-        assert!(err.contains("utility power"), "got: {err}");
+        assert!(err.contains("empty or missing"), "got: {err}");
     }
 
     #[test]

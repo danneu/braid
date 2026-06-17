@@ -12,7 +12,9 @@ use time::PrimitiveDateTime;
 use time::macros::format_description;
 
 use crate::config::FanControl;
-use crate::parse::types::{BtrfsBgType, ScrubState, ScrubTimestamp, SmartHealth, UpsStatusFlag};
+use crate::parse::types::{
+    BtrfsBgType, ScrubState, ScrubTimestamp, SmartHealth, UpsSeverity, UpsStatusFlag,
+};
 use crate::status::{BalanceReport, DiskErrors};
 use crate::tui::model::{
     DaemonStatus, DiskLockState, DiskLuksState, DrivingDrive, FanReading, Model, PoolState,
@@ -290,25 +292,14 @@ fn fan_section(model: &Model) -> Table<'_> {
     Table::new(vec![row], widths).header(header)
 }
 
-/// Render severity color for the UPS status set. Ordering matters:
-/// a critical flag (see `UpsStatusFlag::is_critical`) is red, OB alone
-/// is yellow (on battery, not yet critical), OL is green (utility
-/// power), everything else (including empty-set) is DarkGray.
-///
-/// Shares `UpsStatusFlag::is_critical` with
-/// `preflight::check_ups_not_on_battery` so the two surfaces never
-/// disagree about which tokens count as critical.
+/// Render severity color for the shared UPS status classifier.
 fn ups_severity_color(flags: &[UpsStatusFlag]) -> Color {
-    if flags.iter().any(UpsStatusFlag::is_critical) {
-        return Color::Red;
+    match UpsSeverity::classify(flags) {
+        UpsSeverity::Critical => Color::Red,
+        UpsSeverity::OnBattery => Color::Yellow,
+        UpsSeverity::Online => Color::Green,
+        UpsSeverity::Indeterminate => Color::DarkGray,
     }
-    if flags.contains(&UpsStatusFlag::Ob) {
-        return Color::Yellow;
-    }
-    if flags.contains(&UpsStatusFlag::Ol) {
-        return Color::Green;
-    }
-    Color::DarkGray
 }
 
 /// Format ups.status tokens in `upsc` emission order.
