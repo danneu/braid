@@ -1660,4 +1660,96 @@ Label: none  uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
             "dry-run must issue zero execute-only commands, got: {executed:?}",
         );
     }
+
+    // Intent: `cmd_unlock --dry-run --key-file <path>` must render the preview and
+    //   return WITHOUT validating (stat-ing) the operator-supplied keyfile, even
+    //   when there ARE disks to unlock.
+    // Why it exists: keyfile validation (luks::validate_user_keyfile_path) runs only
+    //   inside resolve_credential, which cmd_unlock reaches only via plan.execute --
+    //   strictly after the `if params.dry_run` return. A refactor hoisting
+    //   resolve_credential above that gate would make dry-run stat the keyfile,
+    //   violating ADR 022's side-effect-free preview contract. validate_user_keyfile_path
+    //   stats via std::fs::symlink_metadata, NOT through the runner, so the stat never
+    //   appears in runner.requests(): Ok(()) is the load-bearing proof the stat was
+    //   skipped -- a regressed gate stats the absent path and returns
+    //   LuksError::Validation("keyfile not found: ...") before Ok(()). The
+    //   zero-execute-commands denylist is the defense-in-depth backstop against the
+    //   broader execute path running, not the witness for keyfile validation.
+    //   Complementary coverage: keyfile-branch preview render content is pinned at the
+    //   plan_unlock level by plan_unlock_dry_run_render_2_closed_disks_with_key_file;
+    //   this test pins cmd_unlock's gate ordering for the keyfile branch. The
+    //   passphrase analog cmd_unlock_dry_run_skips_credential_resolution_with_disks_to_
+    //   unlock guards the same gate with key_file: None, so it never exercises this
+    //   stat seam.
+    // Scenario: auto-unlock operator runs `braid unlock --dry-run --key-file
+    //   /run/keys/braid.key` against a 2-disk closed pool (both mappers closed ->
+    //   to_unlock non-empty) where the key file does not exist.
+    #[test]
+    fn cmd_unlock_dry_run_skips_keyfile_validation_with_disks_to_unlock() {
+        let (state_dir, sp) = isolated_paths();
+        let config = test_config();
+        let membership = two_disk_membership();
+        let fs = unlock_storage_fs(&[
+            "/dev/disk/by-id/virtio-disk1",
+            "/dev/disk/by-id/virtio-disk2",
+        ]);
+        let runner = base_two_disk_runner();
+
+        // Nonexistent path anchored under the freshly-created, empty isolated_paths()
+        // tempdir: a child we never write is guaranteed absent independent of global
+        // filesystem state. validate_user_keyfile_path stats this via std::fs outside
+        // the runner, so a genuinely-absent path (not a wrong-size temp file) is the
+        // clean witness -- if dry-run regresses and resolves the credential,
+        // symlink_metadata fails and returns Err before Ok(()).
+        let bogus = state_dir.path().join("missing-braid.key");
+
+        let result = cmd_unlock(
+            &runner,
+            &fs,
+            &UnlockParams {
+                config: &config,
+                membership: &membership,
+                paths: &sp,
+                passphrase_stdin: false,
+                passphrase_file: None,
+                key_file: Some(&bogus),
+                allow_degraded: false,
+                dry_run: true,
+                sleeper: &crate::progress::NoopSleeper,
+                backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(),
+            },
+        );
+
+        result.expect(
+            "dry-run with disks to unlock must render the preview and return \
+             without validating the (nonexistent) key file",
+        );
+
+        // Future-proof + self-documenting: even if base_two_disk_runner ever
+        // gains open/mount mocks (removing the implicit missing-mock backstop),
+        // dry-run must still issue ZERO execute-only commands. This denylist is
+        // the complete set the unlock execute path can run (credential verify +
+        // LUKS open + scan + mount, both passphrase and keyfile); none are issued
+        // by plan_unlock's probe, so any hit means execute wrongly ran.
+        let executed: Vec<CmdRequest> = runner
+            .requests()
+            .into_iter()
+            .filter(|r| {
+                matches!(
+                    r,
+                    CmdRequest::CryptsetupTestPassphrase { .. }
+                        | CmdRequest::CryptsetupTestKeyFile { .. }
+                        | CmdRequest::CryptsetupLuksOpen { .. }
+                        | CmdRequest::CryptsetupLuksOpenKeyFile { .. }
+                        | CmdRequest::BtrfsDeviceScanAll
+                        | CmdRequest::Mount { .. }
+                        | CmdRequest::MountWithOptions { .. }
+                )
+            })
+            .collect();
+        assert!(
+            executed.is_empty(),
+            "dry-run must issue zero execute-only commands, got: {executed:?}",
+        );
+    }
 }
