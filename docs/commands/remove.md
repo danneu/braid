@@ -46,7 +46,7 @@ sudo braid remove toshiba3 --yes
 
 1. Probes the pool to verify the disk is a live member
 2. Checks that remaining disks have enough free space to absorb the data being migrated
-3. Shows a confirmation prompt with the disk's name and devid, its model/size/serial (best-effort from the live backing device via lsblk -- omitted if unavailable), and the resulting disk count (e.g. `Pool: 3 disks -> 2 disks`)
+3. Shows a confirmation prompt with the disk's name and devid, its model/size/serial (best-effort from the live backing device via lsblk -- omitted if unavailable), and the resulting disk count (e.g. `Pool: 3 disks -> 2 disks`). This interactive prompt is skipped by `--yes` and not shown in `--dry-run`.
 4. If removing the second-to-last disk (going from 2 to 1): first balances the pool from RAID1 to single profile, then removes the device
 5. Runs `btrfs device remove` to migrate all data off the disk (this is the long-running step)
 6. Closes the LUKS mapper on the removed disk
