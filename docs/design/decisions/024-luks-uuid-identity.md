@@ -96,18 +96,31 @@ one.
   UUID-keyed pre-operation and target membership snapshots, so recovery can
   compare live topology with the journaled member set instead of re-discovering
   by label or assuming names still line up.
-- **Display code has an explicit join rule.** User-facing summaries resolve a
-  live pool device's UUID back to `DiskName` for presentation. UUIDs remain
-  available to verbose/machine-readable paths where they are useful evidence.
-  Every display surface uses the same join, including the TUI Data-tab Bus
-  column (its lsblk transport bridge joins the parent disk's LUKS UUID to the
-  member name) and the passphrase credential-verification display for `add`,
-  `replace`, and their recovery replays, which resolves each existing pool
-  member's name through the same live-UUID->`DiskName` join. Member names
-  therefore survive mapper drift -- a member open as `braid-WRONG` still shows
-  its operator name in the `passphrase: checking against ...` line and the
-  `... does not match existing pool member '...'` rejection -- instead of
-  blanking to `--` or echoing the drifted mapper basename.
+- **Display code has an explicit label-provenance rule.** Every user-facing
+  disk row is labeled with an operator `DiskName`, never a mapper basename.
+  That `DiskName` is sourced by one of two attested routes. The
+  live-UUID->`DiskName` join resolves a live pool device's UUID back to its name
+  for presentation, while UUIDs stay available to verbose/machine-readable paths
+  as evidence. This join covers the read surfaces: the TUI Data-tab Bus column
+  (its lsblk transport bridge joins the parent disk's LUKS UUID to the member
+  name) and the passphrase credential-verification display for `add`,
+  `replace`, and their recovery replays. The second route is an
+  already-validated typed `DiskName` carried through the operation: the
+  post-`btrfs`-commit best-effort close that `remove`, `replace`, and `recover`
+  run keeps its close target on the observed mapper (`braid-WRONG`, per
+  "Cleanup follows observed ownership" above) but labels its
+  `disk <name>: locking...`/`locked` progress row from the journaled operator
+  name carried as `close_mapper_best_effort`'s typed `disk_label`.
+  `CredentialVerifyTarget`'s two constructors -- a UUID-joined
+  `existing_pool_member` and an attested `named_candidate` -- are this same
+  split in type form. Either route lets member names survive mapper drift: a
+  member open as `braid-WRONG` still shows its operator name in the
+  `passphrase: checking against ...` line, the
+  `... does not match existing pool member '...'` rejection, and the close
+  progress row, instead of blanking to `--` or echoing the drifted mapper
+  basename. The low-level `cryptsetup close <mapper>` busy-retry diagnostic is
+  the deliberate exception: it still names the real mapper because it is a
+  command echo, not a disk-status row.
 
 ## Runtime Handles And Labels
 
@@ -259,6 +272,18 @@ warns rather than claiming every declared member is assembled.
   no call site can put a mapper-derived name into a credential-verify target.
   `cli/src/credential_verify.rs` unit tests pin the drifted-mapper join and
   the foreign-UUID full-basename fallback at the constructor.
+- `cli/src/replace.rs`, `cli/src/recover.rs`, and `cli/src/remove.rs` unit
+  tests pin that the post-commit best-effort close trailer closes the observed
+  drifted mapper (`braid-WRONG`) while its operator-facing
+  `disk <name>: locking...`/`locked` row -- and `remove`'s
+  `pool: removing <name>...` row -- names the member by its journaled operator
+  name (`disk2`), not the mapper basename. `close_mapper_best_effort`'s
+  `disk_label` parameter is typed `DiskName`, so no caller can pass a
+  mapper-derived label. Each drives the exit-0 close path; the deliberate
+  carve-out -- that the busy-retry diagnostic still echoes the raw mapper
+  (`cryptsetup close <mapper> busy, retrying...`) because it is a command echo,
+  not a disk-status row -- is pinned by
+  `cli/src/add.rs#guard_retries_busy_close_before_success`.
 - `cli/src/tui/probe.rs` unit tests pin the TUI Data-tab Bus column's transport
   join to the parent disk's LUKS UUID, so a member open under a drifted mapper
   (`braid-WRONG`) still renders its bus instead of degrading to `--`.
