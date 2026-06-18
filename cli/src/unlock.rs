@@ -1497,7 +1497,7 @@ Label: none  uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
     //   pointing at a path that does not exist.
     #[test]
     fn cmd_unlock_skips_credential_resolution_when_nothing_to_unlock() {
-        let (_state_dir, sp) = isolated_paths();
+        let (state_dir, sp) = isolated_paths();
         let config = test_config();
         let membership = unlock_three_disk_membership();
 
@@ -1547,10 +1547,13 @@ Label: none  uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
         let runner = unlock_with_mount_ok(runner, "/dev/mapper/braid-disk1", &mp)
             .with_output(balance_req, balance_out);
 
-        // passphrase_file points at a path that does not exist. If dispatch
-        // regresses and hoists resolve_credential above the empty-unlock check,
-        // read_passphrase will fail before this test reaches Ok(()).
-        let bogus = std::path::PathBuf::from("/definitely/not/a/real/path/passphrase");
+        // Nonexistent path anchored under the freshly-created, empty isolated_paths()
+        // tempdir: a child we never write is guaranteed absent independent of global
+        // filesystem state. resolve_credential reads the passphrase file eagerly
+        // (luks::read_passphrase), so if dispatch regresses and hoists
+        // resolve_credential above the empty-to_unlock check, the read of this
+        // absent path fails before Ok(()).
+        let bogus = state_dir.path().join("missing-passphrase");
 
         let result = cmd_unlock(
             &runner,
@@ -1590,7 +1593,7 @@ Label: none  uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
     //   where the passphrase file does not exist.
     #[test]
     fn cmd_unlock_dry_run_skips_credential_resolution_with_disks_to_unlock() {
-        let (_state_dir, sp) = isolated_paths();
+        let (state_dir, sp) = isolated_paths();
         let config = test_config();
         let membership = two_disk_membership();
         let fs = unlock_storage_fs(&[
@@ -1599,9 +1602,12 @@ Label: none  uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
         ]);
         let runner = base_two_disk_runner();
 
-        // Path does not exist: if dry-run regresses and resolves a credential,
-        // read_passphrase opens the bogus path and fails before Ok(()).
-        let bogus = std::path::PathBuf::from("/definitely/not/a/real/path/passphrase");
+        // Nonexistent path anchored under the freshly-created, empty isolated_paths()
+        // tempdir: a child we never write is guaranteed absent independent of global
+        // filesystem state. resolve_credential reads the passphrase file eagerly
+        // (luks::read_passphrase), so if dry-run regresses and resolves the credential,
+        // the read of this absent path fails before Ok(()).
+        let bogus = state_dir.path().join("missing-passphrase");
 
         let result = cmd_unlock(
             &runner,
