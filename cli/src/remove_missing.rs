@@ -409,6 +409,17 @@ pub fn plan_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     // calls, and reasoning about data integrity in multi-missing states
     // (where the survivor is not guaranteed to mirror every chunk under
     // btrfs RAID1's ncopies=2 layout) is left to existing/future logic.
+    //
+    // The "RAID1" label comes from device counts, not a probed profile
+    // (PoolState carries none by design). That is sound: per
+    // docs/design/decisions/001-btrfs-raid1.md, braid only ever stabilizes a
+    // 2-device pool as RAID1 (1 drive = single; the 2nd converts to RAID1),
+    // so a braid 2-device pool is RAID1 by construction. Degraded writes can
+    // add transient single chunks, which maybe_restore_raid1 re-mirrors -- it
+    // is never a stable single pool. The runtime backstop is
+    // device_remove_error (pool.rs), which decodes the kernel's real
+    // min-devices rejection regardless of profile, so correctness never
+    // rests on this label.
     if pool.total_devices == 2 && pool.devices.len() == 1 && pool.missing_count == 1 {
         let repair_command = repair_hint::missing_replace_command(None);
         return Err(PlanFailure::with_notes(
