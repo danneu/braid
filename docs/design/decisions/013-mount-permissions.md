@@ -55,3 +55,5 @@ The setgid bit (2770) ensures new files/directories in the mount root inherit th
 - `cli/src/online_state.rs` -- `mark_online` permission fixup
 - `modules/braid/options.nix` -- `poolAccessGroup` option definition
 - [Sane defaults](005-sane-defaults.md) -- philosophy on opinionated defaults
+- [ADR 032: Pool mount hardening](032-pool-mount-hardening.md) -- mount-layer
+  containment for setuid and device-node payloads stored on the shared pool.

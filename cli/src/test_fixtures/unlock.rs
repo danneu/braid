@@ -149,7 +149,7 @@ pub(crate) fn unlock_with_mount_ok(
             device: device.to_owned(),
             mount_point: mp.clone(),
         },
-        ok_raw("mount -o noatime,skip_balance"),
+        ok_raw("mount -o noatime,skip_balance,subvolid=5,nosuid,nodev"),
     )
 }
 
@@ -167,7 +167,7 @@ pub(crate) fn unlock_with_mount_degraded_ok(
             mount_point: mp.clone(),
             options: vec!["degraded".to_owned()],
         },
-        ok_raw("mount -o noatime,skip_balance,degraded"),
+        ok_raw("mount -o noatime,skip_balance,subvolid=5,degraded,nosuid,nodev"),
     )
 }
 

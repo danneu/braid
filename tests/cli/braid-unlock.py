@@ -149,10 +149,14 @@ with subtest("Test 1: happy path — all locked, unlock opens everything"):
     content = machine.succeed("cat /mnt/storage/test.txt").strip()
     assert content == "persistent data", f"Expected 'persistent data', got '{content}'"
 
-    # Mount options pinned by ADR 015: skip_balance, subvolid=5, no compression
+    # Mount options pinned by ADR 015 and ADR 032: skip_balance, subvolid=5,
+    # nosuid/nodev, and no compression/no noexec
     opts = machine.succeed("findmnt -o OPTIONS -n /mnt/storage").strip()
     assert "skip_balance" in opts, f"Expected skip_balance in mount options, got: {opts}"
     assert "subvolid=5" in opts, f"Expected subvolid=5 in mount options, got: {opts}"
+    assert "nosuid" in opts, f"Expected nosuid in mount options, got: {opts}"
+    assert "nodev" in opts, f"Expected nodev in mount options, got: {opts}"
+    assert "noexec" not in opts, f"Expected no noexec in mount options, got: {opts}"
     assert "compress" not in opts, (
         f"Expected no compression option in mount options "
         f"(see ADR 015), got: {opts}"

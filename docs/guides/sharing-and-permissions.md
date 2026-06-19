@@ -183,10 +183,13 @@ The same approach works for NFS. Export the braid mount point and control access
 services.nfs.server = {
   enable = true;
   exports = ''
-    ${config.braid.mountPoint} 192.168.1.0/24(rw,sync,no_subtree_check,no_root_squash)
+    ${config.braid.mountPoint} 192.168.1.0/24(rw,sync,no_subtree_check,root_squash)
   '';
 };
 ```
+
+Use `no_root_squash` only for fully trusted clients; it maps remote client-root
+to server-root over pool files, which `nosuid,nodev` do not prevent.
 
 Adjust the subnet and options for your network. See `exports(5)` for the full option reference.
 

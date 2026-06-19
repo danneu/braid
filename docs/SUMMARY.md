@@ -75,6 +75,7 @@
 - [029: Release process](design/decisions/029-release-process.md)
 - [030: SMART/btrfs error reporting](design/decisions/030-smart-btrfs-error-reporting.md)
 - [031: Drive-wake posture](design/decisions/031-drive-wake-posture.md)
+- [032: Pool mount hardening](design/decisions/032-pool-mount-hardening.md)
 
 # Internals
 

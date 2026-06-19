@@ -457,6 +457,24 @@ fn base_mount_options() -> Vec<String> {
     ]
 }
 
+/// Enforced pool hardening options kept separate so composition can append them
+/// last. `mount(8)` uses last-wins conflict ordering, so `nosuid,nodev` must
+/// follow every caller extra to contain setuid and device-node payloads on the
+/// shared pool. `noexec` is intentionally excluded; see ADR-032.
+fn enforced_mount_options() -> Vec<String> {
+    vec!["nosuid".to_owned(), "nodev".to_owned()]
+}
+
+/// Owns data-pool mount option composition so base options, caller extras, and
+/// enforced-last hardening stay in one order. Keeping `nosuid,nodev` here means
+/// no `CmdRequest` caller can reorder or drop the shared-pool containment flags.
+fn mount_options(extra: &[String]) -> Vec<String> {
+    let mut all_options = base_mount_options();
+    all_options.extend(extra.iter().cloned());
+    all_options.extend(enforced_mount_options());
+    all_options
+}
+
 /// Placeholder rendered in the `--uuid` slot of the dry-run fresh-format
 /// preview. The real identity is minted per-invocation at plan time (ADR-024)
 /// and then discarded when dry-run returns, so the preview must show a fixed,
@@ -802,7 +820,7 @@ impl CmdRequest {
             } => {
                 let args = vec![
                     "-o".into(),
-                    base_mount_options().join(","),
+                    mount_options(&[]).join(","),
                     device.clone(),
                     mount_point.as_str().to_owned(),
                 ];
@@ -816,11 +834,9 @@ impl CmdRequest {
                 mount_point,
                 options,
             } => {
-                let mut all_options = base_mount_options();
-                all_options.extend(options.iter().cloned());
                 let args = vec![
                     "-o".into(),
-                    all_options.join(","),
+                    mount_options(options).join(","),
                     device.clone(),
                     mount_point.as_str().to_owned(),
                 ];
@@ -2861,10 +2877,10 @@ mod tests {
     }
 
     #[test]
-    // Intent: Mount always includes noatime and skip_balance.
-    // Why: skip_balance prevents the kernel from silently resuming an
-    // interrupted balance on mount — a safety-critical invariant.
-    // Scenario: normal unlock mounts the pool with base options only.
+    // Intent: Mount always includes the base options and pool hardening flags.
+    // Why: skip_balance prevents silent balance resume, while nosuid/nodev
+    // contain privilege escalation through the shared pool.
+    // Scenario: normal unlock mounts the pool with no caller extras.
     fn mount_includes_skip_balance() {
         let cmd = CmdRequest::Mount {
             device: "/dev/mapper/braid-disk1".to_owned(),
@@ -2876,7 +2892,7 @@ mod tests {
             cmd.args,
             vec![
                 "-o",
-                "noatime,skip_balance,subvolid=5",
+                "noatime,skip_balance,subvolid=5,nosuid,nodev",
                 "/dev/mapper/braid-disk1",
                 "/mnt/storage"
             ]
@@ -2884,9 +2900,11 @@ mod tests {
     }
 
     #[test]
-    // Intent: MountWithOptions prepends base options before caller options.
-    // Why: degraded mount must still include skip_balance and subvolid=5.
-    // Scenario: degraded unlock adds -o degraded; base options must appear first.
+    // Intent: MountWithOptions wraps caller options between base options and
+    // hardening flags.
+    // Why: degraded mount must still include skip_balance/subvolid=5 and keep
+    // nosuid/nodev last so they remain effective.
+    // Scenario: degraded unlock adds -o degraded; hardening appears after it.
     fn mount_with_options_includes_skip_balance() {
         let cmd = CmdRequest::MountWithOptions {
             device: "/dev/mapper/braid-disk1".to_owned(),
@@ -2899,7 +2917,31 @@ mod tests {
             cmd.args,
             vec![
                 "-o",
-                "noatime,skip_balance,subvolid=5,degraded",
+                "noatime,skip_balance,subvolid=5,degraded,nosuid,nodev",
+                "/dev/mapper/braid-disk1",
+                "/mnt/storage",
+            ]
+        );
+    }
+
+    #[test]
+    // Intent: Hardening flags render after conflicting caller options.
+    // Why: mount(8) resolves conflicting flags by last-wins ordering, so
+    // nosuid/nodev must stay after any future caller-supplied suid/dev extras.
+    // Scenario: an internal degraded-style call accidentally supplies conflicts.
+    fn mount_hardening_flags_stay_last() {
+        let cmd = CmdRequest::MountWithOptions {
+            device: "/dev/mapper/braid-disk1".to_owned(),
+            mount_point: MountPoint::new("/mnt/storage".to_owned()),
+            options: vec!["suid".to_owned(), "dev".to_owned()],
+        }
+        .to_argv();
+        assert_eq!(cmd.program, "mount");
+        assert_eq!(
+            cmd.args,
+            vec![
+                "-o",
+                "noatime,skip_balance,subvolid=5,suid,dev,nosuid,nodev",
                 "/dev/mapper/braid-disk1",
                 "/mnt/storage",
             ]

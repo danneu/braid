@@ -19215,8 +19215,8 @@ mod tests {
             true,
         );
 
-        let initial = "$ mount -o 'noatime,skip_balance,subvolid=5,degraded' /dev/mapper/braid-new /mnt/storage";
-        let cycle = "$ mount -o 'noatime,skip_balance,subvolid=5,degraded' /dev/mapper/braid-disk1 /mnt/storage";
+        let initial = "$ mount -o 'noatime,skip_balance,subvolid=5,degraded,nosuid,nodev' /dev/mapper/braid-new /mnt/storage";
+        let cycle = "$ mount -o 'noatime,skip_balance,subvolid=5,degraded,nosuid,nodev' /dev/mapper/braid-disk1 /mnt/storage";
         let initial_pos = rendered
             .find(initial)
             .unwrap_or_else(|| panic!("initial mount should use braid-new: {rendered:?}"));

@@ -62,8 +62,10 @@ unit gates on `ConditionPathIsMountPoint=!` and the in-CLI fd
 
 The seal is an unconditional safety invariant, in the same class as the baked-in
 base mount options braid sets unconditionally -- `noatime`
-([ADR 015](015-hdd-defaults.md)) and `skip_balance`
-([Principles](../principles.md)). There is no `immutableWhenUnmounted` knob.
+([ADR 015](015-hdd-defaults.md)), `skip_balance`
+([Principles](../principles.md)), and `nosuid,nodev`
+([ADR 032](032-pool-mount-hardening.md)). There is no `immutableWhenUnmounted`
+knob.
 
 Rationale: there is no legitimate "off" use case (writing the bare offline
 mountpoint *is* the bug). The escape hatches that matter -- graceful degradation
@@ -282,4 +284,6 @@ plan/preview/execute model.
 - `cli/src/mountpoint_guard.rs` -- the guard, the seal site, and the maintenance levers.
 - `cli/src/doctor.rs#classify_mountpoint_immutability` -- the detection signal.
 - [ADR 018: Systemd lifecycle](018-systemd-lifecycle.md) -- the unit lifecycle model.
+- [ADR 032: Pool mount hardening](032-pool-mount-hardening.md) -- another
+  always-on mount safety invariant.
 - [Mounting subvolumes](../../guides/mounting-subvolumes.md) -- the separate-path caveat.

@@ -293,7 +293,7 @@ $ cryptsetup open --type luks '--key-file=-' --perf-no_read_workqueue --perf-no_
 [safe] mkfs.btrfs RAID1 /dev/mapper/braid-toshiba1 /dev/mapper/braid-toshiba2
 $ mkfs.btrfs -d raid1 -m raid1 -O block-group-tree /dev/mapper/braid-toshiba1 /dev/mapper/braid-toshiba2
 [safe] mount -> /mnt/storage
-$ mount -o 'noatime,skip_balance,subvolid=5' /dev/mapper/braid-toshiba1 /mnt/storage
+$ mount -o 'noatime,skip_balance,subvolid=5,nosuid,nodev' /dev/mapper/braid-toshiba1 /mnt/storage
 ```
 
 ### Confirm before it runs

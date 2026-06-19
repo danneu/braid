@@ -68,7 +68,7 @@ sudo braid unlock --dry-run
 3. Verifies the selected credential against every disk it will unlock before opening any mapper
 4. Opens LUKS mappers for all locked disks using the verified credential
 5. Runs `btrfs device scan` to let the kernel discover all pool members
-6. Mounts the btrfs filesystem with `noatime`, `skip_balance`, and `subvolid=5`
+6. Mounts the btrfs filesystem with `noatime`, `skip_balance`, `subvolid=5`, and `nosuid,nodev` (privilege containment)
 7. If any disks are unavailable and `--allow-degraded` is set: mounts with the `degraded` option
 8. After mount: enriches pool.json with live btrfs device IDs and related metadata -- best-effort
 9. Checks for a paused balance and prints a warning if one is found
