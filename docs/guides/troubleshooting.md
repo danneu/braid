@@ -305,6 +305,20 @@ This is intentional. On NixOS module installs, `braid lock` stops every service 
 
 If the service does not restart on `braid unlock`, it is wired for the stop side (`BindsTo`) but not the start side (`WantedBy`). The recommended setup wires the share into the full pool lifecycle -- see [Binding shares to the pool lifecycle](sharing-and-permissions.md#binding-shares-to-the-pool-lifecycle).
 
+## Pool is fragmented
+
+**Symptom:** `filefrag` reports many extents on large files, and you're tempted to run `btrfs filesystem defrag` to compact them.
+
+**Don't run a blanket defrag.** `btrfs filesystem defrag` unshares reflink and snapshot extents: it rewrites shared extents into private copies. On a pool that holds snapshots or reflinked copies, that can sharply increase real space usage and push the filesystem into ENOSPC. Recovering then means freeing space -- for example deleting snapshots or reflinked copies you no longer need -- not a balance, because the space is now held by private extents rather than reclaimable empty block groups. braid ships no automatic or periodic defrag for exactly this reason.
+
+**If a specific file is genuinely fragmented** and measurably hurts performance, defrag just that path and accept the one-time unsharing cost for it:
+
+```sh
+sudo btrfs filesystem defrag /mnt/storage/path/to/fragmented-file
+```
+
+Large, mostly-sequential media and archive files -- braid's target workload -- fragment little, so this is rarely needed. See [ADR 015: HDD defaults](../design/decisions/015-hdd-defaults.md#periodic-or-automatic-defrag) for the full rationale.
+
 ## Related
 
 - [Recovery scenarios](recovery-scenarios.md) -- detailed recovery walkthroughs

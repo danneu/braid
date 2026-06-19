@@ -110,6 +110,7 @@ Periodic scrub (default: monthly). Uses a timer-lifecycle pattern distinct from 
 - The scrub service and resume trigger use `BindsTo` + `After` `braid-online.service`. On shutdown or `systemctl stop braid-online.service`, systemd stops them before `braid lock` runs.
 - `ConditionPathIsMountPoint` on the scrub service and trigger is defense-in-depth.
 - **Serialization via single runner.** Only `braid-scrub.service` ever runs `btrfs scrub`; both activation paths (timer and trigger) issue `systemctl start braid-scrub.service`, and systemd coalesces overlapping starts for the same unit. A completed `scrub-resume-or-start` run satisfies both an overdue timer fire and a pool-online resumable state, with no `flock` and no `/run/braid-scrub.lock`.
+- **No pool lock.** Distinct from the single-runner serialization above, the scrub subcommands also take `LockPolicy::None`, so a scheduled scrub never holds `/run/braid-pool.lock`: braid does not serialize it against a pool mutator, leaving real btrfs conflicts to the kernel. See [Pool lock mutual exclusion](#pool-lock-mutual-exclusion) for why that is safe (a `balance` overlaps; a `replace` is the kernel's documented rejection case).
 - `Conflicts` + `Before` `shutdown.target` and `sleep.target` on the scrub service. The short-lived resume trigger also uses `Conflicts` + `Before` `sleep.target` so suspend setup wins cleanly against pool-online activation.
 
 ### braid-alert.service — notification
@@ -160,6 +161,10 @@ permission fixups but do not touch `braid-online.service`.
 ## Pool lock mutual exclusion
 
 Pool mutators, alert-state mutators, key enrollment, `lock`, and `discover --write` (`unlock`, `add`, `recover`, `remove`, `remove-missing`, `replace`, `enroll`, `lock`, `discover --write`, `ack`, `monitor`) acquire an exclusive `flock` on `/run/braid-pool.lock` in Rust dispatch before reading pool state. `unlock`, `add`, `recover`, `remove`, `remove-missing`, `replace`, `enroll`, `lock`, and `discover --write` are non-blocking fail-fast commands: if the lock is already held by another braid process, the CLI exits 1 immediately with `braid: another braid operation is already in progress` and the user must retry once the active operation completes. Bare `discover` is read-only and does not acquire the lock. `ack` waits up to 10 seconds before returning a retry message. `monitor` exits 0 silently on contention so a skipped timer cycle does not start alert notification. The lock is held through post-processing (permissions, `braid-online` activation/deactivation). Under the held lock, `unlock` re-checks whether the pool is already mounted and exits cleanly if a prior winner mounted it sequentially; other mutators operate on current locked state. See [Principle 12](../principles.md#12-one-pool-operation-at-a-time).
+
+Periodic scrub is deliberately exempt. The scrub subcommands -- `scrub-cancel`, `scrub-needs-resume`, and `scrub-resume-or-start` -- take the `LockPolicy::None` discipline in `cli/src/main.rs#lock_policy`, so `braid-scrub.service` never acquires `/run/braid-pool.lock`. A long monthly scrub can therefore run while a pool mutator holds the lock. If scrub instead took the pool lock, every non-blocking mutator would be rejected for the scrub's entire multi-hour duration via the fail-fast `another braid operation is already in progress` path above -- the pool lock is built for short mutations that briefly exclude each other, not a multi-hour hold.
+
+Not holding the lock is safe because braid defers the real conflict check to the kernel. Scrub is not in btrfs' `exclusive_operation` set, so it does not hold the exclop lock and a `balance` can overlap a running scrub. The one documented conflict is `replace`, which reuses btrfs' scrub machinery: the kernel -- not braid -- refuses to start a `replace` while a scrub is in progress, returning "scrub is in progress" (the kernel's `SCRUB_INPROGRESS` result). braid classifies that on the stderr substring in `cli/src/pool.rs#replace_error` and turns it into a recovery hint pointing the operator at `btrfs scrub cancel` (and `braid status`). `tests/repro/btrfs-replace-rejected-during-scrub.py` pins both halves: the kernel rejection and the classified hint.
 
 ### Lock acquisition site
 
@@ -221,3 +226,4 @@ Services that depend on the pool being mounted use one of three patterns:
 - [003-resilient-boot.md](003-resilient-boot.md) — why no hard dependencies
 - [017-runtime-disk-membership.md](017-runtime-disk-membership.md) — lifecycle model context
 - `tests/module/systemd-lifecycle.py` — state machine test suite
+- `tests/repro/btrfs-replace-rejected-during-scrub.py` -- kernel rejects a conflicting mutator during scrub; recovery hint classified

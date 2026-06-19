@@ -150,7 +150,7 @@ with subtest("Test 1: happy path — all locked, unlock opens everything"):
     assert content == "persistent data", f"Expected 'persistent data', got '{content}'"
 
     # Mount options pinned by ADR 015 and ADR 032: skip_balance, subvolid=5,
-    # nosuid/nodev, and no compression/no noexec
+    # nosuid/nodev, and no compression/no autodefrag/no noexec
     opts = machine.succeed("findmnt -o OPTIONS -n /mnt/storage").strip()
     assert "skip_balance" in opts, f"Expected skip_balance in mount options, got: {opts}"
     assert "subvolid=5" in opts, f"Expected subvolid=5 in mount options, got: {opts}"
@@ -160,6 +160,10 @@ with subtest("Test 1: happy path — all locked, unlock opens everything"):
     assert "compress" not in opts, (
         f"Expected no compression option in mount options "
         f"(see ADR 015), got: {opts}"
+    )
+    assert "autodefrag" not in opts, (
+        f"Expected no autodefrag option in mount options "
+        f"(ADR 015: braid ships no defrag), got: {opts}"
     )
 
 # --- Test 2: Idempotent ---

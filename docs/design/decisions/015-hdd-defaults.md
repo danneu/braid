@@ -39,6 +39,12 @@ Reversal is also partial. Removing `compress=...` affects future writes only; ex
 
 Fedora's `compress=zstd:1` precedent is workstation root filesystems on SSDs: binaries, logs, configs, and package payloads. That precedent does not transfer cleanly to HDD bulk-storage NAS workloads. Users with compression-friendly data, such as text, code, or document servers, can opt specific paths into compression today with `btrfs property set <path> compression zstd`; `reference/btrfs-progs/Documentation/btrfs-property.rst` documents this modern per-inode interface. This is preferable to legacy `chattr +c`, which uses ext2-style flags and defaults to zlib. No braid feature gate is needed for this per-path opt-in.
 
+### Periodic or automatic defrag
+
+Rejected. braid ships no defrag of any kind: no `defrag` command, no periodic defrag timer or service, and no `autodefrag` mount option (`cli/src/cmd.rs#base_mount_options` sets only `noatime`, `skip_balance`, and `subvolid=5`). The target workload is an HDD media/archive NAS where large, mostly-sequential files fragment little, so a scheduled defrag buys little; the upstream `btrfsmaintenance` toolbox ships its defrag job off by default for the same reason.
+
+More decisively, a blanket `btrfs filesystem defrag` unshares reflink and snapshot extents -- it rewrites shared extents into private copies. On a snapshot-capable pool, that unsharing can sharply increase real space usage, turning a routine maintenance pass into an ENOSPC incident. An automatic or periodic defrag would therefore be actively harmful, not merely unnecessary. An operator who hits a genuine fragmentation problem can still defrag a specific path by hand, accepting the one-time unsharing cost for just that path.
+
 ## See
 
 - `cli/src/cmd.rs` — `CryptsetupLuksOpen` and `CryptsetupLuksOpenKeyFile` omit `--allow-discards`
