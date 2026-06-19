@@ -5,12 +5,24 @@
 //! production probe or side effect still surfaces through a missing mock or a
 //! request-list assertion.
 
-use super::shared::mock_ok;
+use super::shared::{DeviceUsageSpec, device_usage_raw_body, mock_ok};
 use crate::alert::{AlertCause, AlertState, save_alert_latch};
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, MockRunner, RawCommandOutput};
 use crate::probe::Filesystem;
 use crate::state_paths::StatePaths;
 use crate::types::{MapperName, MountPoint};
+
+/// FS UUID the ack 2-disk show reports; the `pool_key.fs_uuid` that a mounted ack
+/// of an EnospcRisk latch writes into `enospc-ack.json`.
+pub(crate) const ACK_FS_UUID: &str = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+
+/// Device size (100 GiB) for the ack ENOSPC usage fixtures, so the threshold caps
+/// at 1 GiB. Also the `device_size` in the baseline `PoolKey`.
+pub(crate) const ACK_DEVICE_SIZE: u64 = 100 * (1 << 30);
+
+/// Expected ack-time margin for `ack_btrfs_device_usage_atrisk`: device 1 at
+/// 100 MiB unallocated against the 1 GiB threshold.
+pub(crate) const ACK_ATRISK_MARGIN: i64 = 100 * (1 << 20) - (1 << 30);
 
 const MOUNTINFO_EXT4: &str = "36 35 0:32 / /mnt/storage rw,noatime shared:1 - ext4 /dev/sda1 rw\n";
 const MOUNTINFO_BTRFS: &str =
@@ -321,4 +333,88 @@ pub(crate) fn ack_mounted_probe_runner_with_stale_devid_stats() -> MockRunner {
         },
         btrfs_device_stats_with_stale_devid(),
     )
+}
+
+/// At-risk `btrfs device usage --raw` for the ack pool (devids 1 and 3, matching
+/// the show): device 1 down to 100 MiB unallocated (below the 1 GiB threshold),
+/// device 3 roomy. Margin is `ACK_ATRISK_MARGIN`.
+fn ack_btrfs_device_usage_atrisk() -> RawCommandOutput {
+    mock_ok(
+        "btrfs device usage",
+        &device_usage_raw_body(&[
+            DeviceUsageSpec::live(
+                "/dev/mapper/braid-disk1",
+                1,
+                ACK_DEVICE_SIZE,
+                &[("Data", "RAID1", ACK_DEVICE_SIZE - 100 * (1 << 20))],
+                100 * (1 << 20),
+            ),
+            DeviceUsageSpec::live(
+                "/dev/mapper/braid-disk3",
+                3,
+                ACK_DEVICE_SIZE,
+                &[("Data", "RAID1", ACK_DEVICE_SIZE - 50 * (1 << 30))],
+                50 * (1 << 30),
+            ),
+        ]),
+    )
+}
+
+/// 2-disk btrfs show with no `uuid:` line, so `probe_pool_alerts` yields
+/// `fs_uuid: None` -- the "ack cannot key a baseline" path.
+fn btrfs_show_2disk_no_uuid() -> RawCommandOutput {
+    mock_ok(
+        "btrfs filesystem show /mnt/storage",
+        "Label: none\n\
+         \tTotal devices 2 FS bytes used 1.00GiB\n\
+         \tdevid    1 size 10.00GiB used 2.00GiB path /dev/mapper/braid-disk1\n\
+         \tdevid    3 size 10.00GiB used 2.00GiB path /dev/mapper/braid-disk3\n",
+    )
+}
+
+/// Mounted probe + device-stats runner plus an at-risk usage stub, so a mounted
+/// ack of an EnospcRisk latch can re-probe and write a keyed baseline.
+pub(crate) fn ack_mounted_probe_runner_with_enospc_usage() -> MockRunner {
+    ack_mounted_probe_runner_with_device_stats().with_output(
+        CmdRequest::BtrfsDeviceUsageRaw {
+            mount_point: ack_mp(),
+        },
+        ack_btrfs_device_usage_atrisk(),
+    )
+}
+
+/// Mounted runner whose show carries no FS UUID (plus the at-risk usage stub), so
+/// the ack baseline probe parses usage but builds no `PoolKey` and writes nothing.
+pub(crate) fn ack_mounted_probe_runner_no_uuid_with_enospc_usage() -> MockRunner {
+    MockRunner::default()
+        .with_output(
+            CmdRequest::BtrfsFilesystemShow {
+                mount_point: ack_mp(),
+            },
+            btrfs_show_2disk_no_uuid(),
+        )
+        .with_output(
+            CmdRequest::CryptsetupStatus {
+                mapper: MapperName::from_basename("braid-disk1".into()),
+            },
+            cryptsetup_status_active("braid-disk1", "/dev/vda"),
+        )
+        .with_output(
+            CmdRequest::CryptsetupStatus {
+                mapper: MapperName::from_basename("braid-disk3".into()),
+            },
+            cryptsetup_status_active("braid-disk3", "/dev/vdc"),
+        )
+        .with_output(
+            CmdRequest::BtrfsDeviceStatsJson {
+                mount_point: ack_mp(),
+            },
+            btrfs_device_stats_healthy(),
+        )
+        .with_output(
+            CmdRequest::BtrfsDeviceUsageRaw {
+                mount_point: ack_mp(),
+            },
+            ack_btrfs_device_usage_atrisk(),
+        )
 }

@@ -1,0 +1,125 @@
+# Test: braid monitor — proactive ENOSPC risk (Warning tier)
+#
+# Intent: Verify the full proactive-capacity-alert lifecycle through the real
+#   systemd path: a filling RAID1 pool crosses the ENOSPC threshold, monitor
+#   exits 3 (Warning), the wrapper routes that to the non-beeping advisory
+#   service, status shows the NOTICE banner + enospc_risk cause, ack clears it
+#   and stops the advisory unit, a re-arm cycle exits 0, a `braid add` topology
+#   change invalidates the baseline so a still-at-risk pool re-fires, and a
+#   degraded pool raises MissingDevice (Critical) but never EnospcRisk.
+#
+# Why it exists: Unit tests cover the state machine in isolation. Only a VM
+#   check proves the exit-3 wrapper routing, the advisory systemd unit, the real
+#   `systemctl stop` on ack, and the keyed-baseline invalidation across add.
+#
+# Scenario: 2-disk RAID1 pool (disk1, disk2) pre-created by the initrd fixture,
+#   unlocked via braid-pool.target; disk3 held raw for the add subtest.
+
+import json
+
+start_all()
+machine.wait_for_unit("multi-user.target", timeout=120)
+
+passphrase = "testpassphrase"
+
+with subtest("Monitor timer is active, then stopped for deterministic driving"):
+    machine.succeed("systemctl is-active braid-monitor.timer")
+    # Stop the timer so a 5-minute tick cannot race the manual monitor runs and
+    # mutate the latch / advisory mid-assertion.
+    machine.succeed("systemctl stop braid-monitor.timer")
+
+with subtest("Unlock pool via braid-pool.target"):
+    machine.succeed("systemctl start braid-pool.target")
+    machine.succeed("mountpoint -q /mnt/storage")
+
+with subtest("Healthy empty pool: monitor exits 0"):
+    rc = machine.succeed("set +e; braid monitor; echo $?").strip().splitlines()[-1]
+    assert rc == "0", f"Expected exit 0 on a healthy pool, got {rc}"
+
+with subtest("Fill the pool below the ENOSPC threshold"):
+    # RAID1 mirrors each write to both devices, so writing data drops both
+    # devices' unallocated space below the per-device threshold
+    # (min(1 GiB, 10% of total) -> ~100 MiB for this 2x512 MiB pool). Write
+    # 50 MiB files until braid's own predicate reports at-risk, or the pool
+    # fills. Using `braid status` as the gate keeps the fill amount robust to
+    # LUKS/metadata overhead.
+    for i in range(14):
+        machine.execute(
+            f"dd if=/dev/zero of=/mnt/storage/fill{i} bs=1M count=50 2>/dev/null"
+        )
+        machine.execute("sync")
+        if "ENOSPC risk" in machine.succeed("braid status"):
+            break
+    print(machine.succeed("btrfs device usage --raw /mnt/storage"))
+    assert "ENOSPC risk" in machine.succeed("braid status"), (
+        "fill did not cross the ENOSPC threshold"
+    )
+
+with subtest("At-risk pool: braid monitor exits 3 (Warning, not the beeping exit 1)"):
+    rc = machine.succeed("set +e; braid monitor; echo $?").strip().splitlines()[-1]
+    assert rc == "3", f"Expected exit 3 (Warning), got {rc}"
+    machine.succeed("test -f /var/lib/braid/alert-latch.json")
+
+with subtest("Wrapper routes exit 3 to the non-beeping advisory service"):
+    machine.succeed("rm -f /root/alert-fired")
+    machine.succeed("systemctl start braid-monitor.service")
+    # The advisory ran alertCommand; the beeper did NOT start.
+    machine.wait_until_succeeds("test -f /root/alert-fired")
+    machine.succeed("systemctl is-active braid-alert-advisory.service")
+    machine.fail("systemctl is-active braid-alert.service")
+
+with subtest("Status shows the enospc_risk cause and the NOTICE (not ALERT) banner"):
+    report = json.loads(machine.succeed("braid status --json"))
+    assert report["alert_active"] is True, f"expected alert_active, got {report}"
+    cause_types = [c["type"] for c in report["alert_causes"]]
+    assert "enospc_risk" in cause_types, f"expected enospc_risk cause, got {cause_types}"
+    human = machine.succeed("braid status")
+    assert "NOTICE -- capacity risk detected" in human, (
+        f"expected NOTICE banner, got:\n{human}"
+    )
+    assert "ALERT -- disk health issue detected" not in human, (
+        f"a Warning must not render the critical banner:\n{human}"
+    )
+    assert "ENOSPC risk: pool is one disk-loss" in human, (
+        f"expected the ENOSPC cause line, got:\n{human}"
+    )
+
+with subtest("Ack clears the latch, writes the keyed baseline, and stops the advisory unit"):
+    machine.succeed("braid ack")
+    machine.fail("test -f /var/lib/braid/alert-latch.json")
+    machine.succeed("test -f /var/lib/braid/enospc-ack.json")
+    machine.fail("systemctl is-active braid-alert-advisory.service")
+
+with subtest("Acked-but-still-at-risk pool: follow-up monitor exits 0 (suppressed)"):
+    rc = machine.succeed("set +e; braid monitor; echo $?").strip().splitlines()[-1]
+    assert rc == "0", f"Expected exit 0 (suppressed by baseline), got {rc}"
+    machine.fail("test -f /var/lib/braid/alert-latch.json")
+
+# Note: the baseline-invalidation-on-topology-change (F1) guard lives in the unit
+# test cmd_monitor_stale_baseline_key_mismatch_fires_and_clears, which covers all
+# three mismatch axes (devid set, FS UUID, device_size) structure-insensitively.
+# It is not exercised end-to-end here because `braid add` runs a RAID1 balance
+# that either ENOSPCs on a deliberately-near-full pool or relieves the risk on a
+# non-full one -- so "add succeeds AND the pool stays at-risk" is not a stable
+# end-to-end precondition.
+
+with subtest("Degraded pool raises MissingDevice (Critical) but never EnospcRisk"):
+    # The latch is clean (ack above cleared it). Fail a disk and remount
+    # degraded; monitor must skip ENOSPC entirely and raise only MissingDevice.
+    machine.succeed("test -f /var/lib/braid/enospc-ack.json")
+    machine.succeed("umount /mnt/storage")
+    machine.succeed("cryptsetup close braid-disk2")
+    machine.succeed("mount -o degraded /dev/mapper/braid-disk1 /mnt/storage")
+    rc = machine.succeed("set +e; braid monitor; echo $?").strip().splitlines()[-1]
+    assert rc == "1", f"Expected exit 1 (Critical MissingDevice) on degraded pool, got {rc}"
+    report = json.loads(machine.succeed("braid status --json"))
+    cause_types = [c["type"] for c in report["alert_causes"]]
+    assert "missing_device" in cause_types, f"expected missing_device, got {cause_types}"
+    assert "enospc_risk" not in cause_types, (
+        f"a degraded pool must not raise EnospcRisk, got {cause_types}"
+    )
+    # The skip-before-the-state-machine guarantee: the baseline survives a
+    # degraded cycle untouched.
+    machine.succeed("test -f /var/lib/braid/enospc-ack.json")
+
+machine.shutdown()

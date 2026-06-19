@@ -343,6 +343,11 @@ when any survivor set would have too little pairable unallocated space.
 The per-device threshold is `min(1 GiB, 10% of total device bytes)`,
 matching btrfs's effective data chunk size.
 
+`braid status`, `braid doctor`, and `braid monitor` share one predicate
+(`evaluate_enospc_risk`), so the on-demand advisory and the proactive
+`braid monitor` Warning (exit 3, no beep) never disagree about whether a
+pool is at risk.
+
 See [Balance fails with No space left on device](../guides/troubleshooting.md#balance-fails-with-no-space-left-on-device)
 for recovery options.
 

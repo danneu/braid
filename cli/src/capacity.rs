@@ -8,6 +8,23 @@ use crate::parse::types::BtrfsDeviceUsageEntry;
 
 const GIB: u64 = 1 << 30;
 
+/// Re-alert step for an acked-but-worsening ENOSPC risk: the monitor re-fires
+/// only when the live `margin` has fallen this many bytes below the acked
+/// baseline. Half a btrfs data chunk (512 MiB), deliberately *below* the ~1 GiB
+/// threshold rather than equal to it: an at-risk `margin` is bounded in
+/// `[-threshold, 0)` (unallocated and chunk-pair capacity are both >= 0), so a
+/// full-chunk step would push `baseline_margin - step` past the floor and make
+/// the re-fire branch unreachable. Half a chunk keeps "materially worse"
+/// meaningful while still firing as an acked pool fills toward empty.
+pub const ENOSPC_WORSEN_STEP: u64 = GIB / 2;
+
+/// Re-arm threshold for ENOSPC risk: the monitor drops a stored baseline (so a
+/// future recurrence alerts fresh) once the predicate's signed surplus climbs
+/// back to at least this many bytes. One btrfs data chunk (~1 GiB) of hysteresis
+/// above the `margin < 0` fire boundary keeps a pool hovering at the edge from
+/// flapping between armed and re-armed.
+pub const ENOSPC_REARM_MARGIN: u64 = GIB;
+
 /// Kernel-aligned low-unallocated threshold for proactive ENOSPC advisories.
 ///
 /// Mirrors btrfs's effective data chunk-size cap for non-zoned filesystems:
@@ -40,62 +57,132 @@ pub fn raid1_chunk_pair_capacity(unallocated_desc: &[u64]) -> u64 {
     if largest > rest { rest } else { total / 2 }
 }
 
-/// Advisory for pools that are one disk-loss away from RAID1 chunk ENOSPC.
+/// Sentinel `margin` for pools where the chunk-pair predicate does not apply
+/// (degraded, or fewer than two devices). Callers treat it as healthy: a degraded
+/// pool alerts louder through `MissingDevice`, and a single-device pool has no
+/// RAID1 geometry. Capping at `i64::MAX` keeps `at_risk()` false and lifts the
+/// monitor's re-arm branch (`margin >= ENOSPC_REARM_MARGIN`) -- but the monitor
+/// skips ENOSPC entirely on a degraded pool *before* reaching that branch, so the
+/// sentinel never silently re-arms a still-at-risk pool across a device blip.
+const ENOSPC_MARGIN_NOT_APPLICABLE: i64 = i64::MAX;
+
+/// Typed ENOSPC-risk decision shared by `status`, `doctor`, and `monitor` so the
+/// chunk-pair thresholds live in exactly one place and the three surfaces cannot
+/// disagree about whether a pool is at risk.
 ///
-/// This intentionally returns a vector to match the other status advisory
-/// helpers, while currently emitting at most one message.
-pub fn enospc_risk_advisory(devices: &[BtrfsDeviceUsageEntry], missing_count: u64) -> Vec<String> {
+/// `margin` is the binding signed surplus/deficit in bytes: negative is at-risk
+/// depth (a disk loss may leave the pool unable to allocate RAID1 chunk pairs to
+/// restore redundancy), positive is healthy headroom. It is both the `at_risk`
+/// predicate (`margin < 0`) and the monotonic risk magnitude the monitor
+/// baselines and re-arms on. `count_below` and `device_count` render the advisory
+/// line without a re-probe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EnospcRiskAssessment {
+    pub margin: i64,
+    pub count_below: usize,
+    pub device_count: usize,
+    pub threshold: u64,
+}
+
+impl EnospcRiskAssessment {
+    /// The pool is at risk exactly when the binding margin is negative. This is
+    /// the single predicate `status`, `doctor`, and `monitor` branch on.
+    pub fn at_risk(&self) -> bool {
+        self.margin < 0
+    }
+}
+
+/// Evaluate RAID1 chunk-pair ENOSPC risk as a signed margin.
+///
+/// This is the decision lifted out of `enospc_risk_advisory`'s prose: the
+/// degraded / single-disk guard, the 2-device branch, and the 3+-device per-loss
+/// simulation, kept signed instead of collapsed to a bool so `monitor` gets the
+/// surplus it needs to baseline and re-arm. `margin < 0` is exactly the legacy
+/// `at_risk` predicate, so `status` and `doctor` see identical decisions.
+pub fn evaluate_enospc_risk(
+    devices: &[BtrfsDeviceUsageEntry],
+    missing_count: u64,
+) -> EnospcRiskAssessment {
     if missing_count > 0 || devices.len() < 2 {
-        return Vec::new();
+        return EnospcRiskAssessment {
+            margin: ENOSPC_MARGIN_NOT_APPLICABLE,
+            count_below: 0,
+            device_count: devices.len(),
+            threshold: 0,
+        };
     }
 
     let current_total: u64 = devices.iter().map(|device| device.device_size).sum();
     let current_threshold = enospc_risk_threshold(current_total);
     // count_below intentionally uses the pre-loss threshold rendered in the
-    // advisory, while the 3+ disk predicate below compares each survivor set
+    // advisory, while the 3+ disk margin below compares each survivor set
     // with its no-larger post-loss threshold. That cannot produce a firing
     // advisory with a "0 of N" count: survivor_threshold <= current_threshold,
     // and any survivor set whose members are all >= current_threshold has
     // chunk-pair capacity >= current_threshold, therefore >= survivor_threshold.
-    // So at_risk implies at least one device is below current_threshold.
+    // So margin < 0 implies at least one device is below current_threshold.
     let count_below = devices
         .iter()
         .filter(|device| device.unallocated < current_threshold)
         .count();
 
-    let at_risk = if devices.len() == 2 {
+    // `margin < 0` iff some term is negative, so taking the minimum over the
+    // per-device (2-disk) or per-loss (3+-disk) surplus reproduces the legacy
+    // `any(... < threshold)` predicate while keeping the deepest deficit signed.
+    let margin = if devices.len() == 2 {
         devices
             .iter()
-            .any(|device| device.unallocated < current_threshold)
+            .map(|device| device.unallocated as i64 - current_threshold as i64)
+            .min()
+            .expect("two-device pool always has a minimum")
     } else {
-        (0..devices.len()).any(|lost_index| {
-            let survivor_total: u64 = devices
-                .iter()
-                .enumerate()
-                .filter(|(index, _)| *index != lost_index)
-                .map(|(_, device)| device.device_size)
-                .sum();
-            let survivor_threshold = enospc_risk_threshold(survivor_total);
-            let mut survivor_unallocated: Vec<u64> = devices
-                .iter()
-                .enumerate()
-                .filter(|(index, _)| *index != lost_index)
-                .map(|(_, device)| device.unallocated)
-                .collect();
-            survivor_unallocated.sort_unstable_by(|a, b| b.cmp(a));
-            raid1_chunk_pair_capacity(&survivor_unallocated) < survivor_threshold
-        })
+        (0..devices.len())
+            .map(|lost_index| {
+                let survivor_total: u64 = devices
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| *index != lost_index)
+                    .map(|(_, device)| device.device_size)
+                    .sum();
+                let survivor_threshold = enospc_risk_threshold(survivor_total);
+                let mut survivor_unallocated: Vec<u64> = devices
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| *index != lost_index)
+                    .map(|(_, device)| device.unallocated)
+                    .collect();
+                survivor_unallocated.sort_unstable_by(|a, b| b.cmp(a));
+                raid1_chunk_pair_capacity(&survivor_unallocated) as i64 - survivor_threshold as i64
+            })
+            .min()
+            .expect("three-or-more-device pool always has a minimum")
     };
 
-    if !at_risk {
+    EnospcRiskAssessment {
+        margin,
+        count_below,
+        device_count: devices.len(),
+        threshold: current_threshold,
+    }
+}
+
+/// Advisory for pools that are one disk-loss away from RAID1 chunk ENOSPC.
+///
+/// A thin formatter over `evaluate_enospc_risk` so status and doctor render the
+/// exact same string while sharing one predicate. Returns a vector to match the
+/// other status advisory helpers, while emitting at most one message.
+pub fn enospc_risk_advisory(devices: &[BtrfsDeviceUsageEntry], missing_count: u64) -> Vec<String> {
+    let assessment = evaluate_enospc_risk(devices, missing_count);
+    if !assessment.at_risk() {
         return Vec::new();
     }
 
     let cmd = compact_data_command("<mount>", 50);
     vec![format!(
-        "ENOSPC risk: {count_below} of {} devices have less than {} unallocated -- if a disk fails, the pool may be unable to allocate RAID1 chunks to restore redundancy. Add capacity with 'braid add', delete unneeded files or snapshots, or compact data chunks with '{cmd}' (data only; do not balance metadata).",
-        devices.len(),
-        format_bytes(current_threshold),
+        "ENOSPC risk: {count_below} of {device_count} devices have less than {threshold} unallocated -- if a disk fails, the pool may be unable to allocate RAID1 chunks to restore redundancy. Add capacity with 'braid add', delete unneeded files or snapshots, or compact data chunks with '{cmd}' (data only; do not balance metadata).",
+        count_below = assessment.count_below,
+        device_count = assessment.device_count,
+        threshold = format_bytes(assessment.threshold),
     )]
 }
 
@@ -323,5 +410,199 @@ mod tests {
             device(Devid::new(3), 4 * GIB, 900 * MIB),
         ];
         assert!(enospc_risk_advisory(&devices, 0).is_empty());
+    }
+
+    // Intent: evaluate_enospc_risk returns a healthy sentinel margin for a
+    //   single-device pool, so monitor/status/doctor all treat it as not-at-risk.
+    // Why it exists: the typed predicate must reproduce the legacy guard that
+    //   short-circuits before any chunk-pair math on a degenerate pool.
+    // Scenario: an imported single-profile pool with one device.
+    #[test]
+    fn evaluate_enospc_risk_single_disk_not_applicable() {
+        let devices = vec![device(Devid::new(1), 100 * GIB, 0)];
+        let assessment = evaluate_enospc_risk(&devices, 0);
+        assert!(!assessment.at_risk(), "single-disk pool is never at risk");
+        assert_eq!(assessment.margin, i64::MAX, "healthy sentinel margin");
+        assert_eq!(assessment.device_count, 1);
+        assert_eq!(assessment.count_below, 0);
+    }
+
+    // Intent: evaluate_enospc_risk returns the healthy sentinel margin for a
+    //   degraded pool regardless of how tight unallocated space is.
+    // Why it exists: missing-device status is the louder operator signal, and
+    //   the monitor relies on this sentinel staying not-at-risk so it can skip
+    //   ENOSPC on degraded pools without inventing a separate guard.
+    // Scenario: a two-device pool with one missing member and zero unallocated.
+    #[test]
+    fn evaluate_enospc_risk_degraded_not_applicable() {
+        let devices = vec![
+            device(Devid::new(1), 100 * GIB, 0),
+            device(Devid::new(2), 100 * GIB, 0),
+        ];
+        let assessment = evaluate_enospc_risk(&devices, 1);
+        assert!(
+            !assessment.at_risk(),
+            "degraded pool defers to MissingDevice"
+        );
+        assert_eq!(assessment.margin, i64::MAX);
+    }
+
+    // Intent: evaluate_enospc_risk reports a large positive margin for a roomy
+    //   multi-TiB RAID1 pool.
+    // Why it exists: the signed margin must stay well clear of zero on healthy
+    //   pools so the monitor never spuriously fires or churns its baseline.
+    // Scenario: three 12 TiB disks each with 5 TiB unallocated.
+    #[test]
+    fn evaluate_enospc_risk_healthy_large_positive_margin() {
+        let devices = vec![
+            device(Devid::new(1), 12 * TIB, 5 * TIB),
+            device(Devid::new(2), 12 * TIB, 5 * TIB),
+            device(Devid::new(3), 12 * TIB, 5 * TIB),
+        ];
+        let assessment = evaluate_enospc_risk(&devices, 0);
+        assert!(!assessment.at_risk());
+        assert!(
+            assessment.margin > GIB as i64,
+            "healthy large pool margin must be a comfortable surplus, got {}",
+            assessment.margin
+        );
+    }
+
+    // Intent: evaluate_enospc_risk reports a negative margin whose magnitude is
+    //   the deepest device deficit on an at-risk 2-disk pool.
+    // Why it exists: margin < 0 must be exactly the legacy at_risk predicate, and
+    //   the magnitude is what monitor baselines on -- both pinned here.
+    // Scenario: one 100 GiB disk has only 10 MiB unallocated, its peer 10 GiB.
+    #[test]
+    fn evaluate_enospc_risk_2disk_one_low_negative_margin() {
+        let devices = vec![
+            device(Devid::new(1), 100 * GIB, 10 * MIB),
+            device(Devid::new(2), 100 * GIB, 10 * GIB),
+        ];
+        let assessment = evaluate_enospc_risk(&devices, 0);
+        assert!(assessment.at_risk(), "a device below threshold is at risk");
+        // threshold = min(1 GiB, 200 GiB / 10) = 1 GiB; deepest deficit is the
+        // 10 MiB device: 10 MiB - 1 GiB.
+        assert_eq!(assessment.margin, 10 * MIB as i64 - GIB as i64);
+        assert_eq!(assessment.count_below, 1);
+        assert_eq!(assessment.device_count, 2);
+    }
+
+    // Intent: evaluate_enospc_risk drives a negative margin from the single-disk
+    //   loss simulation on a 3-disk pool.
+    // Why it exists: pins the 3+-device branch's per-loss minimum, so a firing
+    //   monitor alert carries the right magnitude and count.
+    // Scenario: three 4 GiB disks have unallocated [3 GiB, 3 GiB, 700 MiB].
+    #[test]
+    fn evaluate_enospc_risk_3disk_loss_sim_negative_margin() {
+        let devices = vec![
+            device(Devid::new(1), 4 * GIB, 3 * GIB),
+            device(Devid::new(2), 4 * GIB, 3 * GIB),
+            device(Devid::new(3), 4 * GIB, 700 * MIB),
+        ];
+        let assessment = evaluate_enospc_risk(&devices, 0);
+        assert!(assessment.at_risk());
+        assert!(
+            assessment.margin < 0,
+            "loss simulation must deficit, got {}",
+            assessment.margin
+        );
+        assert_eq!(assessment.count_below, 1);
+        assert_eq!(assessment.device_count, 3);
+    }
+
+    // Intent: evaluate_enospc_risk uses each survivor set's own post-loss
+    //   threshold, so a pool that is safe after any single loss reports a
+    //   positive margin.
+    // Why it exists: using the larger pre-loss threshold would flip this to a
+    //   negative margin and false-fire the monitor on small pools.
+    // Scenario: three 4 GiB disks have unallocated [3 GiB, 3 GiB, 900 MiB].
+    #[test]
+    fn evaluate_enospc_risk_survivor_threshold_positive_margin() {
+        let devices = vec![
+            device(Devid::new(1), 4 * GIB, 3 * GIB),
+            device(Devid::new(2), 4 * GIB, 3 * GIB),
+            device(Devid::new(3), 4 * GIB, 900 * MIB),
+        ];
+        let assessment = evaluate_enospc_risk(&devices, 0);
+        assert!(!assessment.at_risk(), "safe after any single loss");
+        assert!(assessment.margin > 0);
+    }
+
+    // Intent: a worse pool produces a strictly more-negative margin than a
+    //   less-bad one (monotonicity of the risk magnitude).
+    // Why it exists: the monitor's "materially worse" re-alert and re-arm logic
+    //   depend on margin decreasing as the pool fills, not just on the sign.
+    // Scenario: two 2-disk pools differing only in the low device's headroom
+    //   (100 MiB vs 10 MiB).
+    #[test]
+    fn evaluate_enospc_risk_margin_is_monotonic_in_severity() {
+        let less_bad = vec![
+            device(Devid::new(1), 100 * GIB, 100 * MIB),
+            device(Devid::new(2), 100 * GIB, 10 * GIB),
+        ];
+        let worse = vec![
+            device(Devid::new(1), 100 * GIB, 10 * MIB),
+            device(Devid::new(2), 100 * GIB, 10 * GIB),
+        ];
+        let less_bad_margin = evaluate_enospc_risk(&less_bad, 0).margin;
+        let worse_margin = evaluate_enospc_risk(&worse, 0).margin;
+        assert!(less_bad_margin < 0 && worse_margin < 0, "both at risk");
+        assert!(
+            worse_margin < less_bad_margin,
+            "worse pool ({worse_margin}) must be more negative than less-bad ({less_bad_margin})"
+        );
+    }
+
+    // Intent: a predicate-healthy 4-disk pool with one near-empty device returns
+    //   a margin large enough to re-arm a stored monitor baseline.
+    // Why it exists (F2): keying re-arm off raw min-headroom rather than the
+    //   predicate margin would leave a healthy pool with one low device stuck
+    //   below the re-arm gate, never clearing its baseline. The matching silent
+    //   advisory (enospc_risk_advisory_silent_on_4_disk_with_one_low) proves it
+    //   is not at risk; this proves the margin clears ENOSPC_REARM_MARGIN.
+    // Scenario: four 100 GiB disks have unallocated [10 GiB, 10 GiB, 10 GiB, 50 MiB].
+    #[test]
+    fn evaluate_enospc_risk_4disk_one_low_margin_clears_rearm() {
+        let devices = vec![
+            device(Devid::new(1), 100 * GIB, 10 * GIB),
+            device(Devid::new(2), 100 * GIB, 10 * GIB),
+            device(Devid::new(3), 100 * GIB, 10 * GIB),
+            device(Devid::new(4), 100 * GIB, 50 * MIB),
+        ];
+        let assessment = evaluate_enospc_risk(&devices, 0);
+        assert!(!assessment.at_risk(), "fault-tolerant pool is healthy");
+        assert!(
+            assessment.margin >= ENOSPC_REARM_MARGIN as i64,
+            "predicate-healthy pool must re-arm; margin {} < REARM {}",
+            assessment.margin,
+            ENOSPC_REARM_MARGIN
+        );
+    }
+
+    // Intent: the ENOSPC hysteresis constants stay pinned -- re-arm at one btrfs
+    //   data chunk of surplus, re-fire at half a chunk of additional deficit.
+    // Why it exists: the monitor's re-alert step and re-arm gate are tuned to
+    //   these exact values. The worsen step MUST stay below the ~1 GiB threshold:
+    //   an at-risk margin is bounded in [-threshold, 0), so a full-chunk step
+    //   would make the re-fire branch unreachable. A silent bump back to 1 GiB
+    //   would quietly kill re-fire; this test fails loudly on that.
+    // Scenario: a refactor edits the chunk-size assumption.
+    #[test]
+    fn enospc_hysteresis_constants_pinned() {
+        assert_eq!(
+            ENOSPC_REARM_MARGIN,
+            1 << 30,
+            "re-arm at one data chunk of surplus"
+        );
+        assert_eq!(
+            ENOSPC_WORSEN_STEP,
+            (1 << 30) / 2,
+            "half a chunk -- below threshold so re-fire stays reachable"
+        );
+        assert!(
+            (ENOSPC_WORSEN_STEP as i64) < ENOSPC_REARM_MARGIN as i64,
+            "worsen step must stay below the threshold for re-fire to be reachable"
+        );
     }
 }

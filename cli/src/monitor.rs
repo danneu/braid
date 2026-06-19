@@ -2,9 +2,14 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
-use crate::alert::{self, AlertCause, compute_alert_state, merge_into_latch, save_acked_stats};
+use crate::alert::{
+    self, AlertCause, compute_alert_state, live_pool_key, load_enospc_ack, merge_into_latch,
+    remove_enospc_ack, save_acked_stats,
+};
+use crate::capacity::{ENOSPC_REARM_MARGIN, ENOSPC_WORSEN_STEP, evaluate_enospc_risk};
 use crate::cmd::{CmdRequest, CommandRunner};
-use crate::parse::parse_btrfs_device_stats;
+use crate::parse::types::BtrfsDeviceUsageEntry;
+use crate::parse::{parse_btrfs_device_stats, parse_btrfs_device_usage};
 use crate::probe::{Filesystem, ProbeError, probe_pool_alerts};
 use crate::state_paths::StatePaths;
 use crate::types::MountPoint;
@@ -108,7 +113,27 @@ pub fn cmd_monitor<R: CommandRunner, F: Filesystem + ?Sized>(
 
         // 7. Compute live alert state. Identity is the devid carried on each
         //    stats row by btrfs -- no path-to-devid map needed.
-        let live_causes = compute_alert_state(&device_stats, &acked, &devids, smartd_active).causes;
+        let mut live_causes =
+            compute_alert_state(&device_stats, &acked, &devids, smartd_active).causes;
+
+        // 7b. Best-effort ENOSPC-risk evaluation. This is the single documented
+        //     exception to the fail-closed mandate: ADR 014's pure-detector
+        //     contract names it (the usage probe skips only EnospcRisk and never
+        //     latches ComputationError), and ADR 018 documents the probe
+        //     mechanism. The helper owns its errors and never returns Err, so it
+        //     stays out of the `?`-propagating ComputationError path below --
+        //     device-error / missing-device alerting in this same cycle is
+        //     untouched if the usage probe fails.
+        let missing_count = devids.missing.len() as u64;
+        if let Some(cause) = evaluate_enospc_for_monitor(
+            runner,
+            mount_point,
+            missing_count,
+            pool.fs_uuid.as_deref(),
+            paths,
+        ) {
+            live_causes.push(cause);
+        }
 
         Ok(Some(live_causes))
     })();
@@ -152,16 +177,192 @@ pub fn cmd_monitor<R: CommandRunner, F: Filesystem + ?Sized>(
     }
 }
 
+/// Probe `btrfs device usage --raw` and parse it into per-device entries.
+///
+/// Returns the parse/probe failure as a `String` detail rather than a typed
+/// error so the only consumer (`evaluate_enospc_for_monitor`) can log-and-skip
+/// without any path that could re-enter the fail-closed `ComputationError` fold.
+fn probe_usage_entries<R: CommandRunner>(
+    runner: &R,
+    mount_point: &MountPoint,
+) -> Result<Vec<BtrfsDeviceUsageEntry>, String> {
+    let raw = runner
+        .run(&CmdRequest::BtrfsDeviceUsageRaw {
+            mount_point: mount_point.clone(),
+        })
+        .map_err(|e| e.to_string())?;
+    let parsed = parse_btrfs_device_usage(&raw).map_err(|e| e.to_string())?;
+    Ok(parsed.devices)
+}
+
+/// Evaluate proactive RAID1 chunk-pair ENOSPC risk for one monitor cycle and
+/// drive the monotonic suppression baseline, returning `Some(EnospcRisk { .. })`
+/// to fire or `None` to suppress.
+///
+/// Best-effort by contract: every failure mode here (probe, parse, baseline
+/// load) is logged and folded into a fire/skip decision -- it never returns
+/// `Err` and never latches `ComputationError`. This is the scoped fail-open
+/// carve-out to the monitor's fail-closed mandate, so a broken usage probe skips
+/// only this cause and leaves device-error / missing-device alerting intact.
+fn evaluate_enospc_for_monitor<R: CommandRunner>(
+    runner: &R,
+    mount_point: &MountPoint,
+    missing_count: u64,
+    fs_uuid: Option<&str>,
+    paths: &StatePaths,
+) -> Option<AlertCause> {
+    // Degraded pools alert louder through MissingDevice. Skip entirely and leave
+    // any baseline untouched -- a transient device absence must not drop a
+    // still-at-risk pool's suppression memory (reconnect keeps the same key).
+    if missing_count > 0 {
+        return None;
+    }
+
+    // Cannot determine risk: log and skip. The scoped fail-open exception.
+    let entries = match probe_usage_entries(runner, mount_point) {
+        Ok(entries) => entries,
+        Err(detail) => {
+            eprintln!("braid monitor: ENOSPC probe skipped -- {detail}");
+            return None;
+        }
+    };
+
+    let assessment = evaluate_enospc_risk(&entries, missing_count);
+    let margin = assessment.margin;
+
+    // Re-arm: a predicate-healthy surplus clears any stored baseline so a future
+    // recurrence alerts fresh. Keys off the predicate margin, NOT raw min
+    // headroom, so a fault-tolerant pool with one low device still re-arms.
+    if margin >= ENOSPC_REARM_MARGIN as i64 {
+        if let Err(e) = remove_enospc_ack(paths) {
+            eprintln!("braid monitor: warning: failed to clear ENOSPC baseline on re-arm: {e}");
+        }
+        return None;
+    }
+
+    // Hysteresis dead band (0 <= margin < ENOSPC_REARM_MARGIN): neither fire nor
+    // re-arm. Leave any baseline in place.
+    if !assessment.at_risk() {
+        return None;
+    }
+
+    let cause = AlertCause::EnospcRisk {
+        margin,
+        count_below: assessment.count_below as u32,
+        device_count: assessment.device_count as u32,
+    };
+
+    let live_key = live_pool_key(fs_uuid, &entries);
+    let baseline = match load_enospc_ack(paths) {
+        Ok(opt) => opt,
+        Err(e) => {
+            // Risk known, baseline positively invalid (corrupt/unreadable): no
+            // usable baseline, clear best-effort, fire armed. Never folds
+            // ComputationError.
+            eprintln!(
+                "braid monitor: ENOSPC baseline unreadable -- firing armed and clearing: {e}"
+            );
+            let _ = remove_enospc_ack(paths);
+            return Some(cause);
+        }
+    };
+
+    let baseline = match baseline {
+        // No baseline at all: armed, fire.
+        None => return Some(cause),
+        Some(b) => b,
+    };
+
+    match &live_key {
+        // Acked with a matching key: emit only if materially worse (more
+        // negative) than the acked baseline by at least one worsen step.
+        // `saturating_sub` guards against an underflow panic if a corrupt but
+        // still-parseable baseline carries an extreme `baseline_margin`.
+        Some(live) if baseline.pool_key == *live => {
+            if margin
+                < baseline
+                    .baseline_margin
+                    .saturating_sub(ENOSPC_WORSEN_STEP as i64)
+            {
+                Some(cause)
+            } else {
+                None
+            }
+        }
+        // Confirmed key mismatch (bootstrap/membership/geometry change): the
+        // stored baseline is stale. Remove it and fire armed.
+        Some(_live) => {
+            eprintln!(
+                "braid monitor: ENOSPC baseline pool key no longer matches the live pool -- re-arming and firing"
+            );
+            let _ = remove_enospc_ack(paths);
+            Some(cause)
+        }
+        // Identity gap (no FS UUID): we cannot compare keys, but this is not a
+        // confirmed different pool. Fire armed yet LEAVE the file so a later
+        // cycle with the FS UUID present can compare and re-arm it properly.
+        None => {
+            eprintln!(
+                "braid monitor: ENOSPC baseline cannot be compared (no FS UUID) -- firing armed, baseline left in place"
+            );
+            Some(cause)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::alert::{AlertSeverity, EnospcAck, PoolKey, load_enospc_ack, save_enospc_ack};
     use crate::cmd::{CmdError, RawCommandOutput};
     use crate::test_fixtures::{
-        MonitorOverride, MonitorReconcileRunner, MonitorTestRunner,
+        BTRFS_SHOW_2DISK_1MISSING, BTRFS_SHOW_2DISK_NO_UUID, MONITOR_FS_UUID, MonitorOverride,
+        MonitorReconcileRunner, MonitorTestRunner, USAGE_DEVICE_SIZE,
         assert_monitor_single_computation_error, isolated_paths, monitor_fs_btrfs, monitor_fs_ext4,
-        monitor_fs_mountinfo_error, monitor_fs_not_mounted, monitor_mp,
+        monitor_fs_mountinfo_error, monitor_fs_not_mounted, monitor_mp, usage_2disk,
+        usage_4disk_one_low,
     };
     use crate::types::Devid;
+
+    const GIB: u64 = 1 << 30;
+    const MIB: u64 = 1 << 20;
+
+    /// At-risk two-disk usage: device 1 has 100 MiB unallocated (below the 1 GiB
+    /// threshold), device 2 is roomy -- a clearly negative predicate margin.
+    fn usage_atrisk() -> String {
+        usage_2disk(USAGE_DEVICE_SIZE, 100 * MIB, 50 * GIB)
+    }
+
+    /// The `PoolKey` the default monitor probe builds for an at-risk 2-disk pool:
+    /// the canonical FS UUID plus both devids at `USAGE_DEVICE_SIZE`.
+    fn matching_pool_key() -> PoolKey {
+        PoolKey {
+            fs_uuid: MONITOR_FS_UUID.to_owned(),
+            devices: vec![
+                (Devid::new(1), USAGE_DEVICE_SIZE),
+                (Devid::new(2), USAGE_DEVICE_SIZE),
+            ],
+        }
+    }
+
+    fn seed_enospc_baseline(paths: &StatePaths, pool_key: PoolKey, baseline_margin: i64) {
+        save_enospc_ack(
+            &EnospcAck {
+                baseline_margin,
+                pool_key,
+            },
+            paths,
+        )
+        .unwrap();
+    }
+
+    fn has_enospc_cause(result: &MonitorResult) -> bool {
+        matches!(result, MonitorResult::Alert(s) if s.causes.iter().any(|c| matches!(c, AlertCause::EnospcRisk { .. })))
+    }
+
+    fn has_computation_error(result: &MonitorResult) -> bool {
+        matches!(result, MonitorResult::Alert(s) if s.causes.iter().any(|c| matches!(c, AlertCause::ComputationError { .. })))
+    }
 
     fn acked_disk(missing_acked: bool, read_io_errs: u64) -> alert::AckedDisk {
         alert::AckedDisk {
@@ -1041,5 +1242,334 @@ mod tests {
             !paths.alert_latch_json().exists(),
             "offline pool must not latch a smartd alert"
         );
+    }
+
+    // --- ENOSPC-risk monitor integration (Step 3) ---
+
+    // Intent: a pool that crosses into RAID1 chunk-pair ENOSPC risk latches
+    //   exactly one EnospcRisk cause at Warning severity, and the latch round
+    //   trips.
+    // Why it exists: this is the proactive-alert path's reason to exist -- an
+    //   unattended filling pool must warn before the first allocation failure,
+    //   and at a non-beeping tier.
+    // Scenario: a healthy 2-disk pool fills until device 1 drops to 100 MiB
+    //   unallocated, below the 1 GiB threshold.
+    #[test]
+    fn cmd_monitor_enters_enospc_risk_warns_without_beep() {
+        let (_dir, paths) = isolated_paths();
+        let runner = MonitorTestRunner::with_usage_payload(usage_atrisk());
+
+        let result = cmd_monitor(&runner, &monitor_fs_btrfs(), &monitor_mp(), &paths);
+
+        let state = alert_state(&result);
+        assert_eq!(
+            state.causes,
+            vec![AlertCause::EnospcRisk {
+                margin: 100 * MIB as i64 - GIB as i64,
+                count_below: 1,
+                device_count: 2,
+            }],
+            "exactly one EnospcRisk cause with the deepest-device margin"
+        );
+        assert_eq!(
+            state.severity(),
+            Some(AlertSeverity::Warning),
+            "ENOSPC risk is a non-beeping Warning"
+        );
+        let saved = alert::load_alert_latch(&paths).unwrap().unwrap();
+        assert_eq!(&saved, state, "latch must round-trip the EnospcRisk cause");
+    }
+
+    // Intent: a usage-probe failure skips only the EnospcRisk cause -- a
+    //   concurrent device-error cause still latches, and no ComputationError is
+    //   folded from the usage failure.
+    // Why it exists (key test): this pins the single scoped fail-open exception
+    //   to the fail-closed mandate. A regression that propagated the usage
+    //   failure into the `?` path would latch ComputationError and mask the real
+    //   device-error signal under a generic beep.
+    // Scenario: device 1 logs read/corruption errors while the btrfs device
+    //   usage probe fails to spawn in the same cycle.
+    #[test]
+    fn cmd_monitor_usage_probe_failure_isolated_from_device_errors() {
+        const STATS_DEVID1_ERRORS: &str = r#"{
+    "__header": {"version": "1"},
+    "device-stats": [
+        {"device": "/dev/mapper/braid-vdb", "devid": 1, "write_io_errs": 0, "read_io_errs": 3, "flush_io_errs": 0, "corruption_errs": 1, "generation_errs": 0},
+        {"device": "/dev/mapper/braid-vdc", "devid": 2, "write_io_errs": 0, "read_io_errs": 0, "flush_io_errs": 0, "corruption_errs": 0, "generation_errs": 0}
+    ]
+}"#;
+        let (_dir, paths) = isolated_paths();
+        let runner = MonitorTestRunner::with_stats_payload_and_usage(
+            STATS_DEVID1_ERRORS,
+            MonitorOverride::UsageResult(Err(CmdError::Failed(
+                "btrfs device usage: spawn failed".into(),
+            ))),
+        );
+
+        let result = cmd_monitor(&runner, &monitor_fs_btrfs(), &monitor_mp(), &paths);
+
+        let state = alert_state(&result);
+        assert_eq!(
+            state.causes,
+            vec![AlertCause::BtrfsDeviceErrors {
+                devid: Devid::new(1)
+            }],
+            "device-error cause survives; no EnospcRisk, no ComputationError folded"
+        );
+    }
+
+    // Intent: a usage-probe failure on an otherwise-healthy pool does not raise a
+    //   spurious alert and leaves a present baseline untouched.
+    // Why it exists: the other skip-without-evaluating path (probe failure) must
+    //   also leave the baseline alone -- it never reaches the re-arm branch.
+    // Scenario: a healthy pool's usage probe fails while a matching-key baseline
+    //   from a prior at-risk episode sits on disk.
+    #[test]
+    fn cmd_monitor_usage_probe_failure_alone_is_ok_and_keeps_baseline() {
+        let (_dir, paths) = isolated_paths();
+        seed_enospc_baseline(&paths, matching_pool_key(), -100);
+        let runner = MonitorTestRunner::with_override(MonitorOverride::UsageResult(Err(
+            CmdError::Failed("btrfs device usage: spawn failed".into()),
+        )));
+
+        let result = cmd_monitor(&runner, &monitor_fs_btrfs(), &monitor_mp(), &paths);
+
+        assert_eq!(
+            result,
+            MonitorResult::Ok,
+            "no spurious alert on probe failure"
+        );
+        assert!(
+            paths.enospc_ack_json().exists(),
+            "probe-failure skip must not touch the baseline"
+        );
+    }
+
+    // Intent: a matching-key baseline suppresses a fresh EnospcRisk while the
+    //   pool stays at risk but not materially worse.
+    // Why it exists: the monotonic baseline's whole job is to stop re-nagging an
+    //   acked pool that is merely still at risk.
+    // Scenario: a pool acked at margin -10 MiB is now at margin ~-130 MiB --
+    //   worse, but by less than the worsen step.
+    #[test]
+    fn cmd_monitor_suppresses_enospc_while_acked_not_worse() {
+        let (_dir, paths) = isolated_paths();
+        seed_enospc_baseline(&paths, matching_pool_key(), -(10 * MIB as i64));
+        let runner = MonitorTestRunner::with_usage_payload(usage_2disk(
+            USAGE_DEVICE_SIZE,
+            900 * MIB,
+            50 * GIB,
+        ));
+
+        let result = cmd_monitor(&runner, &monitor_fs_btrfs(), &monitor_mp(), &paths);
+
+        assert_eq!(result, MonitorResult::Ok, "acked-not-worse must suppress");
+        assert!(
+            paths.enospc_ack_json().exists(),
+            "suppression leaves the baseline in place"
+        );
+    }
+
+    // Intent: a matching-key baseline re-fires EnospcRisk once the pool gets
+    //   materially worse (margin past the worsen step).
+    // Why it exists: the fresh nudge for an acked-but-worsening pool is the
+    //   reason the keyed baseline subsystem exists; without re-fire it would be a
+    //   plain latch.
+    // Scenario: a pool acked at margin -10 MiB fills to margin ~-654 MiB, more
+    //   than one worsen step deeper.
+    #[test]
+    fn cmd_monitor_refires_enospc_when_materially_worse() {
+        let (_dir, paths) = isolated_paths();
+        seed_enospc_baseline(&paths, matching_pool_key(), -(10 * MIB as i64));
+        let runner = MonitorTestRunner::with_usage_payload(usage_2disk(
+            USAGE_DEVICE_SIZE,
+            400 * MIB,
+            50 * GIB,
+        ));
+
+        let result = cmd_monitor(&runner, &monitor_fs_btrfs(), &monitor_mp(), &paths);
+
+        assert!(
+            has_enospc_cause(&result),
+            "a materially worse pool must re-fire, got {result:?}"
+        );
+    }
+
+    // Intent: a predicate-healthy pool re-arms (drops the baseline) even when one
+    //   device is far below the raw threshold, and a later at-risk cycle fires
+    //   fresh.
+    // Why it exists (F2): re-arm must key off the predicate margin, not raw min
+    //   headroom -- a fault-tolerant 4-disk pool with one near-empty device is
+    //   healthy and must clear its baseline so a future recurrence alerts fresh.
+    // Scenario: an acked pool recovers to a large positive margin (4-disk,
+    //   one-low healthy), then later re-enters risk.
+    #[test]
+    fn cmd_monitor_rearms_on_predicate_health_then_refires() {
+        let (_dir, paths) = isolated_paths();
+        seed_enospc_baseline(&paths, matching_pool_key(), -(10 * MIB as i64));
+        let healthy = MonitorTestRunner::with_usage_payload(usage_4disk_one_low());
+
+        let rearm = cmd_monitor(&healthy, &monitor_fs_btrfs(), &monitor_mp(), &paths);
+        assert_eq!(rearm, MonitorResult::Ok, "predicate-healthy pool re-arms");
+        assert!(
+            !paths.enospc_ack_json().exists(),
+            "re-arm must remove the baseline (keyed on predicate margin, not raw headroom)"
+        );
+
+        let atrisk = MonitorTestRunner::with_usage_payload(usage_atrisk());
+        let refire = cmd_monitor(&atrisk, &monitor_fs_btrfs(), &monitor_mp(), &paths);
+        assert!(
+            has_enospc_cause(&refire),
+            "a fresh at-risk cycle after re-arm must fire armed, got {refire:?}"
+        );
+    }
+
+    // Intent: a baseline whose pool_key no longer matches the live pool is
+    //   discarded (not allowed to suppress), across all three mismatch axes:
+    //   changed devid set, changed FS UUID, and same-devid changed device_size.
+    // Why it exists (F1): a stale baseline from a bootstrap/membership/geometry
+    //   change must never silence a fresh risk. The device_size axis is the one
+    //   this round closes -- `fs_uuid + devids` alone would still match a
+    //   same-devid `braid replace`/resize.
+    // Scenario: an at-risk pool carries a baseline acked on an old topology.
+    #[test]
+    fn cmd_monitor_stale_baseline_key_mismatch_fires_and_clears() {
+        let cases: Vec<(&str, PoolKey)> = vec![
+            (
+                "changed-devid-set",
+                PoolKey {
+                    fs_uuid: MONITOR_FS_UUID.to_owned(),
+                    devices: vec![
+                        (Devid::new(1), USAGE_DEVICE_SIZE),
+                        (Devid::new(2), USAGE_DEVICE_SIZE),
+                        (Devid::new(99), USAGE_DEVICE_SIZE),
+                    ],
+                },
+            ),
+            (
+                "changed-fs-uuid",
+                PoolKey {
+                    fs_uuid: "ffffffff-ffff-ffff-ffff-ffffffffffff".to_owned(),
+                    devices: vec![
+                        (Devid::new(1), USAGE_DEVICE_SIZE),
+                        (Devid::new(2), USAGE_DEVICE_SIZE),
+                    ],
+                },
+            ),
+            (
+                "changed-device-size",
+                PoolKey {
+                    fs_uuid: MONITOR_FS_UUID.to_owned(),
+                    devices: vec![(Devid::new(1), 50 * GIB), (Devid::new(2), 50 * GIB)],
+                },
+            ),
+        ];
+
+        for (label, stale_key) in cases {
+            let (_dir, paths) = isolated_paths();
+            seed_enospc_baseline(&paths, stale_key, -(10 * MIB as i64));
+            let runner = MonitorTestRunner::with_usage_payload(usage_atrisk());
+
+            let result = cmd_monitor(&runner, &monitor_fs_btrfs(), &monitor_mp(), &paths);
+
+            assert!(
+                has_enospc_cause(&result),
+                "{label}: stale baseline must not suppress -- EnospcRisk must fire, got {result:?}"
+            );
+            assert!(
+                !paths.enospc_ack_json().exists(),
+                "{label}: a confirmed-mismatched baseline must be removed"
+            );
+        }
+    }
+
+    // Intent: when the live FS UUID is absent (no usable PoolKey), an at-risk
+    //   pool fires armed but the present baseline is LEFT in place.
+    // Why it exists: an identity gap is not a confirmed different pool -- a later
+    //   cycle with the FS UUID present must still be able to compare and re-arm
+    //   the baseline, so the monitor must not delete it here.
+    // Scenario: a transient probe yields a btrfs show without a uuid line while
+    //   the pool is at risk and a baseline sits on disk.
+    #[test]
+    fn cmd_monitor_identity_gap_fires_armed_and_keeps_baseline() {
+        let (_dir, paths) = isolated_paths();
+        seed_enospc_baseline(&paths, matching_pool_key(), -(10 * MIB as i64));
+        let runner = MonitorTestRunner::with_usage_and_override(
+            usage_atrisk(),
+            MonitorOverride::BtrfsShowPayload(BTRFS_SHOW_2DISK_NO_UUID.to_owned()),
+        );
+
+        let result = cmd_monitor(&runner, &monitor_fs_btrfs(), &monitor_mp(), &paths);
+
+        assert!(
+            has_enospc_cause(&result),
+            "identity gap must fire armed, got {result:?}"
+        );
+        assert!(
+            paths.enospc_ack_json().exists(),
+            "an uncomparable baseline must be left in place, not removed"
+        );
+    }
+
+    // Intent: a corrupt baseline file with a live at-risk pool fires armed, clears
+    //   the corrupt file best-effort, and does NOT fold a ComputationError.
+    // Why it exists (F3): the risk-known-but-baseline-lost branch is distinct from
+    //   a usage-probe failure -- a corrupt baseline must not silently suppress a
+    //   real risk, nor escalate to a beeping ComputationError.
+    // Scenario: enospc-ack.json is hand-edited to garbage while the pool is at
+    //   risk.
+    #[test]
+    fn cmd_monitor_corrupt_baseline_fires_armed_without_computation_error() {
+        let (_dir, paths) = isolated_paths();
+        std::fs::write(paths.enospc_ack_json(), b"not json").unwrap();
+        let runner = MonitorTestRunner::with_usage_payload(usage_atrisk());
+
+        let result = cmd_monitor(&runner, &monitor_fs_btrfs(), &monitor_mp(), &paths);
+
+        assert!(
+            has_enospc_cause(&result),
+            "corrupt baseline must fire armed, got {result:?}"
+        );
+        assert!(
+            !has_computation_error(&result),
+            "a corrupt baseline must not fold a ComputationError"
+        );
+        assert!(
+            !paths.enospc_ack_json().exists(),
+            "the corrupt baseline must be cleared best-effort"
+        );
+    }
+
+    // Intent: a degraded pool raises no EnospcRisk and a seeded matching-key
+    //   baseline survives the cycle untouched.
+    // Why it exists: the monitor must skip ENOSPC *before* the state machine on a
+    //   degraded pool. A sentinel-reliant impl that let the i64::MAX degraded
+    //   margin reach the re-arm branch would call remove_enospc_ack and silently
+    //   drop a still-at-risk pool's suppression memory across a transient device
+    //   absence. The file-survival assertion is what fails under that bug -- the
+    //   bare "no EnospcRisk" check stays green because the sentinel also
+    //   suppresses the cause.
+    // Scenario: a 2-present-1-missing degraded pool with a matching baseline on
+    //   disk.
+    #[test]
+    fn cmd_monitor_degraded_skips_enospc_and_preserves_baseline() {
+        let (_dir, paths) = isolated_paths();
+        seed_enospc_baseline(&paths, matching_pool_key(), -(10 * MIB as i64));
+        let runner = MonitorTestRunner::with_override(MonitorOverride::BtrfsShowPayload(
+            BTRFS_SHOW_2DISK_1MISSING.to_owned(),
+        ));
+
+        let result = cmd_monitor(&runner, &monitor_fs_btrfs(), &monitor_mp(), &paths);
+
+        assert!(
+            !has_enospc_cause(&result),
+            "degraded pool must not raise EnospcRisk, got {result:?}"
+        );
+        assert!(
+            paths.enospc_ack_json().exists(),
+            "degraded skip must leave the baseline untouched (it is loaded from disk after)"
+        );
+        // The still-loadable baseline proves the file survived intact.
+        assert!(load_enospc_ack(&paths).unwrap().is_some());
     }
 }

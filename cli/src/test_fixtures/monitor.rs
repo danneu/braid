@@ -4,7 +4,7 @@
 //! effects, so this module promotes the existing narrow runners and
 //! mountinfo-only filesystem helpers without adding a broad topology handler.
 
-use super::shared::mock_ok;
+use super::shared::{DeviceUsageSpec, device_usage_raw_body, mock_ok};
 use crate::alert::AlertCause;
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, RawCommandOutput};
 use crate::monitor::MonitorResult;
@@ -16,10 +16,36 @@ const MOUNTINFO_BTRFS: &str =
     "36 35 0:32 / /mnt/storage rw,noatime shared:1 - btrfs /dev/mapper/braid-vdb rw\n";
 const MOUNTINFO_EXT4: &str = "36 35 0:32 / /mnt/storage rw,noatime shared:1 - ext4 /dev/sda1 rw\n";
 
+/// Canonical FS UUID for the monitor 2-disk show, also the `pool_key.fs_uuid`
+/// the keying-baseline tests seed and compare against.
+pub(crate) const MONITOR_FS_UUID: &str = "de2b8517-f972-45fc-b121-3e160c8ea432";
+
+/// Device size (bytes) for the monitor usage fixtures' large-pool model, chosen
+/// so the ENOSPC threshold caps at 1 GiB and the at-risk margin has room to vary
+/// across the worsen step. Also the `device_size` in the seeded `PoolKey`.
+pub(crate) const USAGE_DEVICE_SIZE: u64 = 100 * (1 << 30); // 100 GiB
+
 const BTRFS_SHOW_2DISK: &str = "Label: none  uuid: de2b8517-f972-45fc-b121-3e160c8ea432\n\
     \tTotal devices 2 FS bytes used 16.17MiB\n\
     \tdevid    1 size 1008.00MiB used 209.50MiB path /dev/mapper/braid-vdb\n\
     \tdevid    2 size 1008.00MiB used 209.50MiB path /dev/mapper/braid-vdc\n";
+
+/// Same two-disk pool as `BTRFS_SHOW_2DISK` but with no `uuid:` line, so
+/// `probe_pool_alerts` yields `fs_uuid: None` and `live_pool_key` returns `None`.
+/// Drives the identity-gap monitor test (live key cannot be built, but the pool
+/// is at risk).
+pub(crate) const BTRFS_SHOW_2DISK_NO_UUID: &str = "Label: none\n\
+    \tTotal devices 2 FS bytes used 16.17MiB\n\
+    \tdevid    1 size 1008.00MiB used 209.50MiB path /dev/mapper/braid-vdb\n\
+    \tdevid    2 size 1008.00MiB used 209.50MiB path /dev/mapper/braid-vdc\n";
+
+/// Two present members plus a btrfs-MISSING devid: a degraded pool
+/// (`missing_count > 0`) so the monitor must skip ENOSPC evaluation entirely.
+pub(crate) const BTRFS_SHOW_2DISK_1MISSING: &str = "Label: none  uuid: de2b8517-f972-45fc-b121-3e160c8ea432\n\
+    \tTotal devices 3 FS bytes used 16.17MiB\n\
+    \tdevid    1 size 1008.00MiB used 209.50MiB path /dev/mapper/braid-vdb\n\
+    \tdevid    2 size 1008.00MiB used 209.50MiB path /dev/mapper/braid-vdc\n\
+    \tdevid    3 size 0 used 0 path MISSING\n";
 
 const CRYPTSETUP_STATUS_VDB: &str = "/dev/mapper/braid-vdb is active and is in use.\n\
       type:    LUKS2\n\
@@ -90,16 +116,93 @@ fn ok_output(stdout: &str) -> RawCommandOutput {
     mock_ok("test", stdout)
 }
 
+/// Build a two-device `btrfs device usage --raw` body for the monitor fixtures,
+/// varying `device_size` and each device's `unallocated` independently so the
+/// keying tests can model a resize (changed `device_size`, same devids) and the
+/// risk tests can model a fill (changed `unallocated`, same `device_size`).
+pub(crate) fn usage_2disk(device_size: u64, unalloc1: u64, unalloc2: u64) -> String {
+    device_usage_raw_body(&[
+        DeviceUsageSpec::live(
+            "/dev/mapper/braid-vdb",
+            1,
+            device_size,
+            &[("Data", "RAID1", device_size.saturating_sub(unalloc1))],
+            unalloc1,
+        ),
+        DeviceUsageSpec::live(
+            "/dev/mapper/braid-vdc",
+            2,
+            device_size,
+            &[("Data", "RAID1", device_size.saturating_sub(unalloc2))],
+            unalloc2,
+        ),
+    ])
+}
+
+/// Roomy two-disk usage: both devices have 50 GiB unallocated, so the predicate
+/// margin is a large positive surplus (well past the re-arm gate). The default
+/// usage for every monitor fixture -- existing tests stay healthy.
+pub(crate) fn usage_2disk_healthy() -> String {
+    usage_2disk(USAGE_DEVICE_SIZE, 50 * (1 << 30), 50 * (1 << 30))
+}
+
+/// Four-disk, one-low *predicate-healthy* usage: three roomy devices plus one at
+/// 50 MiB. The pool survives any single loss (large positive margin) even though
+/// one device is far below the raw threshold -- the F2 re-arm guard. The monitor
+/// 2-disk show only supplies fs_uuid + missing_count(0) here; the helper consumes
+/// the four usage devices.
+pub(crate) fn usage_4disk_one_low() -> String {
+    device_usage_raw_body(&[
+        DeviceUsageSpec::live(
+            "/dev/mapper/braid-vdb",
+            1,
+            USAGE_DEVICE_SIZE,
+            &[("Data", "RAID1", 0)],
+            10 * (1 << 30),
+        ),
+        DeviceUsageSpec::live(
+            "/dev/mapper/braid-vdc",
+            2,
+            USAGE_DEVICE_SIZE,
+            &[("Data", "RAID1", 0)],
+            10 * (1 << 30),
+        ),
+        DeviceUsageSpec::live(
+            "/dev/mapper/braid-vdd",
+            3,
+            USAGE_DEVICE_SIZE,
+            &[("Data", "RAID1", 0)],
+            10 * (1 << 30),
+        ),
+        DeviceUsageSpec::live(
+            "/dev/mapper/braid-vde",
+            4,
+            USAGE_DEVICE_SIZE,
+            &[("Data", "RAID1", 0)],
+            50 * (1 << 20),
+        ),
+    ])
+}
+
 /// One-shot response override for the healthy monitor runner.
 pub(crate) enum MonitorOverride {
     BtrfsShowResult(Result<RawCommandOutput, CmdError>),
     BtrfsShowPayload(String),
     StatsResult(Result<RawCommandOutput, CmdError>),
+    UsageResult(Result<RawCommandOutput, CmdError>),
 }
 
 /// Strict healthy two-disk monitor runner with one optional failure injection.
+///
+/// `stats_payload` and `usage_payload` are always-present fields (default
+/// healthy), so a test can customize both without contending for the single
+/// `override_op` slot. The override slot carries one-shot `Result`/payload
+/// injections (a show, stats, or usage failure) -- which is why the
+/// "at-risk usage + custom show" tests can set usage via the field and the show
+/// via the slot.
 pub(crate) struct MonitorTestRunner {
     stats_payload: String,
+    usage_payload: String,
     override_op: Mutex<Option<MonitorOverride>>,
 }
 
@@ -108,6 +211,7 @@ impl MonitorTestRunner {
     pub(crate) fn with_stale_mapper_stats() -> Self {
         Self {
             stats_payload: STATS_WITH_STALE_MAPPER.to_owned(),
+            usage_payload: usage_2disk_healthy(),
             override_op: Mutex::new(None),
         }
     }
@@ -116,6 +220,7 @@ impl MonitorTestRunner {
     pub(crate) fn with_stale_mapper_errors() -> Self {
         Self {
             stats_payload: STATS_WITH_STALE_MAPPER_ERRORS.to_owned(),
+            usage_payload: usage_2disk_healthy(),
             override_op: Mutex::new(None),
         }
     }
@@ -124,6 +229,7 @@ impl MonitorTestRunner {
     pub(crate) fn with_override(override_op: MonitorOverride) -> Self {
         Self {
             stats_payload: STATS_2DISK_HEALTHY.to_owned(),
+            usage_payload: usage_2disk_healthy(),
             override_op: Mutex::new(Some(override_op)),
         }
     }
@@ -134,7 +240,48 @@ impl MonitorTestRunner {
     pub(crate) fn with_stats_payload(payload: impl Into<String>) -> Self {
         Self {
             stats_payload: payload.into(),
+            usage_payload: usage_2disk_healthy(),
             override_op: Mutex::new(None),
+        }
+    }
+
+    /// Build a runner with a caller-supplied `btrfs device usage --raw` payload
+    /// (healthy stats), so ENOSPC tests can drive an at-risk or re-arm-eligible
+    /// pool through the usage probe. The payload is served from the
+    /// `usage_payload` field, leaving the override slot free.
+    pub(crate) fn with_usage_payload(usage: impl Into<String>) -> Self {
+        Self {
+            stats_payload: STATS_2DISK_HEALTHY.to_owned(),
+            usage_payload: usage.into(),
+            override_op: Mutex::new(None),
+        }
+    }
+
+    /// Build a runner with a custom usage payload *and* a one-shot override
+    /// (typically a `BtrfsShowPayload` to control fs_uuid/membership), so the
+    /// identity-gap test can run an at-risk pool whose show carries no FS UUID.
+    pub(crate) fn with_usage_and_override(
+        usage: impl Into<String>,
+        override_op: MonitorOverride,
+    ) -> Self {
+        Self {
+            stats_payload: STATS_2DISK_HEALTHY.to_owned(),
+            usage_payload: usage.into(),
+            override_op: Mutex::new(Some(override_op)),
+        }
+    }
+
+    /// Build a runner with a caller-supplied stats payload *and* a one-shot
+    /// override (e.g. `UsageResult(Err)`), expressing "device-error stats AND a
+    /// usage-probe failure at once" -- the probe-failure-isolation precondition.
+    pub(crate) fn with_stats_payload_and_usage(
+        stats: impl Into<String>,
+        override_op: MonitorOverride,
+    ) -> Self {
+        Self {
+            stats_payload: stats.into(),
+            usage_payload: usage_2disk_healthy(),
+            override_op: Mutex::new(Some(override_op)),
         }
     }
 
@@ -167,6 +314,16 @@ impl MonitorTestRunner {
         }
         None
     }
+
+    fn take_usage_result(&self) -> Option<Result<RawCommandOutput, CmdError>> {
+        let mut guard = self.override_op.lock().unwrap();
+        if matches!(guard.as_ref(), Some(MonitorOverride::UsageResult(_)))
+            && let Some(MonitorOverride::UsageResult(r)) = guard.take()
+        {
+            return Some(r);
+        }
+        None
+    }
 }
 
 impl CommandRunner for MonitorTestRunner {
@@ -191,6 +348,15 @@ impl CommandRunner for MonitorTestRunner {
                     return r;
                 }
                 Ok(ok_output(&self.stats_payload))
+            }
+            // ENOSPC probe: a one-shot UsageResult override wins (failure
+            // injection); otherwise serve the usage_payload field (default
+            // healthy, so existing monitor tests stay green).
+            CmdRequest::BtrfsDeviceUsageRaw { .. } => {
+                if let Some(r) = self.take_usage_result() {
+                    return r;
+                }
+                Ok(ok_output(&self.usage_payload))
             }
             other => panic!("unexpected CmdRequest in monitor test: {other:?}"),
         }
@@ -220,6 +386,11 @@ impl CommandRunner for MonitorReconcileRunner {
                 other => panic!("unexpected CryptsetupStatus mapper: {other}"),
             },
             CmdRequest::BtrfsDeviceStatsJson { .. } => Ok(ok_output(STATS_2DISK_HEALTHY)),
+            // Healthy usage payload. This runner's topology is degraded (devid 3
+            // MISSING), so the monitor skips ENOSPC before probing usage and this
+            // arm is unreached -- present defensively so a future non-degraded
+            // reconcile fixture cannot panic here.
+            CmdRequest::BtrfsDeviceUsageRaw { .. } => Ok(ok_output(&usage_2disk_healthy())),
             other => panic!("unexpected CmdRequest in monitor reconcile test: {other:?}"),
         }
     }

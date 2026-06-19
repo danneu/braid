@@ -129,10 +129,12 @@ mod ups;
 
 #[allow(unused_imports)]
 pub(crate) use ack::{
-    AckPanicFilesystem, AckPanicRunner, ack_fs_btrfs, ack_fs_ext4, ack_fs_not_mounted,
-    ack_mounted_fs_that_touches_smartd, ack_mounted_probe_runner,
-    ack_mounted_probe_runner_with_device_stats, ack_mounted_probe_runner_with_stale_devid_stats,
-    ack_mp, ack_noop_beeper, ack_offline_fs_that_touches_smartd, ack_write_latch,
+    ACK_ATRISK_MARGIN, ACK_DEVICE_SIZE, ACK_FS_UUID, AckPanicFilesystem, AckPanicRunner,
+    ack_fs_btrfs, ack_fs_ext4, ack_fs_not_mounted, ack_mounted_fs_that_touches_smartd,
+    ack_mounted_probe_runner, ack_mounted_probe_runner_no_uuid_with_enospc_usage,
+    ack_mounted_probe_runner_with_device_stats, ack_mounted_probe_runner_with_enospc_usage,
+    ack_mounted_probe_runner_with_stale_devid_stats, ack_mp, ack_noop_beeper,
+    ack_offline_fs_that_touches_smartd, ack_write_latch,
 };
 #[allow(unused_imports)]
 pub(crate) use discover::{
@@ -171,9 +173,11 @@ pub(crate) use lock::{
 };
 #[allow(unused_imports)]
 pub(crate) use monitor::{
-    MonitorOverride, MonitorReconcileRunner, MonitorTestRunner,
+    BTRFS_SHOW_2DISK_1MISSING, BTRFS_SHOW_2DISK_NO_UUID, MONITOR_FS_UUID, MonitorOverride,
+    MonitorReconcileRunner, MonitorTestRunner, USAGE_DEVICE_SIZE,
     assert_monitor_single_computation_error, monitor_fs_btrfs, monitor_fs_ext4,
-    monitor_fs_mountinfo_error, monitor_fs_not_mounted, monitor_mp,
+    monitor_fs_mountinfo_error, monitor_fs_not_mounted, monitor_mp, usage_2disk,
+    usage_2disk_healthy, usage_4disk_one_low,
 };
 pub(crate) use mount::{
     MOUNT_TEST_PASSPHRASE_BYTES, NoopSleeper, arbitrary_fallback, base_two_disk_runner,

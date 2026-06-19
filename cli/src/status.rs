@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::alert::{self, AlertCause, AlertState};
+use crate::alert::{self, AlertCause, AlertSeverity, AlertState};
 use crate::capacity;
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, LsblkFieldKind};
 use crate::config::{Config, mapper_name};
@@ -1400,11 +1400,19 @@ fn format_status_human(
 ) -> String {
     let mut out = String::new();
 
-    // Alert banner (before everything else)
+    // Alert banner (before everything else). Severity-aware so a non-beeping
+    // Warning (ENOSPC risk) is not rendered as the critical dying-disk line --
+    // the exact mis-signal the severity tier exists to prevent. `None` is
+    // unreachable while `alert_active` is true but fails closed to Critical.
     if report.alert_active {
-        out.push_str(
-            "ALERT -- disk health issue detected. Run 'braid ack' to acknowledge and silence.\n",
-        );
+        match report.alert_causes.iter().map(AlertCause::severity).max() {
+            Some(AlertSeverity::Warning) => out.push_str(
+                "NOTICE -- capacity risk detected. Run 'braid ack' to acknowledge.\n",
+            ),
+            _ => out.push_str(
+                "ALERT -- disk health issue detected. Run 'braid ack' to acknowledge and silence.\n",
+            ),
+        }
         for cause in &report.alert_causes {
             match cause {
                 AlertCause::BtrfsDeviceErrors { devid } => {
@@ -1420,6 +1428,11 @@ fn format_status_human(
                 }
                 AlertCause::ComputationError { detail } => {
                     out.push_str(&format!("  - alert computation error: {detail}\n"));
+                }
+                AlertCause::EnospcRisk { .. } => {
+                    out.push_str(
+                        "  - ENOSPC risk: pool is one disk-loss from being unable to restore RAID1 redundancy\n",
+                    );
                 }
             }
         }
@@ -6816,6 +6829,100 @@ mod tests {
         assert!(
             human.contains("btrfs device errors on foreign-live (devid 1)"),
             "expected foreign mapper basename in alert, got:\n{human}"
+        );
+    }
+
+    // Intent: a Warning-only active alert (EnospcRisk) renders the lower-urgency
+    //   NOTICE banner and the ENOSPC line -- NOT the critical "ALERT -- disk
+    //   health issue detected" text.
+    // Why it exists (F3): the severity tier exists precisely so a non-beeping
+    //   capacity warning is not mis-signaled as a dying disk. A regression to the
+    //   hardcoded critical banner would re-introduce that mis-signal.
+    // Scenario: the monitor latched only EnospcRisk; status renders the banner.
+    #[test]
+    fn status_human_warning_only_renders_notice_not_alert() {
+        let report = status_report_with_alerts(
+            vec![],
+            vec![AlertCause::EnospcRisk {
+                margin: -1,
+                count_below: 1,
+                device_count: 2,
+            }],
+        );
+
+        let human = format_status_human(&report, None, None, None);
+
+        assert!(
+            human.contains("NOTICE -- capacity risk detected. Run 'braid ack' to acknowledge."),
+            "warning-only must render the NOTICE banner, got:\n{human}"
+        );
+        assert!(
+            !human.contains("ALERT -- disk health issue detected"),
+            "warning-only must NOT render the critical ALERT banner, got:\n{human}"
+        );
+        assert!(
+            human.contains(
+                "ENOSPC risk: pool is one disk-loss from being unable to restore RAID1 redundancy"
+            ),
+            "the ENOSPC cause line must render, got:\n{human}"
+        );
+    }
+
+    // Intent: a Critical active alert still renders the critical ALERT banner.
+    // Why it exists: the severity split must not regress the existing critical
+    //   path -- a dying disk must still read as ALERT, not NOTICE.
+    // Scenario: the monitor latched a btrfs device-error cause.
+    #[test]
+    fn status_human_critical_renders_alert_not_notice() {
+        let report = status_report_with_alerts(
+            vec![],
+            vec![AlertCause::BtrfsDeviceErrors {
+                devid: Devid::new(1),
+            }],
+        );
+
+        let human = format_status_human(&report, None, None, None);
+
+        assert!(
+            human.contains("ALERT -- disk health issue detected"),
+            "critical must render the ALERT banner, got:\n{human}"
+        );
+        assert!(
+            !human.contains("NOTICE -- capacity risk detected"),
+            "critical must NOT render the NOTICE banner, got:\n{human}"
+        );
+    }
+
+    // Intent: a mixed Warning+Critical active alert renders the critical ALERT
+    //   banner (max severity wins).
+    // Why it exists: when a pool is both at ENOSPC risk and has a dying disk, the
+    //   louder Critical signal must win the banner.
+    // Scenario: EnospcRisk and MissingDevice are both latched.
+    #[test]
+    fn status_human_mixed_severity_renders_alert() {
+        let report = status_report_with_alerts(
+            vec![],
+            vec![
+                AlertCause::EnospcRisk {
+                    margin: -1,
+                    count_below: 1,
+                    device_count: 2,
+                },
+                AlertCause::MissingDevice {
+                    devid: Devid::new(2),
+                },
+            ],
+        );
+
+        let human = format_status_human(&report, None, None, None);
+
+        assert!(
+            human.contains("ALERT -- disk health issue detected"),
+            "mixed severity must render the critical ALERT banner, got:\n{human}"
+        );
+        assert!(
+            !human.contains("NOTICE -- capacity risk detected"),
+            "mixed severity must NOT render the NOTICE banner, got:\n{human}"
         );
     }
 

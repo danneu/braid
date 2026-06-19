@@ -283,6 +283,12 @@ pub struct AlertPoolState {
     pub present_devids: Vec<Devid>,
     pub missing_devids: Vec<Devid>,
     pub null_underlying: Vec<NullUnderlyingDevice>,
+    /// btrfs filesystem UUID, the strongest field of the ENOSPC baseline's
+    /// `PoolKey`. `None` only when the probe could not extract it; the monitor
+    /// and ack then build no usable `PoolKey` rather than weaken the identity
+    /// guard. Carried as a plain `String` because the alert pipeline only
+    /// compares it, never re-parses it.
+    pub fs_uuid: Option<String>,
 }
 
 /// Named carrier for the two devid sets `compute_alert_state` and
@@ -343,6 +349,7 @@ pub fn probe_pool_alerts<R: CommandRunner, F: Filesystem + ?Sized>(
                 present_devids: vec![],
                 missing_devids: vec![],
                 null_underlying: vec![],
+                fs_uuid: None,
             });
         }
         Some(fstype) if fstype != "btrfs" => {
@@ -358,6 +365,7 @@ pub fn probe_pool_alerts<R: CommandRunner, F: Filesystem + ?Sized>(
         mount_point: mount_point.clone(),
     })?;
     let show = parse_btrfs_filesystem_show(&show_raw)?;
+    let fs_uuid = show.uuid.as_ref().map(|u| u.as_str().to_owned());
 
     let mut present_devids = Vec::new();
     let mut null_underlying = Vec::new();
@@ -405,6 +413,7 @@ pub fn probe_pool_alerts<R: CommandRunner, F: Filesystem + ?Sized>(
         present_devids,
         missing_devids: show.missing_devids,
         null_underlying,
+        fs_uuid,
     })
 }
 
@@ -1952,6 +1961,11 @@ mod tests {
         assert_eq!(result.present_devids, vec![Devid::new(1), Devid::new(2)]);
         assert!(result.missing_devids.is_empty());
         assert!(result.null_underlying.is_empty());
+        assert_eq!(
+            result.fs_uuid.as_deref(),
+            Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"),
+            "alert probe must carry the FS UUID for the ENOSPC baseline key"
+        );
         assert!(
             !runner
                 .requests()
@@ -2083,6 +2097,10 @@ mod tests {
         assert_eq!(result.present_devids, vec![Devid::new(1), Devid::new(2)]);
         assert!(result.missing_devids.is_empty());
         assert!(result.null_underlying.is_empty());
+        assert_eq!(
+            result.fs_uuid, None,
+            "an absent uuid line yields no usable PoolKey identity"
+        );
     }
 
     // Intent: probe_pool_alerts preserves the typed NotBtrfs response when
@@ -2216,6 +2234,7 @@ mod tests {
                     devid: Devid::new(3),
                 },
             ],
+            fs_uuid: None,
         };
 
         assert_eq!(
@@ -2247,6 +2266,7 @@ mod tests {
                     devid: Devid::new(3),
                 },
             ],
+            fs_uuid: None,
         };
 
         assert_eq!(
@@ -2284,6 +2304,7 @@ mod tests {
                 mapper: MapperName::from_basename("braid-three".into()),
                 devid: Devid::new(3),
             }],
+            fs_uuid: None,
         };
 
         let devids = state.alert_devids();

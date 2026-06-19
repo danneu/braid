@@ -171,7 +171,8 @@ every command: [command reference](docs/commands/).
 - **Offline-write safety** -- the unmounted mountpoint is sealed immutable, so
   stray writes fail with `EPERM` instead of landing on the root disk
 - **Monitoring** -- btrfs error counters and smartd health checks raise
-  alerts, beep the PC speaker until acknowledged (`braid ack`), and can run a
+  alerts that beep the PC speaker until acknowledged (`braid ack`); proactive
+  capacity (ENOSPC) risk raises a quieter non-beeping warning. Either can run a
   custom notify command
 - **Fail-closed mutations** -- an interrupted command leaves a marker that
   blocks further mutations until `braid recover` finishes the job or refuses

@@ -1,9 +1,11 @@
 use crate::alert::{
-    self, AlertCause, load_acked_stats_fallible, save_acked_stats, snapshot_current,
+    self, AlertCause, EnospcAck, live_pool_key, load_acked_stats_fallible, save_acked_stats,
+    save_enospc_ack, snapshot_current,
 };
+use crate::capacity::evaluate_enospc_risk;
 use crate::cmd::{CmdRequest, CommandRunner};
-use crate::parse::parse_btrfs_device_stats;
-use crate::probe::{Filesystem, ProbeError, probe_pool_alerts};
+use crate::parse::{parse_btrfs_device_stats, parse_btrfs_device_usage};
+use crate::probe::{AlertPoolState, Filesystem, ProbeError, probe_pool_alerts};
 use crate::state_paths::StatePaths;
 use crate::types::MountPoint;
 use crate::util::detail_suffix;
@@ -104,6 +106,20 @@ fn cmd_ack_impl<R: CommandRunner, F: Filesystem + ?Sized>(
     //    stats row by btrfs -- no path-to-devid map needed.
     let new_acked = snapshot_current(&device_stats, &devids);
     save_acked_stats(&new_acked, paths).map_err(AckError::Io)?;
+
+    // 6. ENOSPC baseline: if the latch carries an EnospcRisk cause, capture the
+    //    *ack-time* margin + pool key from one fresh usage probe (mirroring
+    //    snapshot_current -- the baseline is the state the operator acknowledged,
+    //    from one coherent instant, so a pool that filled further between fire and
+    //    ack is not immediately re-fired). Best-effort: a probe/parse failure or
+    //    an absent fs_uuid clears the latch but writes no baseline.
+    if causes
+        .iter()
+        .any(|c| matches!(c, AlertCause::EnospcRisk { .. }))
+    {
+        let missing_count = devids.missing.len() as u64;
+        write_enospc_baseline(runner, mount_point, &pool, missing_count, paths);
+    }
 
     if let Err(e) = cleanup_alert_files_and_beeper(paths, stop_beeper, remove_smartd) {
         return Err(AckError::CleanupFailed(e));
@@ -231,26 +247,91 @@ fn cleanup_alert_files_and_beeper(
     Ok(())
 }
 
+/// Capture the ack-time ENOSPC suppression baseline from one fresh
+/// `btrfs device usage --raw` probe: the current signed margin plus the live
+/// `PoolKey`, both from one coherent instant.
+///
+/// Best-effort by contract. A usage-probe failure, a parse failure, or an absent
+/// `fs_uuid` (no usable `PoolKey`) logs and writes no baseline -- the same
+/// end-state as an offline ack (one quiet re-fire next cycle at the non-beeping
+/// Warning level, then a clean ack establishes the baseline). It never fails the
+/// ack: the latch is already cleared by the time this runs.
+fn write_enospc_baseline<R: CommandRunner>(
+    runner: &R,
+    mount_point: &MountPoint,
+    pool: &AlertPoolState,
+    missing_count: u64,
+    paths: &StatePaths,
+) {
+    let raw = match runner.run(&CmdRequest::BtrfsDeviceUsageRaw {
+        mount_point: mount_point.clone(),
+    }) {
+        Ok(raw) => raw,
+        Err(e) => {
+            eprintln!(
+                "warning: could not probe usage to baseline ENOSPC risk -- {e}; ack cleared the alert but wrote no baseline"
+            );
+            return;
+        }
+    };
+    let entries = match parse_btrfs_device_usage(&raw) {
+        Ok(parsed) => parsed.devices,
+        Err(e) => {
+            eprintln!(
+                "warning: could not parse usage to baseline ENOSPC risk -- {e}; ack cleared the alert but wrote no baseline"
+            );
+            return;
+        }
+    };
+    let Some(pool_key) = live_pool_key(pool.fs_uuid.as_deref(), &entries) else {
+        eprintln!(
+            "warning: no FS UUID to key the ENOSPC baseline; ack cleared the alert but wrote no baseline"
+        );
+        return;
+    };
+    let assessment = evaluate_enospc_risk(&entries, missing_count);
+    if let Err(e) = save_enospc_ack(
+        &EnospcAck {
+            baseline_margin: assessment.margin,
+            pool_key,
+        },
+        paths,
+    ) {
+        eprintln!(
+            "warning: failed to persist ENOSPC baseline -- {e}; ack cleared the alert but wrote no baseline"
+        );
+    }
+}
+
 /// Shells out directly rather than via `OnlineStateOps::systemctl_stop`
 /// because the beeper stop also runs on the offline cleanup path
 /// (`ack_offline`), which issues no `CommandRunner` requests.
+///
+/// Stops both alert units: the Critical beeper (`braid-alert.service`) and the
+/// non-beeping Warning advisory (`braid-alert-advisory.service`), so one ack
+/// silences whichever tier the last monitor cycle started.
 fn stop_beeper() {
+    stop_unit("braid-alert.service");
+    stop_unit("braid-alert-advisory.service");
+}
+
+fn stop_unit(unit: &str) {
     let result = std::process::Command::new("systemctl")
-        .args(["stop", "braid-alert.service"])
+        .args(["stop", unit])
         .output();
     match result {
         Err(e) => {
-            eprintln!("warning: could not stop braid-alert.service: {e}");
+            eprintln!("warning: could not stop {unit}: {e}");
         }
         Ok(output) => {
-            if let Some(msg) = format_systemctl_stop_failure(&output) {
+            if let Some(msg) = format_systemctl_stop_failure(unit, &output) {
                 eprintln!("{msg}");
             }
         }
     }
 }
 
-fn format_systemctl_stop_failure(output: &std::process::Output) -> Option<String> {
+fn format_systemctl_stop_failure(unit: &str, output: &std::process::Output) -> Option<String> {
     if output.status.success() {
         return None;
     }
@@ -258,7 +339,7 @@ fn format_systemctl_stop_failure(output: &std::process::Output) -> Option<String
     let stderr = String::from_utf8_lossy(&output.stderr);
     let stderr = stderr.trim();
     Some(format!(
-        "warning: systemctl stop braid-alert.service: {}{}",
+        "warning: systemctl stop {unit}: {}{}",
         output.status,
         detail_suffix(stderr)
     ))
@@ -303,12 +384,16 @@ pub enum AckError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::alert::{AckedDeviceCounters, AckedDisk, AckedStats, load_acked_stats};
+    use crate::alert::{
+        AckedDeviceCounters, AckedDisk, AckedStats, load_acked_stats, load_enospc_ack,
+    };
     use crate::monitor::{MonitorResult, cmd_monitor};
     use crate::test_fixtures::{
-        AckPanicFilesystem, AckPanicRunner, MonitorTestRunner, ack_fs_btrfs, ack_fs_ext4,
-        ack_fs_not_mounted, ack_mounted_fs_that_touches_smartd, ack_mounted_probe_runner,
-        ack_mounted_probe_runner_with_device_stats,
+        ACK_ATRISK_MARGIN, ACK_DEVICE_SIZE, ACK_FS_UUID, AckPanicFilesystem, AckPanicRunner,
+        MonitorTestRunner, ack_fs_btrfs, ack_fs_ext4, ack_fs_not_mounted,
+        ack_mounted_fs_that_touches_smartd, ack_mounted_probe_runner,
+        ack_mounted_probe_runner_no_uuid_with_enospc_usage,
+        ack_mounted_probe_runner_with_device_stats, ack_mounted_probe_runner_with_enospc_usage,
         ack_mounted_probe_runner_with_stale_devid_stats, ack_mp, ack_noop_beeper,
         ack_offline_fs_that_touches_smartd, ack_write_latch, isolated_paths, monitor_fs_btrfs,
         monitor_mp,
@@ -2121,7 +2206,7 @@ mod tests {
             stderr: b"Failed to stop braid-alert.service: Unit not loaded.\n".to_vec(),
         };
 
-        let msg = format_systemctl_stop_failure(&output)
+        let msg = format_systemctl_stop_failure("braid-alert.service", &output)
             .expect("non-zero systemctl exit must produce a warning");
 
         assert!(
@@ -2155,7 +2240,7 @@ mod tests {
         };
 
         assert_eq!(
-            format_systemctl_stop_failure(&output),
+            format_systemctl_stop_failure("braid-alert.service", &output),
             Some("warning: systemctl stop braid-alert.service: exit status: 5".to_string()),
         );
     }
@@ -2177,6 +2262,178 @@ mod tests {
             stderr: Vec::new(),
         };
 
-        assert_eq!(format_systemctl_stop_failure(&output), None);
+        assert_eq!(
+            format_systemctl_stop_failure("braid-alert.service", &output),
+            None
+        );
+    }
+
+    // --- ENOSPC baseline ack (Step 5) ---
+
+    // Intent: a mounted ack of an EnospcRisk latch writes enospc-ack.json whose
+    //   pool_key carries the (devid, device_size) pairs from a fresh usage probe
+    //   and whose baseline_margin is the RE-PROBED current margin (not the latched
+    //   fire-time value); it clears the latch, leaves the baseline file in place,
+    //   and fires the cleanup hook once.
+    // Why it exists: the baseline must be the state the operator acknowledged,
+    //   from one coherent instant (mirroring snapshot_current), so a pool that
+    //   filled between fire and ack is not immediately re-fired. The re-probe and
+    //   the persist-past-ack are the contract the monitor's suppression relies on.
+    // Scenario: monitor latched EnospcRisk on a mounted 2-disk pool; the operator
+    //   runs braid ack while the pool is still at risk.
+    #[test]
+    fn cmd_ack_mounted_enospc_risk_writes_reprobed_keyed_baseline() {
+        let (_dir, paths) = isolated_paths();
+        // A deliberately-wrong fire-time margin in the latch: the baseline must
+        // carry the re-probed value, not this.
+        ack_write_latch(
+            &paths,
+            vec![AlertCause::EnospcRisk {
+                margin: -5,
+                count_below: 1,
+                device_count: 2,
+            }],
+        );
+        let runner = ack_mounted_probe_runner_with_enospc_usage();
+        let beeper_calls = std::cell::Cell::new(0u32);
+        let beeper = || beeper_calls.set(beeper_calls.get() + 1);
+
+        let result = cmd_ack_impl(&runner, &ack_fs_btrfs(), &ack_mp(), &paths, &beeper);
+        assert!(result.is_ok(), "ack must succeed, got {result:?}");
+
+        let ack = load_enospc_ack(&paths)
+            .unwrap()
+            .expect("mounted ack must write a baseline");
+        assert_eq!(
+            ack.pool_key.fs_uuid, ACK_FS_UUID,
+            "keyed on the live FS UUID"
+        );
+        assert_eq!(
+            ack.pool_key.devices,
+            vec![
+                (Devid::new(1), ACK_DEVICE_SIZE),
+                (Devid::new(3), ACK_DEVICE_SIZE),
+            ],
+            "pool_key carries (devid, device_size) from the ack-time usage probe"
+        );
+        assert_eq!(
+            ack.baseline_margin, ACK_ATRISK_MARGIN,
+            "baseline is the re-probed margin, not the latched fire-time -5"
+        );
+        assert!(!paths.alert_latch_json().exists(), "ack clears the latch");
+        assert!(
+            paths.enospc_ack_json().exists(),
+            "the baseline persists past ack (post-ack suppression memory)"
+        );
+        assert_eq!(beeper_calls.get(), 1, "cleanup hook fires once");
+    }
+
+    // Intent: a mounted ack of an EnospcRisk latch whose usage probe is unstubbed
+    //   (MissingMock) clears the latch but writes no baseline.
+    // Why it exists: the baseline probe is best-effort -- a probe failure must not
+    //   fail the ack or fabricate a baseline. One quiet re-fire next cycle, then a
+    //   clean ack establishes it.
+    // Scenario: the usage probe fails during a mounted ack of an ENOSPC alert.
+    #[test]
+    fn cmd_ack_mounted_enospc_risk_unstubbed_usage_writes_no_baseline() {
+        let (_dir, paths) = isolated_paths();
+        ack_write_latch(
+            &paths,
+            vec![AlertCause::EnospcRisk {
+                margin: -5,
+                count_below: 1,
+                device_count: 2,
+            }],
+        );
+        // device-stats stubbed, usage NOT -> MissingMock on the baseline probe.
+        let runner = ack_mounted_probe_runner_with_device_stats();
+
+        let result = cmd_ack_impl(
+            &runner,
+            &ack_fs_btrfs(),
+            &ack_mp(),
+            &paths,
+            &ack_noop_beeper,
+        );
+        assert!(result.is_ok(), "best-effort baseline must not fail the ack");
+        assert!(!paths.alert_latch_json().exists(), "ack clears the latch");
+        assert!(
+            !paths.enospc_ack_json().exists(),
+            "a failed usage probe writes no baseline"
+        );
+    }
+
+    // Intent: a mounted ack whose live pool has no FS UUID clears the latch but
+    //   writes no baseline (no usable PoolKey).
+    // Why it exists: a keyless baseline would be invalidated immediately anyway;
+    //   the absent strongest-identity field must not produce a weak baseline.
+    // Scenario: a transient mounted ack reads a btrfs show with no uuid line.
+    #[test]
+    fn cmd_ack_mounted_enospc_risk_no_fs_uuid_writes_no_baseline() {
+        let (_dir, paths) = isolated_paths();
+        ack_write_latch(
+            &paths,
+            vec![AlertCause::EnospcRisk {
+                margin: -5,
+                count_below: 1,
+                device_count: 2,
+            }],
+        );
+        let runner = ack_mounted_probe_runner_no_uuid_with_enospc_usage();
+
+        let result = cmd_ack_impl(
+            &runner,
+            &ack_fs_btrfs(),
+            &ack_mp(),
+            &paths,
+            &ack_noop_beeper,
+        );
+        assert!(result.is_ok(), "ack must succeed, got {result:?}");
+        assert!(!paths.alert_latch_json().exists(), "ack clears the latch");
+        assert!(
+            !paths.enospc_ack_json().exists(),
+            "no FS UUID -> no keyed baseline"
+        );
+    }
+
+    // Intent: an offline ack of an EnospcRisk-only latch is allowed, clears the
+    //   latch, and writes no baseline.
+    // Why it exists: EnospcRisk carries no monotonic counter, so unlike
+    //   BtrfsDeviceErrors it is safe to ack offline -- but offline ack cannot
+    //   probe the live pool_key, so it intentionally writes no baseline (one quiet
+    //   re-fire on remount, then a mounted ack establishes it).
+    // Scenario: the pool is locked/offline and the operator acks a latched ENOSPC
+    //   warning.
+    #[test]
+    fn ack_offline_enospc_risk_clears_latch_writes_no_baseline() {
+        let (_dir, paths) = isolated_paths();
+        ack_write_latch(
+            &paths,
+            vec![AlertCause::EnospcRisk {
+                margin: -5,
+                count_below: 1,
+                device_count: 2,
+            }],
+        );
+
+        let result = cmd_ack_impl(
+            &AckPanicRunner,
+            &ack_fs_not_mounted(),
+            &ack_mp(),
+            &paths,
+            &ack_noop_beeper,
+        );
+        assert!(
+            result.is_ok(),
+            "offline ack of an EnospcRisk-only latch must be allowed, got {result:?}"
+        );
+        assert!(
+            !paths.alert_latch_json().exists(),
+            "offline ack clears the latch"
+        );
+        assert!(
+            !paths.enospc_ack_json().exists(),
+            "offline ack cannot key a baseline, so it writes none"
+        );
     }
 }

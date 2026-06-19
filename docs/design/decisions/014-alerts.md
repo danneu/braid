@@ -27,6 +27,7 @@ A single shared computation produces an `AlertState` consumed by all surfaces �
 - `MissingDevice { devid }` — device missing from pool
 - `SmartdAlert` — smartd SMART health warning
 - `ComputationError { detail }` — probe or parse failed before a structured cause could be determined
+- `EnospcRisk { margin, count_below, device_count }` — pool is one disk-loss away from RAID1 chunk-pair ENOSPC (cannot allocate the chunk pairs to restore redundancy). `margin` is the signed risk magnitude (negative = at-risk depth); the cause deliberately carries no pool identity, so the public `status --json` cause stays a clean risk descriptor and keying lives in `enospc-ack.json` (see [Severity tiers and the ENOSPC baseline](#severity-tiers-and-the-enospc-baseline))
 
 The status banner is cause-neutral ("disk health issue detected"); cause details appear below it and in JSON output.
 
@@ -77,14 +78,32 @@ On a new machine, acked state doesn't exist — everything evaluates fresh.
 
 ### `braid monitor` is a pure detector
 
-Checks state and returns an exit code. Does not start/stop services. The systemd wrapper starts the beeper on exit 1.
+Checks state and returns an exit code. Does not start/stop services. The systemd wrapper maps each exit code to a notification unit.
 
-Exit codes:
-- **0** -- ok, pool offline with no active alerts, or pool-lock-contended cycle (silently skipped; re-evaluated on the next timer tick)
-- **1** -- alert active (disk health issue OR indeterminate state latched as `ComputationError` -- e.g. probe failure, parse failure, mountinfo I/O failure)
-- **2** -- pre-`cmd_monitor` setup failure (e.g. pool-lock I/O, config load failure). Reserved for "could not even attempt to detect"; never emitted by `cmd_monitor` itself.
+The exit-code → wrapper-action numbers are owned by [ADR 018's canonical exit-code table](018-systemd-lifecycle.md#braid-monitortimer--braid-monitorservice--health-polling), so the two Active ADRs cannot drift. This section owns the severity → beep *semantics* that decide which number `cmd_monitor` returns:
 
-Fail closed: any failure inside `cmd_monitor` that leaves pool state indeterminate latches a `ComputationError` cause and reports exit 1, so the systemd wrapper starts the beeper. Exit 2 means the monitor never ran -- a beep would be meaningless because there is no `AlertState` to report.
+- The audible beep is reserved for **Critical** causes. `BtrfsDeviceErrors`, `MissingDevice`, `SmartdAlert`, and `ComputationError` are Critical (`ComputationError` is fail-closed/indeterminate, so it must beep). A Critical alert reports exit 1.
+- `EnospcRisk` is the only **Warning** cause: it notifies via `alertCommand` + `braid status` but does not beep, so the operator is not trained to mute the channel built for a dying disk. A Warning-only cycle reports exit 3.
+- A mixed Warning+Critical cycle reports the Critical exit (1): `AlertState::severity()` returns the max over causes.
+
+Fail closed: any failure inside `cmd_monitor` that leaves pool state indeterminate latches a `ComputationError` cause and reports exit 1, so the systemd wrapper starts the beeper. **One exception** -- the best-effort `btrfs device usage` ENOSPC probe: a probe, parse, or baseline-load failure there skips *only* the `EnospcRisk` cause and deliberately does **not** latch `ComputationError`, so a broken usage probe never masks device-error / missing-device alerting in the same cycle. This is the sole carve-out to the fail-closed mandate; the probe mechanism is documented in [ADR 018](018-systemd-lifecycle.md#braid-monitortimer--braid-monitorservice--health-polling).
+
+### Severity tiers and the ENOSPC baseline
+
+`AlertSeverity` has two tiers, `Warning < Critical`. Every cause has a severity (see the cause list above), and `AlertState::severity()` is the max over its causes. The split exists so a proactive, non-beeping capacity warning is not delivered through the audible channel built for a dying disk: the beep is reserved for Critical, `braid status` and the TUI render a distinct lower-urgency banner for a Warning-only alert, and the monitor routes a Warning-only cycle to exit 3.
+
+`EnospcRisk` uses a **monotonic risk-magnitude baseline** for ack/re-alert, mirroring the `BtrfsDeviceErrors` `exceeds_acked` shape but stored in a dedicated `enospc-ack.json`, not `acked-stats.json` (the two key on different things — error counters vs pool geometry):
+
+- **Ack records the ack-time margin.** A mounted `braid ack` of an `EnospcRisk` latch re-probes `btrfs device usage` and stores the *current* signed `margin` plus a `pool_key`, both from one coherent instant (mirroring `snapshot_current`). The baseline is the state the operator acknowledged, so a pool that filled further between fire and ack is not immediately re-fired.
+- **Re-alert only if materially worse.** The next monitor cycle re-fires `EnospcRisk` only when the live margin has fallen a worsen step below the baseline; otherwise it suppresses.
+- **Re-arm on clear.** When the predicate's own surplus recovers past the re-arm margin, the monitor drops the baseline so a future recurrence alerts fresh. Re-arm keys off the *predicate margin*, not raw min-headroom, so a fault-tolerant pool with one low device still re-arms. The hysteresis gap between the worsen step and the re-arm margin prevents boundary flapping.
+- **Written only by `braid ack`, removed only by the monitor** (re-arm, confirmed key mismatch, or corruption). The baseline persists past ack — it is the post-ack suppression memory — so ack cleanup deliberately does not delete it.
+
+**Baseline identity (`pool_key`).** The baseline is bound to a `pool_key`: the btrfs filesystem UUID plus the sorted per-device `(devid, device_size)` pairs, captured at ack time. The monitor discards a baseline whose key differs from the live pool, so a baseline acked on an old pool (bootstrap/recreate → new FS UUID), an old membership (add/remove → changed devid set), **or** an old geometry (`braid replace`/resize → same devid, changed `device_size`) cannot suppress a fresh `EnospcRisk`. Keying on `device_size`, not just devid, is what closes the same-devid replace gap: `btrfs replace` keeps the source devid but changes the chunk-pair capacity geometry the predicate depends on, so `fs_uuid + devids` alone would stay identical. `device_size` is stable across ordinary fill (only `used`/`unallocated` move), so the key does not churn while a pool merely fills — it changes only on a real topology/geometry event. This is the `EnospcRisk` analog of the membership-change hygiene `acked-stats.json` gets from [reconcile plus the add/remove/recover ghost-drop callers](#acked-stats-hygiene-across-pool-membership-changes); keying the baseline is self-validating, so a missed command hook cannot reintroduce the stale-baseline class.
+
+When the live key cannot be built (the probe yields no FS UUID), the monitor treats it as an identity *gap*, not a confirmed different pool: it fires armed if at risk but leaves any stored baseline in place, so a later cycle with the FS UUID present can compare and re-arm it.
+
+This differs from the "latched until ack even if the condition disappears" rule only in the *post-ack* baseline (re-arm on clear), exactly as `MissingDevice` + `missing_acked` already self-re-arm via `reconcile_acked_stats`. The latch itself stays sticky-until-ack (`merge_into_latch` carries it forward), so the invariant holds.
 
 ### `braid ack` acknowledges current alerts
 
@@ -148,6 +167,7 @@ For genuine offline ack, the persistence layer has an asymmetry by cause type:
 - `BtrfsDeviceErrors { devid }` -- offline ack refuses with an actionable error ("cannot ack btrfs device errors while pool is offline -- unlock the pool first"). The counter baseline that suppresses re-firing is the *current* output of `btrfs device stats`, which requires a mounted pool. Refusing the *whole* ack (not partial-acking other causes) avoids leaving the operator in an "I acked but it still says ALERT" state.
 - `SmartdAlert` -- offline ack removes the smartd flag file (the authoritative trigger source); no `acked-stats.json` write is needed.
 - `ComputationError` -- offline ack removes the latch; the cause re-fires on the next monitor cycle only if the underlying computation still fails.
+- `EnospcRisk` -- offline ack is allowed (it carries no monotonic counter, unlike `BtrfsDeviceErrors`) and clears the latch, but writes **no** baseline: offline ack cannot probe the live `pool_key`, and a keyless baseline would be invalidated anyway. If the pool remounts still at-risk, the monitor re-fires `EnospcRisk` once at the quiet Warning level (exit 3, no beep) and the next mounted ack establishes the keyed baseline. Acceptable for a non-beeping advisory; avoids an offline dependency on `pool.json` membership.
 
 Coupled to the asymmetry: offline ack only loads `acked-stats.json` when at least one `MissingDevice` cause is latched, so an unrelated corrupt `acked-stats.json` cannot block an offline ack of a pure `SmartdAlert` or `ComputationError` latch. When `acked-stats.json` *is* loaded (a `MissingDevice` cause is being applied), the fail-closed `load_acked_stats_fallible` is used so corrupt files are propagated as I/O errors rather than silently overwritten -- matching the policy in `drop_ghost_acked_for_devids`.
 

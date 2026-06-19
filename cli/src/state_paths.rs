@@ -28,6 +28,14 @@ impl StatePaths {
         self.root.join("acked-stats.json")
     }
 
+    /// Monotonic ENOSPC-risk suppression baseline (`EnospcAck`), separate from
+    /// `acked-stats.json` because it keys on pool geometry, not per-device error
+    /// counters. Written only by `braid ack`, removed only by the monitor on
+    /// re-arm / key mismatch / corruption (ADR 014).
+    pub fn enospc_ack_json(&self) -> PathBuf {
+        self.root.join("enospc-ack.json")
+    }
+
     pub fn smartd_alert(&self) -> PathBuf {
         self.root.join("smartd-alert")
     }
@@ -63,6 +71,10 @@ mod tests {
             PathBuf::from("/var/lib/braid/acked-stats.json")
         );
         assert_eq!(
+            p.enospc_ack_json(),
+            PathBuf::from("/var/lib/braid/enospc-ack.json")
+        );
+        assert_eq!(
             p.smartd_alert(),
             PathBuf::from("/var/lib/braid/smartd-alert")
         );
@@ -88,6 +100,10 @@ mod tests {
     fn custom_resolves_under_given_root() {
         let p = StatePaths::custom(PathBuf::from("/tmp/test-braid"));
         assert_eq!(p.pool_json(), PathBuf::from("/tmp/test-braid/pool.json"));
+        assert_eq!(
+            p.enospc_ack_json(),
+            PathBuf::from("/tmp/test-braid/enospc-ack.json")
+        );
         assert_eq!(
             p.alert_latch_corrupt(),
             PathBuf::from("/tmp/test-braid/alert-latch.json.corrupt")

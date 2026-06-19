@@ -3,7 +3,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::parse::types::{BtrfsDeviceStatsOutput, DeviceErrorStats};
+use crate::parse::types::{BtrfsDeviceStatsOutput, BtrfsDeviceUsageEntry, DeviceErrorStats};
 use crate::probe::AlertDevids;
 use crate::state_io::atomic_write;
 use crate::state_paths::StatePaths;
@@ -22,15 +22,68 @@ impl AlertState {
     pub fn active(&self) -> bool {
         !self.causes.is_empty()
     }
+
+    /// Highest severity across all causes, or `None` when there are none. The
+    /// monitor exit code and the status/TUI alert banner branch on this so a
+    /// non-beeping `Warning` (ENOSPC risk) is never rendered as a dying disk.
+    /// `None` is unreachable while a banner is shown (rendering is gated on an
+    /// active alert) but exists because an empty `AlertState` has no maximum.
+    pub fn severity(&self) -> Option<AlertSeverity> {
+        self.causes.iter().map(AlertCause::severity).max()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AlertCause {
-    BtrfsDeviceErrors { devid: Devid },
-    MissingDevice { devid: Devid },
+    BtrfsDeviceErrors {
+        devid: Devid,
+    },
+    MissingDevice {
+        devid: Devid,
+    },
     SmartdAlert,
-    ComputationError { detail: String },
+    ComputationError {
+        detail: String,
+    },
+    /// Pool is approaching RAID1 chunk-pair ENOSPC: a disk loss may leave it
+    /// unable to allocate the chunk pairs needed to restore redundancy. Carries
+    /// the signed risk `margin` (the displayed magnitude) and the
+    /// `count_below`/`device_count` needed to render the line without a re-probe.
+    /// Deliberately carries no pool-identity data -- baseline keying lives in
+    /// `enospc-ack.json`, so the public `status --json` cause stays a clean risk
+    /// descriptor (ADR 014).
+    EnospcRisk {
+        margin: i64,
+        count_below: u32,
+        device_count: u32,
+    },
+}
+
+/// Notification severity tier for an alert cause. `Critical` outranks `Warning`
+/// (declaration order is the `Ord` order), so a mixed alert state escalates to
+/// the beeping path. The audible beep is reserved for `Critical`; a
+/// `Warning`-only cycle notifies via `alertCommand` + `braid status` without
+/// training the operator to mute the channel ADR 014 built for a dying disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum AlertSeverity {
+    Warning,
+    Critical,
+}
+
+impl AlertCause {
+    /// Notification tier for this cause. ENOSPC risk is a non-beeping `Warning`;
+    /// the data-loss / redundancy / SMART causes are `Critical`, and
+    /// `ComputationError` is fail-closed/indeterminate so it must also beep.
+    pub fn severity(&self) -> AlertSeverity {
+        match self {
+            AlertCause::EnospcRisk { .. } => AlertSeverity::Warning,
+            AlertCause::BtrfsDeviceErrors { .. }
+            | AlertCause::MissingDevice { .. }
+            | AlertCause::SmartdAlert
+            | AlertCause::ComputationError { .. } => AlertSeverity::Critical,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -447,6 +500,89 @@ pub fn clear_alert_cleanup_pending(paths: &StatePaths) -> Result<(), std::io::Er
 }
 
 // ---------------------------------------------------------------------------
+// ENOSPC-risk suppression baseline (enospc-ack.json)
+// ---------------------------------------------------------------------------
+
+/// Pool identity + geometry the ENOSPC baseline is bound to: the btrfs FS UUID
+/// plus the sorted per-device `(devid, device_size)` pairs.
+///
+/// Including `device_size` (not bare devid) is what invalidates a baseline
+/// across a same-devid `braid replace`/resize, where `fs_uuid + devids` alone
+/// would still match: `btrfs replace` keeps the source devid but the chunk-pair
+/// capacity geometry the predicate depends on changes. `device_size` is stable
+/// across ordinary fill (only `used`/`unallocated` move), so the key changes
+/// only on a real topology/geometry event, never while a pool is merely filling.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PoolKey {
+    pub fs_uuid: String,
+    pub devices: Vec<(Devid, u64)>,
+}
+
+/// Monotonic ENOSPC-risk suppression baseline captured by `braid ack`: the
+/// ack-time signed `margin` plus the `pool_key` it was taken on. The monitor
+/// re-fires only when the live margin falls materially below `baseline_margin`,
+/// and discards the baseline when the live pool key no longer matches.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnospcAck {
+    pub baseline_margin: i64,
+    pub pool_key: PoolKey,
+}
+
+/// Build the live `PoolKey` for the current probe, or `None` when the pool's
+/// `fs_uuid` is absent.
+///
+/// There is deliberately no membership-only fallback: a `None` key means "no
+/// usable identity", and both the monitor and ack treat it as no-usable-baseline
+/// rather than invent a weaker key that could spuriously match a stored one. The
+/// strongest identity field (FS UUID) being absent must not silently weaken the
+/// guard.
+pub fn live_pool_key(fs_uuid: Option<&str>, devices: &[BtrfsDeviceUsageEntry]) -> Option<PoolKey> {
+    let fs_uuid = fs_uuid?;
+    let mut pairs: Vec<(Devid, u64)> = devices.iter().map(|d| (d.devid, d.device_size)).collect();
+    // Sort so a membership reordering in btrfs output cannot churn the key.
+    pairs.sort_unstable();
+    Some(PoolKey {
+        fs_uuid: fs_uuid.to_owned(),
+        devices: pairs,
+    })
+}
+
+/// Tri-state, fallible loader for the ENOSPC baseline: `Ok(None)` for an absent
+/// file, `Ok(Some(_))` for a clean parse, `Err(_)` for read/parse failure.
+///
+/// Deliberately NOT lossy (unlike `load_acked_stats`): the monitor decides what
+/// to do with each case -- fire armed and remove a positively-invalid baseline
+/// (corrupt or confirmed-different key), but leave the file in place on a mere
+/// identity gap. Keeping that policy at the one call site, not in the loader,
+/// is why this returns the raw tri-state. Reuses `LatchLoadError` for the same
+/// read-vs-parse split the latch loader needs.
+pub fn load_enospc_ack(paths: &StatePaths) -> Result<Option<EnospcAck>, LatchLoadError> {
+    let bytes = match std::fs::read(paths.enospc_ack_json()) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(LatchLoadError::Read(e)),
+    };
+    Ok(Some(serde_json::from_slice(&bytes)?))
+}
+
+/// Persist the ENOSPC baseline. Written only by `braid ack` (live `pool_key` +
+/// the ack-time `margin`, both from one fresh `btrfs device usage --raw` probe).
+pub fn save_enospc_ack(ack: &EnospcAck, paths: &StatePaths) -> Result<(), std::io::Error> {
+    let json = serde_json::to_string_pretty(ack).map_err(std::io::Error::other)?;
+    atomic_write(&paths.enospc_ack_json(), json.as_bytes())
+}
+
+/// Delete the ENOSPC baseline (NotFound tolerant). Removed only by the monitor:
+/// on re-arm (risk cleared), confirmed key mismatch, or corruption.
+pub fn remove_enospc_ack(paths: &StatePaths) -> Result<(), std::io::Error> {
+    match std::fs::remove_file(paths.enospc_ack_json()) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Latch merging
 // ---------------------------------------------------------------------------
 
@@ -487,6 +623,10 @@ fn same_cause_key(a: &AlertCause, b: &AlertCause) -> bool {
         (AlertCause::MissingDevice { devid: a }, AlertCause::MissingDevice { devid: b }) => a == b,
         (AlertCause::SmartdAlert, AlertCause::SmartdAlert) => true,
         (AlertCause::ComputationError { .. }, AlertCause::ComputationError { .. }) => true,
+        // EnospcRisk is a pool-global singleton: one slot in the latch, replaced
+        // (not appended) each cycle. Mandatory -- the `_ => false` fallthrough
+        // would otherwise append a duplicate every monitor cycle.
+        (AlertCause::EnospcRisk { .. }, AlertCause::EnospcRisk { .. }) => true,
         _ => false,
     }
 }
@@ -511,6 +651,17 @@ mod tests {
             flush_io_errs: 0,
             corruption_errs: 0,
             generation_errs: 0,
+        }
+    }
+
+    fn usage_entry(devid: u64, device_size: u64) -> BtrfsDeviceUsageEntry {
+        BtrfsDeviceUsageEntry {
+            path: format!("/dev/mapper/braid-disk{devid}"),
+            devid: Devid::new(devid),
+            device_size,
+            device_slack: 0,
+            allocations: Vec::new(),
+            unallocated: 0,
         }
     }
 
@@ -1895,6 +2046,175 @@ mod tests {
             AlertCause::MissingDevice {
                 devid: Devid::new(2)
             }
+        );
+    }
+
+    // --- EnospcRisk: singleton key, latch carry-forward, severity, serde ---
+
+    // Intent: same_cause_key treats any two EnospcRisk causes as the same latch
+    //   slot regardless of their carried fields.
+    // Why it exists: EnospcRisk is pool-global, so a per-cycle re-detection must
+    //   replace the latched cause, not append a second one. Without the singleton
+    //   arm the `_ => false` fallthrough would grow the latch every monitor cycle.
+    // Scenario: a worsening pool re-detects ENOSPC risk with a deeper margin.
+    #[test]
+    fn same_cause_key_enospc_risk_singleton() {
+        assert!(same_cause_key(
+            &AlertCause::EnospcRisk {
+                margin: -10,
+                count_below: 1,
+                device_count: 2,
+            },
+            &AlertCause::EnospcRisk {
+                margin: -50,
+                count_below: 2,
+                device_count: 3,
+            },
+        ));
+    }
+
+    // Intent: a latched EnospcRisk survives a cycle whose live causes omit it.
+    // Why it exists: ENOSPC risk is latched-until-ack like every other cause, so
+    //   a cycle that does not re-emit it (e.g. a skipped best-effort probe) must
+    //   not silently drop it from the latch.
+    // Scenario: monitor latched EnospcRisk, then the next cycle's usage probe
+    //   fails and contributes no live causes.
+    #[test]
+    fn merge_carries_forward_latched_enospc_risk() {
+        let existing = AlertState {
+            causes: vec![AlertCause::EnospcRisk {
+                margin: -42,
+                count_below: 1,
+                device_count: 2,
+            }],
+        };
+        let merged = merge_into_latch(Some(&existing), &[]);
+        assert_eq!(merged.causes, existing.causes, "EnospcRisk must persist");
+    }
+
+    // Intent: AlertSeverity orders Critical above Warning, and AlertState
+    //   severity is the max over causes (None when empty).
+    // Why it exists: the monitor exit code and the status/TUI banner branch on
+    //   this max; a mixed state must escalate to Critical (beep), a warning-only
+    //   state must stay Warning (no beep), and an empty state must be None.
+    // Scenario: warning-only, mixed warning+critical, and empty alert states.
+    #[test]
+    fn alert_state_severity_max_over_causes() {
+        assert!(AlertSeverity::Critical > AlertSeverity::Warning);
+
+        let warning_only = AlertState {
+            causes: vec![AlertCause::EnospcRisk {
+                margin: -1,
+                count_below: 1,
+                device_count: 2,
+            }],
+        };
+        assert_eq!(warning_only.severity(), Some(AlertSeverity::Warning));
+
+        let mixed = AlertState {
+            causes: vec![
+                AlertCause::EnospcRisk {
+                    margin: -1,
+                    count_below: 1,
+                    device_count: 2,
+                },
+                AlertCause::MissingDevice {
+                    devid: Devid::new(2),
+                },
+            ],
+        };
+        assert_eq!(
+            mixed.severity(),
+            Some(AlertSeverity::Critical),
+            "Critical must win over Warning"
+        );
+
+        assert_eq!(AlertState::default().severity(), None);
+    }
+
+    // Intent: an EnospcRisk cause round-trips through save/load_alert_latch and
+    //   serializes with the documented internally-tagged snake_case shape.
+    // Why it exists: status --json and older binaries read this on-disk shape;
+    //   pinning it prevents a serde drift that would make alert-latch.json
+    //   unreadable or change the public cause descriptor.
+    // Scenario: monitor latches an EnospcRisk cause and a later status/ack reads
+    //   it back.
+    #[test]
+    fn enospc_risk_latch_roundtrip_and_json_shape() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(dir.path().to_path_buf());
+        let state = AlertState {
+            causes: vec![AlertCause::EnospcRisk {
+                margin: -1_063_256_064,
+                count_below: 1,
+                device_count: 2,
+            }],
+        };
+
+        let json = serde_json::to_string(&state).unwrap();
+        assert!(
+            json.contains(
+                r#"{"type":"enospc_risk","margin":-1063256064,"count_below":1,"device_count":2}"#
+            ),
+            "EnospcRisk must serialize internally-tagged snake_case; got {json}"
+        );
+
+        save_alert_latch(&state, &paths).unwrap();
+        let reloaded = load_alert_latch(&paths).unwrap();
+        assert_eq!(reloaded, Some(state));
+    }
+
+    // Intent: EnospcAck save -> load -> remove round-trips, with load tri-state
+    //   reporting Ok(None) before save and after remove.
+    // Why it exists: the monitor's suppression baseline depends on a faithful
+    //   round-trip of the pool key + margin and on absence reading as Ok(None),
+    //   not as an error.
+    // Scenario: braid ack writes a baseline, the monitor loads it, then re-arm
+    //   removes it.
+    #[test]
+    fn enospc_ack_save_load_remove_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(dir.path().to_path_buf());
+
+        assert_eq!(load_enospc_ack(&paths).unwrap(), None, "absent -> Ok(None)");
+
+        let ack = EnospcAck {
+            baseline_margin: -2048,
+            pool_key: PoolKey {
+                fs_uuid: "de2b8517-f972-45fc-b121-3e160c8ea432".to_owned(),
+                devices: vec![(Devid::new(1), 1056964608), (Devid::new(2), 1056964608)],
+            },
+        };
+        save_enospc_ack(&ack, &paths).unwrap();
+        assert_eq!(load_enospc_ack(&paths).unwrap(), Some(ack));
+
+        remove_enospc_ack(&paths).unwrap();
+        assert_eq!(
+            load_enospc_ack(&paths).unwrap(),
+            None,
+            "removed -> Ok(None)"
+        );
+        // NotFound tolerant.
+        remove_enospc_ack(&paths).unwrap();
+    }
+
+    // Intent: live_pool_key returns None when fs_uuid is absent and a
+    //   devid-sorted key when present.
+    // Why it exists: the monitor and ack both treat a None key as no-usable
+    //   identity (fire armed / write no baseline); a membership-only fallback
+    //   would silently weaken the guard. Sorting pins that btrfs row order cannot
+    //   churn the key.
+    // Scenario: a usage probe yields entries with and without an fs_uuid.
+    #[test]
+    fn live_pool_key_requires_fs_uuid_and_sorts() {
+        let entries = vec![usage_entry(2, 1056964608), usage_entry(1, 1056964608)];
+        assert_eq!(live_pool_key(None, &entries), None, "no fs_uuid -> None");
+
+        let key = live_pool_key(Some("fs-uuid"), &entries).expect("present fs_uuid -> Some");
+        assert_eq!(
+            key.devices,
+            vec![(Devid::new(1), 1056964608), (Devid::new(2), 1056964608)],
+            "devices must be devid-sorted regardless of input order"
         );
     }
 }

@@ -46,7 +46,11 @@ in
     alertCommand = lib.mkOption {
       type = lib.types.nullOr lib.types.str;
       default = null;
-      description = "Custom command to run on alert, in addition to beep.";
+      description = ''
+        Custom command to run on alert. Runs alongside the beep on a Critical
+        alert (disk health), and on its own with no beep for a Warning-only
+        alert such as a proactive ENOSPC capacity risk.
+      '';
     };
   };
 
@@ -119,6 +123,26 @@ in
       '';
     };
 
+    # --- Advisory alert service (non-beeping Warning tier) ---
+    # Runs only the user alertCommand -- never the beeper or its loop. oneshot +
+    # RemainAfterExit makes the repeated 5-minute `systemctl start` cycles a
+    # no-op until `braid ack` stops the unit, so alertCommand fires once per
+    # episode rather than every cycle (mirrors the no-beep braid-alert.service
+    # form). The Critical/exit-1 path (braid-alert.service) is unchanged.
+    systemd.services.braid-alert-advisory = {
+      description = "Braid capacity-risk advisory (non-beeping)";
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+      };
+      script = ''
+        ${lib.optionalString (cfg.monitor.alertCommand != null) ''
+          ${cfg.monitor.alertCommand} || true
+        ''}
+        exit 0
+      '';
+    };
+
     # --- Monitor service (pure detector) ---
     systemd.services.braid-monitor = {
       description = "Poll btrfs device stats for disk errors";
@@ -137,6 +161,11 @@ in
         braid monitor || rc=$?
         if [ "$rc" -eq 1 ]; then
           ${pkgs.systemd}/bin/systemctl start braid-alert.service 2>/dev/null || true
+        elif [ "$rc" -eq 3 ]; then
+          # Warning-only (e.g. ENOSPC risk): notify via alertCommand, no beep.
+          # Must precede the `-ge 2` failure branch so 3 is not misread as a
+          # monitor failure. See ADR 018 for the exit-code table.
+          ${pkgs.systemd}/bin/systemctl start braid-alert-advisory.service 2>/dev/null || true
         elif [ "$rc" -ge 2 ]; then
           echo "braid monitor failed (exit $rc)" >&2
         fi

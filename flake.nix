@@ -991,6 +991,11 @@
               braid = linuxCrane.braid;
             }
           );
+          braid-monitor-enospc = pkgs.testers.nixosTest (
+            import ./tests/cli/braid-monitor-enospc.nix {
+              braid = linuxCrane.braid;
+            }
+          );
           monitor-hot-unplug = pkgs.testers.nixosTest (
             import ./tests/cli/monitor-hot-unplug.nix {
               braid = linuxCrane.braid;

@@ -922,8 +922,17 @@ fn main() {
                 braid_cli::monitor::MonitorResult::Ok => {
                     std::process::exit(0);
                 }
-                braid_cli::monitor::MonitorResult::Alert(_) => {
-                    std::process::exit(1);
+                braid_cli::monitor::MonitorResult::Alert(state) => {
+                    // Severity-tiered exit: Warning-only (ENOSPC risk) takes the
+                    // non-beeping advisory path (exit 3); Critical beeps (exit 1).
+                    // The empty-state None is unreachable for an Alert but fails
+                    // closed to the beeping exit -- never a silent exit 0.
+                    match state.severity() {
+                        Some(braid_cli::alert::AlertSeverity::Warning) => std::process::exit(3),
+                        Some(braid_cli::alert::AlertSeverity::Critical) | None => {
+                            std::process::exit(1)
+                        }
+                    }
                 }
             }
         }
