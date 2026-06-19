@@ -335,19 +335,18 @@ mod tests {
         );
     }
 
-    /* Intent: configured target containing a space matches a mountinfo entry
+    /* Intent: a probed target containing a space matches a mountinfo entry
      *   whose mount-point field contains \040.
      * Why: kernel escapes whitespace as octal; without decoding, the
-     *   comparison silently misses the mounted pool and we fall through to
-     *   PoolOffline -- a fail-open result.
-     * Scenario: user configures braid.mountPoint = "/mnt/storage pool".
+     *   comparison silently misses mounted paths that contain whitespace.
+     * Scenario: an unrelated mount elsewhere in the table is rendered as an
+     *   escaped path, and the parser still decodes it before comparison.
      */
     #[test]
     fn fstype_at_mount_decodes_octal_escaped_path() {
-        let body =
-            "36 35 0:32 / /mnt/storage\\040pool rw shared:1 - btrfs /dev/mapper/braid-disk1 rw\n";
+        let body = "36 35 0:32 / /mnt/other\\040backup rw shared:1 - btrfs /dev/mapper/other rw\n";
         assert_eq!(
-            fstype_at_mount(body, "/mnt/storage pool").unwrap(),
+            fstype_at_mount(body, "/mnt/other backup").unwrap(),
             Some("btrfs".to_string())
         );
     }
@@ -444,9 +443,8 @@ mod tests {
      *   unchanged.
      * Why: a `bytes[i] as char` decoder would interpret each UTF-8
      *   continuation byte as a separate Latin-1 code point, producing
-     *   mojibake and silently missing the target. Regression guard for
-     *   the UTF-8 finding.
-     * Scenario: a configured mount path containing U+00E9 (two bytes
+     *   mojibake and silently missing a matching target path.
+     * Scenario: an unrelated mountinfo entry contains U+00E9 (two bytes
      *   0xC3 0xA9), which the kernel passes through verbatim.
      */
     #[test]
@@ -709,18 +707,20 @@ mod tests {
     }
 
     /* Intent: mount_entry_at_via_fs decodes kernel octal escapes in targets.
-     * Why: paths containing spaces must match the configured mount point.
-     * Scenario: braid.mountPoint = "/mnt/storage pool".
+     * Why: paths containing spaces must still compare against decoded
+     *   mountinfo fields.
+     * Scenario: an unrelated mount elsewhere in the table is rendered as an
+     *   escaped path, and the parser still decodes it before comparison.
      */
     #[test]
     fn mount_entry_at_via_fs_decodes_octal_escaped_path() {
         let fs = MockMountInfoFs {
             mountinfo: Ok(
-                "36 35 0:32 / /mnt/storage\\040pool rw shared:1 - btrfs /dev/mapper/braid-disk1 rw\n"
+                "36 35 0:32 / /mnt/other\\040backup rw shared:1 - btrfs /dev/mapper/other rw\n"
                     .to_string(),
             ),
         };
-        let entry = mount_entry_at_via_fs(&fs, "/mnt/storage pool")
+        let entry = mount_entry_at_via_fs(&fs, "/mnt/other backup")
             .unwrap()
             .unwrap();
         assert_eq!(entry.fstype, "btrfs");

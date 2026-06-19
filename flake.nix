@@ -908,6 +908,22 @@
                   linuxSystem
                   ;
               };
+          eval-mountpoint-rejects-bad-chars = import ./tests/eval/mountpoint-assertion-fails.nix {
+            inherit
+              pkgs
+              linuxPkgs
+              nixpkgs
+              linuxSystem
+              ;
+          };
+          eval-mountpoint-accepts-valid = import ./tests/eval/mountpoint-assertion-ok.nix {
+            inherit
+              pkgs
+              linuxPkgs
+              nixpkgs
+              linuxSystem
+              ;
+          };
           eval-nixos-module-default-supplies-package = import ./tests/eval/nixos-module-default-package.nix {
             inherit pkgs self nixpkgs;
           };

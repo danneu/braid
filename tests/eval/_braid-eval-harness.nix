@@ -1,4 +1,10 @@
-{ linuxPkgs, nixpkgs, linuxSystem, lockSystemdStopDeadlineSecs }:
+{
+  linuxPkgs,
+  nixpkgs,
+  linuxSystem,
+  lockSystemdStopDeadlineSecs ? 270,
+  mountPoint ? "/mnt/storage",
+}:
 nixpkgs.lib.nixosSystem {
   system = linuxSystem;
   modules = [
@@ -14,7 +20,7 @@ nixpkgs.lib.nixosSystem {
       braid = {
         enable = true;
         package = linuxPkgs.writeShellScriptBin "braid" "exit 0";
-        inherit lockSystemdStopDeadlineSecs;
+        inherit lockSystemdStopDeadlineSecs mountPoint;
       };
     }
   ];

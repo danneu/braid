@@ -105,7 +105,11 @@ mount path. This is not a coverage gap -- a create-time seal would be a redundan
   `braid add` can run. The pool then mounts OVER the already-sealed dir; `+i`
   persists on the underlying inode, and braid's lock/unmount path never `rmdir`s
   or `chmod`/`chown`s the bare dir, so the next `braid lock` reveals it still
-  sealed.
+  sealed. The module asserts that `cfg.mountPoint` is a canonical absolute path
+  whose segments contain only letters, digits, `_`, `.`, and `-`, with no
+  empty/`.`/`..` segments, whitespace, or shell metacharacters. That assertion
+  makes the unquoted `d ${cfg.mountPoint}` tmpfiles rule and the scrub/seal
+  systemd plumbing safe by construction.
 
 So any pool bootstrapped after braid is enabled inherits an already-sealed
 mountpoint, and persistence carries the seal across every later unlock/lock with

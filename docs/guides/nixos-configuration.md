@@ -91,7 +91,7 @@ When `braid.enable = true`, the module sets up:
 | --- | --- | --- | --- |
 | `braid.enable` | bool | `false` | Enable the braid module |
 | `braid.package` | package or null | `null` | The braid CLI package; `nixosModules.default` defaults it to `braid-cli-unwrapped` |
-| `braid.mountPoint` | path | `/mnt/storage` | Where to mount the btrfs pool |
+| `braid.mountPoint` | path | `/mnt/storage` | Canonical absolute path, with no whitespace or shell metacharacters |
 | `braid.poolAccessGroup` | string or null | `"storage"` | Group for mount point access. `null` to disable |
 | `braid.lockSystemdStopDeadlineSecs` | positive int | `270` | Seconds to wait for the pool lock during `braid-online.service` ExecStop; must stay below the unit's `TimeoutStopSec` |
 
