@@ -211,7 +211,7 @@ pub(crate) use shared::{
 pub(crate) use status::{
     status_btrfs_device_stats_3disk, status_btrfs_device_usage_raw_1disk,
     status_btrfs_device_usage_raw_3disk, status_btrfs_df_raid1, status_btrfs_df_single,
-    status_btrfs_scrub_aborted, status_btrfs_scrub_finished,
+    status_btrfs_scrub_aborted, status_btrfs_scrub_aborted_no_start, status_btrfs_scrub_finished,
     status_btrfs_scrub_finished_with_errors, status_btrfs_scrub_interrupted,
     status_btrfs_scrub_never, status_btrfs_show_1disk, status_btrfs_show_3disk,
     status_btrfs_show_3disk_1missing, status_btrfs_show_3disk_1null_underlying_1missing,

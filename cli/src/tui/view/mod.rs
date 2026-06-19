@@ -59,9 +59,9 @@ fn scrub_hint_command(scrub: &ScrubState) -> Option<String> {
             started_at,
             error_count,
             ..
-        } if *error_count > 0 => Some(scrub_journal_command(&format_scrub_journal_since(
-            started_at,
-        ))),
+        } if *error_count > 0 => started_at
+            .as_ref()
+            .map(|ts| scrub_journal_command(&format_scrub_journal_since(ts))),
         _ => None,
     }
 }
@@ -505,16 +505,19 @@ fn pool_balance_rows(pool: &PoolState) -> u16 {
 
 fn scrub_terminal_rows(
     status: Option<&str>,
-    started_at: &crate::parse::types::ScrubTimestamp,
+    started_at: Option<&crate::parse::types::ScrubTimestamp>,
     error_count: u64,
     duration_secs: Option<u64>,
     total_bytes: Option<u64>,
     rate_bytes_per_sec: Option<u64>,
     now: PrimitiveDateTime,
 ) -> Vec<Row<'static>> {
-    let display = match timeago(&started_at.0, now) {
-        Some(ago) => format!("{} ({})", format_timestamp(&started_at.0), ago),
-        None => format_timestamp(&started_at.0),
+    let display = match started_at {
+        Some(started_at) => match timeago(&started_at.0, now) {
+            Some(ago) => format!("{} ({})", format_timestamp(&started_at.0), ago),
+            None => format_timestamp(&started_at.0),
+        },
+        None => "unknown".to_owned(),
     };
     let mut rows = vec![Row::new(["Last run".to_owned(), display])];
     if let Some(status) = status {
@@ -616,7 +619,7 @@ fn scrub_table(scrub: &ScrubState, now: PrimitiveDateTime) -> Table<'_> {
         } => (
             scrub_terminal_rows(
                 None,
-                started_at,
+                started_at.as_ref(),
                 *error_count,
                 *duration_secs,
                 *total_bytes,
@@ -634,7 +637,7 @@ fn scrub_table(scrub: &ScrubState, now: PrimitiveDateTime) -> Table<'_> {
         } => (
             scrub_terminal_rows(
                 Some("cancelled (will resume)"),
-                started_at,
+                started_at.as_ref(),
                 *error_count,
                 *duration_secs,
                 *total_bytes,
@@ -652,7 +655,7 @@ fn scrub_table(scrub: &ScrubState, now: PrimitiveDateTime) -> Table<'_> {
         } => (
             scrub_terminal_rows(
                 Some("interrupted"),
-                started_at,
+                started_at.as_ref(),
                 *error_count,
                 *duration_secs,
                 *total_bytes,

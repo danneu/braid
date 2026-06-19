@@ -277,7 +277,7 @@ pub(crate) fn sample_pool() -> PoolState {
         unpooled_disks: HashMap::new(),
         alert_state: crate::alert::AlertState::default(),
         scrub: ScrubState::Finished {
-            started_at: ScrubTimestamp(time::macros::datetime!(2026-02-24 02:00:07)),
+            started_at: Some(ScrubTimestamp(time::macros::datetime!(2026-02-24 02:00:07))),
             error_count: 0,
             duration_secs: Some(0),
             total_bytes: Some(33_931_264),

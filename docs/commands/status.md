@@ -583,11 +583,14 @@ the btrfs profile names braid observed; consumers apply their own policy.
   (`YYYY-MM-DDTHH:MM:SS`) as reported by btrfs. It records `Scrub started`, or
   `Scrub resumed` after a resumed scrub, and is not directly comparable to UTC
   fields such as pending-operation `started_at` values ending in `Z`.
+  `started_at` is omitted when btrfs reported no parseable start time; the
+  terminal state still comes from the `Status:` word.
   The same three states also carry `error_count` (integer) -- the count
   btrfs reported, the same number the text output renders as `(N errors)`.
   The `scrub error details:` journalctl command from the text output is
   not part of the JSON (mirroring the profile annotations above); a
-  `--json` consumer derives its own `--since` value from `started_at`.
+  `--json` consumer derives its own `--since` value from `started_at` when
+  present.
 
 A complete report for a healthy 3-disk RAID1 pool:
 

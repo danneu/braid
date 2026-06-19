@@ -180,6 +180,9 @@ impl PartialScrub {
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Parses scrub status while keeping terminal-state classification independent
+/// from display timestamp parsing. `Status:` decides terminal states; a missing
+/// or unparseable start timestamp becomes `started_at: None`, not `Unknown`.
 pub fn parse_btrfs_scrub_status(
     raw: &RawCommandOutput,
 ) -> Result<BtrfsScrubStatusOutput, ParseError> {
@@ -243,37 +246,33 @@ pub fn parse_btrfs_scrub_status(
         });
     }
 
-    if let Some(started_at) = acc.started_at {
-        let state = match acc.status.as_deref() {
-            Some("finished") => ScrubState::Finished {
-                started_at,
-                error_count: acc.error_count,
-                duration_secs: acc.duration_secs,
-                total_bytes: acc.total_bytes,
-                rate_bytes_per_sec: acc.rate_bytes_per_sec,
-            },
-            Some("aborted") => ScrubState::Aborted {
-                started_at,
-                error_count: acc.error_count,
-                duration_secs: acc.duration_secs,
-                total_bytes: acc.total_bytes,
-                rate_bytes_per_sec: acc.rate_bytes_per_sec,
-            },
-            Some("interrupted") => ScrubState::Interrupted {
-                started_at,
-                error_count: acc.error_count,
-                duration_secs: acc.duration_secs,
-                total_bytes: acc.total_bytes,
-                rate_bytes_per_sec: acc.rate_bytes_per_sec,
-            },
-            _ => ScrubState::Unknown,
-        };
-        return Ok(BtrfsScrubStatusOutput { state });
-    }
+    let started_at = acc.started_at;
+    let state = match acc.status.as_deref() {
+        Some("finished") => ScrubState::Finished {
+            started_at,
+            error_count: acc.error_count,
+            duration_secs: acc.duration_secs,
+            total_bytes: acc.total_bytes,
+            rate_bytes_per_sec: acc.rate_bytes_per_sec,
+        },
+        Some("aborted") => ScrubState::Aborted {
+            started_at,
+            error_count: acc.error_count,
+            duration_secs: acc.duration_secs,
+            total_bytes: acc.total_bytes,
+            rate_bytes_per_sec: acc.rate_bytes_per_sec,
+        },
+        Some("interrupted") => ScrubState::Interrupted {
+            started_at,
+            error_count: acc.error_count,
+            duration_secs: acc.duration_secs,
+            total_bytes: acc.total_bytes,
+            rate_bytes_per_sec: acc.rate_bytes_per_sec,
+        },
+        _ => ScrubState::Unknown,
+    };
 
-    Ok(BtrfsScrubStatusOutput {
-        state: ScrubState::Unknown,
-    })
+    Ok(BtrfsScrubStatusOutput { state })
 }
 
 #[cfg(test)]
@@ -333,7 +332,7 @@ mod tests {
                 rate_bytes_per_sec,
                 ..
             } => {
-                assert_eq!(started_at.0, expected_dt);
+                assert_eq!(started_at.as_ref().map(|ts| ts.0), Some(expected_dt));
                 assert_eq!(*error_count, 0);
                 assert_eq!(*total_bytes, Some(33_964_032));
                 assert_eq!(*rate_bytes_per_sec, Some(33_947_648));
@@ -504,8 +503,8 @@ Error summary:    read=1 csum=2
                 rate_bytes_per_sec,
             } => {
                 assert_eq!(
-                    started_at.0,
-                    parse_ctime("Tue Feb 25 10:00:00 2026").unwrap()
+                    started_at.as_ref().map(|ts| ts.0),
+                    Some(parse_ctime("Tue Feb 25 10:00:00 2026").unwrap())
                 );
                 // read=1 + csum=2 + Corrected=2 + Uncorrectable=1 + Unverified=0
                 assert_eq!(*error_count, 6);
@@ -578,8 +577,8 @@ Error summary:    csum=2
                 rate_bytes_per_sec,
             } => {
                 assert_eq!(
-                    started_at.0,
-                    parse_ctime("Tue Feb 25 10:00:00 2026").unwrap()
+                    started_at.as_ref().map(|ts| ts.0),
+                    Some(parse_ctime("Tue Feb 25 10:00:00 2026").unwrap())
                 );
                 assert_eq!(*error_count, 2);
                 assert_eq!(*duration_secs, Some(10));
@@ -621,8 +620,8 @@ Error summary:    no errors found
                 rate_bytes_per_sec,
             } => {
                 assert_eq!(
-                    started_at.0,
-                    parse_ctime("Tue Feb 25 10:00:00 2026").unwrap()
+                    started_at.as_ref().map(|ts| ts.0),
+                    Some(parse_ctime("Tue Feb 25 10:00:00 2026").unwrap())
                 );
                 assert_eq!(*error_count, 0);
                 assert_eq!(*duration_secs, Some(10));
@@ -654,6 +653,126 @@ Error summary:    no errors found
         };
         let out = parse_btrfs_scrub_status(&raw).unwrap();
         assert_eq!(out.state, ScrubState::Unknown);
+    }
+
+    #[test]
+    // Intent: an aborted scrub missing its start line still classifies as Aborted.
+    // Why it exists: terminal state must come from the `Status:` word; a missing
+    // start line must not downgrade a resumable state to `Unknown`.
+    // Scenario: btrfs emits a sparse terminal block after a cancelled scrub.
+    fn scrub_aborted_without_started_is_aborted() {
+        let raw = RawCommandOutput {
+            cmd: "btrfs scrub status --raw".into(),
+            stdout: "\
+UUID:             cc86845b-aec3-408e-bef5-553affc1f2b1
+Status:           aborted
+Duration:         0:00:10
+Total to scrub:   1073741824
+Rate:             104857600/s
+Error summary:    csum=2
+"
+            .into(),
+            stderr: String::new(),
+            exit_status: 0,
+        };
+        let out = parse_btrfs_scrub_status(&raw).unwrap();
+        match out.state {
+            ScrubState::Aborted {
+                started_at,
+                error_count,
+                duration_secs,
+                total_bytes,
+                rate_bytes_per_sec,
+            } => {
+                assert_eq!(started_at, None);
+                assert_eq!(error_count, 2);
+                assert_eq!(duration_secs, Some(10));
+                assert_eq!(total_bytes, Some(1_073_741_824));
+                assert_eq!(rate_bytes_per_sec, Some(104_857_600));
+            }
+            other => panic!("expected Aborted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    // Intent: an interrupted scrub whose start timestamp fails to parse still
+    // classifies as Interrupted.
+    // Why it exists: `parse_ctime` is format/locale-fragile; future drift must
+    // not flip a resumable state into `Unknown`.
+    // Scenario: btrfs prints the start line in an unexpected format.
+    fn scrub_interrupted_with_unparseable_started_is_interrupted() {
+        let raw = RawCommandOutput {
+            cmd: "btrfs scrub status --raw".into(),
+            stdout: "\
+UUID:             cc86845b-aec3-408e-bef5-553affc1f2b1
+Scrub started:    2026-02-25 10:00:00
+Status:           interrupted
+Duration:         0:00:10
+Total to scrub:   1073741824
+Rate:             104857600/s
+Error summary:    no errors found
+"
+            .into(),
+            stderr: String::new(),
+            exit_status: 0,
+        };
+        let out = parse_btrfs_scrub_status(&raw).unwrap();
+        match out.state {
+            ScrubState::Interrupted {
+                started_at,
+                error_count,
+                duration_secs,
+                total_bytes,
+                rate_bytes_per_sec,
+            } => {
+                assert_eq!(started_at, None);
+                assert_eq!(error_count, 0);
+                assert_eq!(duration_secs, Some(10));
+                assert_eq!(total_bytes, Some(1_073_741_824));
+                assert_eq!(rate_bytes_per_sec, Some(104_857_600));
+            }
+            other => panic!("expected Interrupted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    // Intent: a finished scrub with no parseable start time still classifies as
+    // Finished, not Unknown.
+    // Why it exists: completion is authoritative from the `Status:` word; the
+    // start timestamp is decoration.
+    // Scenario: sparse terminal block on a completed scrub.
+    fn scrub_finished_without_started_is_finished() {
+        let raw = RawCommandOutput {
+            cmd: "btrfs scrub status --raw".into(),
+            stdout: "\
+UUID:             cc86845b-aec3-408e-bef5-553affc1f2b1
+Status:           finished
+Duration:         0:00:10
+Total to scrub:   1073741824
+Rate:             104857600/s
+Error summary:    no errors found
+"
+            .into(),
+            stderr: String::new(),
+            exit_status: 0,
+        };
+        let out = parse_btrfs_scrub_status(&raw).unwrap();
+        match out.state {
+            ScrubState::Finished {
+                started_at,
+                error_count,
+                duration_secs,
+                total_bytes,
+                rate_bytes_per_sec,
+            } => {
+                assert_eq!(started_at, None);
+                assert_eq!(error_count, 0);
+                assert_eq!(duration_secs, Some(10));
+                assert_eq!(total_bytes, Some(1_073_741_824));
+                assert_eq!(rate_bytes_per_sec, Some(104_857_600));
+            }
+            other => panic!("expected Finished, got {other:?}"),
+        }
     }
 
     /// Intent: Rate line with a scrub limit suffix must still parse correctly.
@@ -752,8 +871,8 @@ Error summary:    no errors found
         match &out.state {
             ScrubState::Finished { started_at, .. } => {
                 assert_eq!(
-                    started_at.0,
-                    parse_ctime("Tue Feb 25 12:00:00 2026").unwrap()
+                    started_at.as_ref().map(|ts| ts.0),
+                    Some(parse_ctime("Tue Feb 25 12:00:00 2026").unwrap())
                 );
             }
             other => panic!("expected Finished, got {other:?}"),

@@ -21,6 +21,9 @@ pub enum ScrubNeedsResumeError {
     StatusUnknown,
 }
 
+/// Decides whether saved scrub progress should resume from the terminal
+/// `Status:` word; a missing or unparseable start timestamp is not a reason to
+/// strand resumable progress.
 pub fn cmd_scrub_needs_resume<R: CommandRunner>(
     runner: &R,
     mount_point: &MountPoint,
@@ -56,6 +59,38 @@ mod tests {
     fn aborted_needs_resume() {
         let (status_req, status_out) = scrub_status_aborted();
         let runner = MockRunner::default().with_output(status_req, status_out);
+
+        let result = cmd_scrub_needs_resume(&runner, &scrub_mp()).unwrap();
+        assert_eq!(result, ScrubNeedsResumeResult::Yes);
+    }
+
+    #[test]
+    // Intent: an aborted scrub with no parseable start time still reports
+    // needs-resume.
+    // Why it exists: the pool-online resume trigger must not hard-fail and
+    // strand resumable progress over a missing display timestamp.
+    // Scenario: pool-online probes a scrub that `braid lock` aborted, whose
+    // status block lacks a parseable start line.
+    fn aborted_without_started_at_still_needs_resume() {
+        let runner = MockRunner::default().with_output(
+            CmdRequest::BtrfsScrubStatus {
+                mount_point: scrub_mp(),
+            },
+            RawCommandOutput {
+                cmd: "btrfs scrub status --raw /mnt/storage".into(),
+                stdout: "\
+UUID:             cc86845b-aec3-408e-bef5-553affc1f2b1
+Status:           aborted
+Duration:         0:00:10
+Total to scrub:   1073741824
+Rate:             104857600/s
+Error summary:    no errors found
+"
+                .into(),
+                stderr: String::new(),
+                exit_status: 0,
+            },
+        );
 
         let result = cmd_scrub_needs_resume(&runner, &scrub_mp()).unwrap();
         assert_eq!(result, ScrubNeedsResumeResult::Yes);

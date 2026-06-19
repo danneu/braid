@@ -371,6 +371,19 @@ pub(crate) fn status_btrfs_scrub_aborted() -> RawCommandOutput {
     )
 }
 
+/// Scrub-status output for an aborted scrub with no parseable start time.
+pub(crate) fn status_btrfs_scrub_aborted_no_start() -> RawCommandOutput {
+    mock_ok(
+        "btrfs scrub status --raw",
+        "UUID:             aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
+         Status:           aborted\n\
+         Duration:         0:00:01\n\
+         Total to scrub:   1073741824\n\
+         Rate:             1073741824/s\n\
+         Error summary:    no errors found\n",
+    )
+}
+
 /// Scrub-status output for an interrupted scrub.
 pub(crate) fn status_btrfs_scrub_interrupted() -> RawCommandOutput {
     mock_ok(
