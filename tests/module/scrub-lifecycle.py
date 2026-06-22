@@ -36,6 +36,7 @@ TIMER = "braid-scrub.timer"
 SERVICE = "braid-scrub.service"
 TRIGGER_SERVICE = "braid-scrub-resume-trigger.service"
 STAMP = "/var/lib/systemd/timers/stamp-braid-scrub.timer"
+SCRUB_CANCEL_REQUESTED_FLAG = "/var/lib/braid/scrub-cancel-requested"
 # TODO: Play with these values to speed up test. This test is really slow.
 SCRUB_PAYLOAD_MIB = 32
 SCRUB_READ_DELAY_MS = 500
@@ -227,6 +228,11 @@ with subtest("cancel: lock succeeds while scrub holds mount busy"):
     cancel.fail("mountpoint -q /mnt/storage")
     cancel.fail("test -e /dev/mapper/braid-disk1")
     cancel.fail("test -e /dev/mapper/braid-disk2")
+    cancel.succeed("test -f {}".format(SCRUB_CANCEL_REQUESTED_FLAG))
+    mode = cancel.succeed("stat -c %a {}".format(SCRUB_CANCEL_REQUESTED_FLAG)).strip()
+    assert mode == "600", (
+        "expected scrub-cancel-requested mode 600, got {}".format(mode)
+    )
 
 with subtest("cancel: ExecStop succeeded (idle cancel is benign)"):
     # The fake scrub never ran `btrfs scrub start`, so raw `btrfs scrub cancel`

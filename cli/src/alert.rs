@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -521,12 +522,14 @@ pub fn mark_alert_cleanup_pending(paths: &StatePaths) -> Result<(), std::io::Err
         Err(e) => return Err(e),
     }
 
-    std::fs::OpenOptions::new()
+    let f = std::fs::OpenOptions::new()
         .create(true)
         .write(true)
         .truncate(false)
-        .open(path)
-        .map(|_| ())
+        .mode(0o600)
+        .open(path)?;
+    f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    Ok(())
 }
 
 /// Clear the cleanup-pending sentinel. Absence already means no pending work.
@@ -1109,6 +1112,36 @@ mod tests {
             paths.alert_cleanup_pending().is_file(),
             "cleanup marker must be a regular file"
         );
+    }
+
+    // Intent: mark_alert_cleanup_pending creates a new sentinel at exactly
+    //   0600 even under an owner-masking umask.
+    // Why it exists: the sentinel create path is a direct OpenOptions site,
+    //   so it must declare braid's root-only state-file boundary itself
+    //   instead of relying on the ambient process umask.
+    // Scenario: ack cleanup starts on a host whose service manager or
+    //   wrapper has set a process umask that masks owner bits.
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "exact_0600 gate mutates process-wide umask; run serially"]
+    fn mark_alert_cleanup_pending_exact_0600_under_owner_masking_umask() {
+        use nix::sys::stat::{Mode, umask};
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(dir.path().to_path_buf());
+
+        let prior = umask(Mode::from_bits_truncate(0o777));
+        let result = mark_alert_cleanup_pending(&paths);
+        umask(prior);
+        result.unwrap();
+
+        let mode = std::fs::metadata(paths.alert_cleanup_pending())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "cleanup sentinel must be exactly 0600");
     }
 
     // Intent: mark_alert_cleanup_pending is idempotent when the sentinel is

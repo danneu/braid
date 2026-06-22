@@ -119,6 +119,12 @@ test-parsers *args:
 # name is `braid-cli` (not `braid`); prefer this recipe over `cargo test -p <name>`.
 test-rust:
     cargo test --lib --bin braid --test golden_nixos_26_05 --test tty_guard --test confirm_yes
+    just test-state-modes
+
+# Run state-mode tests that mutate process-wide umask; keep them serial and
+# outside the default parallel Rust lane.
+test-state-modes:
+    cargo test --manifest-path cli/Cargo.toml --lib exact_0600 -- --ignored --test-threads=1
 
 # Format nix source + tests with nixfmt
 fmt-nix:

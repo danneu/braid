@@ -8,6 +8,7 @@ let
   cfg = config.braid;
   inherit (import ./hardening.nix { }) base;
   inherit (import ./constants.nix) braidOnlineStopTimeoutSecs;
+  inherit (import ./state-flags.nix { inherit pkgs; }) braidTouchFlag;
   braidWrapped = import ./wrapper.nix { inherit cfg pkgs lib; };
   cryptsetup = cfg.packages.cryptsetup;
   btrfsProgs = cfg.packages.btrfsProgs;
@@ -19,7 +20,7 @@ let
     # btrfs exits 1 for both a cancelled scrub and a genuine failure, so
     # scrub-resume-or-start keys off this marker to exit 0 on a deliberate
     # cancel and let onFailure fire only on a real failure. See ADR 018.
-    touch /var/lib/braid/scrub-cancel-requested
+    ${braidTouchFlag} /var/lib/braid/scrub-cancel-requested
 
     # If pool is already unmounted during shutdown race, nothing remains to cancel.
     ${utilLinux}/bin/mountpoint -q ${cfg.mountPoint} || exit 0
@@ -51,7 +52,7 @@ in
       # State directory — pool config, LUKS header backups, alert flag files.
       # The CLI creates this on first write, but the smartd shell hook needs it
       # to exist before the CLI has ever run.
-      "d /var/lib/braid 0750 root root -"
+      "d /var/lib/braid 0700 root root -"
       "d ${cfg.mountPoint} 0755 root root -"
       "f /run/braid-pool.lock 0600 root root -"
     ]

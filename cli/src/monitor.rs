@@ -479,25 +479,11 @@ mod tests {
     // Why it exists: a failed reconcile write leaves monitor's persisted
     //   ack baseline indeterminate; returning Ok would turn a persistent
     //   state-directory write fault into a journald-only warning.
-    // Scenario: monitor prunes an orphan devid from acked-stats.json, but the
-    //   state directory becomes read-only before the reconciled file can be
-    //   saved.
+    // Scenario: monitor prunes an orphan devid from acked-stats.json, but a
+    //   poisoned stale temp path prevents the reconciled file from being saved.
     #[cfg(unix)]
     #[test]
     fn save_acked_stats_failure_latches_computation_error() {
-        use std::os::unix::fs::PermissionsExt;
-
-        struct RestorePerms {
-            path: std::path::PathBuf,
-            perms: std::fs::Permissions,
-        }
-
-        impl Drop for RestorePerms {
-            fn drop(&mut self) {
-                let _ = std::fs::set_permissions(&self.path, self.perms.clone());
-            }
-        }
-
         let (_dir, paths) = isolated_paths();
         save_acked_stats(
             &alert::AckedStats(BTreeMap::from([("99".to_owned(), acked_disk(false, 99))])),
@@ -505,17 +491,13 @@ mod tests {
         )
         .unwrap();
 
-        let state_dir = paths
-            .acked_stats_json()
+        let acked_path = paths.acked_stats_json();
+        let state_dir = acked_path
             .parent()
             .expect("acked-stats path has state directory")
             .to_path_buf();
-        let original_perms = std::fs::metadata(&state_dir).unwrap().permissions();
-        let _restore = RestorePerms {
-            path: state_dir.clone(),
-            perms: original_perms,
-        };
-        std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let stale_tmp = state_dir.join(".acked-stats.json.tmp");
+        std::fs::create_dir(&stale_tmp).unwrap();
 
         let result = cmd_monitor(
             &MonitorReconcileRunner,

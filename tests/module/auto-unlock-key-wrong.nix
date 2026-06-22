@@ -52,7 +52,6 @@ in
       # Seed pool.json — the initrd fixture bypasses `braid add`, so there is
       # no pool membership file.  braid unlock requires it.
       systemd.tmpfiles.rules = [
-        "d /var/lib/braid 0755 root root -"
         ''f /var/lib/braid/pool.json 0644 root root - {"disks":{"11111111-1111-1111-1111-111111111111":{"name":"disk1","by_id":"/dev/disk/by-id/virtio-disk1"}}}''
       ];
 

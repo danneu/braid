@@ -18,6 +18,19 @@ import re
 start_all()
 machine.wait_for_unit("multi-user.target")
 
+# --- Subtest 0: State directory mode ---
+
+with subtest("State directory is root-only and tmpfiles converges old modes"):
+    mode = machine.succeed("stat -c %a /var/lib/braid").strip()
+    assert mode == "700", "expected /var/lib/braid mode 700, got {}".format(mode)
+
+    machine.succeed("chmod 0750 /var/lib/braid")
+    machine.succeed("systemd-tmpfiles --create")
+    mode = machine.succeed("stat -c %a /var/lib/braid").strip()
+    assert mode == "700", (
+        "systemd-tmpfiles must converge /var/lib/braid to 700, got {}".format(mode)
+    )
+
 # --- Subtest 1: Hook script contents ---
 
 with subtest("Smartd hook script has correct contents"):
@@ -58,8 +71,23 @@ with subtest("Smartd hook creates flag file and starts alert service"):
     machine.succeed(f"{hook_path}")
 
     machine.succeed("test -f /var/lib/braid/smartd-alert")
+    mode = machine.succeed("stat -c %a /var/lib/braid/smartd-alert").strip()
+    assert mode == "600", "expected smartd-alert mode 600, got {}".format(mode)
     machine.succeed("systemctl is-active braid-alert.service")
     machine.succeed("test -f /root/alert-fired")
+
+# --- Subtest 2b: Hook convergence ---
+
+with subtest("Smartd hook converges an existing alert flag to 0600"):
+    machine.succeed("chmod 0644 /var/lib/braid/smartd-alert")
+    machine.execute("systemctl stop braid-alert.service 2>/dev/null || true")
+
+    machine.succeed(f"{hook_path}")
+
+    mode = machine.succeed("stat -c %a /var/lib/braid/smartd-alert").strip()
+    assert mode == "600", (
+        "smartd hook must converge smartd-alert to 600, got {}".format(mode)
+    )
 
 # --- Subtest 3: Ack clears smartd alert ---
 

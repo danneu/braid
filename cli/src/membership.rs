@@ -528,6 +528,7 @@ pub(crate) fn write_corrupt_sidecar_at(
 ) -> Result<(), CorruptSidecarError> {
     use std::fs::OpenOptions;
     use std::io::{ErrorKind, Write};
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
     let raw = std::fs::read(path).map_err(|e| CorruptSidecarError {
         target: path.to_path_buf(),
@@ -551,9 +552,15 @@ pub(crate) fn write_corrupt_sidecar_at(
         match OpenOptions::new()
             .write(true)
             .create_new(true)
+            .mode(0o600)
             .open(&candidate)
         {
             Ok(mut f) => {
+                f.set_permissions(std::fs::Permissions::from_mode(0o600))
+                    .map_err(|e| CorruptSidecarError {
+                        target: candidate.clone(),
+                        source: e,
+                    })?;
                 f.write_all(&raw).map_err(|e| CorruptSidecarError {
                     target: candidate.clone(),
                     source: e,
@@ -793,6 +800,38 @@ mod tests {
         assert_eq!(std::fs::read(&first_retry).unwrap(), seed_bytes);
         assert_eq!(std::fs::read(&second_retry).unwrap(), seed_bytes);
         assert_eq!(std::fs::read(&pool_json).unwrap(), seed_bytes);
+    }
+
+    // Intent: corrupt-state sidecar creation writes a fresh forensic
+    //   snapshot at exactly 0600 even under an owner-masking umask.
+    // Why it exists: OpenOptions::mode is still umask-masked; without an
+    //   fd chmod, a hostile or unusual umask can produce an unreadable or
+    //   wrongly-modeled sidecar instead of braid's root-only state boundary.
+    // Scenario: braid preserves a corrupt pool.json on a host whose service
+    //   manager or wrapper has set a process umask that masks owner bits.
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "exact_0600 gate mutates process-wide umask; run serially"]
+    fn write_corrupt_sidecar_exact_0600_under_owner_masking_umask() {
+        use nix::sys::stat::{Mode, umask};
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let pool_json = dir.path().join("pool.json");
+        std::fs::write(&pool_json, br#"{"disks":{}}"#).unwrap();
+        let t = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        let sidecar = dir.path().join(format!(
+            "pool.json.corrupt-{}",
+            format_rfc3339_utc_seconds(t)
+        ));
+
+        let prior = umask(Mode::from_bits_truncate(0o777));
+        let result = write_corrupt_sidecar_at(&pool_json, t);
+        umask(prior);
+        result.unwrap();
+
+        let mode = std::fs::metadata(&sidecar).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "corrupt sidecar must be exactly 0600");
     }
 
     // Intent: sidecar timestamp formatting emits seconds-only UTC with a

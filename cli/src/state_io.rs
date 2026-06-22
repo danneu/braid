@@ -1,5 +1,6 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 
 /// Rename a temp file to its final path and fsync the parent directory.
@@ -48,13 +49,18 @@ pub fn sync_dir(dir: &Path) -> io::Result<()> {
     d.sync_all()
 }
 
-/// Atomically replace a file by writing to a temp file in the same directory,
-/// fsyncing data, renaming, then fsyncing the parent directory.
+/// Atomically replace a root-only braid state file by writing an exact-0600
+/// temp file inside an exact-0700 parent directory, fsyncing data, renaming,
+/// then fsyncing the parent directory.
 pub fn atomic_write(path: &Path, contents: &[u8]) -> io::Result<()> {
     let dir = path.parent().ok_or_else(|| {
         io::Error::new(io::ErrorKind::InvalidInput, "path has no parent directory")
     })?;
-    fs::create_dir_all(dir)?;
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .recursive(true)
+        .create(dir)?;
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
 
     let file_name = path
         .file_name()
@@ -66,7 +72,9 @@ pub fn atomic_write(path: &Path, contents: &[u8]) -> io::Result<()> {
             .create(true)
             .truncate(true)
             .write(true)
+            .mode(0o600)
             .open(&tmp_path)?;
+        tmp.set_permissions(fs::Permissions::from_mode(0o600))?;
         tmp.write_all(contents)?;
         tmp.sync_all()?;
     }
@@ -77,6 +85,7 @@ pub fn atomic_write(path: &Path, contents: &[u8]) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
     use tempfile::TempDir;
 
     #[test]
@@ -86,6 +95,54 @@ mod tests {
         atomic_write(&path, br#"{"ok":true}"#).unwrap();
         let contents = std::fs::read_to_string(path).unwrap();
         assert!(contents.contains("\"ok\""));
+        let mode = std::fs::metadata(tmp.path().join("a").join("b"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o700, "state directory must be root-only");
+    }
+
+    // Intent: atomic_write tightens an existing state directory to 0700
+    //   before writing inside it.
+    // Why it exists: older binaries or out-of-band setup may have left
+    //   /var/lib/braid traversable by group/other; the CLI fallback must
+    //   converge that directory instead of trusting its existing mode.
+    // Scenario: an upgraded NAS performs its first state write after the
+    //   state directory was created at 0755 by an earlier create path.
+    #[test]
+    fn atomic_write_converges_existing_parent_dir_to_0700() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("state");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = dir.join("state.json");
+
+        atomic_write(&path, br#"{"ok":true}"#).unwrap();
+
+        let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "state directory must converge to 0700");
+    }
+
+    // Intent: atomic_write forces a reused temp inode to 0600 before the
+    //   final rename.
+    // Why it exists: OpenOptions::mode only applies when the inode is first
+    //   created; a stale .tmp file left at 0644 would otherwise remain
+    //   group/world-readable after being renamed into place.
+    // Scenario: a crash leaves .pool.json.tmp behind, an older binary or
+    //   operator chmods it to 0644, then the next state write reuses it.
+    #[test]
+    fn atomic_write_converges_reused_temp_file_to_0600() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("state.json");
+        let tmp_path = tmp.path().join(".state.json.tmp");
+        std::fs::write(&tmp_path, b"stale").unwrap();
+        std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        atomic_write(&path, b"fresh").unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "state files must converge to 0600");
     }
 
     #[test]

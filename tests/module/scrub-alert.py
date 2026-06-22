@@ -141,6 +141,8 @@ with subtest("fail: a failed scrub (exit 1) leaves the unit failed"):
 
 with subtest("fail: onFailure fired -- flag set, beeper started, alertCommand ran"):
     fail.wait_until_succeeds("test -f {}".format(SCRUB_FAILED_FLAG), timeout=30)
+    mode = fail.succeed("stat -c %a {}".format(SCRUB_FAILED_FLAG)).strip()
+    assert mode == "600", "expected scrub-failed mode 600, got {}".format(mode)
     fail.wait_until_succeeds("systemctl is-active braid-alert.service", timeout=30)
     fail.wait_until_succeeds("test -f {}".format(ALERT_FIRED), timeout=30)
 

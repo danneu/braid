@@ -47,7 +47,6 @@ in
         };
 
         systemd.tmpfiles.rules = [
-          "d /var/lib/braid 0755 root root -"
           poolJson
         ];
 
@@ -119,7 +118,6 @@ in
         };
 
         systemd.tmpfiles.rules = [
-          "d /var/lib/braid 0755 root root -"
           poolJson
         ];
 

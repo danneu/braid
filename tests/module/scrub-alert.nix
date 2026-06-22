@@ -61,7 +61,6 @@ in
       braid = monitorBraid;
 
       systemd.tmpfiles.rules = [
-        "d /var/lib/braid 0755 root root -"
         poolJson
       ];
 
@@ -110,10 +109,6 @@ in
       ];
 
       braid = monitorBraid;
-
-      systemd.tmpfiles.rules = [
-        "d /var/lib/braid 0755 root root -"
-      ];
 
       systemd.services.braid-unlock.script = unlockScript;
 

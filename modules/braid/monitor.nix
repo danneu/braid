@@ -8,6 +8,7 @@ let
   cfg = config.braid;
   beepEnabled = cfg.monitor.beep;
   inherit (import ./hardening.nix { }) base;
+  inherit (import ./state-flags.nix { inherit pkgs; }) braidTouchFlag;
   braidWrapped = import ./wrapper.nix { inherit cfg pkgs lib; };
   wrappedAlertCommand = lib.optionalString (cfg.monitor.alertCommand != null) ''
     ${pkgs.coreutils}/bin/timeout -k 5s ${toString cfg.monitor.alertCommandTimeoutSec}s ${pkgs.runtimeShell} -c ${lib.escapeShellArg cfg.monitor.alertCommand} || true
@@ -25,7 +26,7 @@ let
   '';
 
   smartdAlertScript = pkgs.writeShellScript "braid-smartd-alert" ''
-    touch /var/lib/braid/smartd-alert
+    ${braidTouchFlag} /var/lib/braid/smartd-alert
     ${pkgs.systemd}/bin/systemctl start braid-alert.service 2>/dev/null || true
   '';
 in
@@ -198,7 +199,7 @@ in
         RestrictAddressFamilies = [ "AF_UNIX" ];
       };
       script = ''
-        touch /var/lib/braid/scrub-failed
+        ${braidTouchFlag} /var/lib/braid/scrub-failed
         ${pkgs.systemd}/bin/systemctl start braid-alert.service 2>/dev/null || true
       '';
     };
