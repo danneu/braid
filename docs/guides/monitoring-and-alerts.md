@@ -8,13 +8,14 @@ Read this if you want to understand the alert system, configure notifications, o
 
 ## How monitoring works
 
-braid runs a health check every 5 minutes via a systemd timer. The check looks at three things:
+braid runs a health check every 5 minutes via a systemd timer. The check looks at four things:
 
 1. **btrfs device stats** -- non-zero error counters (read, write, flush, corruption, generation errors) on any drive.
 2. **Missing devices** -- a drive that should be in the pool but is not present.
 3. **SMART alerts** -- smartd detected a SMART health warning on a drive.
+4. **Scrub failures** -- the scheduled maintenance scrub failed to run or complete. `braid-scrub.service` raises this via `onFailure` (it writes a flag and starts the beeper); the monitor latches it on the next cycle.
 
-A scrub that discovers unrepairable read, checksum, or generation errors increments the same btrfs device stats, so it follows the same beep and `braid status` flow as an everyday I/O error.
+A scrub that discovers unrepairable read, checksum, or generation errors increments the same btrfs device stats, so it follows the same beep and `braid status` flow as an everyday I/O error. That is distinct from check 4: a *failed* scrub (one that could not run or complete) is what raises the scrub-failure alert, while corruption a scrub *found* surfaces through check 1.
 
 If any check triggers, braid activates an alert.
 
@@ -99,6 +100,7 @@ The output shows a banner when alerts are active and lists the causes:
 - **BtrfsDeviceErrors** -- a specific drive has non-zero error counters. Could be a bad cable, a dying drive, or a transient issue.
 - **MissingDevice** -- a drive is missing from the pool. Check if a cable came loose or if the drive failed.
 - **SmartdAlert** -- SMART reports a health warning. The drive may be failing.
+- **ScrubFailed** -- the scheduled scrub failed to run or complete. Check `journalctl -u braid-scrub.service` for the cause (a btrfs internal error, a device error that aborted the scrub, or metadata ENOSPC).
 
 ### 2. Investigate
 
@@ -162,6 +164,13 @@ smartd (always running)
   -> writes /var/lib/braid/smartd-alert flag
   -> starts braid-alert.service
   -> next braid monitor cycle picks up the flag
+
+braid-scrub.service (scheduled scrub)
+  -> fails to run/complete
+  -> onFailure: braid-scrub-failed.service
+    -> writes /var/lib/braid/scrub-failed flag
+    -> starts braid-alert.service
+    -> next braid monitor cycle picks up the flag
 
 braid ack
   -> clears alert state

@@ -98,8 +98,9 @@ pub fn cmd_monitor<R: CommandRunner, F: Filesystem + ?Sized>(
         // 4. Compute alert-local membership views.
         let devids = pool.alert_devids();
 
-        // 5. Check smartd alert flag
+        // 5. Check smartd + scrub-failed alert flags
         let smartd_active = alert::smartd_alert_active(paths);
+        let scrub_failed = alert::scrub_failed_active(paths);
 
         // 6. Reconcile stale ack state: prune orphan devids and self-heal
         //    missing_acked for devices that are present again.
@@ -114,7 +115,7 @@ pub fn cmd_monitor<R: CommandRunner, F: Filesystem + ?Sized>(
         // 7. Compute live alert state. Identity is the devid carried on each
         //    stats row by btrfs -- no path-to-devid map needed.
         let mut live_causes =
-            compute_alert_state(&device_stats, &acked, &devids, smartd_active).causes;
+            compute_alert_state(&device_stats, &acked, &devids, smartd_active, scrub_failed).causes;
 
         // 7b. Best-effort ENOSPC-risk evaluation. This is the single documented
         //     exception to the fail-closed mandate: ADR 014's pure-detector
@@ -1215,6 +1216,76 @@ mod tests {
         assert_eq!(
             &saved, state,
             "saved latch must match returned monitor alert"
+        );
+    }
+
+    // Intent: cmd_monitor threads the scrub-failed flag into alert computation
+    //   and persists a single ScrubFailed cause for a mounted healthy pool.
+    // Why it exists: mirrors the smartd command-wiring test -- helper tests
+    //   cover the flag reader and compute helper in isolation, but not that
+    //   cmd_monitor reads the flag, merges it, and saves the latch.
+    // Scenario: braid-scrub-failed.service touched the flag (onFailure) while
+    //   the pool is mounted and otherwise healthy.
+    #[test]
+    fn cmd_monitor_latches_scrub_failed_when_mounted() {
+        let (_dir, paths) = isolated_paths();
+        std::fs::write(paths.scrub_failed(), b"").unwrap();
+
+        let result = cmd_monitor(
+            &MonitorTestRunner::with_stale_mapper_stats(),
+            &monitor_fs_btrfs(),
+            &monitor_mp(),
+            &paths,
+        );
+        let state = alert_state(&result);
+        assert_eq!(state.causes, vec![AlertCause::ScrubFailed]);
+        assert_eq!(
+            state.severity(),
+            Some(AlertSeverity::Critical),
+            "a failed scrub is a Critical (beeping) cause"
+        );
+
+        let saved = alert::load_alert_latch(&paths).unwrap().unwrap();
+        assert_eq!(
+            &saved, state,
+            "saved latch must match returned monitor alert"
+        );
+    }
+
+    // Intent: the scrub-failed flag, present across two monitor cycles, yields
+    //   exactly ONE latched ScrubFailed cause.
+    // Why it exists (the dedup regression the single-cycle mirrors miss): the
+    //   flag persists from onFailure until ack, so without the
+    //   same_cause_key ScrubFailed singleton arm each cycle would append a fresh
+    //   duplicate and the latch would grow unbounded. The single-cycle
+    //   push/latch test passes regardless; only this two-cycle assertion catches
+    //   the missing arm.
+    // Scenario: braid-scrub-failed.service set the flag; two monitor timer
+    //   cycles run before the operator acks.
+    #[test]
+    fn cmd_monitor_scrub_failed_latches_single_cause_across_two_cycles() {
+        let (_dir, paths) = isolated_paths();
+        std::fs::write(paths.scrub_failed(), b"").unwrap();
+
+        let first = cmd_monitor(
+            &MonitorTestRunner::with_stale_mapper_stats(),
+            &monitor_fs_btrfs(),
+            &monitor_mp(),
+            &paths,
+        );
+        assert_eq!(alert_state(&first).causes, vec![AlertCause::ScrubFailed]);
+
+        // Flag still set (monitor never removes it -- only ack does).
+        let second = cmd_monitor(
+            &MonitorTestRunner::with_stale_mapper_stats(),
+            &monitor_fs_btrfs(),
+            &monitor_mp(),
+            &paths,
+        );
+        assert_eq!(
+            alert_state(&second).causes,
+            vec![AlertCause::ScrubFailed],
+            "a flag across two cycles must latch exactly one ScrubFailed, not grow the latch"
         );
     }
 

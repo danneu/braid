@@ -134,7 +134,7 @@ pub(crate) use ack::{
     ack_mounted_probe_runner, ack_mounted_probe_runner_no_uuid_with_enospc_usage,
     ack_mounted_probe_runner_with_device_stats, ack_mounted_probe_runner_with_enospc_usage,
     ack_mounted_probe_runner_with_stale_devid_stats, ack_mp, ack_noop_beeper,
-    ack_offline_fs_that_touches_smartd, ack_write_latch,
+    ack_offline_fs_that_touches_scrub_failed, ack_offline_fs_that_touches_smartd, ack_write_latch,
 };
 #[allow(unused_imports)]
 pub(crate) use discover::{

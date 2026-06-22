@@ -2355,7 +2355,7 @@ mod tests {
 
         // compute_alert_state must produce MissingDevice for devid 2 and 3
         // (the missing set) and no BtrfsDeviceErrors for devid 1.
-        let alert = compute_alert_state(&stats, &acked, &devids, false);
+        let alert = compute_alert_state(&stats, &acked, &devids, false, false);
         assert!(
             alert.causes.contains(&AlertCause::MissingDevice {
                 devid: Devid::new(2)

@@ -656,14 +656,16 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
 // Alert state (latch-based)
 // ---------------------------------------------------------------------------
 
-/// Read alert state from the latch file + smartd flag. Status reads the latch
-/// instead of recomputing live alert state -- the latch is the single source of
-/// truth. Recomputing would cause the alert to disappear when a condition
-/// resolves, contradicting the "latched until ack" model. The smartd flag is
-/// checked as a bridge for between-cycle fires. The cleanup-pending sentinel is
-/// also surfaced so interrupted ack cleanup remains visible to status and TUI.
+/// Read alert state from the latch file + smartd / scrub-failed flags. Status
+/// reads the latch instead of recomputing live alert state -- the latch is the
+/// single source of truth. Recomputing would cause the alert to disappear when
+/// a condition resolves, contradicting the "latched until ack" model. The
+/// smartd and scrub-failed flags are checked as a bridge for between-cycle
+/// fires. The cleanup-pending sentinel is also surfaced so interrupted ack
+/// cleanup remains visible to status and TUI.
 pub(crate) fn resolve_alert_state(paths: &StatePaths) -> AlertState {
     let smartd_active = alert::smartd_alert_active(paths);
+    let scrub_failed = alert::scrub_failed_active(paths);
     let cleanup_pending = alert::alert_cleanup_pending(paths);
 
     let latch = match alert::load_alert_latch(paths) {
@@ -683,6 +685,9 @@ pub(crate) fn resolve_alert_state(paths: &StatePaths) -> AlertState {
             if smartd_active {
                 causes.push(AlertCause::SmartdAlert);
             }
+            if scrub_failed {
+                causes.push(AlertCause::ScrubFailed);
+            }
             return AlertState { causes };
         }
     };
@@ -695,6 +700,14 @@ pub(crate) fn resolve_alert_state(paths: &StatePaths) -> AlertState {
             .any(|c| matches!(c, AlertCause::SmartdAlert))
     {
         state.causes.push(AlertCause::SmartdAlert);
+    }
+    if scrub_failed
+        && !state
+            .causes
+            .iter()
+            .any(|c| matches!(c, AlertCause::ScrubFailed))
+    {
+        state.causes.push(AlertCause::ScrubFailed);
     }
     if cleanup_pending {
         state.causes.push(AlertCause::ComputationError {
@@ -1425,6 +1438,11 @@ fn format_status_human(
                 }
                 AlertCause::SmartdAlert => {
                     out.push_str("  - SMART health warning\n");
+                }
+                AlertCause::ScrubFailed => {
+                    out.push_str(
+                        "  - scheduled scrub failed -- check journalctl -u braid-scrub.service\n",
+                    );
                 }
                 AlertCause::ComputationError { detail } => {
                     out.push_str(&format!("  - alert computation error: {detail}\n"));
@@ -6893,6 +6911,33 @@ mod tests {
         );
     }
 
+    // Intent: a ScrubFailed-only active alert renders the critical ALERT banner
+    //   plus the scrub-failure cause line -- never the Warning NOTICE banner.
+    // Why it exists (F1, pinned to the rendered line): ScrubFailed is Critical,
+    //   so a misclassification to Warning would flip this banner to NOTICE and
+    //   route the latch to the non-beeping advisory. This pins the tier all the
+    //   way through to the human output.
+    // Scenario: the monitor latched only ScrubFailed; status renders the banner.
+    #[test]
+    fn status_human_scrub_failed_renders_alert_not_notice() {
+        let report = status_report_with_alerts(vec![], vec![AlertCause::ScrubFailed]);
+
+        let human = format_status_human(&report, None, None, None);
+
+        assert!(
+            human.contains("ALERT -- disk health issue detected"),
+            "scrub-failure must render the critical ALERT banner, got:\n{human}"
+        );
+        assert!(
+            !human.contains("NOTICE -- capacity risk detected"),
+            "scrub-failure must NOT render the NOTICE banner, got:\n{human}"
+        );
+        assert!(
+            human.contains("scheduled scrub failed -- check journalctl -u braid-scrub.service"),
+            "the scrub-failure cause line must render, got:\n{human}"
+        );
+    }
+
     // Intent: a mixed Warning+Critical active alert renders the critical ALERT
     //   banner (max severity wins).
     // Why it exists: when a pool is both at ENOSPC risk and has a dying disk, the
@@ -7829,5 +7874,22 @@ mod tests {
         let state = resolve_alert_state(&paths);
 
         assert_eq!(state.causes, vec![AlertCause::SmartdAlert]);
+    }
+
+    // Intent: resolve_alert_state bridges a live scrub-failed flag into
+    //   AlertState when no latch has recorded the ScrubFailed cause yet.
+    // Why it exists: braid-scrub-failed.service can fire between monitor cycles,
+    //   so read-only status must surface the flag immediately (mirror of the
+    //   smartd bridge), before the monitor's next poll latches it.
+    // Scenario: onFailure wrote scrub-failed, monitor has not persisted a latch
+    //   yet, and the operator runs `braid status` during that gap.
+    #[test]
+    fn resolve_alert_state_appends_scrub_failed_when_latch_absent() {
+        let (_tmp, paths) = isolated_paths();
+        std::fs::write(paths.scrub_failed(), b"").unwrap();
+
+        let state = resolve_alert_state(&paths);
+
+        assert_eq!(state.causes, vec![AlertCause::ScrubFailed]);
     }
 }

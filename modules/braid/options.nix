@@ -134,6 +134,17 @@ in
       }
     ];
 
+    # A warning, not an assertion: running your own monitoring while braid does
+    # the scrub is unusual but legitimate, so it must still evaluate. With the
+    # monitor off there is no braid-scrub-failed.service and no device-stats
+    # poll, so neither a failed scrub nor scrub-discovered corruption raises any
+    # alert.
+    warnings = lib.optional (cfg.autoScrub.enable && !cfg.monitor.enable) ''
+      braid: autoScrub is enabled but monitor is disabled -- scrub failures and
+      scrub-discovered corruption will not raise any alert (no beep, no `braid status`
+      cause). Enable braid.monitor to alert on scrub problems.
+    '';
+
     users.groups = lib.mkIf (cfg.poolAccessGroup != null) {
       ${cfg.poolAccessGroup} = { };
     };

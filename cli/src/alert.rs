@@ -43,6 +43,16 @@ pub enum AlertCause {
         devid: Devid,
     },
     SmartdAlert,
+    /// The scheduled maintenance scrub (`braid-scrub.service`) failed to run or
+    /// complete: a btrfs internal error, a transient device error that aborted
+    /// the scrub, ENOSPC on metadata, or a spawn failure. Distinct from
+    /// scrub-*found* corruption, which still alerts via `BtrfsDeviceErrors`
+    /// (ADR 014). Flag-driven like `SmartdAlert`: `braid-scrub-failed.service`
+    /// (the scrub unit's `onFailure`) touches `scrub-failed`, the monitor
+    /// latches this cause, and `braid ack` clears it. No `Display`/JSON code:
+    /// the human text lives in `status.rs#format_status_human` and the
+    /// internally-tagged enum auto-serializes as `{"type":"scrub_failed"}`.
+    ScrubFailed,
     ComputationError {
         detail: String,
     },
@@ -73,14 +83,15 @@ pub enum AlertSeverity {
 
 impl AlertCause {
     /// Notification tier for this cause. ENOSPC risk is a non-beeping `Warning`;
-    /// the data-loss / redundancy / SMART causes are `Critical`, and
-    /// `ComputationError` is fail-closed/indeterminate so it must also beep.
+    /// the data-loss / redundancy / SMART / failed-scrub causes are `Critical`,
+    /// and `ComputationError` is fail-closed/indeterminate so it must also beep.
     pub fn severity(&self) -> AlertSeverity {
         match self {
             AlertCause::EnospcRisk { .. } => AlertSeverity::Warning,
             AlertCause::BtrfsDeviceErrors { .. }
             | AlertCause::MissingDevice { .. }
             | AlertCause::SmartdAlert
+            | AlertCause::ScrubFailed
             | AlertCause::ComputationError { .. } => AlertSeverity::Critical,
         }
     }
@@ -159,6 +170,7 @@ pub fn compute_alert_state(
     acked: &AckedStats,
     devids: &AlertDevids,
     smartd_alert_active: bool,
+    scrub_failed: bool,
 ) -> AlertState {
     let mut causes = Vec::new();
 
@@ -189,6 +201,10 @@ pub fn compute_alert_state(
 
     if smartd_alert_active {
         causes.push(AlertCause::SmartdAlert);
+    }
+
+    if scrub_failed {
+        causes.push(AlertCause::ScrubFailed);
     }
 
     AlertState { causes }
@@ -350,6 +366,28 @@ pub fn smartd_alert_active(paths: &StatePaths) -> bool {
 /// Remove the smartd alert flag file. Returns Ok(()) even if it didn't exist.
 pub fn remove_smartd_alert_flag(paths: &StatePaths) -> Result<(), std::io::Error> {
     match std::fs::remove_file(paths.smartd_alert()) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Check if the scrub-failed flag file exists (mirror of `smartd_alert_active`).
+///
+/// Treats only a regular file at the path as an active alert: a directory or
+/// other non-file is ignored so a stray inode cannot wedge `braid ack` (whose
+/// cleanup uses `remove_file`).
+pub fn scrub_failed_active(paths: &StatePaths) -> bool {
+    paths
+        .scrub_failed()
+        .metadata()
+        .map(|m| m.is_file())
+        .unwrap_or(false)
+}
+
+/// Remove the scrub-failed flag file. Returns Ok(()) even if it didn't exist.
+pub fn remove_scrub_failed_flag(paths: &StatePaths) -> Result<(), std::io::Error> {
+    match std::fs::remove_file(paths.scrub_failed()) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e),
@@ -622,6 +660,11 @@ fn same_cause_key(a: &AlertCause, b: &AlertCause) -> bool {
         ) => a == b,
         (AlertCause::MissingDevice { devid: a }, AlertCause::MissingDevice { devid: b }) => a == b,
         (AlertCause::SmartdAlert, AlertCause::SmartdAlert) => true,
+        // Scrub-failure is a singleton: one slot, replaced each cycle. Mandatory
+        // -- the flag persists from onFailure until ack, so without this arm the
+        // `_ => false` fallthrough would append a fresh duplicate every monitor
+        // cycle and the latch would grow unbounded.
+        (AlertCause::ScrubFailed, AlertCause::ScrubFailed) => true,
         (AlertCause::ComputationError { .. }, AlertCause::ComputationError { .. }) => true,
         // EnospcRisk is a pool-global singleton: one slot in the latch, replaced
         // (not appended) each cycle. Mandatory -- the `_ => false` fallthrough
@@ -1178,6 +1221,7 @@ mod tests {
                 missing: BTreeSet::new(),
             },
             false,
+            false,
         );
         assert!(!alert.active());
         assert!(alert.causes.is_empty());
@@ -1197,6 +1241,7 @@ mod tests {
                 recognized: BTreeSet::from([Devid::new(1)]),
                 missing: BTreeSet::new(),
             },
+            false,
             false,
         );
         assert!(alert.active());
@@ -1221,6 +1266,7 @@ mod tests {
                 missing: BTreeSet::from([Devid::new(2)]),
             },
             false,
+            false,
         );
         assert!(alert.active());
         assert_eq!(alert.causes.len(), 1);
@@ -1244,6 +1290,7 @@ mod tests {
                 missing: BTreeSet::new(),
             },
             true,
+            false,
         );
         assert!(alert.active());
         assert_eq!(alert.causes.len(), 1);
@@ -1275,6 +1322,7 @@ mod tests {
                 recognized: BTreeSet::from([Devid::new(1)]),
                 missing: BTreeSet::new(),
             },
+            false,
             false,
         );
         assert!(!alert.active());
@@ -1320,6 +1368,7 @@ mod tests {
                 missing: BTreeSet::new(),
             },
             false,
+            false,
         );
         assert!(alert.active(), "stale-high baseline should trigger alert");
     }
@@ -1344,6 +1393,7 @@ mod tests {
                 missing: BTreeSet::from([Devid::new(2)]),
             },
             false,
+            false,
         );
         assert!(!alert.active(), "acked missing should not trigger alert");
     }
@@ -1362,6 +1412,7 @@ mod tests {
                 missing: BTreeSet::from([Devid::new(2)]),
             },
             true,
+            false,
         );
         assert!(alert.active());
         assert_eq!(alert.causes.len(), 3);
@@ -1449,6 +1500,7 @@ mod tests {
                 missing: BTreeSet::new(),
             },
             false,
+            false,
         );
         assert!(
             alert.active(),
@@ -1479,6 +1531,7 @@ mod tests {
                 missing: BTreeSet::new(),
             },
             false,
+            false,
         );
         assert!(!alert.active());
         assert!(alert.causes.is_empty());
@@ -1504,6 +1557,7 @@ mod tests {
                 recognized: BTreeSet::new(),
                 missing: BTreeSet::new(),
             },
+            false,
             false,
         );
         assert!(!alert.active());
@@ -1533,6 +1587,7 @@ mod tests {
                 missing: BTreeSet::from([Devid::new(2)]),
             },
             false,
+            false,
         );
 
         assert_eq!(
@@ -1560,6 +1615,7 @@ mod tests {
                 recognized: BTreeSet::from([Devid::new(1), Devid::new(2)]),
                 missing: BTreeSet::from([Devid::new(2)]),
             },
+            false,
             false,
         );
         assert!(alert.active());
@@ -2038,6 +2094,7 @@ mod tests {
                 missing: alert_missing.clone(),
             },
             false,
+            false,
         );
         assert!(alert.active());
         assert_eq!(alert.causes.len(), 1);
@@ -2216,5 +2273,135 @@ mod tests {
             vec![(Devid::new(1), 1056964608), (Devid::new(2), 1056964608)],
             "devices must be devid-sorted regardless of input order"
         );
+    }
+
+    // --- ScrubFailed: flag reader, push, singleton key, severity ---
+
+    // Intent: scrub_failed_active treats only a regular file at the flag path
+    //   as an active alert source -- absent paths and directories are false.
+    // Why it exists: mirrors smartd_alert_active. A directory at the flag path
+    //   would make `braid ack` cleanup (remove_file) fail, so the reader must
+    //   never count a non-file as active. Fails loudly on a Path::exists revert.
+    // Scenario: test scaffolding or a hook bug leaves a directory at
+    //   /var/lib/braid/scrub-failed.
+    #[cfg(unix)]
+    #[test]
+    fn scrub_failed_active_requires_regular_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(dir.path().to_path_buf());
+
+        assert!(!scrub_failed_active(&paths), "absent path must be false");
+
+        std::fs::write(paths.scrub_failed(), b"").unwrap();
+        assert!(
+            scrub_failed_active(&paths),
+            "regular file must be true (matches the onFailure `touch`)"
+        );
+        std::fs::remove_file(paths.scrub_failed()).unwrap();
+
+        std::fs::create_dir(paths.scrub_failed()).unwrap();
+        assert!(
+            !scrub_failed_active(&paths),
+            "directory must be false (regression guard for Path::exists revert)"
+        );
+    }
+
+    // Intent: compute_alert_state pushes a single ScrubFailed cause when the
+    //   scrub_failed bool is set (mirror of alert_on_smartd).
+    // Why it exists: the scrub-failed flag is the third non-counter event
+    //   source feeding the latch; this pins that the bool maps to the cause.
+    // Scenario: braid-scrub-failed.service touched the flag and the pool is
+    //   otherwise healthy.
+    #[test]
+    fn alert_on_scrub_failed() {
+        let stats = make_stats(vec![zero_device(Devid::new(1))]);
+        let acked = AckedStats::default();
+        let alert = compute_alert_state(
+            &stats,
+            &acked,
+            &AlertDevids {
+                recognized: BTreeSet::from([Devid::new(1)]),
+                missing: BTreeSet::new(),
+            },
+            false,
+            true,
+        );
+        assert!(alert.active());
+        assert_eq!(alert.causes, vec![AlertCause::ScrubFailed]);
+    }
+
+    // Intent: same_cause_key treats any two ScrubFailed causes as the same latch
+    //   slot.
+    // Why it exists: ScrubFailed is a singleton -- the flag persists from
+    //   onFailure until ack, so without the singleton arm the `_ => false`
+    //   fallthrough would append a fresh duplicate every monitor cycle and the
+    //   latch would grow unbounded.
+    // Scenario: two monitor cycles both observe the scrub-failed flag.
+    #[test]
+    fn same_cause_key_scrub_failed_singleton() {
+        assert!(same_cause_key(
+            &AlertCause::ScrubFailed,
+            &AlertCause::ScrubFailed
+        ));
+    }
+
+    // Intent: a latched ScrubFailed survives a cycle whose live causes omit it.
+    // Why it exists: ScrubFailed is latched-until-ack like every other cause, so
+    //   a cycle that does not re-emit it must not silently drop it.
+    // Scenario: monitor latched ScrubFailed, then a later cycle's flag read
+    //   transiently returns nothing.
+    #[test]
+    fn merge_carries_forward_latched_scrub_failed() {
+        let existing = AlertState {
+            causes: vec![AlertCause::ScrubFailed],
+        };
+        let merged = merge_into_latch(Some(&existing), &[]);
+        assert_eq!(merged.causes, existing.causes, "ScrubFailed must persist");
+    }
+
+    // Intent: ScrubFailed is Critical, and an AlertState whose only cause is
+    //   ScrubFailed reports Some(Critical).
+    // Why it exists (F1 regression): the moment ScrubFailed is misclassified
+    //   Warning, the monitor routes its latch to exit 3 (the non-beeping
+    //   advisory) and status renders NOTICE instead of ALERT -- silently
+    //   contradicting the beeping onFailure source it mirrors. This fails the
+    //   instant the tier is wrong.
+    // Scenario: a failed scrub is the sole latched cause.
+    #[test]
+    fn scrub_failed_severity_is_critical() {
+        assert_eq!(
+            AlertCause::ScrubFailed.severity(),
+            AlertSeverity::Critical,
+            "a failed scrub must beep, exactly like the smartd source it mirrors"
+        );
+        let state = AlertState {
+            causes: vec![AlertCause::ScrubFailed],
+        };
+        assert_eq!(state.severity(), Some(AlertSeverity::Critical));
+    }
+
+    // Intent: ScrubFailed round-trips through save/load_alert_latch and
+    //   serializes with the documented internally-tagged snake_case shape.
+    // Why it exists: status --json and older binaries read this on-disk shape;
+    //   the variant carries no fields, so {"type":"scrub_failed"} is the whole
+    //   contract -- pin it so a serde drift cannot change the public cause value.
+    // Scenario: monitor latches ScrubFailed and a later status/ack reads it back.
+    #[test]
+    fn scrub_failed_latch_roundtrip_and_json_shape() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(dir.path().to_path_buf());
+        let state = AlertState {
+            causes: vec![AlertCause::ScrubFailed],
+        };
+
+        let json = serde_json::to_string(&state).unwrap();
+        assert!(
+            json.contains(r#"{"type":"scrub_failed"}"#),
+            "ScrubFailed must serialize as the bare internally-tagged value; got {json}"
+        );
+
+        save_alert_latch(&state, &paths).unwrap();
+        let reloaded = load_alert_latch(&paths).unwrap();
+        assert_eq!(reloaded, Some(state));
     }
 }

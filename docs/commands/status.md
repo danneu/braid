@@ -83,9 +83,10 @@ When a health alert is active, a banner appears at the top of the output:
 ALERT -- disk health issue detected. Run 'braid ack' to acknowledge and silence.
   - btrfs device errors on toshiba1 (devid 1)
   - SMART health warning
+  - scheduled scrub failed -- check journalctl -u braid-scrub.service
 ```
 
-Alert causes include btrfs device errors, missing devices, and SMART health warnings. Alerts are latched -- they persist until acknowledged with `braid ack`, even if the underlying condition resolves.
+Alert causes include btrfs device errors, missing devices, SMART health warnings, and a failed scheduled scrub (`--json` cause value `{"type":"scrub_failed"}`). Alerts are latched -- they persist until acknowledged with `braid ack`, even if the underlying condition resolves.
 
 ### Allocation table
 

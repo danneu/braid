@@ -264,6 +264,16 @@ with subtest("resume: cancel preserves Aborted state across lock/unlock"):
     )
 
     resume.succeed("braid lock")
+    # A real lock-time cancel makes btrfs exit 1, but the cancel-request marker
+    # ExecStop wrote lets scrub-resume-or-start exit 0, so the unit is success,
+    # not failed. This is exactly what keeps onFailure (-> ScrubFailed alert)
+    # from firing on every lock/suspend/shutdown; the dedicated end-to-end proof
+    # is the scrub-alert test, but pin Result here too since this subtest is the
+    # one that already cancels a real mid-flight scrub.
+    cancel_result = show(resume, SERVICE, "Result")
+    assert cancel_result == "success", (
+        "lock-cancelled real scrub must be success, got Result={}".format(cancel_result)
+    )
     dm_delay_deactivate(resume, SCRUB_DELAY_DISKS)
     unlock(resume)
     resume.wait_until_succeeds(

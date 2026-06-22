@@ -143,6 +143,23 @@ in
       '';
     };
 
+    # --- Scrub-failure hook ---
+    # Started by braid-scrub.service's onFailure (Change: ADR 018). Modeled on
+    # smartdAlertScript: writes the durable scrub-failed flag (for
+    # status/latch/ack) AND starts the Critical beeper immediately. No
+    # ConditionPathIsMountPoint -- it must run even when the failure is a lost
+    # mount. The scrub unit's SuccessExitStatus=3 keeps scrub-found corruption
+    # off this path (it alerts via the device-stats poll per ADR 014); only a
+    # genuine failed-to-run/complete scrub reaches here.
+    systemd.services.braid-scrub-failed = {
+      description = "Record and announce a failed braid scrub";
+      serviceConfig.Type = "oneshot";
+      script = ''
+        touch /var/lib/braid/scrub-failed
+        ${pkgs.systemd}/bin/systemctl start braid-alert.service 2>/dev/null || true
+      '';
+    };
+
     # --- Monitor service (pure detector) ---
     systemd.services.braid-monitor = {
       description = "Poll btrfs device stats for disk errors";

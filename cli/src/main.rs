@@ -891,14 +891,25 @@ fn main() {
         Commands::ScrubResumeOrStart(args) => {
             let runner = RealRunner;
             let mount_point = braid_cli::types::MountPoint::new(args.mount.clone());
-            match braid_cli::scrub_resume_or_start::cmd_scrub_resume_or_start(&runner, &mount_point)
-            {
+            match braid_cli::scrub_resume_or_start::cmd_scrub_resume_or_start(
+                &runner,
+                &mount_point,
+                &paths,
+            ) {
                 Ok(braid_cli::scrub_resume_or_start::ScrubResumeOrStartResult::Resumed {
                     uncorrectable_errors: false,
                 })
                 | Ok(braid_cli::scrub_resume_or_start::ScrubResumeOrStartResult::Started {
                     uncorrectable_errors: false,
                 }) => std::process::exit(0),
+                Ok(braid_cli::scrub_resume_or_start::ScrubResumeOrStartResult::Cancelled) => {
+                    // A deliberate teardown (lock/suspend/shutdown) cancelled
+                    // the scrub. btrfs exits 1, but the cancel-request marker
+                    // proves it was intentional, so this is a clean, resumable
+                    // stop -- exit 0 so onFailure (-> ScrubFailed) never fires.
+                    println!("scrub cancelled (resumable)");
+                    std::process::exit(0)
+                }
                 Ok(braid_cli::scrub_resume_or_start::ScrubResumeOrStartResult::Resumed {
                     uncorrectable_errors: true,
                 })

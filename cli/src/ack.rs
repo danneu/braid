@@ -59,12 +59,20 @@ fn cmd_ack_impl<R: CommandRunner, F: Filesystem + ?Sized>(
         }
     };
     let smartd_active = alert::smartd_alert_active(paths);
+    let scrub_failed_active = alert::scrub_failed_active(paths);
     let cleanup_pending = alert::alert_cleanup_pending(paths);
     let latch_had_smartd = causes.iter().any(|c| matches!(c, AlertCause::SmartdAlert));
     let remove_smartd = smartd_active || latch_had_smartd;
+    let latch_had_scrub_failed = causes.iter().any(|c| matches!(c, AlertCause::ScrubFailed));
+    let remove_scrub_failed = scrub_failed_active || latch_had_scrub_failed;
 
-    if cleanup_pending && causes.is_empty() && !smartd_active && !latch_corrupt {
-        if let Err(e) = cleanup_alert_files_and_beeper(paths, stop_beeper, false) {
+    if cleanup_pending
+        && causes.is_empty()
+        && !smartd_active
+        && !scrub_failed_active
+        && !latch_corrupt
+    {
+        if let Err(e) = cleanup_alert_files_and_beeper(paths, stop_beeper, false, false) {
             return Err(AckError::CleanupFailed(e));
         }
         println!("{ACK_NO_COUNT_LINE}");
@@ -82,13 +90,15 @@ fn cmd_ack_impl<R: CommandRunner, F: Filesystem + ?Sized>(
             &causes,
             latch_corrupt,
             smartd_active,
+            scrub_failed_active,
             remove_smartd,
+            remove_scrub_failed,
             paths,
             stop_beeper,
         );
     }
 
-    if causes.is_empty() && !smartd_active && !latch_corrupt {
+    if causes.is_empty() && !smartd_active && !scrub_failed_active && !latch_corrupt {
         println!("no active alerts");
         return Ok(());
     }
@@ -121,7 +131,9 @@ fn cmd_ack_impl<R: CommandRunner, F: Filesystem + ?Sized>(
         write_enospc_baseline(runner, mount_point, &pool, missing_count, paths);
     }
 
-    if let Err(e) = cleanup_alert_files_and_beeper(paths, stop_beeper, remove_smartd) {
+    if let Err(e) =
+        cleanup_alert_files_and_beeper(paths, stop_beeper, remove_smartd, remove_scrub_failed)
+    {
         return Err(AckError::CleanupFailed(e));
     }
 
@@ -146,15 +158,18 @@ fn format_ack_confirmation(latched_count: usize) -> String {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn ack_offline(
     causes: &[AlertCause],
     latch_corrupt: bool,
     smartd_active: bool,
+    scrub_failed_active: bool,
     remove_smartd: bool,
+    remove_scrub_failed: bool,
     paths: &StatePaths,
     stop_beeper: &dyn Fn(),
 ) -> Result<(), AckError> {
-    let has_alert = !causes.is_empty() || smartd_active || latch_corrupt;
+    let has_alert = !causes.is_empty() || smartd_active || scrub_failed_active || latch_corrupt;
     if !has_alert {
         return Err(AckError::PoolNotMounted);
     }
@@ -164,6 +179,9 @@ fn ack_offline(
     // output, which we cannot produce with the pool offline. Refusing the
     // *whole* ack (rather than partial-acking other causes) avoids leaving
     // the user in an ambiguous "I acked but it still says ALERT" state.
+    // ScrubFailed falls through this refusal and the MissingDevice filter
+    // unchanged (no new arm), exactly as SmartdAlert does -- offline ack just
+    // removes the flag and writes no acked-stats.
     if causes
         .iter()
         .any(|c| matches!(c, AlertCause::BtrfsDeviceErrors { .. }))
@@ -192,7 +210,9 @@ fn ack_offline(
         save_acked_stats(&acked, paths).map_err(AckError::Io)?;
     }
 
-    if let Err(e) = cleanup_alert_files_and_beeper(paths, stop_beeper, remove_smartd) {
+    if let Err(e) =
+        cleanup_alert_files_and_beeper(paths, stop_beeper, remove_smartd, remove_scrub_failed)
+    {
         return Err(AckError::CleanupFailed(e));
     }
     println!("{ACK_NO_COUNT_LINE}");
@@ -214,18 +234,19 @@ fn ack_offline(
 /// hook is invoked on every cleanup call, not that the audible alert was
 /// silenced.
 ///
-/// `cmd_ack_impl` derives `remove_smartd` once from inputs snapshotted at
-/// entry. Cleanup deletes the smartd flag only when the snapshot already
-/// represented an active smartd source: the flag was present at entry, or the
-/// latch carried a `SmartdAlert` cause. A flag that arrives after a snapshot
-/// with neither condition is left for the next monitor cycle.
+/// `cmd_ack_impl` derives `remove_smartd` / `remove_scrub_failed` once from
+/// inputs snapshotted at entry. Cleanup deletes each flag only when the snapshot
+/// already represented an active source for it: the flag was present at entry,
+/// or the latch carried the matching `SmartdAlert` / `ScrubFailed` cause. A flag
+/// that arrives after a snapshot with neither condition is left for the next
+/// monitor cycle.
 ///
 /// Cleanup marks `alert-cleanup-pending` after `stop_beeper` and before any
-/// destructive removal. The removals then run in smartd-flag, latch,
-/// corrupt-sidecar order so ADR 014's forensic sidecar is the last destructive
-/// step. The marker is cleared only after every removal succeeds. If marker
-/// creation itself fails, no destructive removal has run and the original entry
-/// signals still drive retry; if a later step fails, the marker remains to
+/// destructive removal. The removals then run in smartd-flag, scrub-failed-flag,
+/// latch, corrupt-sidecar order so ADR 014's forensic sidecar is the last
+/// destructive step. The marker is cleared only after every removal succeeds. If
+/// marker creation itself fails, no destructive removal has run and the original
+/// entry signals still drive retry; if a later step fails, the marker remains to
 /// drive the cleanup-only retry branch in `cmd_ack_impl`.
 ///
 /// The `stop_beeper` parameter is the injected `&dyn Fn()` from
@@ -235,11 +256,15 @@ fn cleanup_alert_files_and_beeper(
     paths: &StatePaths,
     stop_beeper: &dyn Fn(),
     remove_smartd: bool,
+    remove_scrub_failed: bool,
 ) -> Result<(), std::io::Error> {
     stop_beeper();
     alert::mark_alert_cleanup_pending(paths)?;
     if remove_smartd {
         alert::remove_smartd_alert_flag(paths)?;
+    }
+    if remove_scrub_failed {
+        alert::remove_scrub_failed_flag(paths)?;
     }
     alert::remove_alert_latch(paths)?;
     alert::remove_alert_latch_corrupt(paths)?;
@@ -395,8 +420,8 @@ mod tests {
         ack_mounted_probe_runner_no_uuid_with_enospc_usage,
         ack_mounted_probe_runner_with_device_stats, ack_mounted_probe_runner_with_enospc_usage,
         ack_mounted_probe_runner_with_stale_devid_stats, ack_mp, ack_noop_beeper,
-        ack_offline_fs_that_touches_smartd, ack_write_latch, isolated_paths, monitor_fs_btrfs,
-        monitor_mp,
+        ack_offline_fs_that_touches_scrub_failed, ack_offline_fs_that_touches_smartd,
+        ack_write_latch, isolated_paths, monitor_fs_btrfs, monitor_mp,
     };
     use crate::types::Devid;
     use std::collections::BTreeMap;
@@ -773,6 +798,146 @@ mod tests {
         assert!(
             !paths.acked_stats_json().exists(),
             "empty offline ack must not create acked-stats"
+        );
+    }
+
+    // Intent: Mounted ack with only the scrub-failed flag (no latch) runs the
+    //   full ack path -- queries btrfs device stats, removes the flag, writes a
+    //   fresh baseline, and fires the beeper-stop hook once.
+    // Why it exists: braid-scrub-failed.service can fire between monitor cycles.
+    //   The mounted no-alert gate now reads `!scrub_failed_active`; a regression
+    //   dropping that term would no-op this ack and leave the flag + beeper.
+    //   Mirrors the smartd-flag-no-latch mounted test.
+    // Scenario: onFailure wrote /var/lib/braid/scrub-failed; before monitor
+    //   latched it, the operator runs `braid ack` on a mounted pool.
+    #[test]
+    fn cmd_ack_with_mounted_pool_and_scrub_failed_flag_no_latch_runs_full_ack_path() {
+        let (_dir, paths) = isolated_paths();
+        std::fs::write(paths.scrub_failed(), b"").unwrap();
+        let runner = ack_mounted_probe_runner_with_device_stats();
+        let beeper_calls = std::cell::Cell::new(0u32);
+        let beeper = || beeper_calls.set(beeper_calls.get() + 1);
+
+        let result = cmd_ack_impl(&runner, &ack_fs_btrfs(), &ack_mp(), &paths, &beeper);
+
+        assert!(
+            result.is_ok(),
+            "scrub-failed-only ack should succeed, got {result:?}"
+        );
+        assert!(
+            runner
+                .requests()
+                .iter()
+                .any(|r| matches!(r, CmdRequest::BtrfsDeviceStatsJson { .. })),
+            "scrub-failed-only ack must run the full ack path"
+        );
+        assert!(
+            !paths.scrub_failed().exists(),
+            "scrub-failed flag must be removed"
+        );
+        assert!(
+            paths.acked_stats_json().exists(),
+            "snapshot must have been saved"
+        );
+        assert_eq!(
+            beeper_calls.get(),
+            1,
+            "stop_beeper must fire once on mounted scrub-failed-only ack"
+        );
+    }
+
+    // Intent: Offline ack of a bare scrub-failed flag (no latch) clears the flag
+    //   and exits Ok, not PoolNotMounted, and writes no acked-stats.
+    // Why it exists: ack_offline's gate now includes `scrub_failed_active`; a
+    //   regression dropping that term would refuse a bare-flag offline ack with
+    //   PoolNotMounted. Mirrors the smartd bare-flag offline test, and pins that
+    //   ScrubFailed falls through the MissingDevice filter (no acked-stats).
+    // Scenario: onFailure wrote scrub-failed; before monitor latched it, the
+    //   operator locked the pool and runs `braid ack`.
+    #[test]
+    fn ack_offline_scrub_failed_flag_no_latch_clears_flag_not_pool_not_mounted() {
+        let (_dir, paths) = isolated_paths();
+        std::fs::write(paths.scrub_failed(), b"").unwrap();
+
+        let result = cmd_ack_impl(
+            &AckPanicRunner,
+            &ack_fs_not_mounted(),
+            &ack_mp(),
+            &paths,
+            &ack_noop_beeper,
+        );
+
+        assert!(
+            result.is_ok(),
+            "offline scrub-failed-flag ack must succeed, got {result:?}"
+        );
+        assert!(
+            !paths.scrub_failed().exists(),
+            "scrub-failed flag must be removed"
+        );
+        assert!(
+            !paths.acked_stats_json().exists(),
+            "scrub-failed-only offline ack must not write acked-stats"
+        );
+    }
+
+    // Intent: Offline ack does not let a scrub-failed flag written during probing
+    //   turn an empty entry snapshot into an acknowledged alert.
+    // Why it exists: onFailure is not under the pool lock, so it can fire while
+    //   probe_pool_alerts reads mountinfo. ack snapshots scrub_failed_active at
+    //   entry (before the probe); a post-probe read would consume the late flag
+    //   and hide it from the next monitor cycle. Mirrors the smartd snapshot-race.
+    // Scenario: pool is offline with no alerts at ack entry, but onFailure writes
+    //   the flag while ack is probing the mount point.
+    #[test]
+    fn ack_offline_does_not_consume_scrub_failed_flag_arriving_during_probe() {
+        let (_dir, paths) = isolated_paths();
+        let fs = ack_offline_fs_that_touches_scrub_failed(&paths);
+
+        let result = cmd_ack_impl(&AckPanicRunner, &fs, &ack_mp(), &paths, &ack_noop_beeper);
+
+        assert!(
+            matches!(result, Err(AckError::PoolNotMounted)),
+            "empty offline snapshot must refuse, got {result:?}"
+        );
+        assert!(
+            paths.scrub_failed().exists(),
+            "late scrub-failed flag must remain for the next monitor cycle"
+        );
+        assert!(
+            !paths.alert_latch_json().exists(),
+            "ack must not create a latch"
+        );
+        assert!(
+            !paths.acked_stats_json().exists(),
+            "empty offline ack must not create acked-stats"
+        );
+    }
+
+    // Intent: Offline cleanup removes a scrub-failed flag written during probing
+    //   when the entry snapshot already had a latched ScrubFailed cause.
+    // Why it exists: the crash-recovery arm treats a latched ScrubFailed as an
+    //   active source even if the flag was absent at entry, so `remove_scrub_failed`
+    //   must be driven by `latch_had_scrub_failed`, not by `scrub_failed_active`
+    //   alone. Mirrors the smartd second-arm exception.
+    // Scenario: a prior monitor cycle latched ScrubFailed, the flag is absent at
+    //   ack entry, and onFailure writes it again during the offline probe.
+    #[test]
+    fn ack_offline_with_scrub_failed_latch_cleans_mid_probe_flag() {
+        let (_dir, paths) = isolated_paths();
+        ack_write_latch(&paths, vec![AlertCause::ScrubFailed]);
+        let fs = ack_offline_fs_that_touches_scrub_failed(&paths);
+
+        let result = cmd_ack_impl(&AckPanicRunner, &fs, &ack_mp(), &paths, &ack_noop_beeper);
+
+        assert!(
+            result.is_ok(),
+            "offline scrub-failed-latch ack should succeed, got {result:?}"
+        );
+        assert!(!paths.alert_latch_json().exists(), "latch must be removed");
+        assert!(
+            !paths.scrub_failed().exists(),
+            "latched ScrubFailed cleanup must remove the mid-probe flag"
         );
     }
 

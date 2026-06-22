@@ -98,7 +98,7 @@ This is the **canonical exit-code table** for `braid monitor`. ADR 014 owns the 
 | Exit | Meaning | Wrapper action |
 |------|---------|----------------|
 | 0 | Healthy, pool-offline, or pool-lock-contended cycle | nothing |
-| 1 | Critical alert active (btrfs device errors, missing device, SMART, or fail-closed `ComputationError`) | start `braid-alert.service` (beeps) |
+| 1 | Critical alert active (btrfs device errors, missing device, SMART, latched `ScrubFailed`, or fail-closed `ComputationError`) | start `braid-alert.service` (beeps) |
 | 3 | Warning-only alert active (ENOSPC risk) | start `braid-alert-advisory.service` (`alertCommand` only, no beep) |
 | 2 | pre-`cmd_monitor` setup failure (pool-lock I/O, config load); never emitted by `cmd_monitor` itself | log `braid monitor failed` to the journal |
 
@@ -116,6 +116,9 @@ Periodic scrub (default: monthly). Uses a timer-lifecycle pattern distinct from 
 - `Persistent=true` + `AccuracySec=1d`. When the timer activates (pool unlock), systemd compares the last-trigger stamp against `OnCalendar`. If a scrub was overdue during the offline period, it fires immediately.
 - `braid-scrub.service` is the only foreground scrub runner. It is `Type=simple`; its internal `braid scrub-resume-or-start --mount <mount>` ExecStart resumes saved scrub progress first, then starts a fresh scrub only when btrfs reports nothing resumable.
 - `braid-scrub.service` uses a shared `ExecStop` cancel script -- same pattern as the nixpkgs btrfs scrub service. This cancels in-flight scrub on lock or shutdown through `btrfs scrub cancel`, leaving btrfs-progs' `/var/lib/btrfs/scrub.status.<fsid>` progress file available for the next resume.
+- **Failure alerting (`onFailure` + clean-teardown contract).** `braid-scrub.service` declares `onFailure = [ braid-scrub-failed.service ]` (gated on `monitor.enable`, so there is no dangling unit reference when the monitor does not exist) and `SuccessExitStatus = [ 3 ]`. A genuinely failed scrub fails the unit and fires `onFailure`, which writes the `scrub-failed` flag and starts the beeper (see [ADR 014](014-alerts.md#two-detection-sources-one-alert-model)). Two carve-outs make this safe:
+  - **A cancelled scrub is not a failure.** `braid lock`/suspend/shutdown cancel the in-flight scrub, and btrfs exits **1** for a cancel -- *indistinguishable from a genuine failure* by exit code or by scrub status (btrfs sets `canceled = !!ret`, so a fatal error also renders as `aborted`). So the `ExecStop` script writes a cancel-request marker (`/var/lib/braid/scrub-cancel-requested`) **before** issuing the cancel, and `scrub-resume-or-start` keys off it: marker present at the post-exit check -> exit 0 (clean, resumable); marker absent -> exit non-zero (genuine failure -> `onFailure`). The runner removes any stale marker at entry, and that cleanup is **fail-closed** -- if it cannot guarantee a clean slate (an un-removable marker), the run errors out and alerts rather than risk reading a later genuine exit 1 as a cancel. Scrub status is never consulted; the marker is the sole discriminator. lock/suspend/shutdown therefore never leave the unit `failed`.
+  - **Corruption found is not an execution failure.** btrfs exits **3** when a scrub completes but finds uncorrectable errors. `SuccessExitStatus=3` declares that a service success, so corruption routes to the monitor's `BtrfsDeviceErrors` device-stats poll (ADR 014), never to `onFailure`. This also fixes a latent bug where such a scrub silently left the unit `failed`. Only exit 3 is whitelisted; genuine failures (exit 1, no marker) still fail the unit.
 - `braid-scrub-resume-trigger.service` is the pool-online predicate-and-poke path. It is `Type=oneshot`, `wantedBy`, `BindsTo`, and `After` `braid-online.service`; it runs internal `braid scrub-needs-resume --mount <mount>` and starts `braid-scrub.service` with `systemctl start --no-block` only when saved progress is resumable.
 - The scrub service and resume trigger use `BindsTo` + `After` `braid-online.service`. On shutdown or `systemctl stop braid-online.service`, systemd stops them before `braid lock` runs.
 - `ConditionPathIsMountPoint` on the scrub service and trigger is defense-in-depth.
@@ -125,7 +128,7 @@ Periodic scrub (default: monthly). Uses a timer-lifecycle pattern distinct from 
 
 ### braid-alert.service — notification
 
-Started by monitor on error detection. Beeps via PC speaker (if enabled) and/or runs a custom alert command. Stopped by `braid ack`.
+Started by monitor on error detection, and by `braid-scrub-failed.service` (the scrub unit's `onFailure`) so a failed scrub beeps immediately without waiting for the next monitor cycle. Beeps via PC speaker (if enabled) and/or runs a custom alert command. Stopped by `braid ack`.
 
 ## Rust dispatch as synchronization layer
 

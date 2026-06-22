@@ -12,6 +12,14 @@ let
   btrfsProgs = cfg.packages.btrfsProgs;
   utilLinux = cfg.packages.utilLinux;
   scrubCancelScript = pkgs.writeShellScript "braid-scrub-maybe-cancel" ''
+    # Record cancel intent BEFORE anything else -- before the mountpoint
+    # early-exit and before the cancel ioctl -- so the marker is present on
+    # every deliberate stop (braid lock, suspend, shutdown, mount-gone race).
+    # btrfs exits 1 for both a cancelled scrub and a genuine failure, so
+    # scrub-resume-or-start keys off this marker to exit 0 on a deliberate
+    # cancel and let onFailure fire only on a real failure. See ADR 018.
+    touch /var/lib/braid/scrub-cancel-requested
+
     # If pool is already unmounted during shutdown race, nothing remains to cancel.
     ${utilLinux}/bin/mountpoint -q ${cfg.mountPoint} || exit 0
 
@@ -82,12 +90,25 @@ in
       before = [ "sleep.target" ];
       bindsTo = [ "braid-online.service" ];
       after = [ "braid-online.service" ];
+      # Alert on a genuinely failed scrub. Gated on monitor.enable so there is
+      # no dangling unit reference when braid-scrub-failed.service (and the
+      # braid-alert.service it starts) do not exist. A deliberate cancel
+      # (lock/suspend/shutdown) exits 0 via the cancel-request marker, and
+      # SuccessExitStatus=3 keeps scrub-found corruption off this path, so
+      # onFailure fires only on a real failed-to-run/complete scrub. See ADR 018.
+      onFailure = lib.mkIf cfg.monitor.enable [ "braid-scrub-failed.service" ];
       unitConfig.ConditionPathIsMountPoint = cfg.mountPoint;
       serviceConfig = {
         # simple (not oneshot) so ExecStop is invoked on stop.
         Type = "simple";
         Nice = 19;
         IOSchedulingClass = "idle";
+        # btrfs exit 3 = uncorrectable errors found, scrub COMPLETED. Declare it
+        # a service success so corruption never reaches onFailure -- it alerts
+        # via the monitor's device-stats poll (ADR 014), and this also fixes a
+        # latent bug where such a scrub silently left the unit `failed`. Only
+        # exit 3 is whitelisted; genuine failures (exit 1) still fail the unit.
+        SuccessExitStatus = [ 3 ];
         # Scheduled/manual scrub: resume saved progress first; start fresh
         # only when btrfs reports nothing resumable.
         ExecStart = "${braidWrapped}/bin/braid scrub-resume-or-start --mount ${cfg.mountPoint}";

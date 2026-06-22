@@ -1071,6 +1071,11 @@
               braid = linuxCrane.braid-cli-unwrapped;
             }
           );
+          scrub-alert = pkgs.testers.nixosTest (
+            import ./tests/module/scrub-alert.nix {
+              braid = linuxCrane.braid-cli-unwrapped;
+            }
+          );
           lock-stops-bound-consumers = pkgs.testers.nixosTest (
             import ./tests/module/lock-stops-bound-consumers.nix {
               braid = linuxCrane.braid-cli-unwrapped;

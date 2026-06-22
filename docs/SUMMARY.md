@@ -82,6 +82,7 @@
 - [LUKS unlock](internals/luks-unlock.md)
 - [Device disappearance](internals/tool-behavior/device-disappearance.md)
 - [smartd alert conditions](internals/tool-behavior/smartd-alerts.md)
+- [Scrub-failure alerts](internals/tool-behavior/scrub-failure-alerts.md)
 - [SATA hot-unplug](internals/real-world/sata-hot-unplug.md)
 - [btrfs balance profiles](internals/btrfs/balance-profiles.md)
 - [btrfs balance soft flag](internals/btrfs/balance-soft.md)

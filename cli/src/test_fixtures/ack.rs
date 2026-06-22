@@ -157,6 +157,47 @@ impl Filesystem for MountedFsThatTouchesSmartd<'_> {
     }
 }
 
+/// Offline mountinfo probe that writes `scrub-failed` mid-probe -- the
+/// scrub-failed analog of `OfflineFsThatTouchesSmartd`, since
+/// `braid-scrub-failed.service` (onFailure) is not under the pool lock and can
+/// fire while ack is probing the mount point.
+struct OfflineFsThatTouchesScrubFailed<'a> {
+    paths: &'a StatePaths,
+}
+
+impl Filesystem for OfflineFsThatTouchesScrubFailed<'_> {
+    fn exists(&self, _path: &str) -> bool {
+        false
+    }
+
+    fn is_block_device(&self, _path: &str) -> bool {
+        false
+    }
+
+    fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
+        assert_eq!(path, "/proc/self/mountinfo");
+        std::fs::write(self.paths.scrub_failed(), b"").unwrap();
+        Ok(String::new())
+    }
+
+    fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
+        Ok(vec![])
+    }
+
+    fn create_dir_all(&self, _path: &str) -> Result<(), std::io::Error> {
+        unreachable!(
+            "OfflineFsThatTouchesScrubFailed: read-only fixture; create_dir_all must never be called"
+        )
+    }
+}
+
+/// Offline mountinfo probe that writes `scrub-failed` mid-probe.
+pub(crate) fn ack_offline_fs_that_touches_scrub_failed<'a>(
+    paths: &'a StatePaths,
+) -> impl Filesystem + 'a {
+    OfflineFsThatTouchesScrubFailed { paths }
+}
+
 /// Canonical ack-test mount point shared by the ack runner outputs.
 pub(crate) fn ack_mp() -> MountPoint {
     MountPoint::new("/mnt/storage".to_owned())

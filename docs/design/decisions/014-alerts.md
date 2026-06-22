@@ -26,6 +26,7 @@ A single shared computation produces an `AlertState` consumed by all surfaces �
 - `BtrfsDeviceErrors { devid }` — non-zero btrfs device stat counters above acked baseline, excluding alert-local missing devids
 - `MissingDevice { devid }` — device missing from pool
 - `SmartdAlert` — smartd SMART health warning
+- `ScrubFailed` — the scheduled maintenance scrub (`braid-scrub.service`) failed to run or complete (btrfs internal error, a transient device error that aborted the scrub, ENOSPC on metadata, or a spawn failure). Distinct from scrub-*found* corruption, which still alerts via `BtrfsDeviceErrors` through the device-stats poll (see [Two detection sources](#two-detection-sources-one-alert-model)). Flag-driven like `SmartdAlert`; serializes as `{"type":"scrub_failed"}`
 - `ComputationError { detail }` — probe or parse failed before a structured cause could be determined
 - `EnospcRisk { margin, count_below, device_count }` — pool is one disk-loss away from RAID1 chunk-pair ENOSPC (cannot allocate the chunk pairs to restore redundancy). `margin` is the signed risk magnitude (negative = at-risk depth); the cause deliberately carries no pool identity, so the public `status --json` cause stays a clean risk descriptor and keying lives in `enospc-ack.json` (see [Severity tiers and the ENOSPC baseline](#severity-tiers-and-the-enospc-baseline))
 
@@ -33,7 +34,11 @@ The status banner is cause-neutral ("disk health issue detected"); cause details
 
 ### Two detection sources, one alert model
 
-braid owns btrfs device stats + missing device detection. smartd owns SMART monitoring and writes a flag file (`/var/lib/braid/smartd-alert`) when triggered. The shared computation checks btrfs stats, missing devices, and smartd.
+braid owns btrfs device stats + missing device detection. smartd owns SMART monitoring and writes a flag file (`/var/lib/braid/smartd-alert`) when triggered. A third event source is the scheduled scrub: `braid-scrub.service`'s `onFailure` runs `braid-scrub-failed.service`, which writes `/var/lib/braid/scrub-failed`. The shared computation checks btrfs stats, missing devices, the smartd flag, and the scrub-failed flag.
+
+This `ScrubFailed` source covers scrub *execution* failure only. Scrub-*found* corruption is deliberately **not** raised here: an uncorrectable-error scrub completes (btrfs exit 3, declared a service success via `SuccessExitStatus=3`, so `onFailure` never fires), and the corruption it logged into the per-device counters already reaches the operator via the `BtrfsDeviceErrors` device-stats poll. A separate scrub-status probe would be redundant with that pipeline — that long-standing note applies to corruption, not to execution failure.
+
+The whole `ScrubFailed` pipeline is gated on `braid.monitor.enable`: the `onFailure` reference, `braid-scrub-failed.service`, the latch, and `braid ack` all live behind the monitor. Running `autoScrub` without the monitor is unusual but legitimate (an operator who does their own monitoring), so it is a build-time **warning**, not an assertion: braid emits a `warnings` entry for the `autoScrub.enable && !monitor.enable` combination noting that neither a failed scrub nor scrub-discovered corruption will raise any alert.
 
 ### All five btrfs device stat counters trigger alerts
 
@@ -54,11 +59,13 @@ Alerts persist until `braid ack` — even if the triggering condition disappears
 
 ### Ack snapshots gating inputs before probing
 
-`cmd_ack` reads the alert latch, the smartd flag (`smartd-alert`), and the ack cleanup-pending sentinel (`alert-cleanup-pending`) once at function entry, before `probe_pool_alerts`. Every decision in that ack -- the gate that decides whether to proceed, the cleanup-only retry branch, and the cleanup that removes alert files -- references that single snapshot. If the sentinel is the only live signal, `cmd_ack` runs a cleanup-only retry branch before `probe_pool_alerts` so recovery does not depend on probe success and does not rewrite the acknowledged baseline. The alert probe is devid-keyed and intentionally does not depend on LUKS UUID identity or pool FSID. The pool lock at `/run/braid-pool.lock` already serializes monitor vs ack vs add/remove writers, but the smartd hook is intentionally unlocked, so a per-ack snapshot is the only mechanism that gives ack a coherent view of smartd state.
+`cmd_ack` reads the alert latch, the smartd flag (`smartd-alert`), the scrub-failed flag (`scrub-failed`), and the ack cleanup-pending sentinel (`alert-cleanup-pending`) once at function entry, before `probe_pool_alerts`. Every decision in that ack -- the gate that decides whether to proceed, the cleanup-only retry branch, and the cleanup that removes alert files -- references that single snapshot. If the sentinel is the only live signal, `cmd_ack` runs a cleanup-only retry branch before `probe_pool_alerts` so recovery does not depend on probe success and does not rewrite the acknowledged baseline. The alert probe is devid-keyed and intentionally does not depend on LUKS UUID identity or pool FSID. The pool lock at `/run/braid-pool.lock` already serializes monitor vs ack vs add/remove writers, but the smartd and scrub-failed hooks are intentionally unlocked, so a per-ack snapshot is the only mechanism that gives ack a coherent view of that flag state.
 
 The smartd flag is cleared during cleanup when either the snapshot observed the flag active or the snapshot's latch carried a `SmartdAlert` cause. The first arm covers the normal "flag present, ack silences it" case. The second arm is an explicit exception for the crash-recovery case where a prior cycle latched `SmartdAlert` but the flag was already absent at snapshot, such as a partially-applied earlier ack, manual state, or filesystem-level divergence. The user's ack is aimed at the latched smartd source, so a flag that the smartd hook writes during the probe is part of that source and is cleared.
 
 A flag that exists at cleanup time when the snapshot saw neither active smartd state nor a latched `SmartdAlert` cause arrived after the snapshot and is left in place: the next monitor cycle is responsible for latching it cleanly.
+
+The scrub-failed flag follows the identical two-arm rule against `ScrubFailed`: cleared when the snapshot saw the flag active or the latch carried `ScrubFailed`, and otherwise preserved for the next monitor cycle.
 
 ### Ack state keyed by btrfs devid
 
@@ -82,7 +89,7 @@ Checks state and returns an exit code. Does not start/stop services. The systemd
 
 The exit-code → wrapper-action numbers are owned by [ADR 018's canonical exit-code table](018-systemd-lifecycle.md#braid-monitortimer--braid-monitorservice--health-polling), so the two Active ADRs cannot drift. This section owns the severity → beep *semantics* that decide which number `cmd_monitor` returns:
 
-- The audible beep is reserved for **Critical** causes. `BtrfsDeviceErrors`, `MissingDevice`, `SmartdAlert`, and `ComputationError` are Critical (`ComputationError` is fail-closed/indeterminate, so it must beep). A Critical alert reports exit 1.
+- The audible beep is reserved for **Critical** causes. `BtrfsDeviceErrors`, `MissingDevice`, `SmartdAlert`, `ScrubFailed`, and `ComputationError` are Critical (`ComputationError` is fail-closed/indeterminate, so it must beep; a failed scrub beeps exactly like the smartd source it mirrors). A Critical alert reports exit 1.
 - `EnospcRisk` is the only **Warning** cause: it notifies via `alertCommand` + `braid status` but does not beep, so the operator is not trained to mute the channel built for a dying disk. A Warning-only cycle reports exit 3.
 - A mixed Warning+Critical cycle reports the Critical exit (1): `AlertState::severity()` returns the max over causes.
 
@@ -153,7 +160,7 @@ This preserves "latched until ack" even when the on-disk state is unreadable: th
 
 #### Cleanup ordering and retry-on-failure
 
-Ack cleanup preserves three invariants. First, the beeper stop hook is attempted before any fallible cleanup operation; the hook is best-effort, so the invariant is that the stop attempt runs, not that sound was proven stopped. Second, destructive removals run in `smartd-alert` -> `alert-latch.json` -> `alert-latch.json.corrupt` order, so the corrupt sidecar leaves last and the forensic guarantee above is preserved across cleanup failures. Third, ack writes `alert-cleanup-pending` after the stop hook and before the first destructive step, then clears it only after the last destructive step succeeds.
+Ack cleanup preserves three invariants. First, the beeper stop hook is attempted before any fallible cleanup operation; the hook is best-effort, so the invariant is that the stop attempt runs, not that sound was proven stopped. Second, destructive removals run in `smartd-alert` -> `scrub-failed` -> `alert-latch.json` -> `alert-latch.json.corrupt` order, so the corrupt sidecar leaves last and the forensic guarantee above is preserved across cleanup failures. Third, ack writes `alert-cleanup-pending` after the stop hook and before the first destructive step, then clears it only after the last destructive step succeeds.
 
 `CleanupFailed` recovery has two cases. If creating `alert-cleanup-pending` itself fails, no destructive removal has run, so the original entry signals are byte-identical and the retry is driven by the normal ack path. If marker creation succeeded and a later step failed, the sentinel remains on disk. `cmd_ack` consults that sentinel before probing; when it is the only live signal, the hoisted cleanup-only branch reruns cleanup without `probe_pool_alerts`, without runner requests, and without rewriting `acked-stats.json`. Either path makes re-running `braid ack` after fixing the I/O fault genuinely idempotent.
 
@@ -166,6 +173,7 @@ For genuine offline ack, the persistence layer has an asymmetry by cause type:
 - `MissingDevice { devid }` -- offline ack reads the latch and applies `missing_acked = true` to that devid in `acked-stats.json` (insert-or-update; existing `device_stats` baselines are preserved). The next mounted monitor cycle suppresses the cause, and `reconcile_acked_stats` self-heals `missing_acked` back to `false` if the device returns.
 - `BtrfsDeviceErrors { devid }` -- offline ack refuses with an actionable error ("cannot ack btrfs device errors while pool is offline -- unlock the pool first"). The counter baseline that suppresses re-firing is the *current* output of `btrfs device stats`, which requires a mounted pool. Refusing the *whole* ack (not partial-acking other causes) avoids leaving the operator in an "I acked but it still says ALERT" state.
 - `SmartdAlert` -- offline ack removes the smartd flag file (the authoritative trigger source); no `acked-stats.json` write is needed.
+- `ScrubFailed` -- offline ack removes the scrub-failed flag file (mirroring `SmartdAlert`); no `acked-stats.json` write is needed. It falls through the `BtrfsDeviceErrors` offline refusal and the `MissingDevice` filter unchanged.
 - `ComputationError` -- offline ack removes the latch; the cause re-fires on the next monitor cycle only if the underlying computation still fails.
 - `EnospcRisk` -- offline ack is allowed (it carries no monotonic counter, unlike `BtrfsDeviceErrors`) and clears the latch, but writes **no** baseline: offline ack cannot probe the live `pool_key`, and a keyless baseline would be invalidated anyway. If the pool remounts still at-risk, the monitor re-fires `EnospcRisk` once at the quiet Warning level (exit 3, no beep) and the next mounted ack establishes the keyed baseline. Acceptable for a non-beeping advisory; avoids an offline dependency on `pool.json` membership.
 

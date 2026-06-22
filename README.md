@@ -170,10 +170,10 @@ every command: [command reference](docs/commands/).
   `nixos-rebuild`; membership lives in UUID-keyed `/var/lib/braid/pool.json`
 - **Offline-write safety** -- the unmounted mountpoint is sealed immutable, so
   stray writes fail with `EPERM` instead of landing on the root disk
-- **Monitoring** -- btrfs error counters and smartd health checks raise
-  alerts that beep the PC speaker until acknowledged (`braid ack`); proactive
-  capacity (ENOSPC) risk raises a quieter non-beeping warning. Either can run a
-  custom notify command
+- **Monitoring** -- btrfs error counters, smartd health checks, and failed
+  scheduled scrubs raise alerts that beep the PC speaker until acknowledged
+  (`braid ack`); proactive capacity (ENOSPC) risk raises a quieter non-beeping
+  warning. Either can run a custom notify command
 - **Fail-closed mutations** -- an interrupted command leaves a marker that
   blocks further mutations until `braid recover` finishes the job or refuses
 - **UPS safety** -- with UPS support enabled, NUT drives orderly poweroff on low battery, mutating commands refuse to start unless UPS utility power is verified, and `braid ups status` / the TUI show live UPS state
