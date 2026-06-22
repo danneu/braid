@@ -6,6 +6,7 @@
 }:
 let
   cfg = config.braid;
+  inherit (import ./hardening.nix { }) base;
   inherit (import ./constants.nix) braidOnlineStopTimeoutSecs;
   braidWrapped = import ./wrapper.nix { inherit cfg pkgs lib; };
   cryptsetup = cfg.packages.cryptsetup;
@@ -52,6 +53,7 @@ in
       # to exist before the CLI has ever run.
       "d /var/lib/braid 0750 root root -"
       "d ${cfg.mountPoint} 0755 root root -"
+      "f /run/braid-pool.lock 0600 root root -"
     ]
     ++ lib.optionals cfg.autoUnlock.enable [
       # Locked parent -- non-root cannot traverse into the mounted USB.
@@ -126,7 +128,11 @@ in
       conflicts = [ "sleep.target" ];
       before = [ "sleep.target" ];
       unitConfig.ConditionPathIsMountPoint = cfg.mountPoint;
-      serviceConfig.Type = "oneshot";
+      serviceConfig = base // {
+        Type = "oneshot";
+        CapabilityBoundingSet = "";
+        RestrictAddressFamilies = [ "AF_UNIX" ];
+      };
       path = [
         braidWrapped
         pkgs.systemd
@@ -240,7 +246,13 @@ in
       ];
       before = [ "braid-auto-unlock.service" ];
       unitConfig.ConditionPathIsMountPoint = "!${cfg.mountPoint}";
-      serviceConfig.Type = "oneshot";
+      serviceConfig = base // {
+        Type = "oneshot";
+        ReadWritePaths = [ (builtins.dirOf cfg.mountPoint) ];
+        CapabilityBoundingSet = [ "CAP_LINUX_IMMUTABLE" ];
+        PrivateNetwork = true;
+        PrivateDevices = true;
+      };
       path = [ braidWrapped ];
       script = "braid seal-mountpoint";
     };

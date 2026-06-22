@@ -22,6 +22,17 @@ machine.wait_for_unit("multi-user.target", timeout=120)
 
 passphrase = "testpassphrase"
 
+
+def show(unit, prop):
+    return machine.succeed(
+        "systemctl show {} -p {} --value".format(unit, prop)
+    ).strip()
+
+
+def unit_content(unit):
+    return machine.succeed("systemctl cat {}".format(unit))
+
+
 # --- Subtest 1: Timer active at boot ---
 
 with subtest("Monitor timer is active at boot"):
@@ -36,11 +47,33 @@ with subtest("braid-monitor.service carries the statx mount-point gate"):
     # mounted-but-anomalous beep (see ADR 018). Subtests 3/9 below pass with or
     # without the gate (offline -> exit 0 -> no beep), so without this
     # assertion the gate could be deleted silently. Mirrors auto-scrub.py.
-    unit = machine.succeed("systemctl cat braid-monitor.service")
+    unit = unit_content("braid-monitor.service")
     assert "ConditionPathIsMountPoint=/mnt/storage" in unit, (
         "braid-monitor.service must carry ConditionPathIsMountPoint; got:\n"
         + unit
     )
+
+with subtest("braid-monitor.service carries the root sandbox"):
+    unit = unit_content("braid-monitor.service")
+    assert "ProtectSystem=strict" in unit, (
+        "braid-monitor.service must use ProtectSystem=strict:\n" + unit
+    )
+    assert "ReadWritePaths=/var/lib/braid" in unit, (
+        "braid-monitor.service must keep braid state writable:\n" + unit
+    )
+    assert "/run/braid-pool.lock" in unit, (
+        "braid-monitor.service must keep the pool lock writable:\n" + unit
+    )
+    assert "CapabilityBoundingSet=CAP_SYS_ADMIN" in unit, (
+        "braid-monitor.service must keep only device-mapper status capability:\n"
+        + unit
+    )
+    assert "RestrictAddressFamilies=AF_UNIX" in unit, (
+        "braid-monitor.service must restrict to AF_UNIX:\n" + unit
+    )
+    assert show("braid-monitor.service", "NoNewPrivileges") == "yes"
+    assert show("braid-monitor.service", "PrivateDevices") == "no"
+    assert "systemd-tmpfiles-setup.service" in show("braid-monitor.service", "After")
 
 # --- Subtest 3: No alert side effects before mount ---
 
@@ -58,6 +91,22 @@ with subtest("Unlock pool via braid-pool.target"):
     machine.succeed("systemctl start braid-pool.target")
     machine.succeed("mountpoint -q /mnt/storage")
     machine.succeed("systemctl is-active braid-online.service")
+
+with subtest("monitor sandbox lock bind mount contends with host namespace"):
+    flock_bin = machine.succeed("command -v flock").strip()
+    sleep_bin = machine.succeed("command -v sleep").strip()
+    machine.succeed(
+        "systemd-run --unit=braid-flock-probe "
+        "-p ProtectSystem=strict "
+        "-p ReadWritePaths=/run/braid-pool.lock "
+        "--service-type=exec "
+        f"{flock_bin} /run/braid-pool.lock {sleep_bin} 30"
+    )
+    machine.wait_until_succeeds("systemctl is-active braid-flock-probe.service")
+    machine.fail(f"{flock_bin} -n /run/braid-pool.lock {sleep_bin} 0")
+    machine.succeed("systemctl stop braid-flock-probe.service")
+    machine.wait_until_fails("systemctl is-active braid-flock-probe.service")
+    machine.succeed(f"{flock_bin} -n /run/braid-pool.lock {sleep_bin} 0")
 
 # --- Subtest 5: Healthy monitor run produces no alert ---
 

@@ -14,6 +14,7 @@
 let
   cfg = config.braid;
   fc = cfg.fanControl;
+  inherit (import ./hardening.nix { }) base;
 in
 {
   options.braid.fanControl = {
@@ -158,16 +159,9 @@ in
     systemd.services.hddfancontrol-braid = {
       description = "HDD fan control (braid)";
       wantedBy = [ "multi-user.target" ];
-      serviceConfig = {
-        # Security hardening (matches nixpkgs hddfancontrol module).
+      serviceConfig = base // {
         CPUSchedulingPolicy = "rr";
         CPUSchedulingPriority = 49;
-        ProtectSystem = "strict";
-        PrivateTmp = true;
-        ProtectHome = true;
-        SystemCallArchitectures = "native";
-        MemoryDenyWriteExecute = true;
-        NoNewPrivileges = true;
         # Crash recovery: restart on mid-probe drive removal or transient
         # hwmon read errors during hot-swap events.
         Restart = "always";
@@ -214,8 +208,10 @@ in
 
     systemd.services.braid-fan-reload = {
       description = "Restart hddfancontrol after SATA drive topology change";
-      serviceConfig = {
+      serviceConfig = base // {
         Type = "oneshot";
+        CapabilityBoundingSet = "";
+        RestrictAddressFamilies = [ "AF_UNIX" ];
         # Debounce: SATA hotplug produces multiple udev events in quick
         # succession. While this oneshot is active (in the sleep), further
         # start requests are no-ops -- events collapse into one restart.

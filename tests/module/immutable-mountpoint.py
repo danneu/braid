@@ -57,6 +57,12 @@ def doctor_check_status(node, name):
     raise AssertionError(f"check {name} not found in doctor report: {out}")
 
 
+def show(node, unit, prop):
+    return node.succeed(
+        "systemctl show {} -p {} --value".format(unit, prop)
+    ).strip()
+
+
 def unlock(node):
     node.succeed(f"printf '%s\\n' {passphrase} | braid unlock --passphrase-stdin")
     node.succeed(f"mountpoint -q {MP}")
@@ -85,6 +91,22 @@ with subtest("boot seal makes the offline mountpoint immutable"):
     # Positive half of the doctor wiring: the check is registered, probes the
     # configured path, and stays quiet (ok, not warn) when the invariant holds.
     assert doctor_check_status(machine, "mountpoint_immutable") == "ok"
+
+with subtest("seal unit carries the root sandbox"):
+    unit = machine.succeed("systemctl cat braid-seal-mountpoint.service")
+    assert "ProtectSystem=strict" in unit, (
+        "seal unit must use ProtectSystem=strict:\n" + unit
+    )
+    assert "ReadWritePaths=/mnt" in unit, (
+        "seal unit must keep the mountpoint parent writable without making "
+        "the guarded path a private mount root:\n" + unit
+    )
+    assert "CapabilityBoundingSet=CAP_LINUX_IMMUTABLE" in unit, (
+        "seal unit must keep only immutable-flag capability:\n" + unit
+    )
+    assert show(machine, "braid-seal-mountpoint.service", "PrivateNetwork") == "yes"
+    assert show(machine, "braid-seal-mountpoint.service", "PrivateDevices") == "yes"
+    assert show(machine, "braid-seal-mountpoint.service", "NoNewPrivileges") == "yes"
 
 # --- Case 6: tmpfiles issues no chmod/chown against the sealed dir ---
 

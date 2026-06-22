@@ -165,6 +165,18 @@ with subtest("defaults: scrub resume trigger is loaded and lifecycle-bound"):
         "Expected ConditionPathIsMountPoint=/mnt/storage in trigger unit, got:\n"
         + trigger_content
     )
+    assert "ProtectSystem=strict" in trigger_content, (
+        "Expected ProtectSystem=strict in trigger unit, got:\n"
+        + trigger_content
+    )
+    assert "CapabilityBoundingSet=" in trigger_content, (
+        "Expected empty CapabilityBoundingSet in trigger unit, got:\n"
+        + trigger_content
+    )
+    assert "RestrictAddressFamilies=AF_UNIX" in trigger_content, (
+        "Expected AF_UNIX-only address families in trigger unit, got:\n"
+        + trigger_content
+    )
     conflicts = show(defaults, TRIGGER_SERVICE, "Conflicts")
     assert "sleep.target" in conflicts, (
         "Expected sleep.target in Conflicts, got: " + conflicts

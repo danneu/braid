@@ -20,6 +20,7 @@
 let
   cfg = config.braid;
   ups = cfg.ups;
+  inherit (import ./hardening.nix { }) base;
 in
 {
   options.braid.ups = {
@@ -79,16 +80,19 @@ in
         "upsmon.service"
       ];
       path = [ pkgs.coreutils ];
-      serviceConfig = {
+      serviceConfig = base // {
         Type = "oneshot";
         RemainAfterExit = true;
+        ReadWritePaths = [ "/var/lib/braid" ];
+        CapabilityBoundingSet = "";
+        PrivateNetwork = true;
+        PrivateDevices = true;
         ExecStart = pkgs.writeShellScript "braid-ups-secrets" ''
           set -euo pipefail
           if [ ! -s /var/lib/braid/upsmon.pass ]; then
             umask 077
             head -c 24 /dev/urandom | base64 > /var/lib/braid/upsmon.pass
             chmod 0600 /var/lib/braid/upsmon.pass
-            chown root:root /var/lib/braid/upsmon.pass
           fi
         '';
       };

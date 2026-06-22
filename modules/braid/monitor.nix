@@ -7,7 +7,27 @@
 let
   cfg = config.braid;
   beepEnabled = cfg.monitor.beep;
+  inherit (import ./hardening.nix { }) base;
   braidWrapped = import ./wrapper.nix { inherit cfg pkgs lib; };
+  lightAlert = {
+    NoNewPrivileges = true;
+    ProtectKernelModules = true;
+    ProtectControlGroups = true;
+    ProtectKernelLogs = true;
+    LockPersonality = true;
+    RestrictSUIDSGID = true;
+  };
+  alertProfile = if cfg.monitor.alertCommand == null then base else lightAlert;
+  alertType =
+    if beepEnabled then
+      {
+        Type = "simple";
+      }
+    else
+      {
+        Type = "oneshot";
+        RemainAfterExit = true;
+      };
 
   # Canonical privilege-dropped beep wrapper. This is the SINGLE source of
   # truth for the alert beep argv: both the alert service script and the
@@ -70,6 +90,18 @@ in
 
     boot.kernelModules = lib.mkIf beepEnabled [ "pcspkr" ];
 
+    systemd.services.braid-pcspkr-load = lib.mkIf beepEnabled {
+      description = "Load pcspkr for braid audible alerts";
+      wantedBy = [ "multi-user.target" ];
+      serviceConfig = base // {
+        Type = "oneshot";
+        ProtectKernelModules = false;
+        CapabilityBoundingSet = [ "CAP_SYS_MODULE" ];
+        PrivateNetwork = true;
+        ExecStart = "${pkgs.kmod}/bin/modprobe pcspkr";
+      };
+    };
+
     # beep refuses to run as root — grant the beep group write access to
     # the PC Speaker evdev device so the alert service can beep unprivileged.
     users.groups.beep = lib.mkIf beepEnabled { };
@@ -90,20 +122,10 @@ in
     # --- Alert service ---
     systemd.services.braid-alert = {
       description = "Braid disk health alert (audible beep if enabled)";
-      serviceConfig =
-        if beepEnabled then
-          {
-            Type = "simple";
-          }
-        else
-          {
-            Type = "oneshot";
-            RemainAfterExit = true;
-          };
+      wants = lib.optionals beepEnabled [ "braid-pcspkr-load.service" ];
+      after = lib.optionals beepEnabled [ "braid-pcspkr-load.service" ];
+      serviceConfig = alertType // alertProfile;
       script = ''
-        ${lib.optionalString beepEnabled ''
-          ${pkgs.kmod}/bin/modprobe pcspkr 2>/dev/null || true
-        ''}
         ${lib.optionalString (cfg.monitor.alertCommand != null) ''
           ${cfg.monitor.alertCommand} || true
         ''}
@@ -131,7 +153,7 @@ in
     # form). The Critical/exit-1 path (braid-alert.service) is unchanged.
     systemd.services.braid-alert-advisory = {
       description = "Braid capacity-risk advisory (non-beeping)";
-      serviceConfig = {
+      serviceConfig = alertProfile // {
         Type = "oneshot";
         RemainAfterExit = true;
       };
@@ -153,7 +175,12 @@ in
     # genuine failed-to-run/complete scrub reaches here.
     systemd.services.braid-scrub-failed = {
       description = "Record and announce a failed braid scrub";
-      serviceConfig.Type = "oneshot";
+      serviceConfig = base // {
+        Type = "oneshot";
+        ReadWritePaths = [ "/var/lib/braid" ];
+        CapabilityBoundingSet = "";
+        RestrictAddressFamilies = [ "AF_UNIX" ];
+      };
       script = ''
         touch /var/lib/braid/scrub-failed
         ${pkgs.systemd}/bin/systemctl start braid-alert.service 2>/dev/null || true
@@ -163,12 +190,21 @@ in
     # --- Monitor service (pure detector) ---
     systemd.services.braid-monitor = {
       description = "Poll btrfs device stats for disk errors";
+      after = [ "systemd-tmpfiles-setup.service" ];
       unitConfig.ConditionPathIsMountPoint = cfg.mountPoint;
       # statx-based gate (STATX_ATTR_MOUNT_ROOT), independent of the
       # /proc/self/mountinfo parse `braid monitor` fails closed on -- skips
       # only a confirmed-offline pool, never the mounted-but-anomalous beep.
       # Keep it: removal means wasteful 5-min offline runs. See ADR 018.
-      serviceConfig.Type = "oneshot";
+      serviceConfig = base // {
+        Type = "oneshot";
+        ReadWritePaths = [
+          "/var/lib/braid"
+          "/run/braid-pool.lock"
+        ];
+        CapabilityBoundingSet = [ "CAP_SYS_ADMIN" ];
+        RestrictAddressFamilies = [ "AF_UNIX" ];
+      };
       path = [
         braidWrapped
         cfg.packages.btrfsProgs

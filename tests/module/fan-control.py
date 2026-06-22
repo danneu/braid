@@ -17,15 +17,20 @@ import json
 start_all()
 machine.wait_for_unit("multi-user.target")
 
+
+def show(unit, prop):
+    return machine.succeed(
+        "systemctl show {} -p {} --value".format(unit, prop)
+    ).strip()
+
+
 with subtest("drivetemp kernel module is loaded"):
     machine.succeed("lsmod | grep -q drivetemp")
 
 with subtest("hddfancontrol-braid service has correct arguments"):
     # NixOS generates a wrapper script for `script =` directives. Extract
     # the script path from ExecStart and read it.
-    exec_start = machine.succeed(
-        "systemctl show hddfancontrol-braid.service -p ExecStart --value"
-    ).strip()
+    exec_start = show("hddfancontrol-braid.service", "ExecStart")
     script_path = exec_start.split("path=")[1].split(";")[0].strip()
     script = machine.succeed(f"cat {script_path}")
     assert "-d ata" in script, f"Expected '-d ata' in script:\n{script}"
@@ -45,19 +50,39 @@ with subtest("resolver script references correct platform device and pwm number"
         f"Expected minStart:maxStop suffix on -p arg:\n{script}"
 
 with subtest("hddfancontrol-braid has Restart=always and RestartSec=5s"):
-    restart = machine.succeed(
-        "systemctl show hddfancontrol-braid.service -p Restart --value"
-    ).strip()
+    restart = show("hddfancontrol-braid.service", "Restart")
     assert restart == "always", f"Expected Restart=always, got {restart}"
-    restart_sec = machine.succeed(
-        "systemctl show hddfancontrol-braid.service -p RestartUSec --value"
-    ).strip()
+    restart_sec = show("hddfancontrol-braid.service", "RestartUSec")
     assert restart_sec == "5s", f"Expected RestartUSec=5s, got {restart_sec}"
 
+with subtest("hddfancontrol-braid carries shared hardening without PrivateDevices"):
+    unit = machine.succeed("systemctl cat hddfancontrol-braid.service")
+    assert "ProtectSystem=strict" in unit, (
+        "hddfancontrol-braid must use ProtectSystem=strict:\n" + unit
+    )
+    assert show("hddfancontrol-braid.service", "NoNewPrivileges") == "yes"
+    assert show("hddfancontrol-braid.service", "ProtectHome") == "yes"
+    assert show("hddfancontrol-braid.service", "PrivateTmp") == "yes"
+    assert show("hddfancontrol-braid.service", "MemoryDenyWriteExecute") == "yes"
+    assert "SystemCallArchitectures=native" in unit, (
+        "hddfancontrol-braid must keep native syscall arch:\n" + unit
+    )
+    assert "CPUSchedulingPolicy=rr" in unit, (
+        "hddfancontrol-braid must keep rr scheduling:\n" + unit
+    )
+    assert show("hddfancontrol-braid.service", "PrivateDevices") == "no"
+    assert "RestrictRealtime=" not in unit, (
+        "base hardening must not block rr scheduling:\n" + unit
+    )
+
+with subtest("hddfancontrol-braid script starts inside the sandbox"):
+    machine.wait_until_succeeds(
+        "journalctl -b -u hddfancontrol-braid.service --no-pager "
+        "| grep -q 'expected exactly one PWM path'"
+    )
+
 with subtest("no hddtemp daemon dependency"):
-    after = machine.succeed(
-        "systemctl show hddfancontrol-braid.service -p After --value"
-    ).strip()
+    after = show("hddfancontrol-braid.service", "After")
     assert "hddtemp" not in after, f"hddtemp found in After: {after}"
     machine.fail("systemctl cat hddtemp.service")
 
@@ -65,6 +90,16 @@ with subtest("braid-fan-reload oneshot exists with debounce"):
     unit = machine.succeed("systemctl cat braid-fan-reload.service")
     assert "restart hddfancontrol-braid.service" in unit
     assert "sleep 5" in unit
+    assert "ProtectSystem=strict" in unit, (
+        "braid-fan-reload must use ProtectSystem=strict:\n" + unit
+    )
+    assert "CapabilityBoundingSet=" in unit, (
+        "braid-fan-reload must drop all capabilities:\n" + unit
+    )
+    assert "RestrictAddressFamilies=AF_UNIX" in unit, (
+        "braid-fan-reload must restrict to AF_UNIX:\n" + unit
+    )
+    assert show("braid-fan-reload.service", "NoNewPrivileges") == "yes"
 
 with subtest("udev rules have correct add and remove SATA hotswap rules"):
     rules = machine.succeed(

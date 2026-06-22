@@ -238,5 +238,6 @@ Services that depend on the pool being mounted use one of three patterns:
 - [026-pool-lock-rust-owned.md](026-pool-lock-rust-owned.md) — Rust-owned pool lock and lifecycle synchronization
 - [003-resilient-boot.md](003-resilient-boot.md) — why no hard dependencies
 - [017-runtime-disk-membership.md](017-runtime-disk-membership.md) — lifecycle model context
+- [033-systemd-unit-hardening.md](033-systemd-unit-hardening.md) -- systemd exec sandbox baseline and per-unit exceptions
 - `tests/module/systemd-lifecycle.py` — state machine test suite
 - `tests/repro/btrfs-replace-rejected-during-scrub.py` -- kernel rejects a conflicting mutator during scrub; recovery hint classified

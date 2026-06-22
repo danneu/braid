@@ -114,6 +114,22 @@ with subtest("fail: unlock the pool"):
     fail.succeed("systemctl is-active braid-online.service")
     fail.succeed("mountpoint -q /mnt/storage")
 
+with subtest("fail: scrub failure hook carries the root sandbox"):
+    unit = fail.succeed("systemctl cat braid-scrub-failed.service")
+    assert "ProtectSystem=strict" in unit, (
+        "scrub failure hook must use ProtectSystem=strict:\n" + unit
+    )
+    assert "ReadWritePaths=/var/lib/braid" in unit, (
+        "scrub failure hook must keep braid state writable:\n" + unit
+    )
+    assert "CapabilityBoundingSet=" in unit, (
+        "scrub failure hook must drop all capabilities:\n" + unit
+    )
+    assert "RestrictAddressFamilies=AF_UNIX" in unit, (
+        "scrub failure hook must restrict to AF_UNIX:\n" + unit
+    )
+    assert show(fail, "braid-scrub-failed.service", "NoNewPrivileges") == "yes"
+
 with subtest("fail: a failed scrub (exit 1) leaves the unit failed"):
     fail.succeed("echo 1 > {}".format(SCRUB_EXIT_FILE))
     fail.succeed("rm -f {} {}".format(SCRUB_FAILED_FLAG, ALERT_FIRED))

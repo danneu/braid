@@ -23,6 +23,12 @@ machine.wait_for_unit("upsmon.service", timeout=60)
 machine.wait_for_unit("upsdrv.service", timeout=60)
 
 
+def show(unit, prop):
+    return machine.succeed(
+        "systemctl show {} -p {} --value".format(unit, prop)
+    ).strip()
+
+
 def assert_no_secret(label: str, haystack: str, token: str) -> None:
     assert token not in haystack, f"upsmon token leaked into {label}"
 
@@ -36,6 +42,21 @@ with subtest("Secret file is 0600 root:root outside the Nix store"):
     assert_stat("/var/lib/braid/upsmon.pass", "root:root 600")
     token = machine.succeed("cat /var/lib/braid/upsmon.pass").strip()
     assert token != "", "upsmon token must not be empty"
+
+with subtest("Secret generator carries the root sandbox"):
+    unit = machine.succeed("systemctl cat braid-ups-secrets.service")
+    assert "ProtectSystem=strict" in unit, (
+        "ups secret unit must use ProtectSystem=strict:\n" + unit
+    )
+    assert "ReadWritePaths=/var/lib/braid" in unit, (
+        "ups secret unit must keep braid state writable:\n" + unit
+    )
+    assert "CapabilityBoundingSet=" in unit, (
+        "ups secret unit must drop all capabilities:\n" + unit
+    )
+    assert show("braid-ups-secrets.service", "PrivateNetwork") == "yes"
+    assert show("braid-ups-secrets.service", "PrivateDevices") == "yes"
+    assert show("braid-ups-secrets.service", "NoNewPrivileges") == "yes"
 
 with subtest("Runtime NUT configs are restricted positive controls"):
     assert_stat("/run/nut/upsd.users", "root:root 400")
