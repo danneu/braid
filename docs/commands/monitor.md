@@ -48,7 +48,7 @@ Alerts have two severities. The audible beep is reserved for Critical; a Warning
 
 **Warning (exit 3, no beep -- notifies via `alertCommand` and `braid status`):**
 
-- **ENOSPC risk** -- the pool is one disk-loss away from being unable to allocate the RAID1 chunk pairs needed to restore redundancy. This is the same shared predicate `braid status` and `braid doctor` report, now evaluated proactively each monitor cycle. Acknowledge to silence; it re-fires only if the pool gets materially worse, and re-arms when the risk clears. Best-effort: if the `btrfs device usage` probe fails, only this check is skipped -- it never masks a Critical alert in the same cycle, and never escalates to a beep.
+- **ENOSPC risk** -- the pool is one disk-loss away from being unable to allocate the RAID1 chunk pairs needed to restore redundancy. This is the same shared predicate `braid status` and `braid doctor` report, now evaluated proactively each monitor cycle. Acknowledge to **snooze** the reminder (default 7 days), not resolve it: if the pool is still at risk when the interval elapses, monitor reminds again (and `braid status` shows the advisory the whole time); ack again to re-snooze. It re-arms immediately when the risk clears. Best-effort: if the `btrfs device usage` probe fails, only this check is skipped -- it never masks a Critical alert in the same cycle, and never escalates to a beep.
 
 ## Flags
 
@@ -61,7 +61,7 @@ None. Monitor has no flags -- it reads from the braid config and state files.
 3. Loads the acknowledged-stats baseline (`acked-stats.json`) from a previous `braid ack`. If the file is unreadable or unparseable, monitor fails closed -- it latches a `ComputationError` rather than firing every acknowledged cause against an empty baseline.
 4. Self-heals stale ack state before computing alerts: prunes baseline entries for devices no longer in the pool, and clears the missing-acked flag for any device that was acknowledged missing but is now present again. If the baseline changed, the updated `acked-stats.json` is written immediately; a write failure (e.g. EROFS, ENOSPC) is itself a fail-closed `ComputationError`.
 5. Computes alert causes against the reconciled baseline: btrfs device errors above the baseline, missing/null-underlying devices, the smartd alert flag, and the scrub-failed flag.
-6. Best-effort ENOSPC check: probes `btrfs device usage` and raises an `EnospcRisk` Warning when the pool is one disk-loss from RAID1 chunk-pair exhaustion. A matching `enospc-ack.json` baseline suppresses it unless the pool got materially worse; the baseline is dropped (re-armed) when the risk clears. A probe or parse failure skips only this check.
+6. Best-effort ENOSPC check: probes `btrfs device usage` and raises an `EnospcRisk` Warning when the pool is one disk-loss from RAID1 chunk-pair exhaustion. A matching `enospc-ack.json` snooze marker suppresses it until its reminder deadline elapses, after which it re-fires every cycle until a re-ack; the marker is dropped (re-armed) when the risk clears. A probe or parse failure skips only this check.
 7. Merges the causes into the alert latch (`alert-latch.json`). The latch is sticky: once an alert fires, it stays active until `braid ack` clears it.
 
 ## Alert pipeline

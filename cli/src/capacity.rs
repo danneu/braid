@@ -8,16 +8,6 @@ use crate::parse::types::BtrfsDeviceUsageEntry;
 
 const GIB: u64 = 1 << 30;
 
-/// Re-alert step for an acked-but-worsening ENOSPC risk: the monitor re-fires
-/// only when the live `margin` has fallen this many bytes below the acked
-/// baseline. Half a btrfs data chunk (512 MiB), deliberately *below* the ~1 GiB
-/// threshold rather than equal to it: an at-risk `margin` is bounded in
-/// `[-threshold, 0)` (unallocated and chunk-pair capacity are both >= 0), so a
-/// full-chunk step would push `baseline_margin - step` past the floor and make
-/// the re-fire branch unreachable. Half a chunk keeps "materially worse"
-/// meaningful while still firing as an acked pool fills toward empty.
-pub const ENOSPC_WORSEN_STEP: u64 = GIB / 2;
-
 /// Re-arm threshold for ENOSPC risk: the monitor drops a stored baseline (so a
 /// future recurrence alerts fresh) once the predicate's signed surplus climbs
 /// back to at least this many bytes. One btrfs data chunk (~1 GiB) of hysteresis
@@ -531,8 +521,9 @@ mod tests {
 
     // Intent: a worse pool produces a strictly more-negative margin than a
     //   less-bad one (monotonicity of the risk magnitude).
-    // Why it exists: the monitor's "materially worse" re-alert and re-arm logic
-    //   depend on margin decreasing as the pool fills, not just on the sign.
+    // Why it exists: the monitor's re-arm logic keys off the margin magnitude, not
+    //   just its sign, so margin must move monotonically as the pool fills and
+    //   recovers for the re-arm gate to be reached in order.
     // Scenario: two 2-disk pools differing only in the low device's headroom
     //   (100 MiB vs 10 MiB).
     #[test]
@@ -580,13 +571,12 @@ mod tests {
         );
     }
 
-    // Intent: the ENOSPC hysteresis constants stay pinned -- re-arm at one btrfs
-    //   data chunk of surplus, re-fire at half a chunk of additional deficit.
-    // Why it exists: the monitor's re-alert step and re-arm gate are tuned to
-    //   these exact values. The worsen step MUST stay below the ~1 GiB threshold:
-    //   an at-risk margin is bounded in [-threshold, 0), so a full-chunk step
-    //   would make the re-fire branch unreachable. A silent bump back to 1 GiB
-    //   would quietly kill re-fire; this test fails loudly on that.
+    // Intent: the ENOSPC re-arm gate stays pinned at one btrfs data chunk (~1 GiB)
+    //   of surplus.
+    // Why it exists: the monitor drops a stored snooze marker once the predicate
+    //   margin climbs back to this gate, so a future recurrence alerts fresh. One
+    //   data chunk of hysteresis above the `margin < 0` fire boundary keeps a pool
+    //   hovering at the edge from flapping; a silent change would re-tune re-arm.
     // Scenario: a refactor edits the chunk-size assumption.
     #[test]
     fn enospc_hysteresis_constants_pinned() {
@@ -594,15 +584,6 @@ mod tests {
             ENOSPC_REARM_MARGIN,
             1 << 30,
             "re-arm at one data chunk of surplus"
-        );
-        assert_eq!(
-            ENOSPC_WORSEN_STEP,
-            (1 << 30) / 2,
-            "half a chunk -- below threshold so re-fire stays reachable"
-        );
-        assert!(
-            (ENOSPC_WORSEN_STEP as i64) < ENOSPC_REARM_MARGIN as i64,
-            "worsen step must stay below the threshold for re-fire to be reachable"
         );
     }
 }

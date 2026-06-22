@@ -20,10 +20,6 @@ pub(crate) const ACK_FS_UUID: &str = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
 /// at 1 GiB. Also the `device_size` in the baseline `PoolKey`.
 pub(crate) const ACK_DEVICE_SIZE: u64 = 100 * (1 << 30);
 
-/// Expected ack-time margin for `ack_btrfs_device_usage_atrisk`: device 1 at
-/// 100 MiB unallocated against the 1 GiB threshold.
-pub(crate) const ACK_ATRISK_MARGIN: i64 = 100 * (1 << 20) - (1 << 30);
-
 const MOUNTINFO_EXT4: &str = "36 35 0:32 / /mnt/storage rw,noatime shared:1 - ext4 /dev/sda1 rw\n";
 const MOUNTINFO_BTRFS: &str =
     "36 35 0:32 / /mnt/storage rw,noatime shared:1 - btrfs /dev/mapper/braid-disk1 rw\n";
@@ -378,7 +374,7 @@ pub(crate) fn ack_mounted_probe_runner_with_stale_devid_stats() -> MockRunner {
 
 /// At-risk `btrfs device usage --raw` for the ack pool (devids 1 and 3, matching
 /// the show): device 1 down to 100 MiB unallocated (below the 1 GiB threshold),
-/// device 3 roomy. Margin is `ACK_ATRISK_MARGIN`.
+/// device 3 roomy -- a clearly negative predicate margin.
 fn ack_btrfs_device_usage_atrisk() -> RawCommandOutput {
     mock_ok(
         "btrfs device usage",
@@ -389,6 +385,32 @@ fn ack_btrfs_device_usage_atrisk() -> RawCommandOutput {
                 ACK_DEVICE_SIZE,
                 &[("Data", "RAID1", ACK_DEVICE_SIZE - 100 * (1 << 20))],
                 100 * (1 << 20),
+            ),
+            DeviceUsageSpec::live(
+                "/dev/mapper/braid-disk3",
+                3,
+                ACK_DEVICE_SIZE,
+                &[("Data", "RAID1", ACK_DEVICE_SIZE - 50 * (1 << 30))],
+                50 * (1 << 30),
+            ),
+        ]),
+    )
+}
+
+/// Healthy (dead-band) `btrfs device usage --raw` for the ack pool: device 1 has
+/// 1.5 GiB unallocated against the 1 GiB threshold (predicate margin 0.5 GiB, in
+/// `[0, REARM)`), so the fresh ack-time probe is not at risk and a mounted ack
+/// writes no snooze marker. Devids 1 and 3 match the show.
+fn ack_btrfs_device_usage_healthy() -> RawCommandOutput {
+    mock_ok(
+        "btrfs device usage",
+        &device_usage_raw_body(&[
+            DeviceUsageSpec::live(
+                "/dev/mapper/braid-disk1",
+                1,
+                ACK_DEVICE_SIZE,
+                &[("Data", "RAID1", ACK_DEVICE_SIZE - 1536 * (1 << 20))],
+                1536 * (1 << 20),
             ),
             DeviceUsageSpec::live(
                 "/dev/mapper/braid-disk3",
@@ -421,6 +443,17 @@ pub(crate) fn ack_mounted_probe_runner_with_enospc_usage() -> MockRunner {
             mount_point: ack_mp(),
         },
         ack_btrfs_device_usage_atrisk(),
+    )
+}
+
+/// Mounted probe + device-stats runner plus a healthy (dead-band) usage stub, so a
+/// mounted ack of an EnospcRisk latch whose pool recovered writes no snooze marker.
+pub(crate) fn ack_mounted_probe_runner_with_healthy_enospc_usage() -> MockRunner {
+    ack_mounted_probe_runner_with_device_stats().with_output(
+        CmdRequest::BtrfsDeviceUsageRaw {
+            mount_point: ack_mp(),
+        },
+        ack_btrfs_device_usage_healthy(),
     )
 }
 

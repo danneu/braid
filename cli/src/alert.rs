@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -556,14 +557,55 @@ pub struct PoolKey {
     pub devices: Vec<(Devid, u64)>,
 }
 
-/// Monotonic ENOSPC-risk suppression baseline captured by `braid ack`: the
-/// ack-time signed `margin` plus the `pool_key` it was taken on. The monitor
-/// re-fires only when the live margin falls materially below `baseline_margin`,
-/// and discards the baseline when the live pool key no longer matches.
+/// How long a `braid ack` snoozes ENOSPC reminders. Lives here next to
+/// `EnospcAck` because it is marker/ack policy, not capacity-byte math: the
+/// monitor suppresses the reminder for one interval, then re-fires every cycle
+/// until a re-ack. Deliberately a hardcoded constant, not a `braid.*` config
+/// knob -- a reminder cadence is an internal policy detail, not a
+/// product-boundary feature worth a config surface (ADR 014).
+pub const ENOSPC_REMINDER_INTERVAL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+
+/// Unix-epoch seconds for `now`, clamping a pre-epoch clock to 0. Lets the snooze
+/// deadline be stamped and compared as a flat integer.
+fn unix_secs(now: SystemTime) -> u64 {
+    now.duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// ENOSPC-risk reminder snooze captured by `braid ack`: the `pool_key` the snooze
+/// was taken on plus `snoozed_until`, the Unix-epoch-seconds deadline (ack time +
+/// `ENOSPC_REMINDER_INTERVAL`). `braid ack` writes it only while the fresh
+/// ack-time probe still sees the pool at risk; the monitor suppresses the reminder
+/// until the deadline, then re-fires every cycle until a re-ack stamps a fresh
+/// deadline, and discards it when the live pool key no longer matches. Ack snoozes
+/// the reminder, it does not resolve the risk. Flat `u64` (not a nested
+/// `SystemTime`) so the on-disk file stays flat and the monitor compare is a plain
+/// integer compare.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnospcAck {
-    pub baseline_margin: i64,
     pub pool_key: PoolKey,
+    pub snoozed_until: u64,
+}
+
+impl EnospcAck {
+    /// Snooze ENOSPC reminders for one interval from `now`. Written by `braid ack`.
+    pub fn snooze(pool_key: PoolKey, now: SystemTime) -> Self {
+        EnospcAck {
+            pool_key,
+            snoozed_until: unix_secs(now).saturating_add(ENOSPC_REMINDER_INTERVAL.as_secs()),
+        }
+    }
+
+    /// True while `now` is inside the snooze window: before the deadline and no
+    /// more than one interval before it. A deadline beyond `now + interval` (the
+    /// clock moved between ack and now -- ahead at ack, or corrected backward
+    /// since) reads as elapsed so the monitor reminds again.
+    pub fn is_snoozed(&self, now: SystemTime) -> bool {
+        let now = unix_secs(now);
+        now < self.snoozed_until
+            && self.snoozed_until <= now.saturating_add(ENOSPC_REMINDER_INTERVAL.as_secs())
+    }
 }
 
 /// Build the live `PoolKey` for the current probe, or `None` when the pool's
@@ -603,8 +645,9 @@ pub fn load_enospc_ack(paths: &StatePaths) -> Result<Option<EnospcAck>, LatchLoa
     Ok(Some(serde_json::from_slice(&bytes)?))
 }
 
-/// Persist the ENOSPC baseline. Written only by `braid ack` (live `pool_key` +
-/// the ack-time `margin`, both from one fresh `btrfs device usage --raw` probe).
+/// Persist the ENOSPC snooze marker. Written only by `braid ack`, and only while
+/// the fresh `btrfs device usage --raw` probe still sees the pool at risk: the
+/// live `pool_key` plus the reminder deadline one `ENOSPC_REMINDER_INTERVAL` out.
 pub fn save_enospc_ack(ack: &EnospcAck, paths: &StatePaths) -> Result<(), std::io::Error> {
     let json = serde_json::to_string_pretty(ack).map_err(std::io::Error::other)?;
     atomic_write(&paths.enospc_ack_json(), json.as_bytes())
@@ -2222,11 +2265,14 @@ mod tests {
     }
 
     // Intent: EnospcAck save -> load -> remove round-trips, with load tri-state
-    //   reporting Ok(None) before save and after remove.
-    // Why it exists: the monitor's suppression baseline depends on a faithful
-    //   round-trip of the pool key + margin and on absence reading as Ok(None),
-    //   not as an error.
-    // Scenario: braid ack writes a baseline, the monitor loads it, then re-arm
+    //   reporting Ok(None) before save and after remove, and the on-disk file
+    //   carrying the flat `{ pool_key, snoozed_until }` shape.
+    // Why it exists: the monitor's suppression depends on a faithful round-trip of
+    //   the pool key + deadline and on absence reading as Ok(None), not as an
+    //   error. The flat-shape assertion pins that snoozed_until stays a top-level
+    //   integer the monitor compares directly and a VM test rewrites with a
+    //   one-line jq.
+    // Scenario: braid ack writes a snooze marker, the monitor loads it, then re-arm
     //   removes it.
     #[test]
     fn enospc_ack_save_load_remove_roundtrip() {
@@ -2236,14 +2282,26 @@ mod tests {
         assert_eq!(load_enospc_ack(&paths).unwrap(), None, "absent -> Ok(None)");
 
         let ack = EnospcAck {
-            baseline_margin: -2048,
             pool_key: PoolKey {
                 fs_uuid: "de2b8517-f972-45fc-b121-3e160c8ea432".to_owned(),
                 devices: vec![(Devid::new(1), 1056964608), (Devid::new(2), 1056964608)],
             },
+            snoozed_until: 1_700_000_000,
         };
         save_enospc_ack(&ack, &paths).unwrap();
         assert_eq!(load_enospc_ack(&paths).unwrap(), Some(ack));
+
+        let on_disk: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(paths.enospc_ack_json()).unwrap()).unwrap();
+        assert_eq!(
+            on_disk["snoozed_until"].as_u64(),
+            Some(1_700_000_000),
+            "snoozed_until is a flat top-level integer"
+        );
+        assert!(
+            on_disk["pool_key"]["fs_uuid"].is_string(),
+            "pool_key stays a nested object"
+        );
 
         remove_enospc_ack(&paths).unwrap();
         assert_eq!(
@@ -2253,6 +2311,80 @@ mod tests {
         );
         // NotFound tolerant.
         remove_enospc_ack(&paths).unwrap();
+    }
+
+    // Intent: EnospcAck::snooze stamps a deadline exactly one reminder interval
+    //   past `now` (in Unix-epoch seconds).
+    // Why it exists: the snooze deadline is the entire suppression contract -- an
+    //   off-by-one or wrong-unit slip here would mis-time every reminder.
+    // Scenario: braid ack snoozes an at-risk pool at a known wall-clock instant.
+    #[test]
+    fn enospc_ack_snooze_sets_deadline_one_interval_out() {
+        let pool_key = PoolKey {
+            fs_uuid: "fs".to_owned(),
+            devices: vec![(Devid::new(1), 1), (Devid::new(2), 1)],
+        };
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let ack = EnospcAck::snooze(pool_key, now);
+        assert_eq!(
+            ack.snoozed_until,
+            1_700_000_000 + ENOSPC_REMINDER_INTERVAL.as_secs()
+        );
+    }
+
+    // Intent: is_snoozed is true only inside the half-open window
+    //   (now, now+interval]: just before the deadline and at the clamp upper bound,
+    //   but false exactly at the deadline, in the past, and beyond one interval out.
+    // Why it exists: the window boundary plus the clock-anomaly clamp is the
+    //   monitor's whole suppress/remind decision. The at-deadline `==` false case
+    //   pins re-firing the moment the snooze expires; the `==`-at-clamp (true) and
+    //   `>`-past-clamp (false) cases together pin the inclusive `<=` clamp against a
+    //   slip to `<`.
+    // Scenario: a monitor cycle evaluates a snooze marker at a fixed wall clock
+    //   against deadlines seeded just-before / at / past the deadline and at / past
+    //   the one-interval clamp.
+    #[test]
+    fn enospc_ack_is_snoozed_window() {
+        let now_secs = 1_700_000_000u64;
+        let now = UNIX_EPOCH + Duration::from_secs(now_secs);
+        let interval = ENOSPC_REMINDER_INTERVAL.as_secs();
+        let ack = |snoozed_until| EnospcAck {
+            pool_key: PoolKey {
+                fs_uuid: "fs".to_owned(),
+                devices: vec![(Devid::new(1), 1), (Devid::new(2), 1)],
+            },
+            snoozed_until,
+        };
+
+        assert!(
+            ack(now_secs + 1).is_snoozed(now),
+            "just before the deadline -> snoozed"
+        );
+        assert!(
+            !ack(now_secs).is_snoozed(now),
+            "exactly at the deadline -> remind"
+        );
+        assert!(!ack(1).is_snoozed(now), "deadline in the past -> remind");
+        assert!(
+            ack(now_secs + interval).is_snoozed(now),
+            "deadline exactly one interval out (freshly written) -> snoozed (inclusive clamp)"
+        );
+        assert!(
+            !ack(now_secs + interval + 1).is_snoozed(now),
+            "deadline beyond one interval (clock anomaly) -> remind"
+        );
+    }
+
+    // Intent: the reminder interval is pinned at 7 days.
+    // Why it exists: the snooze cadence is a deliberate product choice; a silent
+    //   change would re-time every ENOSPC reminder without a test failing.
+    // Scenario: a refactor edits the interval constant.
+    #[test]
+    fn enospc_reminder_interval_is_seven_days() {
+        assert_eq!(
+            ENOSPC_REMINDER_INTERVAL,
+            Duration::from_secs(7 * 24 * 60 * 60)
+        );
     }
 
     // Intent: live_pool_key returns None when fs_uuid is absent and a

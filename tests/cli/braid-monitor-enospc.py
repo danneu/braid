@@ -3,9 +3,12 @@
 # Intent: Verify the full proactive-capacity-alert lifecycle through the real
 #   systemd path: a filling RAID1 pool crosses the ENOSPC threshold, monitor
 #   exits 3 (Warning), the wrapper routes that to the non-beeping advisory
-#   service, status shows the NOTICE banner + enospc_risk cause, ack clears it
-#   and stops the advisory unit, a re-arm cycle exits 0, and a degraded pool
-#   raises MissingDevice (Critical) but never EnospcRisk.
+#   service, status shows the NOTICE banner + enospc_risk cause, and ack snoozes
+#   the reminder (clears the latch + stops the advisory unit) without resolving --
+#   status keeps showing the live advisory, the monitor stays quiet within the
+#   snooze window, re-alerts once the reminder interval elapses, and goes quiet
+#   again after a re-ack. A degraded pool raises MissingDevice (Critical) but
+#   never EnospcRisk.
 #
 # Why it exists: Unit tests cover the state machine in isolation. Only a VM
 #   check proves the exit-3 wrapper routing, the advisory systemd unit, the real
@@ -86,16 +89,46 @@ with subtest("Status shows the enospc_risk cause and the NOTICE (not ALERT) bann
         f"expected the ENOSPC cause line, got:\n{human}"
     )
 
-with subtest("Ack clears the latch, writes the keyed baseline, and stops the advisory unit"):
+with subtest("Ack snoozes: clears the latch, writes the snooze marker, stops the advisory unit"):
     machine.succeed("braid ack")
     machine.fail("test -f /var/lib/braid/alert-latch.json")
     machine.succeed("test -f /var/lib/braid/enospc-ack.json")
     machine.fail("systemctl is-active braid-alert-advisory.service")
 
-with subtest("Acked-but-still-at-risk pool: follow-up monitor exits 0 (suppressed)"):
+with subtest("Acked-but-still-at-risk pool: follow-up monitor exits 0 (within the snooze window)"):
     rc = machine.succeed("set +e; braid monitor; echo $?").strip().splitlines()[-1]
-    assert rc == "0", f"Expected exit 0 (suppressed by baseline), got {rc}"
+    assert rc == "0", f"Expected exit 0 (suppressed within the snooze window), got {rc}"
     machine.fail("test -f /var/lib/braid/alert-latch.json")
+
+with subtest("Ack snoozes but does not resolve -- status still shows the live advisory"):
+    # The marker exists (the real ack above wrote it). status recomputes risk live
+    # from the pool, independent of the marker, so the advisory must persist.
+    assert "ENOSPC risk" in machine.succeed("braid status"), (
+        "ack snoozes the reminder; it must not resolve the live status advisory"
+    )
+
+with subtest("Reminder elapses -> monitor re-alerts (exit 3)"):
+    # Rewrite the snooze deadline into the past (preserving pool_key) to simulate
+    # the reminder interval elapsing. The monitor timer is stopped, so nothing
+    # races this edit.
+    machine.succeed(
+        "tmp=$(mktemp); jq '.snoozed_until = 1' /var/lib/braid/enospc-ack.json > \"$tmp\" "
+        '&& mv "$tmp" /var/lib/braid/enospc-ack.json'
+    )
+    rc = machine.succeed("set +e; braid monitor; echo $?").strip().splitlines()[-1]
+    assert rc == "3", f"Expected exit 3 (reminder re-fires after the interval), got {rc}"
+    machine.succeed("test -f /var/lib/braid/alert-latch.json")
+
+with subtest("Re-ack snoozes for another interval -> exit 0"):
+    machine.succeed("braid ack")
+    rc = machine.succeed("set +e; braid monitor; echo $?").strip().splitlines()[-1]
+    assert rc == "0", f"Expected exit 0 (re-ack re-opened the snooze window), got {rc}"
+    # Prove the re-ack stamped a fresh future deadline, not a vacuous pass.
+    now = int(machine.succeed("date +%s").strip())
+    deadline = int(
+        machine.succeed("jq '.snoozed_until' /var/lib/braid/enospc-ack.json").strip()
+    )
+    assert deadline > now, f"re-ack must stamp a future deadline; got {deadline} <= {now}"
 
 # Note: baseline-invalidation-on-topology-change (F1) is covered by the unit
 # test cmd_monitor_stale_baseline_key_mismatch_fires_and_clears across all three

@@ -7,7 +7,7 @@ experimental: true
 
 {{#include ../_includes/experimental-command-callout.md.inc}}
 
-Acknowledges active alerts and silences the PC speaker beeper. When there is an active alert source on a mounted pool, it also sets the current device error counts as the new baseline so the same condition won't re-trigger.
+Acknowledges active alerts and silences the PC speaker beeper. On a mounted pool it also records the acknowledged state so the same condition won't immediately re-trigger: device error counts become the new baseline, and a still-at-risk ENOSPC capacity warning is *snoozed* for a reminder interval -- a snooze, not a resolve, so `braid status` keeps showing the live capacity advisory.
 
 ## When to use it
 
@@ -47,12 +47,15 @@ no active alerts
 2. If the pool is mounted:
    - If a latch entry exists, the smartd alert flag is present, the scrub-failed flag is present, or the latch is corrupt, snapshots the current `btrfs device stats` error counters and missing-device state.
    - Writes that snapshot as the new acknowledged baseline (`acked-stats.json`). Future monitor runs compare against this baseline, so the same error counts won't trigger again.
+   - If a latched `EnospcRisk` is still at risk on a fresh `btrfs device usage` probe, writes a snooze marker (`enospc-ack.json`) with a reminder deadline one interval (7 days) out. This *snoozes* the monitor reminder -- it does not resolve the risk, and `braid status` keeps showing the live advisory. If the pool has recovered by ack time, no marker is written, so a later recurrence alerts immediately.
    - If none of those alert sources is present, exits 0 with `no active alerts` and does not query btrfs or rewrite `acked-stats.json`.
 3. Stops `braid-alert.service` (the beeper), best-effort. This runs first so the stop attempt is reached before any later file-removal I/O error can short-circuit the rest of cleanup.
 4. Removes the smartd alert flag (`smartd-alert`) if present.
 5. Removes the scrub-failed flag (`scrub-failed`) if present.
 6. Removes the alert latch file (`alert-latch.json`).
 7. Removes the corrupt-latch sidecar (`alert-latch.json.corrupt`) if present.
+
+**Offline ack.** When the pool is locked or unmounted, an `EnospcRisk` ack still clears the latch but writes no snooze marker (offline cannot probe the pool key or confirm risk). A still-at-risk pool re-fires `EnospcRisk` -- a quiet Warning, no beep -- on remount and each subsequent mounted cycle until a mounted ack snoozes it.
 
 On a cleanup I/O error, ack preserves retry state so the next `braid ack` resumes cleanup after the I/O fault is fixed.
 

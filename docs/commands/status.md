@@ -347,7 +347,9 @@ matching btrfs's effective data chunk size.
 `braid status`, `braid doctor`, and `braid monitor` share one predicate
 (`evaluate_enospc_risk`), so the on-demand advisory and the proactive
 `braid monitor` Warning (exit 3, no beep) never disagree about whether a
-pool is at risk.
+pool is at risk. Acknowledging the alert only *snoozes* the `braid monitor`
+reminder; `braid status` recomputes risk live and keeps printing this
+advisory for as long as the pool is at risk.
 
 See [Balance fails with No space left on device](../guides/troubleshooting.md#balance-fails-with-no-space-left-on-device)
 for recovery options.

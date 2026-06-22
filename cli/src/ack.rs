@@ -1,3 +1,5 @@
+use std::time::SystemTime;
+
 use crate::alert::{
     self, AlertCause, EnospcAck, live_pool_key, load_acked_stats_fallible, save_acked_stats,
     save_enospc_ack, snapshot_current,
@@ -31,10 +33,12 @@ pub fn cmd_ack<R: CommandRunner, F: Filesystem + ?Sized>(
     cmd_ack_impl(runner, fs, mount_point, paths, &stop_beeper)
 }
 
-/// Injectable-hook variant used by tests to observe beeper cleanup ordering.
+/// Injectable-hook variant used by tests -- in this module and the monitor's
+/// re-ack integration test -- to exercise the real ack path without shelling out
+/// to systemd.
 ///
 /// Production goes through `cmd_ack`, which supplies the real systemd hook.
-fn cmd_ack_impl<R: CommandRunner, F: Filesystem + ?Sized>(
+pub(crate) fn cmd_ack_impl<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
     mount_point: &MountPoint,
@@ -117,18 +121,19 @@ fn cmd_ack_impl<R: CommandRunner, F: Filesystem + ?Sized>(
     let new_acked = snapshot_current(&device_stats, &devids);
     save_acked_stats(&new_acked, paths).map_err(AckError::Io)?;
 
-    // 6. ENOSPC baseline: if the latch carries an EnospcRisk cause, capture the
-    //    *ack-time* margin + pool key from one fresh usage probe (mirroring
-    //    snapshot_current -- the baseline is the state the operator acknowledged,
-    //    from one coherent instant, so a pool that filled further between fire and
-    //    ack is not immediately re-fired). Best-effort: a probe/parse failure or
-    //    an absent fs_uuid clears the latch but writes no baseline.
+    // 6. ENOSPC snooze: if the latch carries an EnospcRisk cause, snooze the
+    //    reminder from one fresh usage probe -- when the pool is still at risk,
+    //    write the live pool key + a reminder deadline one interval out. Ack
+    //    snoozes the reminder, it does not resolve the risk. Best-effort: a
+    //    probe/parse failure, an absent fs_uuid, or a pool that recovered by ack
+    //    time clears the latch but writes no marker (a later recurrence fires armed).
     if causes
         .iter()
         .any(|c| matches!(c, AlertCause::EnospcRisk { .. }))
     {
         let missing_count = devids.missing.len() as u64;
-        write_enospc_baseline(runner, mount_point, &pool, missing_count, paths);
+        let now = SystemTime::now();
+        write_enospc_baseline(runner, mount_point, &pool, missing_count, paths, now);
     }
 
     if let Err(e) =
@@ -272,21 +277,27 @@ fn cleanup_alert_files_and_beeper(
     Ok(())
 }
 
-/// Capture the ack-time ENOSPC suppression baseline from one fresh
-/// `btrfs device usage --raw` probe: the current signed margin plus the live
-/// `PoolKey`, both from one coherent instant.
+/// Snooze ENOSPC reminders from one fresh `btrfs device usage --raw` probe: when
+/// the probe still sees the pool at risk, write a snooze marker (live `PoolKey`
+/// plus a reminder deadline one `ENOSPC_REMINDER_INTERVAL` past `now`).
+///
+/// Writes no marker when the fresh probe is NOT at risk: the pool recovered
+/// between fire and ack, and a snooze stamped on a not-at-risk pool would wrongly
+/// suppress a recurrence inside the window (the dead-band monitor branch keeps the
+/// marker). No marker -> a later recurrence fires armed.
 ///
 /// Best-effort by contract. A usage-probe failure, a parse failure, or an absent
-/// `fs_uuid` (no usable `PoolKey`) logs and writes no baseline -- the same
-/// end-state as an offline ack (one quiet re-fire next cycle at the non-beeping
-/// Warning level, then a clean ack establishes the baseline). It never fails the
-/// ack: the latch is already cleared by the time this runs.
+/// `fs_uuid` (no usable `PoolKey`) logs and writes no marker -- the same end-state
+/// as an offline ack (one quiet re-fire next cycle at the non-beeping Warning
+/// level, then a mounted ack snoozes it). It never fails the ack: the latch is
+/// already cleared by the time this runs.
 fn write_enospc_baseline<R: CommandRunner>(
     runner: &R,
     mount_point: &MountPoint,
     pool: &AlertPoolState,
     missing_count: u64,
     paths: &StatePaths,
+    now: SystemTime,
 ) {
     let raw = match runner.run(&CmdRequest::BtrfsDeviceUsageRaw {
         mount_point: mount_point.clone(),
@@ -315,15 +326,16 @@ fn write_enospc_baseline<R: CommandRunner>(
         return;
     };
     let assessment = evaluate_enospc_risk(&entries, missing_count);
-    if let Err(e) = save_enospc_ack(
-        &EnospcAck {
-            baseline_margin: assessment.margin,
-            pool_key,
-        },
-        paths,
-    ) {
+    // Snooze only a live risk. If the pool recovered (dead-band or past re-arm) by
+    // ack time, write no marker: a snooze stamped on a not-at-risk pool would
+    // wrongly suppress a recurrence inside the window, since the dead-band monitor
+    // branch keeps the marker. No marker -> a later recurrence fires armed.
+    if !assessment.at_risk() {
+        return;
+    }
+    if let Err(e) = save_enospc_ack(&EnospcAck::snooze(pool_key, now), paths) {
         eprintln!(
-            "warning: failed to persist ENOSPC baseline -- {e}; ack cleared the alert but wrote no baseline"
+            "warning: failed to persist ENOSPC snooze marker -- {e}; ack cleared the alert but wrote no marker"
         );
     }
 }
@@ -410,15 +422,16 @@ pub enum AckError {
 mod tests {
     use super::*;
     use crate::alert::{
-        AckedDeviceCounters, AckedDisk, AckedStats, load_acked_stats, load_enospc_ack,
+        AckedDeviceCounters, AckedDisk, AckedStats, ENOSPC_REMINDER_INTERVAL, load_acked_stats,
+        load_enospc_ack,
     };
     use crate::monitor::{MonitorResult, cmd_monitor};
     use crate::test_fixtures::{
-        ACK_ATRISK_MARGIN, ACK_DEVICE_SIZE, ACK_FS_UUID, AckPanicFilesystem, AckPanicRunner,
-        MonitorTestRunner, ack_fs_btrfs, ack_fs_ext4, ack_fs_not_mounted,
-        ack_mounted_fs_that_touches_smartd, ack_mounted_probe_runner,
-        ack_mounted_probe_runner_no_uuid_with_enospc_usage,
+        ACK_DEVICE_SIZE, ACK_FS_UUID, AckPanicFilesystem, AckPanicRunner, MonitorTestRunner,
+        ack_fs_btrfs, ack_fs_ext4, ack_fs_not_mounted, ack_mounted_fs_that_touches_smartd,
+        ack_mounted_probe_runner, ack_mounted_probe_runner_no_uuid_with_enospc_usage,
         ack_mounted_probe_runner_with_device_stats, ack_mounted_probe_runner_with_enospc_usage,
+        ack_mounted_probe_runner_with_healthy_enospc_usage,
         ack_mounted_probe_runner_with_stale_devid_stats, ack_mp, ack_noop_beeper,
         ack_offline_fs_that_touches_scrub_failed, ack_offline_fs_that_touches_smartd,
         ack_write_latch, isolated_paths, monitor_fs_btrfs, monitor_mp,
@@ -429,6 +442,7 @@ mod tests {
     use std::os::unix::process::ExitStatusExt;
     #[cfg(unix)]
     use std::process::{ExitStatus, Output};
+    use std::time::UNIX_EPOCH;
 
     // Intent: The mounted ack confirmation formatter preserves the no-count
     //   fallback and the singular/plural counted forms.
@@ -2435,22 +2449,21 @@ mod tests {
 
     // --- ENOSPC baseline ack (Step 5) ---
 
-    // Intent: a mounted ack of an EnospcRisk latch writes enospc-ack.json whose
-    //   pool_key carries the (devid, device_size) pairs from a fresh usage probe
-    //   and whose baseline_margin is the RE-PROBED current margin (not the latched
-    //   fire-time value); it clears the latch, leaves the baseline file in place,
-    //   and fires the cleanup hook once.
-    // Why it exists: the baseline must be the state the operator acknowledged,
-    //   from one coherent instant (mirroring snapshot_current), so a pool that
-    //   filled between fire and ack is not immediately re-fired. The re-probe and
-    //   the persist-past-ack are the contract the monitor's suppression relies on.
+    // Intent: a mounted ack of an EnospcRisk latch whose fresh probe is still at
+    //   risk writes enospc-ack.json keyed on the live (devid, device_size) pairs,
+    //   with snoozed_until one reminder interval past ack time; it clears the
+    //   latch, leaves the marker in place, and fires the cleanup hook once.
+    // Why it exists: ack snoozes the reminder (it does not resolve), and the
+    //   monitor's suppression relies on a fresh, correctly-keyed deadline. The
+    //   re-probe (live key from the ack-time usage probe, not the latched fire-time
+    //   cause) and the persist-past-ack are that contract.
     // Scenario: monitor latched EnospcRisk on a mounted 2-disk pool; the operator
     //   runs braid ack while the pool is still at risk.
     #[test]
     fn cmd_ack_mounted_enospc_risk_writes_reprobed_keyed_baseline() {
         let (_dir, paths) = isolated_paths();
-        // A deliberately-wrong fire-time margin in the latch: the baseline must
-        // carry the re-probed value, not this.
+        // A fire-time cause in the latch; the snooze marker must be keyed off the
+        // fresh ack-time probe, not this latched value.
         ack_write_latch(
             &paths,
             vec![AlertCause::EnospcRisk {
@@ -2463,12 +2476,20 @@ mod tests {
         let beeper_calls = std::cell::Cell::new(0u32);
         let beeper = || beeper_calls.set(beeper_calls.get() + 1);
 
+        let before = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
         let result = cmd_ack_impl(&runner, &ack_fs_btrfs(), &ack_mp(), &paths, &beeper);
+        let after = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
         assert!(result.is_ok(), "ack must succeed, got {result:?}");
 
         let ack = load_enospc_ack(&paths)
             .unwrap()
-            .expect("mounted ack must write a baseline");
+            .expect("mounted ack of a still-at-risk pool must write a snooze marker");
         assert_eq!(
             ack.pool_key.fs_uuid, ACK_FS_UUID,
             "keyed on the live FS UUID"
@@ -2481,16 +2502,58 @@ mod tests {
             ],
             "pool_key carries (devid, device_size) from the ack-time usage probe"
         );
-        assert_eq!(
-            ack.baseline_margin, ACK_ATRISK_MARGIN,
-            "baseline is the re-probed margin, not the latched fire-time -5"
+        let interval = ENOSPC_REMINDER_INTERVAL.as_secs();
+        assert!(
+            (before + interval..=after + interval).contains(&ack.snoozed_until),
+            "snoozed_until {} must be one reminder interval past ack time [{}, {}]",
+            ack.snoozed_until,
+            before + interval,
+            after + interval
         );
         assert!(!paths.alert_latch_json().exists(), "ack clears the latch");
         assert!(
             paths.enospc_ack_json().exists(),
-            "the baseline persists past ack (post-ack suppression memory)"
+            "the marker persists past ack (post-ack snooze memory)"
         );
         assert_eq!(beeper_calls.get(), 1, "cleanup hook fires once");
+    }
+
+    // Intent: a mounted ack of an EnospcRisk latch whose fresh probe is HEALTHY
+    //   (dead-band, 0 <= margin < REARM) clears the latch but writes no snooze
+    //   marker.
+    // Why it exists (F1): the at-risk gate. Acking a recovered pool must not stamp
+    //   a snooze onto a not-at-risk pool -- the dead-band monitor branch keeps a
+    //   marker, so a snooze written here would wrongly suppress a recurrence inside
+    //   the window. No marker -> a later recurrence fires armed (pairs with
+    //   cmd_monitor_at_risk_no_marker_fires_armed).
+    // Scenario: monitor latched EnospcRisk, the pool recovered into the dead-band
+    //   between fire and ack, and the operator runs braid ack.
+    #[test]
+    fn cmd_ack_mounted_enospc_healthy_at_ack_writes_no_snooze() {
+        let (_dir, paths) = isolated_paths();
+        ack_write_latch(
+            &paths,
+            vec![AlertCause::EnospcRisk {
+                margin: -5,
+                count_below: 1,
+                device_count: 2,
+            }],
+        );
+        let runner = ack_mounted_probe_runner_with_healthy_enospc_usage();
+
+        let result = cmd_ack_impl(
+            &runner,
+            &ack_fs_btrfs(),
+            &ack_mp(),
+            &paths,
+            &ack_noop_beeper,
+        );
+        assert!(result.is_ok(), "ack must succeed, got {result:?}");
+        assert!(!paths.alert_latch_json().exists(), "ack clears the latch");
+        assert!(
+            !paths.enospc_ack_json().exists(),
+            "a not-at-risk ack-time probe writes no snooze marker"
+        );
     }
 
     // Intent: a mounted ack of an EnospcRisk latch whose usage probe is unstubbed

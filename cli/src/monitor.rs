@@ -1,12 +1,13 @@
 #[cfg(test)]
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::time::SystemTime;
 
 use crate::alert::{
     self, AlertCause, compute_alert_state, live_pool_key, load_enospc_ack, merge_into_latch,
     remove_enospc_ack, save_acked_stats,
 };
-use crate::capacity::{ENOSPC_REARM_MARGIN, ENOSPC_WORSEN_STEP, evaluate_enospc_risk};
+use crate::capacity::{ENOSPC_REARM_MARGIN, evaluate_enospc_risk};
 use crate::cmd::{CmdRequest, CommandRunner};
 use crate::parse::types::BtrfsDeviceUsageEntry;
 use crate::parse::{parse_btrfs_device_stats, parse_btrfs_device_usage};
@@ -126,12 +127,14 @@ pub fn cmd_monitor<R: CommandRunner, F: Filesystem + ?Sized>(
         //     device-error / missing-device alerting in this same cycle is
         //     untouched if the usage probe fails.
         let missing_count = devids.missing.len() as u64;
+        let now = SystemTime::now();
         if let Some(cause) = evaluate_enospc_for_monitor(
             runner,
             mount_point,
             missing_count,
             pool.fs_uuid.as_deref(),
             paths,
+            now,
         ) {
             live_causes.push(cause);
         }
@@ -197,10 +200,14 @@ fn probe_usage_entries<R: CommandRunner>(
 }
 
 /// Evaluate proactive RAID1 chunk-pair ENOSPC risk for one monitor cycle and
-/// drive the monotonic suppression baseline, returning `Some(EnospcRisk { .. })`
+/// drive the snooze-marker suppression, returning `Some(EnospcRisk { .. })`
 /// to fire or `None` to suppress.
 ///
-/// Best-effort by contract: every failure mode here (probe, parse, baseline
+/// `now` is the live wall clock (captured by `cmd_monitor`), compared against the
+/// marker's snooze deadline; injecting it keeps the window check deterministic in
+/// tests.
+///
+/// Best-effort by contract: every failure mode here (probe, parse, marker
 /// load) is logged and folded into a fire/skip decision -- it never returns
 /// `Err` and never latches `ComputationError`. This is the scoped fail-open
 /// carve-out to the monitor's fail-closed mandate, so a broken usage probe skips
@@ -211,6 +218,7 @@ fn evaluate_enospc_for_monitor<R: CommandRunner>(
     missing_count: u64,
     fs_uuid: Option<&str>,
     paths: &StatePaths,
+    now: SystemTime,
 ) -> Option<AlertCause> {
     // Degraded pools alert louder through MissingDevice. Skip entirely and leave
     // any baseline untouched -- a transient device absence must not drop a
@@ -275,19 +283,15 @@ fn evaluate_enospc_for_monitor<R: CommandRunner>(
     };
 
     match &live_key {
-        // Acked with a matching key: emit only if materially worse (more
-        // negative) than the acked baseline by at least one worsen step.
-        // `saturating_sub` guards against an underflow panic if a corrupt but
-        // still-parseable baseline carries an extreme `baseline_margin`.
+        // Acked with a matching key: suppress while the snooze window is open,
+        // otherwise remind. Once the deadline elapses (or a clock anomaly pushes
+        // it more than one interval out, which `is_snoozed` treats as elapsed) the
+        // monitor re-fires every cycle until a re-ack stamps a fresh deadline.
         Some(live) if baseline.pool_key == *live => {
-            if margin
-                < baseline
-                    .baseline_margin
-                    .saturating_sub(ENOSPC_WORSEN_STEP as i64)
-            {
-                Some(cause)
-            } else {
+            if baseline.is_snoozed(now) {
                 None
+            } else {
+                Some(cause)
             }
         }
         // Confirmed key mismatch (bootstrap/membership/geometry change): the
@@ -314,19 +318,39 @@ fn evaluate_enospc_for_monitor<R: CommandRunner>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::alert::{AlertSeverity, EnospcAck, PoolKey, load_enospc_ack, save_enospc_ack};
+    use crate::ack::cmd_ack_impl;
+    use crate::alert::{
+        AlertSeverity, ENOSPC_REMINDER_INTERVAL, EnospcAck, PoolKey, load_enospc_ack,
+        save_enospc_ack,
+    };
     use crate::cmd::{CmdError, RawCommandOutput};
     use crate::test_fixtures::{
         BTRFS_SHOW_2DISK_1MISSING, BTRFS_SHOW_2DISK_NO_UUID, MONITOR_FS_UUID, MonitorOverride,
-        MonitorReconcileRunner, MonitorTestRunner, USAGE_DEVICE_SIZE,
+        MonitorReconcileRunner, MonitorTestRunner, USAGE_DEVICE_SIZE, ack_noop_beeper,
         assert_monitor_single_computation_error, isolated_paths, monitor_fs_btrfs, monitor_fs_ext4,
         monitor_fs_mountinfo_error, monitor_fs_not_mounted, monitor_mp, usage_2disk,
         usage_4disk_one_low,
     };
     use crate::types::Devid;
+    use std::time::UNIX_EPOCH;
 
     const GIB: u64 = 1 << 30;
     const MIB: u64 = 1 << 20;
+
+    /// Real-clock `now` in Unix seconds, for seeding snooze deadlines relative to
+    /// the wall clock `cmd_monitor` reads.
+    fn now_secs() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+
+    /// A snooze deadline half a reminder interval in the future, so a matching-key
+    /// marker reads as still-snoozed under `cmd_monitor`'s real clock.
+    fn open_snooze_deadline() -> u64 {
+        now_secs() + ENOSPC_REMINDER_INTERVAL.as_secs() / 2
+    }
 
     /// At-risk two-disk usage: device 1 has 100 MiB unallocated (below the 1 GiB
     /// threshold), device 2 is roomy -- a clearly negative predicate margin.
@@ -346,11 +370,11 @@ mod tests {
         }
     }
 
-    fn seed_enospc_baseline(paths: &StatePaths, pool_key: PoolKey, baseline_margin: i64) {
+    fn seed_enospc_baseline(paths: &StatePaths, pool_key: PoolKey, snoozed_until: u64) {
         save_enospc_ack(
             &EnospcAck {
-                baseline_margin,
                 pool_key,
+                snoozed_until,
             },
             paths,
         )
@@ -1398,7 +1422,7 @@ mod tests {
     #[test]
     fn cmd_monitor_usage_probe_failure_alone_is_ok_and_keeps_baseline() {
         let (_dir, paths) = isolated_paths();
-        seed_enospc_baseline(&paths, matching_pool_key(), -100);
+        seed_enospc_baseline(&paths, matching_pool_key(), open_snooze_deadline());
         let runner = MonitorTestRunner::with_override(MonitorOverride::UsageResult(Err(
             CmdError::Failed("btrfs device usage: spawn failed".into()),
         )));
@@ -1416,53 +1440,154 @@ mod tests {
         );
     }
 
-    // Intent: a matching-key baseline suppresses a fresh EnospcRisk while the
-    //   pool stays at risk but not materially worse.
-    // Why it exists: the monotonic baseline's whole job is to stop re-nagging an
-    //   acked pool that is merely still at risk.
-    // Scenario: a pool acked at margin -10 MiB is now at margin ~-130 MiB --
-    //   worse, but by less than the worsen step.
+    // Intent: a matching-key marker whose snooze window is still open suppresses a
+    //   fresh EnospcRisk while the pool stays at risk.
+    // Why it exists: the snooze's whole job is to stop re-nagging an acked pool for
+    //   one reminder interval; an open window must keep the monitor quiet and leave
+    //   the marker in place.
+    // Scenario: a pool acked moments ago (deadline half an interval out) is still
+    //   at risk on the next monitor cycle.
     #[test]
-    fn cmd_monitor_suppresses_enospc_while_acked_not_worse() {
+    fn cmd_monitor_suppresses_enospc_within_snooze() {
         let (_dir, paths) = isolated_paths();
-        seed_enospc_baseline(&paths, matching_pool_key(), -(10 * MIB as i64));
-        let runner = MonitorTestRunner::with_usage_payload(usage_2disk(
-            USAGE_DEVICE_SIZE,
-            900 * MIB,
-            50 * GIB,
-        ));
+        seed_enospc_baseline(&paths, matching_pool_key(), open_snooze_deadline());
+        let runner = MonitorTestRunner::with_usage_payload(usage_atrisk());
 
         let result = cmd_monitor(&runner, &monitor_fs_btrfs(), &monitor_mp(), &paths);
 
-        assert_eq!(result, MonitorResult::Ok, "acked-not-worse must suppress");
+        assert_eq!(
+            result,
+            MonitorResult::Ok,
+            "an open snooze window must suppress"
+        );
         assert!(
             paths.enospc_ack_json().exists(),
-            "suppression leaves the baseline in place"
+            "suppression leaves the marker in place"
         );
     }
 
-    // Intent: a matching-key baseline re-fires EnospcRisk once the pool gets
-    //   materially worse (margin past the worsen step).
-    // Why it exists: the fresh nudge for an acked-but-worsening pool is the
-    //   reason the keyed baseline subsystem exists; without re-fire it would be a
-    //   plain latch.
-    // Scenario: a pool acked at margin -10 MiB fills to margin ~-654 MiB, more
-    //   than one worsen step deeper.
+    // Intent: a matching-key marker whose snooze deadline has elapsed re-fires
+    //   EnospcRisk while the pool is still at risk.
+    // Why it exists: once the reminder interval passes, an acked-but-still-at-risk
+    //   pool must remind again every cycle until a re-ack -- the snooze is a
+    //   reminder, not a permanent mute.
+    // Scenario: a pool acked over a reminder interval ago (deadline far in the
+    //   past) is still at risk.
     #[test]
-    fn cmd_monitor_refires_enospc_when_materially_worse() {
+    fn cmd_monitor_refires_enospc_after_snooze_elapsed() {
         let (_dir, paths) = isolated_paths();
-        seed_enospc_baseline(&paths, matching_pool_key(), -(10 * MIB as i64));
-        let runner = MonitorTestRunner::with_usage_payload(usage_2disk(
-            USAGE_DEVICE_SIZE,
-            400 * MIB,
-            50 * GIB,
-        ));
+        seed_enospc_baseline(&paths, matching_pool_key(), 1);
+        let runner = MonitorTestRunner::with_usage_payload(usage_atrisk());
 
         let result = cmd_monitor(&runner, &monitor_fs_btrfs(), &monitor_mp(), &paths);
 
         assert!(
             has_enospc_cause(&result),
-            "a materially worse pool must re-fire, got {result:?}"
+            "an elapsed snooze must re-fire, got {result:?}"
+        );
+    }
+
+    // Intent: after an elapsed snooze re-fires EnospcRisk, a real re-ack stamps a
+    //   fresh deadline and the next monitor cycle goes quiet again.
+    // Why it exists: pins the reminder loop's reset edge -- re-acking a
+    //   still-at-risk pool must re-open the snooze window (not stay latched on),
+    //   exercising the real ack -> monitor handoff at the cmd level.
+    // Scenario: an acked pool's reminder elapses and the monitor reminds; the
+    //   operator runs braid ack again while the pool is still at risk.
+    #[test]
+    fn cmd_monitor_after_reack_is_snoozed_again() {
+        let (_dir, paths) = isolated_paths();
+        seed_enospc_baseline(&paths, matching_pool_key(), 1); // elapsed
+        let runner = MonitorTestRunner::with_usage_payload(usage_atrisk());
+
+        let fired = cmd_monitor(&runner, &monitor_fs_btrfs(), &monitor_mp(), &paths);
+        assert!(
+            has_enospc_cause(&fired),
+            "an elapsed snooze must re-fire before re-ack, got {fired:?}"
+        );
+
+        cmd_ack_impl(
+            &runner,
+            &monitor_fs_btrfs(),
+            &monitor_mp(),
+            &paths,
+            &ack_noop_beeper,
+        )
+        .expect("re-ack of a still-at-risk pool must succeed");
+
+        let quiet = cmd_monitor(&runner, &monitor_fs_btrfs(), &monitor_mp(), &paths);
+        assert_eq!(
+            quiet,
+            MonitorResult::Ok,
+            "re-ack must re-open the snooze window so the monitor goes quiet, got {quiet:?}"
+        );
+        assert!(
+            now_secs() < load_enospc_ack(&paths).unwrap().unwrap().snoozed_until,
+            "re-ack stamps a fresh future deadline (not a vacuous pass)"
+        );
+    }
+
+    // Intent: with no snooze marker on disk, an at-risk pool fires EnospcRisk
+    //   immediately (armed).
+    // Why it exists (F1): pins the "recurrence after a healthy ack alerts
+    //   immediately" half of contract #5 -- a healthy ack writes no marker, so the
+    //   next time the pool re-enters risk the monitor must fire at once, not stay
+    //   silent. Pairs with cmd_ack_mounted_enospc_healthy_at_ack_writes_no_snooze.
+    // Scenario: a pool that recovered and was acked healthy (no marker) later fills
+    //   back into risk.
+    #[test]
+    fn cmd_monitor_at_risk_no_marker_fires_armed() {
+        let (_dir, paths) = isolated_paths();
+        assert!(
+            !paths.enospc_ack_json().exists(),
+            "precondition: no snooze marker on disk"
+        );
+        let runner = MonitorTestRunner::with_usage_payload(usage_atrisk());
+
+        let result = cmd_monitor(&runner, &monitor_fs_btrfs(), &monitor_mp(), &paths);
+
+        assert!(
+            has_enospc_cause(&result),
+            "no marker -> at-risk pool fires armed, got {result:?}"
+        );
+    }
+
+    // Intent: a structurally-valid OLD-shape marker ({ pool_key, baseline_margin }
+    //   with no snoozed_until) is treated as corrupt -- an at-risk cycle fires
+    //   EnospcRisk armed and clears the file.
+    // Why it exists (F3): pins the "no on-disk migration" claim. The unreleased
+    //   margin-baseline file fails to deserialize (snoozed_until missing), so it
+    //   falls through the existing corrupt-marker path (fire armed + remove). A
+    //   future #[serde(default)] on snoozed_until would silently turn it into a
+    //   deadline-0 (elapsed) marker that still fires but would NOT be removed --
+    //   this test fails loudly on that slip.
+    // Scenario: a NAS upgraded across this change still has an old margin-shaped
+    //   enospc-ack.json on disk while the pool is at risk.
+    #[test]
+    fn cmd_monitor_old_margin_shaped_marker_fires_armed_and_clears() {
+        let (_dir, paths) = isolated_paths();
+        let key = matching_pool_key();
+        let pool_key_value = serde_json::to_value(&key).unwrap();
+        let old_shape = serde_json::json!({
+            "pool_key": pool_key_value,
+            "baseline_margin": -2048,
+        });
+        std::fs::write(
+            paths.enospc_ack_json(),
+            serde_json::to_vec(&old_shape).unwrap(),
+        )
+        .unwrap();
+        let runner = MonitorTestRunner::with_usage_payload(usage_atrisk());
+
+        let result = cmd_monitor(&runner, &monitor_fs_btrfs(), &monitor_mp(), &paths);
+
+        assert!(
+            has_enospc_cause(&result),
+            "old margin-shaped marker must fire armed, got {result:?}"
+        );
+        assert!(
+            !paths.enospc_ack_json().exists(),
+            "old margin-shaped marker (missing snoozed_until) is corrupt -> removed"
         );
     }
 
@@ -1477,7 +1602,7 @@ mod tests {
     #[test]
     fn cmd_monitor_rearms_on_predicate_health_then_refires() {
         let (_dir, paths) = isolated_paths();
-        seed_enospc_baseline(&paths, matching_pool_key(), -(10 * MIB as i64));
+        seed_enospc_baseline(&paths, matching_pool_key(), open_snooze_deadline());
         let healthy = MonitorTestRunner::with_usage_payload(usage_4disk_one_low());
 
         let rearm = cmd_monitor(&healthy, &monitor_fs_btrfs(), &monitor_mp(), &paths);
@@ -1538,7 +1663,7 @@ mod tests {
 
         for (label, stale_key) in cases {
             let (_dir, paths) = isolated_paths();
-            seed_enospc_baseline(&paths, stale_key, -(10 * MIB as i64));
+            seed_enospc_baseline(&paths, stale_key, open_snooze_deadline());
             let runner = MonitorTestRunner::with_usage_payload(usage_atrisk());
 
             let result = cmd_monitor(&runner, &monitor_fs_btrfs(), &monitor_mp(), &paths);
@@ -1564,7 +1689,7 @@ mod tests {
     #[test]
     fn cmd_monitor_identity_gap_fires_armed_and_keeps_baseline() {
         let (_dir, paths) = isolated_paths();
-        seed_enospc_baseline(&paths, matching_pool_key(), -(10 * MIB as i64));
+        seed_enospc_baseline(&paths, matching_pool_key(), open_snooze_deadline());
         let runner = MonitorTestRunner::with_usage_and_override(
             usage_atrisk(),
             MonitorOverride::BtrfsShowPayload(BTRFS_SHOW_2DISK_NO_UUID.to_owned()),
@@ -1625,7 +1750,7 @@ mod tests {
     #[test]
     fn cmd_monitor_degraded_skips_enospc_and_preserves_baseline() {
         let (_dir, paths) = isolated_paths();
-        seed_enospc_baseline(&paths, matching_pool_key(), -(10 * MIB as i64));
+        seed_enospc_baseline(&paths, matching_pool_key(), open_snooze_deadline());
         let runner = MonitorTestRunner::with_override(MonitorOverride::BtrfsShowPayload(
             BTRFS_SHOW_2DISK_1MISSING.to_owned(),
         ));

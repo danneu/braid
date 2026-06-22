@@ -17,11 +17,13 @@ braid runs a health check every 5 minutes via a systemd timer. The check looks a
 
 A scrub that discovers unrepairable read, checksum, or generation errors increments the same btrfs device stats, so it follows the same beep and `braid status` flow as an everyday I/O error. That is distinct from check 4: a *failed* scrub (one that could not run or complete) is what raises the scrub-failure alert, while corruption a scrub *found* surfaces through check 1.
 
+Separately, the monitor runs a proactive **capacity (ENOSPC) risk** check: it warns when an intact pool is one disk-loss away from being unable to allocate the RAID1 chunk pairs needed to restore redundancy. Unlike the four checks above, this is a *non-beeping* advisory (monitor exit 3) -- it runs your alert command and shows in `braid status`, but never beeps. Acknowledging it *snoozes* the reminder for 7 days rather than resolving it: if the pool is still at risk when the interval elapses the monitor reminds again, `braid status` keeps showing the advisory the whole time, and it re-arms automatically once you add capacity or free space.
+
 If any check triggers, braid activates an alert.
 
 ### What happens on alert
 
-When `braid monitor` detects an issue (exit code 1), the systemd wrapper starts `braid-alert.service`, which:
+When `braid monitor` detects a Critical issue (exit code 1), the systemd wrapper starts `braid-alert.service`, which:
 
 - **Beeps the PC speaker** (if enabled) until acknowledged. The cadence starts at 5 seconds and backs off exponentially (5s, 10s, 20s, 40s, ...) up to once every 15 minutes, so the early beeps are urgent but an ignored alert doesn't stay obnoxious.
 - **Runs your custom alert command** (if configured).
@@ -127,7 +129,7 @@ Once you have investigated and resolved (or accepted) the issue:
 sudo braid ack
 ```
 
-This silences the beep and resets the alert baseline. New errors after ack will trigger a fresh alert.
+This silences the beep and resets the device-error baseline; new errors after ack trigger a fresh alert. A capacity (ENOSPC) warning is instead *snoozed* for a reminder interval -- ack does not resolve it, and `braid status` keeps showing it until you add capacity or free space.
 
 ## Checking monitor status
 
