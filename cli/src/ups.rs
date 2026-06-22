@@ -158,7 +158,7 @@ fn cmd_ups_status_to<R: CommandRunner>(
     let Some(ups_cfg) = config.ups() else {
         return print_not_enabled(json, out);
     };
-    let parsed = match query_ups(runner, &ups_cfg.name) {
+    let parsed = match query_ups(runner, ups_cfg.name.as_str()) {
         Ok(q) => q.parsed,
         Err(UpsQueryError::InvocationFailed(e)) => {
             return emit_invocation_failed(json, e, out);
@@ -178,7 +178,7 @@ fn cmd_ups_status_to<R: CommandRunner>(
             out,
             "{}",
             format_human(
-                &ups_cfg.name,
+                ups_cfg.name.as_str(),
                 &parsed,
                 status_tag::color_enabled_for_stdout()
             )

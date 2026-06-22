@@ -52,34 +52,37 @@ fn fallback_disk_luks_lock<R: CommandRunner>(
 
     let expected_path = match backing_path_resolver.canonicalize(by_id_path) {
         Ok(path) => path,
-        Err(_) => return (DiskLockState::Unknown, Some(underlying)),
+        Err(_) => return (DiskLockState::Unknown, Some(underlying.as_str().to_owned())),
     };
-    let found_path = match backing_path_resolver.canonicalize(&underlying) {
+    let found_path = match backing_path_resolver.canonicalize(underlying.as_str()) {
         Ok(path) => path,
-        Err(_) => return (DiskLockState::Unknown, Some(underlying)),
+        Err(_) => return (DiskLockState::Unknown, Some(underlying.as_str().to_owned())),
     };
     if expected_path != found_path {
-        return (DiskLockState::Unknown, Some(underlying));
+        return (DiskLockState::Unknown, Some(underlying.as_str().to_owned()));
     }
 
     let Some(expected_uuid) = expected_uuid else {
-        return (DiskLockState::Unknown, Some(underlying));
+        return (DiskLockState::Unknown, Some(underlying.as_str().to_owned()));
     };
     let uuid_raw = match runner.run(&CmdRequest::CryptsetupLuksUuid {
-        device: underlying.clone(),
+        device: underlying.as_str().to_owned(),
     }) {
         Ok(raw) => raw,
-        Err(_) => return (DiskLockState::Unknown, Some(underlying)),
+        Err(_) => return (DiskLockState::Unknown, Some(underlying.as_str().to_owned())),
     };
     let found_uuid = match parse_cryptsetup_luks_uuid(&uuid_raw) {
         Ok(out) => out.uuid,
-        Err(_) => return (DiskLockState::Unknown, Some(underlying)),
+        Err(_) => return (DiskLockState::Unknown, Some(underlying.as_str().to_owned())),
     };
 
     if &found_uuid == expected_uuid {
-        (DiskLockState::Unlocked, Some(underlying))
+        (
+            DiskLockState::Unlocked,
+            Some(underlying.as_str().to_owned()),
+        )
     } else {
-        (DiskLockState::Unknown, Some(underlying))
+        (DiskLockState::Unknown, Some(underlying.as_str().to_owned()))
     }
 }
 

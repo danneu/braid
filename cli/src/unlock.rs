@@ -297,7 +297,9 @@ mod tests {
 
         let runner = MockRunner::default()
             .with_output(
-                CmdRequest::MountpointCheck { path: mp.clone() },
+                CmdRequest::MountpointCheck {
+                    path: mp.clone().into(),
+                },
                 unlock_err_raw("mountpoint", 1, ""),
             )
             .with_output(uuid1_req, uuid1_out)
@@ -372,7 +374,7 @@ mod tests {
 
         let runner = MockRunner::default()
             .with_output(
-                CmdRequest::MountpointCheck { path: mp },
+                CmdRequest::MountpointCheck { path: mp.into() },
                 unlock_err_raw("mountpoint", 1, ""),
             )
             .with_output(uuid1_req, uuid1_out)
@@ -674,7 +676,9 @@ mod tests {
         let (balance_req, balance_out) = unlock_btrfs_balance_status_paused(&mp);
         let runner = MockRunner::default()
             .with_output(
-                CmdRequest::MountpointCheck { path: mp.clone() },
+                CmdRequest::MountpointCheck {
+                    path: mp.clone().into(),
+                },
                 unlock_err_raw("mountpoint", 1, ""),
             )
             .with_output(uuid1_req, uuid1_out)
@@ -866,7 +870,7 @@ mod tests {
         ]);
         let runner = base_two_disk_runner().with_output(
             CmdRequest::MountpointCheck {
-                path: MountPoint::new("/mnt/storage".to_owned()),
+                path: MountPoint::new("/mnt/storage".to_owned()).into(),
             },
             unlock_ok_raw("mountpoint"),
         );
@@ -933,7 +937,7 @@ mod tests {
         let (uuid3_req, uuid3_out) = unlock_luks_uuid_not_luks("/dev/disk/by-id/virtio-disk3");
         let runner = MockRunner::default()
             .with_output(
-                CmdRequest::MountpointCheck { path: mp },
+                CmdRequest::MountpointCheck { path: mp.into() },
                 unlock_err_raw("mountpoint", 1, ""),
             )
             .with_output(uuid1_req, uuid1_out)
@@ -1125,7 +1129,9 @@ mod tests {
         let (balance_req, balance_out) = unlock_btrfs_balance_status_idle(&mp);
         let runner = MockRunner::default()
             .with_output(
-                CmdRequest::MountpointCheck { path: mp.clone() },
+                CmdRequest::MountpointCheck {
+                    path: mp.clone().into(),
+                },
                 unlock_err_raw("mountpoint", 1, ""),
             )
             .with_output(uuid1_req, uuid1_out)
@@ -1238,7 +1244,9 @@ mod tests {
         let (balance_req, balance_out) = unlock_btrfs_balance_status_idle(&mp);
         let runner = MockRunner::default()
             .with_output(
-                CmdRequest::MountpointCheck { path: mp.clone() },
+                CmdRequest::MountpointCheck {
+                    path: mp.clone().into(),
+                },
                 unlock_err_raw("mountpoint", 1, ""),
             )
             .with_output(uuid1_req, uuid1_out)
@@ -1372,7 +1380,9 @@ mod tests {
 
         let runner = MockRunner::default()
             .with_output(
-                CmdRequest::MountpointCheck { path: mp.clone() },
+                CmdRequest::MountpointCheck {
+                    path: mp.clone().into(),
+                },
                 unlock_err_raw("mountpoint", 1, ""),
             )
             .with_output(uuid1_req, uuid1_out)
@@ -1529,7 +1539,9 @@ Label: none  uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
         let (balance_req, balance_out) = unlock_btrfs_balance_status_idle(&mp);
         let runner = MockRunner::default()
             .with_output(
-                CmdRequest::MountpointCheck { path: mp.clone() },
+                CmdRequest::MountpointCheck {
+                    path: mp.clone().into(),
+                },
                 unlock_err_raw("mountpoint", 1, ""),
             )
             .with_output(uuid1_req, uuid1_out)

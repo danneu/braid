@@ -1,4 +1,6 @@
-use crate::types::{Devid, LuksFormatExtraOpts, LuksLabel, LuksUuid, MapperName, MountPoint};
+use crate::types::{
+    Devid, LuksFormatExtraOpts, LuksLabel, LuksUuid, MapperName, MountPoint, MountpointCheckPath,
+};
 use crate::util::detail_suffix;
 use std::os::unix::process::ExitStatusExt;
 use thiserror::Error;
@@ -148,7 +150,7 @@ pub enum CmdRequest {
         mount_point: MountPoint,
     },
     MountpointCheck {
-        path: MountPoint,
+        path: MountpointCheckPath,
     },
     // Polling commands for progress monitoring
     BtrfsBalanceStatus {

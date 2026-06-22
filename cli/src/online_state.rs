@@ -110,7 +110,7 @@ pub enum OnlineError {
 
 pub trait OnlineStateOps {
     fn unit_active_state(&self, unit: &str) -> Result<UnitActiveState, OnlineError>;
-    fn is_mountpoint(&self, path: &Path) -> Result<bool, OnlineError>;
+    fn is_mountpoint(&self, mount_point: &MountPoint) -> Result<bool, OnlineError>;
     fn chown(&self, path: &Path, owner: &str, group: &str) -> Result<(), OnlineError>;
     fn chmod(&self, path: &Path, mode: u32) -> Result<(), OnlineError>;
     fn systemctl_start(&self, unit: &str) -> Result<(), OnlineError>;
@@ -145,17 +145,18 @@ impl OnlineStateOps for RealOnlineStateOps<'_> {
         Ok(UnitActiveState::parse(&output.stdout))
     }
 
-    fn is_mountpoint(&self, path: &Path) -> Result<bool, OnlineError> {
-        let mount_point = MountPoint::new(path.display().to_string());
+    fn is_mountpoint(&self, mount_point: &MountPoint) -> Result<bool, OnlineError> {
         let output = self
             .runner
-            .run(&CmdRequest::MountpointCheck { path: mount_point })
+            .run(&CmdRequest::MountpointCheck {
+                path: mount_point.clone().into(),
+            })
             .map_err(|source| OnlineError::Spawn { source })?;
         match output.exit_status {
             0 => Ok(true),
             32 => Ok(false),
             code => Err(OnlineError::Mountpoint {
-                path: path.display().to_string(),
+                path: mount_point.as_str().to_owned(),
                 exit_code: code,
                 stderr: output.stderr.trim().into(),
             }),
@@ -263,7 +264,7 @@ pub fn mark_online(
     ops: &dyn OnlineStateOps,
 ) -> Result<(), OnlineError> {
     let mount_point = Path::new(cfg.mount_point().as_str());
-    let mounted = match ops.is_mountpoint(mount_point) {
+    let mounted = match ops.is_mountpoint(cfg.mount_point()) {
         Ok(mounted) => mounted,
         Err(e) => {
             eprintln!("braid: WARNING: failed to check mountpoint {mount_point:?}: {e}");
@@ -339,7 +340,7 @@ pub fn run_with_online_marker<E>(
 /// `mark_online`'s fail-safe and skips the synchronous stop.
 pub fn mark_offline(cfg: &Config, ops: &dyn OnlineStateOps) -> Result<(), OnlineError> {
     let path = Path::new(cfg.mount_point().as_str());
-    match ops.is_mountpoint(path) {
+    match ops.is_mountpoint(cfg.mount_point()) {
         Ok(true) => return Ok(()),
         Ok(false) => {}
         Err(e) => {
@@ -482,7 +483,7 @@ impl OnlineStateOps for RecordingOnlineStateOps {
         })
     }
 
-    fn is_mountpoint(&self, _path: &Path) -> Result<bool, OnlineError> {
+    fn is_mountpoint(&self, _mount_point: &MountPoint) -> Result<bool, OnlineError> {
         self.calls.borrow_mut().push("mountpoint".into());
         self.mounted
             .borrow()
@@ -568,13 +569,16 @@ mod tests {
     fn real_ops_mountpoint_exit_zero_is_mounted() {
         let runner = MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
-                path: MountPoint::new("/mnt/storage".into()),
+                path: MountPoint::new("/mnt/storage".into()).into(),
             },
             mountpoint_out(0, ""),
         );
         let ops = RealOnlineStateOps::new(&runner);
 
-        assert!(ops.is_mountpoint(Path::new("/mnt/storage")).unwrap());
+        assert!(
+            ops.is_mountpoint(&MountPoint::parse("/mnt/storage").unwrap())
+                .unwrap()
+        );
     }
 
     // Intent: RealOnlineStateOps maps mountpoint exit 32 to not mounted.
@@ -587,13 +591,16 @@ mod tests {
     fn real_ops_mountpoint_exit_32_is_not_mounted() {
         let runner = MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
-                path: MountPoint::new("/mnt/storage".into()),
+                path: MountPoint::new("/mnt/storage".into()).into(),
             },
             mountpoint_out(32, "/mnt/storage is not a mountpoint\n"),
         );
         let ops = RealOnlineStateOps::new(&runner);
 
-        assert!(!ops.is_mountpoint(Path::new("/mnt/storage")).unwrap());
+        assert!(
+            !ops.is_mountpoint(&MountPoint::parse("/mnt/storage").unwrap())
+                .unwrap()
+        );
     }
 
     // Intent: RealOnlineStateOps treats mountpoint exit 1 as a probe error.
@@ -605,14 +612,14 @@ mod tests {
     fn real_ops_mountpoint_exit_one_is_error() {
         let runner = MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
-                path: MountPoint::new("/mnt/storage".into()),
+                path: MountPoint::new("/mnt/storage".into()).into(),
             },
             mountpoint_out(1, "bad usage\n"),
         );
         let ops = RealOnlineStateOps::new(&runner);
 
         let err = ops
-            .is_mountpoint(Path::new("/mnt/storage"))
+            .is_mountpoint(&MountPoint::parse("/mnt/storage").unwrap())
             .expect_err("exit 1 should be classified as a probe error");
         assert!(
             matches!(err, OnlineError::Mountpoint { exit_code: 1, .. }),
@@ -630,14 +637,14 @@ mod tests {
     fn real_ops_mountpoint_other_exit_is_error() {
         let runner = MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
-                path: MountPoint::new("/mnt/storage".into()),
+                path: MountPoint::new("/mnt/storage".into()).into(),
             },
             mountpoint_out(2, "unexpected failure\n"),
         );
         let ops = RealOnlineStateOps::new(&runner);
 
         let err = ops
-            .is_mountpoint(Path::new("/mnt/storage"))
+            .is_mountpoint(&MountPoint::parse("/mnt/storage").unwrap())
             .expect_err("unexpected exit should be classified as a probe error");
         assert!(
             matches!(err, OnlineError::Mountpoint { exit_code: 2, .. }),

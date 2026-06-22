@@ -17,6 +17,7 @@ use braid_cli::preview::{PerDiskStyle, PreviewNote};
 use braid_cli::probe::RealFilesystem;
 use braid_cli::progress::{ProgressMode, resolve_progress_output};
 use braid_cli::state_paths::StatePaths;
+use braid_cli::types::MountPoint;
 
 #[derive(Debug, Parser)]
 #[command(name = "braid", version)]
@@ -454,15 +455,15 @@ struct DiscoverArgs {
 #[derive(Debug, Args)]
 struct ScrubCancelArgs {
     /// Mount point of the braid pool to check
-    #[arg(long)]
-    mount: String,
+    #[arg(long, value_parser = MountPoint::parse)]
+    mount: MountPoint,
 }
 
 #[derive(Debug, Args)]
 struct ScrubMountArgs {
     /// Mount point of the braid pool to scrub
-    #[arg(long)]
-    mount: String,
+    #[arg(long, value_parser = MountPoint::parse)]
+    mount: MountPoint,
 }
 
 /// Renders help for a nested command path without reintroducing Clap's
@@ -863,8 +864,7 @@ fn main() {
             // filesystem dependencies beyond the binary itself — see
             // docs/design/decisions/018-systemd-lifecycle.md (thin-systemd-layer principle).
             let runner = RealRunner;
-            let mount_point = braid_cli::types::MountPoint::new(args.mount.clone());
-            match braid_cli::scrub_cancel::cmd_scrub_cancel(&runner, &mount_point) {
+            match braid_cli::scrub_cancel::cmd_scrub_cancel(&runner, &args.mount) {
                 Ok(_) => std::process::exit(0),
                 Err(e) => {
                     print_cli_error(&e.to_string());
@@ -874,8 +874,7 @@ fn main() {
         }
         Commands::ScrubNeedsResume(args) => {
             let runner = RealRunner;
-            let mount_point = braid_cli::types::MountPoint::new(args.mount.clone());
-            match braid_cli::scrub_needs_resume::cmd_scrub_needs_resume(&runner, &mount_point) {
+            match braid_cli::scrub_needs_resume::cmd_scrub_needs_resume(&runner, &args.mount) {
                 Ok(braid_cli::scrub_needs_resume::ScrubNeedsResumeResult::Yes) => {
                     std::process::exit(0)
                 }
@@ -890,10 +889,9 @@ fn main() {
         }
         Commands::ScrubResumeOrStart(args) => {
             let runner = RealRunner;
-            let mount_point = braid_cli::types::MountPoint::new(args.mount.clone());
             match braid_cli::scrub_resume_or_start::cmd_scrub_resume_or_start(
                 &runner,
-                &mount_point,
+                &args.mount,
                 &paths,
             ) {
                 Ok(braid_cli::scrub_resume_or_start::ScrubResumeOrStartResult::Resumed {
@@ -1416,7 +1414,7 @@ fn disk_name_candidates() -> Vec<CompletionCandidate> {
 mod tests {
     use super::*;
     use braid_cli::membership::{self, DiskMember};
-    use braid_cli::types::{ByIdPath, DiskName, LuksUuid};
+    use braid_cli::types::{ByIdPath, DiskName, LuksUuid, MountPoint};
     use tempfile::TempDir;
 
     fn expected_luks_format_args() -> Vec<String> {
@@ -1455,6 +1453,21 @@ mod tests {
         DiskMember::new(disk_name(name), by_id(by_id_path))
     }
 
+    fn assert_scrub_mount_rejects(argv: &[&str]) {
+        let err = Cli::try_parse_from(argv.iter().copied()).expect_err("mount should fail");
+        assert_eq!(err.kind(), ErrorKind::ValueValidation);
+    }
+
+    fn assert_scrub_mount_parses(argv: &[&str], expected: &str) {
+        let cli = Cli::try_parse_from(argv.iter().copied()).expect("mount should parse");
+        let mount = match cli.command {
+            Commands::ScrubCancel(args) => args.mount,
+            Commands::ScrubNeedsResume(args) | Commands::ScrubResumeOrStart(args) => args.mount,
+            other => panic!("unexpected command: {other:?}"),
+        };
+        assert_eq!(mount, MountPoint::parse(expected).unwrap());
+    }
+
     fn pool_membership(entries: &[(u64, &str, &str)]) -> PoolMembership {
         let mut membership = PoolMembership::empty();
         for (seed, name, by_id_path) in entries {
@@ -1463,6 +1476,51 @@ mod tests {
                 .unwrap();
         }
         membership
+    }
+
+    // Intent: scrub-cancel validates --mount through MountPoint at clap parse
+    //   time.
+    // Why it exists: this hidden systemd ExecStop hook must reject flag-shaped
+    //   mount values before dispatch, without relying on later
+    //   MountPoint::new calls.
+    // Scenario: a malformed module-generated or manual invocation passes
+    //   `--mount=-o`.
+    #[test]
+    fn scrub_cancel_rejects_invalid_mount_arg() {
+        assert_scrub_mount_rejects(&["braid", "scrub-cancel", "--mount=-o"]);
+        assert_scrub_mount_parses(
+            &["braid", "scrub-cancel", "--mount=/mnt/storage"],
+            "/mnt/storage",
+        );
+    }
+
+    // Intent: scrub-needs-resume validates --mount through MountPoint at clap
+    //   parse time.
+    // Why it exists: the resume trigger is a hidden systemd boundary and must
+    //   fail as a usage error for malformed mount text.
+    // Scenario: a bad unit argument tries to pass an option-like mount path.
+    #[test]
+    fn scrub_needs_resume_rejects_invalid_mount_arg() {
+        assert_scrub_mount_rejects(&["braid", "scrub-needs-resume", "--mount=-o"]);
+        assert_scrub_mount_parses(
+            &["braid", "scrub-needs-resume", "--mount=/mnt/storage"],
+            "/mnt/storage",
+        );
+    }
+
+    // Intent: scrub-resume-or-start validates --mount through MountPoint at
+    //   clap parse time.
+    // Why it exists: the scrub runner must reject malformed mount text before
+    //   any command executes.
+    // Scenario: a bad timer/manual invocation tries to pass an option-like
+    //   mount path.
+    #[test]
+    fn scrub_resume_or_start_rejects_invalid_mount_arg() {
+        assert_scrub_mount_rejects(&["braid", "scrub-resume-or-start", "--mount=-o"]);
+        assert_scrub_mount_parses(
+            &["braid", "scrub-resume-or-start", "--mount=/mnt/storage"],
+            "/mnt/storage",
+        );
     }
 
     fn parsed_lock_policy(argv: &[&str]) -> LockPolicy {

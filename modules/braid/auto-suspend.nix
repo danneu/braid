@@ -20,6 +20,7 @@
 let
   cfg = config.braid;
   braidWrapped = import ./wrapper.nix { inherit cfg pkgs lib; };
+  grammar = import ./grammar.nix { inherit lib; };
 in
 {
   options.braid.autoSuspend = {
@@ -47,6 +48,11 @@ in
           "braid.autoSuspend requires Wake-on-LAN to wake the NAS after suspend. "
           + "Set braid.autoSuspend.wolInterface to your primary network interface (e.g. \"eno1\"). "
           + "Find it with: ip link";
+      }
+      {
+        assertion =
+          cfg.autoSuspend.wolInterface == null || grammar.isValidInterface cfg.autoSuspend.wolInterface;
+        message = "braid.autoSuspend.wolInterface must be 1-15 characters of letters, digits, '_', '.', or '-', must not be '.' or '..', and must not start with '-'.";
       }
       {
         assertion =

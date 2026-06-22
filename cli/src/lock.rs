@@ -267,7 +267,7 @@ fn classify_candidate_mapper<R: CommandRunner>(
         } => device,
     };
     let uuid_raw = runner.run(&CmdRequest::CryptsetupLuksUuid {
-        device: backing_device.clone(),
+        device: backing_device.as_str().to_owned(),
     })?;
     let parsed = parse_cryptsetup_luks_uuid(&uuid_raw)
         .map_err(|e| CmdError::Failed(format!("cryptsetup luksUUID {backing_device}: {e}")))?;
@@ -872,7 +872,7 @@ where
 
     // 1. Check if pool is mounted
     let mp_result = runner.run(&CmdRequest::MountpointCheck {
-        path: mount_point.clone(),
+        path: mount_point.clone().into(),
     })?;
     let pool_was_mounted = mp_result.exit_status == 0;
 
@@ -1628,7 +1628,7 @@ mod tests {
         MockRunner::default()
             .with_output(
                 CmdRequest::MountpointCheck {
-                    path: MountPoint::new("/mnt/storage".to_owned()),
+                    path: MountPoint::new("/mnt/storage".to_owned()).into(),
                 },
                 lock_ok_raw("mountpoint -q /mnt/storage"),
             )
@@ -1651,7 +1651,7 @@ mod tests {
     fn cmd_lock_skips_lifecycle_pre_steps_when_lifecycle_disabled() {
         let runner = MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
-                path: MountPoint::new("/mnt/storage".to_owned()),
+                path: MountPoint::new("/mnt/storage".to_owned()).into(),
             },
             lock_err_raw("mountpoint -q /mnt/storage", 1, ""),
         );
@@ -1719,7 +1719,7 @@ mod tests {
             )
             .with_output(
                 CmdRequest::MountpointCheck {
-                    path: MountPoint::new("/mnt/storage".to_owned()),
+                    path: MountPoint::new("/mnt/storage".to_owned()).into(),
                 },
                 lock_err_raw("mountpoint -q /mnt/storage", 1, ""),
             );
@@ -1989,7 +1989,7 @@ mod tests {
         membership.insert(test_uuid(701), alpha).unwrap();
         let runner = MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
-                path: MountPoint::new("/mnt/storage".to_owned()),
+                path: MountPoint::new("/mnt/storage".to_owned()).into(),
             },
             lock_err_raw("mountpoint -q /mnt/storage", 1, ""),
         );
@@ -2039,7 +2039,7 @@ mod tests {
     fn execute_does_not_close_membership_mapper_absent_from_plan() {
         let runner = MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
-                path: MountPoint::new("/mnt/storage".into()),
+                path: MountPoint::new("/mnt/storage".into()).into(),
             },
             lock_err_raw("mountpoint -q /mnt/storage", 1, ""),
         );
@@ -2075,7 +2075,7 @@ mod tests {
     fn lock_already_locked() {
         let runner = MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
-                path: MountPoint::new("/mnt/storage".to_owned()),
+                path: MountPoint::new("/mnt/storage".to_owned()).into(),
             },
             lock_err_raw("mountpoint -q /mnt/storage", 1, ""),
         );
@@ -2093,7 +2093,7 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::MountpointCheck {
-                    path: MountPoint::new("/mnt/storage".to_owned()),
+                    path: MountPoint::new("/mnt/storage".to_owned()).into(),
                 },
                 lock_err_raw("mountpoint -q /mnt/storage", 1, ""),
             )
@@ -2122,7 +2122,7 @@ mod tests {
     fn lock_umount_busy_fails() {
         let runner = lock_with_fsid_probe_mocks(MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
-                path: MountPoint::new("/mnt/storage".to_owned()),
+                path: MountPoint::new("/mnt/storage".to_owned()).into(),
             },
             lock_ok_raw("mountpoint -q /mnt/storage"),
         ))
@@ -2180,7 +2180,7 @@ mod tests {
     fn lock_umount_failure_skips_forget() {
         let runner = lock_with_fsid_probe_mocks(MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
-                path: MountPoint::new("/mnt/storage".to_owned()),
+                path: MountPoint::new("/mnt/storage".to_owned()).into(),
             },
             lock_ok_raw("mountpoint -q /mnt/storage"),
         ))
@@ -2235,7 +2235,7 @@ mod tests {
     fn lock_umount_busy_includes_hint() {
         let runner = lock_with_fsid_probe_mocks(MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
-                path: MountPoint::new("/mnt/storage".to_owned()),
+                path: MountPoint::new("/mnt/storage".to_owned()).into(),
             },
             lock_ok_raw("mountpoint -q /mnt/storage"),
         ))
@@ -2291,7 +2291,7 @@ mod tests {
     fn lock_umount_busy_retry_succeeds_on_second_attempt() {
         let runner = lock_with_fsid_probe_mocks(MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
-                path: MountPoint::new("/mnt/storage".to_owned()),
+                path: MountPoint::new("/mnt/storage".to_owned()).into(),
             },
             lock_ok_raw("mountpoint -q /mnt/storage"),
         ))
@@ -2366,7 +2366,7 @@ mod tests {
     fn lock_umount_non_busy_failure_does_not_retry() {
         let runner = lock_with_fsid_probe_mocks(MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
-                path: MountPoint::new("/mnt/storage".to_owned()),
+                path: MountPoint::new("/mnt/storage".to_owned()).into(),
             },
             lock_ok_raw("mountpoint -q /mnt/storage"),
         ))
@@ -2435,7 +2435,7 @@ mod tests {
     fn lock_umount_cmd_error_bubbles_immediately_without_mapper_close() {
         let runner = lock_with_fsid_probe_mocks(MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
-                path: MountPoint::new("/mnt/storage".to_owned()),
+                path: MountPoint::new("/mnt/storage".to_owned()).into(),
             },
             lock_ok_raw("mountpoint -q /mnt/storage"),
         ));
@@ -2468,7 +2468,7 @@ mod tests {
     fn lock_umount_non_busy_omits_hint() {
         let runner = lock_with_fsid_probe_mocks(MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
-                path: MountPoint::new("/mnt/storage".to_owned()),
+                path: MountPoint::new("/mnt/storage".to_owned()).into(),
             },
             lock_ok_raw("mountpoint -q /mnt/storage"),
         ))
@@ -2523,7 +2523,7 @@ mod tests {
     fn lock_umount_path_containing_busy_phrase_omits_hint() {
         let runner = lock_with_fsid_probe_mocks(MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
-                path: MountPoint::new("/mnt/storage".to_owned()),
+                path: MountPoint::new("/mnt/storage".to_owned()).into(),
             },
             lock_ok_raw("mountpoint -q /mnt/storage"),
         ))
@@ -2599,7 +2599,7 @@ mod tests {
     fn lock_execute_forget_filters_disappeared_mapper() {
         let runner = lock_with_fsid_probe_mocks(MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
-                path: MountPoint::new("/mnt/storage".to_owned()),
+                path: MountPoint::new("/mnt/storage".to_owned()).into(),
             },
             lock_ok_raw("mountpoint -q /mnt/storage"),
         ))
@@ -2653,7 +2653,7 @@ mod tests {
     fn lock_forget_failure_is_nonfatal() {
         let runner = lock_with_fsid_probe_mocks(MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
-                path: MountPoint::new("/mnt/storage".to_owned()),
+                path: MountPoint::new("/mnt/storage".to_owned()).into(),
             },
             lock_ok_raw("mountpoint -q /mnt/storage"),
         ))
@@ -2791,7 +2791,7 @@ mod tests {
         // Pool is not mounted -- mountpoint check returns non-zero.
         let runner = MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
-                path: MountPoint::new("/mnt/storage".to_owned()),
+                path: MountPoint::new("/mnt/storage".to_owned()).into(),
             },
             lock_err_raw("mountpoint -q /mnt/storage", 1, ""),
         );
@@ -2847,7 +2847,7 @@ mod tests {
         let runner = with_orphan_mapper(
             lock_with_fsid_probe_mocks(MockRunner::default().with_output(
                 CmdRequest::MountpointCheck {
-                    path: MountPoint::new("/mnt/storage".to_owned()),
+                    path: MountPoint::new("/mnt/storage".to_owned()).into(),
                 },
                 lock_ok_raw("mountpoint -q /mnt/storage"),
             )),
@@ -2900,7 +2900,7 @@ mod tests {
         let runner = with_orphan_mapper(
             lock_with_fsid_probe_mocks(MockRunner::default().with_output(
                 CmdRequest::MountpointCheck {
-                    path: MountPoint::new("/mnt/storage".to_owned()),
+                    path: MountPoint::new("/mnt/storage".to_owned()).into(),
                 },
                 lock_ok_raw("mountpoint -q /mnt/storage"),
             )),
@@ -2974,7 +2974,7 @@ mod tests {
     fn dry_run_preview_nothing_to_do() {
         let runner = MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
-                path: MountPoint::new("/mnt/storage".to_owned()),
+                path: MountPoint::new("/mnt/storage".to_owned()).into(),
             },
             lock_err_raw("mountpoint -q /mnt/storage", 1, ""),
         );
@@ -3004,7 +3004,7 @@ mod tests {
     fn mounted_probe_failure_fallback_closes_uuid_verified_member() {
         let runner = lock_with_fsid_probe_mocks(MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
-                path: MountPoint::new("/mnt/storage".to_owned()),
+                path: MountPoint::new("/mnt/storage".to_owned()).into(),
             },
             lock_ok_raw("mountpoint -q /mnt/storage"),
         ))
@@ -3053,7 +3053,7 @@ mod tests {
     fn systemd_stop_probe_failed_fallback_pauses_running_balance() {
         let runner = lock_with_fsid_probe_mocks(MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
-                path: MountPoint::new("/mnt/storage".to_owned()),
+                path: MountPoint::new("/mnt/storage".to_owned()).into(),
             },
             lock_ok_raw("mountpoint -q /mnt/storage"),
         ))
@@ -3108,7 +3108,7 @@ mod tests {
         let runner = with_orphan_mapper(
             MockRunner::default().with_output(
                 CmdRequest::MountpointCheck {
-                    path: MountPoint::new("/mnt/storage".to_owned()),
+                    path: MountPoint::new("/mnt/storage".to_owned()).into(),
                 },
                 lock_err_raw("mountpoint -q /mnt/storage", 1, ""),
             ),
@@ -3141,7 +3141,7 @@ mod tests {
             with_orphan_mapper(
                 MockRunner::default().with_output(
                     CmdRequest::MountpointCheck {
-                        path: MountPoint::new("/mnt/storage".to_owned()),
+                        path: MountPoint::new("/mnt/storage".to_owned()).into(),
                     },
                     lock_err_raw("mountpoint -q /mnt/storage", 1, ""),
                 ),
@@ -3207,7 +3207,7 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::MountpointCheck {
-                    path: MountPoint::new("/mnt/storage".to_owned()),
+                    path: MountPoint::new("/mnt/storage".to_owned()).into(),
                 },
                 lock_err_raw("mountpoint -q /mnt/storage", 1, ""),
             )
@@ -3240,7 +3240,7 @@ mod tests {
     fn unverified_fallback_candidate_is_warned_and_skipped() {
         let runner = MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
-                path: MountPoint::new("/mnt/storage".to_owned()),
+                path: MountPoint::new("/mnt/storage".to_owned()).into(),
             },
             lock_err_raw("mountpoint -q /mnt/storage", 1, ""),
         );
@@ -3907,7 +3907,7 @@ mod tests {
             .collect();
         let runner = lock_with_fsid_probe_mocks(MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
-                path: MountPoint::new("/mnt/storage".to_owned()),
+                path: MountPoint::new("/mnt/storage".to_owned()).into(),
             },
             lock_ok_raw("mountpoint -q /mnt/storage"),
         ))
@@ -4004,7 +4004,7 @@ mod tests {
     fn lock_refuses_when_exclusive_op_active() {
         let runner = lock_with_fsid_probe_mocks(MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
-                path: MountPoint::new("/mnt/storage".to_owned()),
+                path: MountPoint::new("/mnt/storage".to_owned()).into(),
             },
             lock_ok_raw("mountpoint -q /mnt/storage"),
         ));
@@ -4034,7 +4034,7 @@ mod tests {
     fn lock_probe_failed_refuses_when_exclusive_op_active() {
         let runner = lock_with_fsid_probe_mocks(MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
-                path: MountPoint::new("/mnt/storage".to_owned()),
+                path: MountPoint::new("/mnt/storage".to_owned()).into(),
             },
             lock_ok_raw("mountpoint -q /mnt/storage"),
         ))
@@ -4079,7 +4079,7 @@ mod tests {
     fn lock_refuses_when_balance_paused() {
         let runner = lock_with_fsid_probe_mocks(MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
-                path: MountPoint::new("/mnt/storage".to_owned()),
+                path: MountPoint::new("/mnt/storage".to_owned()).into(),
             },
             lock_ok_raw("mountpoint -q /mnt/storage"),
         ));
@@ -4113,7 +4113,7 @@ mod tests {
     fn lock_rejects_mounted_but_not_btrfs() {
         let runner = MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
-                path: MountPoint::new("/mnt/storage".to_owned()),
+                path: MountPoint::new("/mnt/storage".to_owned()).into(),
             },
             lock_ok_raw("mountpoint -q /mnt/storage"),
         );
@@ -5016,7 +5016,7 @@ mod tests {
         let plan_runner = MockRunner::default()
             .with_output(
                 CmdRequest::MountpointCheck {
-                    path: MountPoint::new("/mnt/storage".to_owned()),
+                    path: MountPoint::new("/mnt/storage".to_owned()).into(),
                 },
                 lock_ok_raw("mountpoint -q /mnt/storage"),
             )
@@ -5414,7 +5414,7 @@ mod tests {
     fn full_arm_notbtrfs_aborts_does_not_fall_back() {
         let runner = MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
-                path: MountPoint::new("/mnt/storage".to_owned()),
+                path: MountPoint::new("/mnt/storage".to_owned()).into(),
             },
             lock_ok_raw("mountpoint -q /mnt/storage"),
         );

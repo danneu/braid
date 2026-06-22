@@ -405,13 +405,12 @@ pub struct Model {
 impl Model {
     pub fn new(
         disks: DiskIdentity,
-        mount_point: String,
+        mount_point: MountPoint,
         fan_control: Option<crate::config::FanControl>,
         ups_config: Option<crate::config::Ups>,
         advisories: Vec<String>,
         paths: StatePaths,
     ) -> (Self, Vec<Effect>) {
-        let mount_point = MountPoint::new(mount_point);
         let mut effects: Vec<Effect> = vec![Effect::ProbePool {
             mount_point: mount_point.clone(),
             disks: disks.clone(),
@@ -433,7 +432,7 @@ impl Model {
         let mut ups_probe_inflight = false;
         if let Some(u) = ups_config.as_ref() {
             effects.push(Effect::ProbeUps {
-                name: u.name.clone(),
+                name: u.name.as_str().to_owned(),
             });
             ups_probe_inflight = true;
         }
@@ -479,7 +478,7 @@ impl Model {
             },
             selected_disk: 0,
             pool,
-            mount_point: MountPoint::new(String::new()),
+            mount_point: MountPoint::parse("/mnt/storage").expect("valid demo mount point"),
             probe_duration: None,
             frame: 0,
             spinner_deadline: None,
@@ -709,7 +708,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (_model, effects) = Model::new(
             identity.clone(),
-            "/mnt/storage".to_owned(),
+            MountPoint::parse("/mnt/storage").unwrap(),
             None,
             None,
             vec![],

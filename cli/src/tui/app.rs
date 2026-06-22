@@ -72,7 +72,7 @@ fn fan_probe_effect(model: &Model) -> Option<Effect> {
 fn ups_probe_effect(model: &Model) -> Option<Effect> {
     let u = model.ups_config.as_ref()?;
     Some(Effect::ProbeUps {
-        name: u.name.clone(),
+        name: u.name.as_str().to_owned(),
     })
 }
 
@@ -414,7 +414,9 @@ mod tests {
     }
 
     fn sample_ups_config() -> crate::config::Ups {
-        crate::config::Ups { name: "ups".into() }
+        crate::config::Ups {
+            name: crate::types::UpsName::parse("ups").unwrap(),
+        }
     }
 
     fn sample_ups_snapshot() -> UpsSnapshot {
@@ -525,7 +527,7 @@ mod tests {
                 names: sample_disk_names(),
                 ..Default::default()
             },
-            "/mnt/storage".to_owned(),
+            crate::types::MountPoint::parse("/mnt/storage").unwrap(),
             Some(sample_fan_control()),
             Some(sample_ups_config()),
             vec![],
@@ -567,7 +569,7 @@ mod tests {
                 names: sample_disk_names(),
                 ..Default::default()
             },
-            "/mnt/storage".to_owned(),
+            crate::types::MountPoint::parse("/mnt/storage").unwrap(),
             Some(sample_fan_control()),
             None,
             vec![],
@@ -592,7 +594,7 @@ mod tests {
                 names: sample_disk_names(),
                 ..Default::default()
             },
-            "/mnt/storage".to_owned(),
+            crate::types::MountPoint::parse("/mnt/storage").unwrap(),
             None,
             None,
             vec![],
@@ -617,7 +619,7 @@ mod tests {
                 names: sample_disk_names(),
                 ..Default::default()
             },
-            "/mnt/storage".to_owned(),
+            crate::types::MountPoint::parse("/mnt/storage").unwrap(),
             None,
             Some(sample_ups_config()),
             vec![],
@@ -641,7 +643,7 @@ mod tests {
                 names: sample_disk_names(),
                 ..Default::default()
             },
-            "/mnt/storage".to_owned(),
+            crate::types::MountPoint::parse("/mnt/storage").unwrap(),
             None,
             None,
             vec![],

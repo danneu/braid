@@ -981,16 +981,16 @@ impl BrowseState {
                 }
             }
             BrowseSelection::NutStatus | BrowseSelection::NutVariables => CmdRequest::UpscQuery {
-                name: ups_config?.name.clone(),
+                name: ups_config?.name.as_str().to_owned(),
             },
             BrowseSelection::NutCommands => CmdRequest::UpscmdList {
-                name: ups_config?.name.clone(),
+                name: ups_config?.name.as_str().to_owned(),
             },
             BrowseSelection::NutClients => CmdRequest::UpscClients {
-                name: ups_config?.name.clone(),
+                name: ups_config?.name.as_str().to_owned(),
             },
             BrowseSelection::NutRwVars => CmdRequest::UpsrwList {
-                name: ups_config?.name.clone(),
+                name: ups_config?.name.as_str().to_owned(),
             },
             BrowseSelection::NutUpses => CmdRequest::UpscListUpses,
             BrowseSelection::SystemdStatus | BrowseSelection::SystemdShow => {
@@ -1348,7 +1348,9 @@ mod tests {
     }
 
     fn ups() -> Ups {
-        Ups { name: "ups".into() }
+        Ups {
+            name: crate::types::UpsName::parse("ups").unwrap(),
+        }
     }
 
     fn browse_request(effect: Option<Effect>) -> CmdRequest {

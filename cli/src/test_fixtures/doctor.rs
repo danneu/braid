@@ -190,7 +190,7 @@ impl Filesystem for DoctorMockFs {
 pub(crate) fn mountpoint_ok() -> (CmdRequest, RawCommandOutput) {
     (
         CmdRequest::MountpointCheck {
-            path: MountPoint::new("/mnt/storage".to_owned()),
+            path: MountPoint::new("/mnt/storage".to_owned()).into(),
         },
         RawCommandOutput {
             cmd: "mountpoint -q /mnt/storage".into(),
@@ -204,7 +204,7 @@ pub(crate) fn mountpoint_ok() -> (CmdRequest, RawCommandOutput) {
 pub(crate) fn mountpoint_fail() -> (CmdRequest, RawCommandOutput) {
     (
         CmdRequest::MountpointCheck {
-            path: MountPoint::new("/mnt/storage".to_owned()),
+            path: MountPoint::new("/mnt/storage".to_owned()).into(),
         },
         RawCommandOutput {
             cmd: "mountpoint -q /mnt/storage".into(),

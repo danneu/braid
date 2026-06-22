@@ -2550,7 +2550,9 @@ pub(crate) mod tests {
     #[test]
     fn data_tab_ups_runtime_uses_duration_units() {
         let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(sample_pool()));
-        model.ups_config = Some(crate::config::Ups { name: "ups".into() });
+        model.ups_config = Some(crate::config::Ups {
+            name: crate::types::UpsName::parse("ups").unwrap(),
+        });
         model.ups = Some(UpsSnapshot {
             flags: Vec::new(),
             battery_charge_pct: Some(100),

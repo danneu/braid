@@ -21,6 +21,7 @@ let
   cfg = config.braid;
   ups = cfg.ups;
   inherit (import ./hardening.nix { }) base;
+  grammar = import ./grammar.nix { inherit lib; };
 in
 {
   options.braid.ups = {
@@ -60,8 +61,8 @@ in
   config = lib.mkIf (cfg.enable && ups.enable) {
     assertions = [
       {
-        assertion = ups.name != "";
-        message = "braid.ups.name must be non-empty when braid.ups.enable = true.";
+        assertion = grammar.isValidUpsName ups.name;
+        message = "braid.ups.name must be 1-32 characters of letters, digits, '_', '.', or '-', and must not start with '-'.";
       }
     ];
 

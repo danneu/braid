@@ -18,7 +18,9 @@ use crate::probe::{self, Filesystem};
 use crate::secret::Passphrase;
 use crate::state_paths::StatePaths;
 use crate::status_tag::{StatusTag, color_enabled_for_stderr, emit_status, status_line};
-use crate::types::{ByIdPath, ConfigDiskState, DiskName, KeyFilePath, LuksUuid, MountPoint};
+use crate::types::{
+    ByIdPath, ConfigDiskState, DiskName, KeyFilePath, LuksUuid, MountpointCheckPath,
+};
 use std::io::Read;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
@@ -671,6 +673,8 @@ fn validate_generated_keyfile_target<R: CommandRunner>(
 ) -> Result<(), EnrollKeyFileError> {
     let dir = key_file_directory(key_file_path);
     let dir_display = dir.display().to_string();
+    let mountpoint_path = MountpointCheckPath::parse(&dir_display)
+        .map_err(|e| EnrollKeyFileError::Validation(e.to_string()))?;
 
     let meta = match std::fs::metadata(dir) {
         Ok(meta) => meta,
@@ -692,7 +696,7 @@ fn validate_generated_keyfile_target<R: CommandRunner>(
     }
 
     let mountpoint = runner.run(&CmdRequest::MountpointCheck {
-        path: MountPoint::new(dir_display.clone()),
+        path: mountpoint_path,
     })?;
     if mountpoint.exit_status != 0 {
         let message = match phase {
@@ -1456,6 +1460,41 @@ mod tests {
     }
 
     /*
+     * Intent: `--generate` rejects a flag-shaped DIR before the filesystem
+     *   metadata check and before running `mountpoint -q`.
+     * Why it exists: the generated keyfile probe turns DIR into
+     *   `mountpoint -q <DIR>` with no `--`, so a leading-dash path must fail
+     *   at the MountpointCheckPath boundary.
+     * Scenario: user runs `braid enroll --generate -- -o`; the derived
+     *   keyfile path is `-o/braid.key` and the parent DIR is `-o`.
+     */
+    #[test]
+    fn generate_rejects_flag_shaped_directory_before_metadata_check() {
+        let runner = MockRunner::default();
+        let err = validate_generated_keyfile_target(
+            &runner,
+            Path::new("-o").join(KEYFILE_NAME).as_path(),
+            KeyfileTargetPhase::Plan,
+        )
+        .expect_err("flag-shaped directory must fail");
+
+        assert!(
+            err.to_string()
+                .contains("invalid mountpoint check path '-o'"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            !err.to_string().contains("keyfile directory does not exist"),
+            "parse must happen before metadata lookup, got: {err}"
+        );
+        assert!(
+            runner.requests().is_empty(),
+            "flag-shaped directory must fail before any command runs; got {:?}",
+            runner.requests()
+        );
+    }
+
+    /*
      * Intent: `--generate` rejects a non-directory target before command
      *   execution.
      * Why it exists: a typo that points DIR at a regular file must not reach
@@ -1547,7 +1586,7 @@ mod tests {
         assert_eq!(
             runner.requests(),
             vec![CmdRequest::MountpointCheck {
-                path: MountPoint::new(target.display().to_string()),
+                path: MountpointCheckPath::parse(&target.display().to_string()).unwrap(),
             }],
             "mountpoint failure must stop before LUKS discovery"
         );
@@ -1598,7 +1637,7 @@ mod tests {
         assert_eq!(
             runner.requests(),
             vec![CmdRequest::MountpointCheck {
-                path: MountPoint::new(target.display().to_string()),
+                path: MountpointCheckPath::parse(&target.display().to_string()).unwrap(),
             }],
             "dry-run target validation must stop before LUKS discovery"
         );
@@ -1654,7 +1693,7 @@ mod tests {
         assert_eq!(
             runner.requests(),
             vec![CmdRequest::MountpointCheck {
-                path: MountPoint::new(tmp.path().display().to_string()),
+                path: MountpointCheckPath::parse(&tmp.path().display().to_string()).unwrap(),
             }],
             "existing-keyfile refusal must happen before LUKS discovery"
         );

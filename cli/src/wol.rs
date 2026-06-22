@@ -132,7 +132,7 @@ mod tests {
 
     fn auto_suspend() -> AutoSuspend {
         AutoSuspend {
-            wol_interface: "eno1".into(),
+            wol_interface: crate::types::Interface::parse("eno1").unwrap(),
         }
     }
 

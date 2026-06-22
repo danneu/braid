@@ -7,6 +7,7 @@ use nom::{
 };
 
 use crate::cmd::RawCommandOutput;
+use crate::types::BackingPath;
 
 use super::ParseError;
 use super::types::{BackingDevice, CryptsetupStatusOutput};
@@ -72,7 +73,14 @@ pub fn parse_cryptsetup_status(
     let backing = if device.is_empty() || device == "(null)" {
         BackingDevice::Null
     } else {
-        BackingDevice::Path(device)
+        BackingDevice::Path(
+            BackingPath::parse(&device).map_err(|e| ParseError::InvalidValue {
+                cmd: raw.cmd.clone(),
+                field: "device".into(),
+                raw: e.raw,
+                detail: e.detail,
+            })?,
+        )
     };
     Ok(CryptsetupStatusOutput::Active { backing })
 }
@@ -100,7 +108,7 @@ mod tests {
         let out = parse_cryptsetup_status(&raw).unwrap();
         assert!(matches!(
             out,
-            CryptsetupStatusOutput::Active { backing: BackingDevice::Path(p) } if p == "/dev/vdb"
+            CryptsetupStatusOutput::Active { backing: BackingDevice::Path(p) } if p.as_str() == "/dev/vdb"
         ));
     }
 
@@ -167,5 +175,33 @@ mod tests {
                 backing: BackingDevice::Null
             }
         );
+    }
+
+    // Intent: invalid active `device:` values surface as structured
+    //   ParseError::InvalidValue for the device field.
+    // Why it exists: cryptsetup status is the single backing-path parse
+    //   boundary; consumers must never re-spend a malformed status value as
+    //   `cryptsetup luksUUID <device>`.
+    // Scenario: cryptsetup output unexpectedly reports a non-absolute device
+    //   path and the parser rejects it before command planning continues.
+    #[test]
+    fn cryptsetup_status_invalid_device_is_invalid_value() {
+        let raw = RawCommandOutput {
+            cmd: "cryptsetup status".into(),
+            stdout: "/dev/mapper/braid-vda is active.\n  device:  dev/vda\n  type:  LUKS2\n".into(),
+            stderr: String::new(),
+            exit_status: 0,
+        };
+        let err = parse_cryptsetup_status(&raw).unwrap_err();
+        match err {
+            ParseError::InvalidValue {
+                field, raw, detail, ..
+            } => {
+                assert_eq!(field, "device");
+                assert_eq!(raw, "dev/vda");
+                assert_eq!(detail, "must be an absolute path");
+            }
+            other => panic!("expected InvalidValue, got {other:?}"),
+        }
     }
 }

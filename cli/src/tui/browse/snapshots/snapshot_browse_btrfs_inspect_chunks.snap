@@ -1,6 +1,6 @@
 ---
 source: cli/src/tui/browse/view.rs
-assertion_line: 701
+assertion_line: 683
 expression: "buffer_to_string(&render(&model, 80, 14))"
 ---
 ┌ Pgm ─────┐┌ Cmd ─────────┐┌ View ────────┐┌ Content ─────────────────────────┐
@@ -16,4 +16,4 @@ expression: "buffer_to_string(&render(&model, 80, 14))"
 │          ││              ││              ││                                  │
 │          ││              ││              ││                                  │
 └──────────┘└──────────────┘└──────────────┘└──────────────────────────────────┘
-$ btrfs inspect-internal list-chunks '--sort=devid,pstart' ''
+$ btrfs inspect-internal list-chunks '--sort=devid,pstart' /mnt/storage

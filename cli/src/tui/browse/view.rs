@@ -686,7 +686,9 @@ mod tests {
     #[test]
     fn snapshot_browse_nut_status() {
         let mut model = model();
-        model.ups_config = Some(Ups { name: "ups".into() });
+        model.ups_config = Some(Ups {
+            name: crate::types::UpsName::parse("ups").unwrap(),
+        });
         model.ups = Some(ups_snapshot());
         model.browse.select_next();
         snap!(buffer_to_string(&render(&model, 80, 14)));
@@ -700,7 +702,9 @@ mod tests {
     #[test]
     fn snapshot_browse_nut_status_multi_flag() {
         let mut model = model();
-        model.ups_config = Some(Ups { name: "ups".into() });
+        model.ups_config = Some(Ups {
+            name: crate::types::UpsName::parse("ups").unwrap(),
+        });
         let mut snap = ups_snapshot();
         snap.flags = vec![
             crate::parse::types::UpsStatusFlag::Ob,
@@ -714,7 +718,9 @@ mod tests {
     #[test]
     fn snapshot_browse_nut_variables() {
         let mut model = model();
-        model.ups_config = Some(Ups { name: "ups".into() });
+        model.ups_config = Some(Ups {
+            name: crate::types::UpsName::parse("ups").unwrap(),
+        });
         model.ups = Some(ups_snapshot());
         model.browse.select_next();
         model.browse.focus = BrowseFocus::Command;
@@ -725,7 +731,9 @@ mod tests {
     #[test]
     fn snapshot_browse_nut_commands() {
         let mut model = model();
-        model.ups_config = Some(Ups { name: "ups".into() });
+        model.ups_config = Some(Ups {
+            name: crate::types::UpsName::parse("ups").unwrap(),
+        });
         model.browse.select_next();
         model.browse.focus = BrowseFocus::Command;
         model.browse.select_next();
@@ -745,7 +753,9 @@ mod tests {
     #[test]
     fn snapshot_browse_nut_clients() {
         let mut model = model();
-        model.ups_config = Some(Ups { name: "ups".into() });
+        model.ups_config = Some(Ups {
+            name: crate::types::UpsName::parse("ups").unwrap(),
+        });
         model.browse.select_next();
         model.browse.focus = BrowseFocus::Command;
         for _ in 0..3 {
@@ -766,7 +776,9 @@ mod tests {
     #[test]
     fn snapshot_browse_nut_rw_vars() {
         let mut model = model();
-        model.ups_config = Some(Ups { name: "ups".into() });
+        model.ups_config = Some(Ups {
+            name: crate::types::UpsName::parse("ups").unwrap(),
+        });
         model.browse.select_next();
         model.browse.focus = BrowseFocus::Command;
         for _ in 0..4 {

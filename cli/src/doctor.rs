@@ -619,10 +619,7 @@ fn ensure_mountpoint_is_mounted<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>
     }
 
     let mount_point = config.mount_point().to_owned();
-    let is_mounted = ctx
-        .online_ops
-        .is_mountpoint(Path::new(mount_point.as_str()))
-        .unwrap_or(false);
+    let is_mounted = ctx.online_ops.is_mountpoint(&mount_point).unwrap_or(false);
     ctx.mountpoint_is_mounted = Some(is_mounted);
     Some(is_mounted)
 }
@@ -1385,7 +1382,7 @@ fn check_ups_daemon_up<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> Chec
     let Some(ups_cfg) = config.ups() else {
         return CheckResult::skip(name, "skipped (braid.ups not enabled)");
     };
-    match crate::ups::query_ups(ctx.runner, &ups_cfg.name) {
+    match crate::ups::query_ups(ctx.runner, ups_cfg.name.as_str()) {
         Err(crate::ups::UpsQueryError::InvocationFailed(e)) => CheckResult::fail(
             name,
             format!("upsc invocation failed: {e} -- is pkgs.nut on PATH?"),
@@ -1443,10 +1440,7 @@ fn check_braid_online_active_when_mounted<R: CommandRunner>(
         );
     }
     let mount_point = config.mount_point().clone();
-    match ctx
-        .online_ops
-        .is_mountpoint(Path::new(mount_point.as_str()))
-    {
+    match ctx.online_ops.is_mountpoint(&mount_point) {
         Ok(true) => {}
         Ok(false) => {
             return CheckResult::skip(
@@ -1603,7 +1597,7 @@ fn check_mountpoint_immutable<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) 
     // Tri-state mount state straight from is_mountpoint: Ok -> Some, Err ->
     // None. NOT ensure_mountpoint_is_mounted -- its unwrap_or(false) would let a
     // probe error masquerade as "offline" and fire a false offline+mutable Warn.
-    let mounted = ctx.online_ops.is_mountpoint(mp).ok();
+    let mounted = ctx.online_ops.is_mountpoint(&mount_point).ok();
     let probe = ImmutabilityProbe::from_result(RealMountpointGuard.is_immutable(mp));
 
     match classify_mountpoint_immutability(mount_point.as_str(), mounted, probe) {
@@ -2982,13 +2976,13 @@ mod tests {
     }
 
     // Intent: empty mount_point fails Config schema validation, with the
-    //   "must not be empty" message surfaced to the doctor report.
+    //   MountPoint parser message surfaced to the doctor report.
     // Why it exists: pins the user-facing failure mode for the most common
     //   hand-edit mistake (blanking mount_point) so the doctor report
     //   says exactly what is wrong.
     // Scenario: an operator hand-edits config.json and leaves mount_point
     //   as the empty string; doctor must Fail config_schema and include
-    //   the schema-builder error message.
+    //   the type-boundary error message.
     #[test]
     fn valid_json_bad_schema_empty_mount() {
         let f = write_temp(r#"{"mount_point":""}"#);
@@ -3003,7 +2997,7 @@ mod tests {
         let schema = find_check(&report, "config_schema");
         assert_eq!(schema.status, CheckStatus::Fail);
         assert!(
-            schema.message.contains("mount_point must not be empty"),
+            schema.message.contains("invalid mount point ''"),
             "unexpected message: {}",
             schema.message
         );
@@ -3037,7 +3031,7 @@ mod tests {
         let schema = find_check(&report, "config_schema");
         assert_eq!(schema.status, CheckStatus::Fail);
         assert!(
-            schema.message.contains("mount_point must not be empty"),
+            schema.message.contains("invalid mount point ''"),
             "unexpected message: {}",
             schema.message
         );
@@ -6754,7 +6748,7 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::MountpointCheck {
-                    path: MountPoint::new("/mnt/storage".into()),
+                    path: MountPoint::new("/mnt/storage".into()).into(),
                 },
                 RawCommandOutput {
                     cmd: "mountpoint".into(),
@@ -6793,7 +6787,7 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::MountpointCheck {
-                    path: MountPoint::new("/mnt/storage".into()),
+                    path: MountPoint::new("/mnt/storage".into()).into(),
                 },
                 RawCommandOutput {
                     cmd: "mountpoint".into(),
@@ -6828,7 +6822,7 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::MountpointCheck {
-                    path: MountPoint::new("/mnt/storage".into()),
+                    path: MountPoint::new("/mnt/storage".into()).into(),
                 },
                 RawCommandOutput {
                     cmd: "mountpoint".into(),
@@ -6862,7 +6856,7 @@ mod tests {
             let runner = MockRunner::default()
                 .with_output(
                     CmdRequest::MountpointCheck {
-                        path: MountPoint::new("/mnt/storage".into()),
+                        path: MountPoint::new("/mnt/storage".into()).into(),
                     },
                     RawCommandOutput {
                         cmd: "mountpoint".into(),
@@ -6898,7 +6892,7 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::MountpointCheck {
-                    path: MountPoint::new("/mnt/storage".into()),
+                    path: MountPoint::new("/mnt/storage".into()).into(),
                 },
                 RawCommandOutput {
                     cmd: "mountpoint".into(),
@@ -6946,7 +6940,7 @@ mod tests {
             let runner = MockRunner::default()
                 .with_output(
                     CmdRequest::MountpointCheck {
-                        path: MountPoint::new("/mnt/storage".into()),
+                        path: MountPoint::new("/mnt/storage".into()).into(),
                     },
                     RawCommandOutput {
                         cmd: "mountpoint".into(),
@@ -6998,7 +6992,7 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::MountpointCheck {
-                    path: MountPoint::new("/mnt/storage".into()),
+                    path: MountPoint::new("/mnt/storage".into()).into(),
                 },
                 RawCommandOutput {
                     cmd: "mountpoint".into(),
@@ -7049,7 +7043,7 @@ mod tests {
     fn braid_online_check_fails_on_mountpoint_probe_error() {
         let runner = MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
-                path: MountPoint::new("/mnt/storage".into()),
+                path: MountPoint::new("/mnt/storage".into()).into(),
             },
             RawCommandOutput {
                 cmd: "mountpoint".into(),
@@ -7094,7 +7088,7 @@ mod tests {
     fn braid_online_check_skips_when_not_mounted() {
         let runner = MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
-                path: MountPoint::new("/mnt/storage".into()),
+                path: MountPoint::new("/mnt/storage".into()).into(),
             },
             RawCommandOutput {
                 cmd: "mountpoint".into(),

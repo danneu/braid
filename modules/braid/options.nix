@@ -7,20 +7,7 @@
 let
   cfg = config.braid;
   inherit (import ./constants.nix) braidOnlineStopTimeoutSecs;
-
-  mountPointOk =
-    let
-      mp = toString cfg.mountPoint;
-      trimmed =
-        if mp != "/" && lib.hasSuffix "/" mp then
-          builtins.substring 0 (builtins.stringLength mp - 1) mp
-        else
-          mp;
-      segs = lib.splitString "/" trimmed;
-      body = builtins.tail segs;
-      segOk = s: s != "" && s != "." && s != ".." && builtins.match "[A-Za-z0-9_.-]+" s != null;
-    in
-    lib.hasPrefix "/" trimmed && builtins.head segs == "" && body != [ ] && builtins.all segOk body;
+  grammar = import ./grammar.nix { inherit lib; };
 in
 {
   options.braid = {
@@ -108,7 +95,7 @@ in
         message = "braid.package must be set when braid.enable = true. The braid-unlock service requires the CLI binary.";
       }
       {
-        assertion = mountPointOk;
+        assertion = grammar.mountPointOk cfg.mountPoint;
         message = "braid.mountPoint must be a canonical absolute path: segments of letters, digits, '_', '.', '-' separated by single '/', with no empty/'.'/'..' segments, spaces, newlines, or shell metacharacters. Got: '${toString cfg.mountPoint}'.";
       }
       {

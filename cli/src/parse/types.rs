@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize, Serializer};
 
-use crate::types::{Devid, Fsid, LuksUuid};
+use crate::types::{BackingPath, Devid, Fsid, LuksUuid};
 
 // --- JSON command output structs ---
 
@@ -150,7 +150,7 @@ pub enum CryptsetupStatusOutput {
 /// path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BackingDevice {
-    Path(String),
+    Path(BackingPath),
     Null,
 }
 

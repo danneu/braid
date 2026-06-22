@@ -924,6 +924,7 @@
               linuxSystem
               ;
           };
+          eval-grammar-parity = import ./tests/eval/grammar-parity.nix { inherit pkgs; };
           eval-nixos-module-default-supplies-package = import ./tests/eval/nixos-module-default-package.nix {
             inherit pkgs self nixpkgs;
           };

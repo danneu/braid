@@ -457,6 +457,58 @@ impl fmt::Display for Devid {
 }
 
 // ---------------------------------------------------------------------------
+// Argv-safe text newtypes
+// ---------------------------------------------------------------------------
+
+fn argv_token_floor(raw: &str) -> Result<(), &'static str> {
+    if raw.is_empty() {
+        return Err("must not be empty");
+    }
+    if raw.starts_with('-') {
+        return Err("must not start with '-'");
+    }
+    Ok(())
+}
+
+fn is_ups_name_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-'
+}
+
+fn canonical_mount_point_ok(raw: &str) -> bool {
+    let trimmed = if raw != "/" && raw.ends_with('/') {
+        &raw[..raw.len() - 1]
+    } else {
+        raw
+    };
+
+    if !trimmed.starts_with('/') {
+        return false;
+    }
+
+    let segments: Vec<&str> = trimmed.split('/').collect();
+    if segments.first() != Some(&"") {
+        return false;
+    }
+
+    let body = &segments[1..];
+    !body.is_empty()
+        && body.iter().all(|segment| {
+            !segment.is_empty()
+                && *segment != "."
+                && *segment != ".."
+                && segment.chars().all(is_ups_name_char)
+        })
+}
+
+fn is_plausible_mapper_basename(name: &str) -> bool {
+    argv_token_floor(name).is_ok()
+        && !name.contains('/')
+        && !name
+            .chars()
+            .any(|c| c.is_ascii_whitespace() || c.is_ascii_control())
+}
+
+// ---------------------------------------------------------------------------
 // MapperName / MountPoint
 // ---------------------------------------------------------------------------
 
@@ -469,10 +521,15 @@ pub struct MapperName(String);
 
 impl MapperName {
     /// Wrap a mapper basename observed from system output (btrfs show,
-    /// cryptsetup status, a `/dev/mapper/` scan). Unvalidated on purpose:
-    /// these names come from the kernel, not user input. `config::mapper_name`
+    /// cryptsetup status, a `/dev/mapper/` scan). Release builds accept
+    /// kernel-reported names verbatim, while debug builds assert that parser
+    /// call sites did not strip an implausible basename. `config::mapper_name`
     /// is the canonical `braid-<disk>` derivation; this is the observation door.
     pub fn from_basename(name: String) -> Self {
+        debug_assert!(
+            is_plausible_mapper_basename(&name),
+            "mapper basename must be non-empty, option-safe, whitespace-free, and slash-free"
+        );
         MapperName(name)
     }
 
@@ -513,12 +570,35 @@ impl LuksLabel {
 
 /// Wraps the absolute mount path braid hands to `mount(8)` so it cannot be
 /// confused with arbitrary user paths at call sites that mix the two.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct MountPoint(String);
 
+/// Error returned when constructing a `MountPoint` from a non-canonical path.
+#[derive(Debug, Error)]
+#[error(
+    "invalid mount point '{raw}': must be a canonical absolute path -- segments of [A-Za-z0-9_.-] separated by single '/', no empty/'.'/'..' segments"
+)]
+pub struct MountPointParseError {
+    /// Original mount path supplied at a config, CLI, or test boundary.
+    pub raw: String,
+}
+
 impl MountPoint {
-    /// Sole construction door now that the inner mount path is sealed.
+    /// Parse the canonical absolute pool mount path grammar shared with the
+    /// Nix module assertion. External string boundaries must use this instead
+    /// of `MountPoint::new`.
+    pub fn parse(raw: &str) -> Result<Self, MountPointParseError> {
+        if !canonical_mount_point_ok(raw) {
+            return Err(MountPointParseError {
+                raw: raw.to_owned(),
+            });
+        }
+        Ok(MountPoint(raw.to_owned()))
+    }
+
+    /// Infallible internal door for a mount path already validated by
+    /// `MountPoint::parse` or the Nix module assertion. External string
+    /// boundaries must use the validating parser instead.
     pub fn new(path: String) -> Self {
         MountPoint(path)
     }
@@ -543,6 +623,246 @@ impl fmt::Display for LuksLabel {
 }
 
 impl fmt::Display for MountPoint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl Serialize for MountPoint {
+    fn serialize<S>(&self, ser: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        ser.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for MountPoint {
+    fn deserialize<D>(de: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(de)?;
+        MountPoint::parse(&s).map_err(serde::de::Error::custom)
+    }
+}
+
+/// Local NUT UPS identifier used in generated NUT config and `upsc <name>`
+/// argv slots. It intentionally models only a local identifier; braid appends
+/// `@localhost` when writing the NUT monitor target.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct UpsName(String);
+
+/// Error returned when a configured UPS name is not safe for NUT config keys
+/// and argv positional use.
+#[derive(Debug, Error)]
+#[error(
+    "invalid UPS name '{raw}': must be 1-32 characters of [A-Za-z0-9._-] and must not start with '-'"
+)]
+pub struct UpsNameParseError {
+    /// Original UPS name supplied by config or a test boundary.
+    pub raw: String,
+}
+
+impl UpsName {
+    /// Parse a local UPS identifier accepted by both Rust config loading and
+    /// the matching Nix module predicate.
+    pub fn parse(raw: &str) -> Result<Self, UpsNameParseError> {
+        if argv_token_floor(raw).is_err() || raw.len() > 32 || !raw.chars().all(is_ups_name_char) {
+            return Err(UpsNameParseError {
+                raw: raw.to_owned(),
+            });
+        }
+        Ok(UpsName(raw.to_owned()))
+    }
+
+    /// Borrow the validated UPS identifier for argv rendering and diagnostics.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for UpsName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl Serialize for UpsName {
+    fn serialize<S>(&self, ser: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        ser.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for UpsName {
+    fn deserialize<D>(de: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(de)?;
+        UpsName::parse(&s).map_err(serde::de::Error::custom)
+    }
+}
+
+/// Linux network interface name used for Wake-on-LAN diagnostics and ethtool
+/// argv. The grammar is the shared Rust/Nix conservative subset of
+/// `dev_valid_name`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Interface(String);
+
+/// Error returned when a configured interface is outside braid's shared
+/// Rust/Nix interface-name grammar.
+#[derive(Debug, Error)]
+#[error(
+    "invalid interface '{raw}': must be 1-15 characters of [A-Za-z0-9._-], must not be '.' or '..', and must not start with '-'"
+)]
+pub struct InterfaceParseError {
+    /// Original interface name supplied by config or a test boundary.
+    pub raw: String,
+}
+
+impl Interface {
+    /// Parse the conservative interface-name grammar accepted by both Rust
+    /// config loading and the matching Nix module predicate.
+    pub fn parse(raw: &str) -> Result<Self, InterfaceParseError> {
+        if argv_token_floor(raw).is_err()
+            || raw.len() > 15
+            || raw == "."
+            || raw == ".."
+            || !raw.chars().all(is_ups_name_char)
+        {
+            return Err(InterfaceParseError {
+                raw: raw.to_owned(),
+            });
+        }
+        Ok(Interface(raw.to_owned()))
+    }
+
+    /// Borrow the validated interface name for ethtool argv and diagnostics.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for Interface {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl Serialize for Interface {
+    fn serialize<S>(&self, ser: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        ser.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for Interface {
+    fn deserialize<D>(de: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(de)?;
+        Interface::parse(&s).map_err(serde::de::Error::custom)
+    }
+}
+
+/// Absolute backing block path reported by `cryptsetup status`. Validating at
+/// the parse boundary keeps every later `cryptsetup luksUUID <device>` argv
+/// construction tied to a known-safe observed path.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct BackingPath(String);
+
+/// Error returned when cryptsetup reports a backing path that is not suitable
+/// for argv reuse.
+#[derive(Debug, Error)]
+#[error("invalid backing path '{raw}': {detail}")]
+pub struct BackingPathParseError {
+    /// Original `device:` value from cryptsetup status.
+    pub raw: String,
+    /// Specific parse failure, preserved for `ParseError::InvalidValue`.
+    pub detail: String,
+}
+
+impl BackingPath {
+    /// Parse an absolute backing-device path reported by cryptsetup status.
+    pub fn parse(raw: &str) -> Result<Self, BackingPathParseError> {
+        if !raw.starts_with('/') {
+            return Err(BackingPathParseError {
+                raw: raw.to_owned(),
+                detail: "must be an absolute path".to_owned(),
+            });
+        }
+        if raw
+            .chars()
+            .any(|c| c.is_ascii_whitespace() || c.is_ascii_control())
+        {
+            return Err(BackingPathParseError {
+                raw: raw.to_owned(),
+                detail: "must not contain ASCII whitespace or control characters".to_owned(),
+            });
+        }
+        Ok(BackingPath(raw.to_owned()))
+    }
+
+    /// Borrow the validated backing path for argv rendering.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for BackingPath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+/// Path token accepted by `mountpoint -q <path>`. Unlike `MountPoint`, this
+/// allows relative paths and spaces because generated-keyfile probes pass one
+/// argv element directly and are never interpolated into shell or systemd text.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MountpointCheckPath(String);
+
+/// Error returned when a mountpoint probe path would be unsafe as a positional
+/// argv token.
+#[derive(Debug, Error)]
+#[error(
+    "invalid mountpoint check path '{raw}': must be non-empty, must not start with '-', and must not contain ASCII control characters"
+)]
+pub struct MountpointCheckPathParseError {
+    /// Original mountpoint probe path.
+    pub raw: String,
+}
+
+impl MountpointCheckPath {
+    /// Parse a path token for the `mountpoint -q` probe boundary.
+    pub fn parse(raw: &str) -> Result<Self, MountpointCheckPathParseError> {
+        if argv_token_floor(raw).is_err() || raw.chars().any(|c| c.is_ascii_control()) {
+            return Err(MountpointCheckPathParseError {
+                raw: raw.to_owned(),
+            });
+        }
+        Ok(MountpointCheckPath(raw.to_owned()))
+    }
+
+    /// Borrow the validated probe path for argv rendering and test matching.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<MountPoint> for MountpointCheckPath {
+    fn from(value: MountPoint) -> Self {
+        MountpointCheckPath(value.0)
+    }
+}
+
+impl fmt::Display for MountpointCheckPath {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(f)
     }
@@ -993,6 +1313,197 @@ mod tests {
         // Intent: JSON-source ByIdPath validates through the same gate.
         let r: Result<ByIdPath, _> = serde_json::from_str("\"/dev/sda1\"");
         assert!(r.is_err());
+    }
+
+    // Intent: MountPoint accepts the canonical absolute path samples shared
+    //   with the Nix grammar parity check.
+    // Why it exists: config deserialize and scrub CLI parsing rely on this
+    //   boundary to reject argv-unsafe mount paths before command rendering.
+    // Scenario: an operator configures a normal pool mount, a trailing slash,
+    //   or a hidden segment and braid accepts it.
+    #[test]
+    fn mount_point_parse_accepts_canonical_paths() {
+        for raw in [
+            "/mnt/storage",
+            "/mnt/tank-1",
+            "/mnt/storage/",
+            "/mnt/.snapshots",
+        ] {
+            assert!(MountPoint::parse(raw).is_ok(), "{raw} should parse");
+        }
+    }
+
+    // Intent: MountPoint rejects the unsafe and non-canonical path samples
+    //   shared with the Nix grammar parity check.
+    // Why it exists: these values are interpolated by the module and also
+    //   rendered as argv positionals; relative, flag-shaped, whitespace, and
+    //   shell-like text must fail before use.
+    // Scenario: a bad config.json or scrub --mount value is rejected at the
+    //   type boundary instead of reaching mount, btrfs, or systemd hooks.
+    #[test]
+    fn mount_point_parse_rejects_non_canonical_paths() {
+        for raw in [
+            "mnt/storage",
+            "-o",
+            "",
+            "/",
+            "/mnt//storage",
+            "/mnt/./storage",
+            "/mnt/../storage",
+            "/mnt/my drive",
+            "/mnt/x;touch",
+        ] {
+            assert!(MountPoint::parse(raw).is_err(), "{raw:?} should fail");
+        }
+    }
+
+    // Intent: UpsName accepts the local NUT identifier samples shared with
+    //   the Nix grammar parity check.
+    // Why it exists: braid appends `@localhost` itself, so this type must
+    //   model only the local identifier used in argv and module config keys.
+    // Scenario: common local UPS names deserialize and render unchanged.
+    #[test]
+    fn ups_name_parse_accepts_local_identifiers() {
+        for raw in ["ups", "my-ups", "ups_1", "abcdefghijklmnopqrstuvwxyzabcdef"] {
+            assert!(UpsName::parse(raw).is_ok(), "{raw} should parse");
+        }
+    }
+
+    // Intent: UpsName rejects remote-target and argv-unsafe samples shared
+    //   with the Nix grammar parity check.
+    // Why it exists: accepting `@`, `:`, spaces, or leading dashes would
+    //   either corrupt generated NUT config or re-open a positional argv
+    //   boundary.
+    // Scenario: a misconfigured UPS name fails during config loading.
+    #[test]
+    fn ups_name_parse_rejects_remote_or_unsafe_identifiers() {
+        for raw in [
+            "ups@host:3493",
+            "ups:1",
+            "-x",
+            "with space",
+            "abcdefghijklmnopqrstuvwxyzabcdefg",
+        ] {
+            assert!(UpsName::parse(raw).is_err(), "{raw:?} should fail");
+        }
+    }
+
+    // Intent: Interface accepts the interface-name samples shared with the
+    //   Nix grammar parity check.
+    // Why it exists: ethtool receives this value as a positional argv token,
+    //   so runtime config loading and module evaluation must agree.
+    // Scenario: ordinary ethernet, bridge, and VLAN interface names work.
+    #[test]
+    fn interface_parse_accepts_common_names() {
+        for raw in ["eno1", "br0", "eth0.100"] {
+            assert!(Interface::parse(raw).is_ok(), "{raw} should parse");
+        }
+    }
+
+    // Intent: Interface rejects unsafe and non-kernel-like samples shared
+    //   with the Nix grammar parity check.
+    // Why it exists: the conservative grammar rejects option-like,
+    //   whitespace, slash, colon, dot-only, and oversized names before
+    //   ethtool sees them.
+    // Scenario: a bad auto-suspend wolInterface fails during config loading.
+    #[test]
+    fn interface_parse_rejects_unsafe_names() {
+        for raw in [
+            "eth/0",
+            "eth:0",
+            ".",
+            "..",
+            "abcdefghijklmnop",
+            "-i",
+            "with space",
+        ] {
+            assert!(Interface::parse(raw).is_err(), "{raw:?} should fail");
+        }
+    }
+
+    // Intent: BackingPath accepts absolute cryptsetup backing-device paths.
+    // Why it exists: the cryptsetup status parser carries this type into
+    //   later `cryptsetup luksUUID <device>` argv construction.
+    // Scenario: real device and mapper backing paths parse at the tool-output
+    //   boundary.
+    #[test]
+    fn backing_path_parse_accepts_absolute_paths() {
+        for raw in ["/dev/vdb", "/dev/mapper/braid-x"] {
+            assert!(BackingPath::parse(raw).is_ok(), "{raw} should parse");
+        }
+    }
+
+    // Intent: BackingPath rejects non-absolute and whitespace-bearing status
+    //   values.
+    // Why it exists: every consumer flow reuses this parsed value as a
+    //   positional argv device, so invalid tool output must fail once at the
+    //   parse boundary.
+    // Scenario: a malformed `cryptsetup status` device line cannot reach
+    //   `cryptsetup luksUUID`.
+    #[test]
+    fn backing_path_parse_rejects_argv_unsafe_paths() {
+        for raw in ["dev/vdb", "-o", "/dev/my disk"] {
+            assert!(BackingPath::parse(raw).is_err(), "{raw:?} should fail");
+        }
+    }
+
+    // Intent: MountpointCheckPath accepts relative, absolute, and
+    //   space-bearing path tokens that are safe as one argv element.
+    // Why it exists: generated-keyfile probes are not pool mount points and
+    //   may legitimately use relative USB mount directories.
+    // Scenario: `braid enroll --generate` probes `.`, `media/usb`, and paths
+    //   containing spaces without forcing MountPoint's absolute grammar.
+    #[test]
+    fn mountpoint_check_path_parse_accepts_path_tokens() {
+        for raw in [".", "media/usb", "/media/usb", "/media/My USB"] {
+            assert!(
+                MountpointCheckPath::parse(raw).is_ok(),
+                "{raw:?} should parse"
+            );
+        }
+    }
+
+    // Intent: MountpointCheckPath rejects empty, leading-dash, and control
+    //   path tokens.
+    // Why it exists: `mountpoint -q <dir>` has no `--` separator, so the
+    //   generated-keyfile directory must not be flag-shaped or control-laden.
+    // Scenario: `braid enroll --generate -- -o` fails before command
+    //   execution.
+    #[test]
+    fn mountpoint_check_path_parse_rejects_unsafe_tokens() {
+        for raw in ["", "-o", "/media/\nusb"] {
+            assert!(
+                MountpointCheckPath::parse(raw).is_err(),
+                "{raw:?} should fail"
+            );
+        }
+    }
+
+    // Intent: MapperName::from_basename debug-asserts on option-like and
+    //   whitespace-bearing basenames.
+    // Why it exists: the observation door stays infallible in release builds,
+    //   but debug/test builds should catch parser regressions that feed it an
+    //   implausible basename.
+    // Scenario: a stripped `/dev/mapper/` basename accidentally includes a
+    //   leading dash.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic]
+    fn mapper_name_from_basename_panics_on_leading_dash_in_debug() {
+        let _ = MapperName::from_basename("-x".to_owned());
+    }
+
+    // Intent: MapperName::from_basename debug-asserts on whitespace-bearing
+    //   basenames.
+    // Why it exists: parser regressions should be caught in tests while the
+    //   release observation door still accepts kernel-reported names.
+    // Scenario: a malformed mapper scan feeds a basename with an embedded
+    //   space.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic]
+    fn mapper_name_from_basename_panics_on_whitespace_in_debug() {
+        let _ = MapperName::from_basename("a b".to_owned());
     }
 
     // -- LuksFormatExtraOpts ------------------------------------------------

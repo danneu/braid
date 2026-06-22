@@ -284,7 +284,7 @@ pub(crate) fn base_two_disk_runner() -> MockRunner {
     MockRunner::default()
         .with_output(
             CmdRequest::MountpointCheck {
-                path: MountPoint::new("/mnt/storage".to_owned()),
+                path: MountPoint::new("/mnt/storage".to_owned()).into(),
             },
             err_raw("mountpoint", 1, ""),
         )

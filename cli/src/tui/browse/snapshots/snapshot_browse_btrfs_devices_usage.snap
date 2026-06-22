@@ -1,6 +1,6 @@
 ---
 source: cli/src/tui/browse/view.rs
-assertion_line: 511
+assertion_line: 493
 expression: "buffer_to_string(&render(&model, 80, 14))"
 ---
 ┌ Pgm ─────┐┌ Cmd ─────────┐┌ View ────────┐┌ Content ─────────────────────────┐
@@ -16,4 +16,4 @@ expression: "buffer_to_string(&render(&model, 80, 14))"
 │          ││              ││              ││                                  │
 │          ││              ││              ││                                  │
 └──────────┘└──────────────┘└──────────────┘└──────────────────────────────────┘
-$ btrfs device usage ''
+$ btrfs device usage /mnt/storage

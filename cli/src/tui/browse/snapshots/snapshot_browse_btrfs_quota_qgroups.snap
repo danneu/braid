@@ -1,6 +1,6 @@
 ---
 source: cli/src/tui/browse/view.rs
-assertion_line: 680
+assertion_line: 662
 expression: "buffer_to_string(&render(&model, 80, 14))"
 ---
 ┌ Pgm ─────┐┌ Cmd ─────────┐┌ View ────────┐┌ Content ─────────────────────────┐
@@ -16,4 +16,4 @@ expression: "buffer_to_string(&render(&model, 80, 14))"
 │          ││              ││              ││                                  │
 │          ││              ││              ││                                  │
 └──────────┘└──────────────┘└──────────────┘└──────────────────────────────────┘
-$ btrfs qgroup show -p -c -r -e ''
+$ btrfs qgroup show -p -c -r -e /mnt/storage

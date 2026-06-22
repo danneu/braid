@@ -94,7 +94,7 @@ pub(crate) fn probe_observed_mapper_uuid<R: CommandRunner>(
     };
 
     let probe = match runner.run(&CmdRequest::CryptsetupLuksUuid {
-        device: backing_device.to_owned(),
+        device: backing_device.as_str().to_owned(),
     }) {
         Ok(out) => out,
         Err(e) => {

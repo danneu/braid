@@ -501,7 +501,7 @@ pub fn probe_pool<R: CommandRunner, F: Filesystem + ?Sized>(
         };
 
         let uuid_raw = runner.run(&CmdRequest::CryptsetupLuksUuid {
-            device: underlying.clone(),
+            device: underlying.as_str().to_owned(),
         })?;
         let uuid_out = parse_cryptsetup_luks_uuid(&uuid_raw)?;
 
@@ -509,7 +509,7 @@ pub fn probe_pool<R: CommandRunner, F: Filesystem + ?Sized>(
             mapper: MapperName::from_basename(name),
             luks_uuid: uuid_out.uuid,
             devid: bdev.devid,
-            underlying,
+            underlying: underlying.as_str().to_owned(),
         });
     }
 

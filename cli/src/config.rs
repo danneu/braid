@@ -1,4 +1,4 @@
-use crate::types::{DiskName, LuksLabel, MapperName, MountPoint};
+use crate::types::{DiskName, Interface, LuksLabel, MapperName, MountPoint, UpsName};
 use serde::Deserialize;
 use std::fs;
 use std::path::Path;
@@ -37,7 +37,7 @@ pub struct FanControl {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Ups {
-    pub name: String,
+    pub name: UpsName,
 }
 
 /// Module-owned auto-suspend config mirrored into the CLI so runtime
@@ -45,7 +45,7 @@ pub struct Ups {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AutoSuspend {
-    pub wol_interface: String,
+    pub wol_interface: Interface,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -215,7 +215,25 @@ mod tests {
     fn rejects_empty_mount_point() {
         let raw = r#"{"mount_point":""}"#;
         let err = serde_json::from_str::<Config>(raw).expect_err("empty mount should fail");
-        assert!(err.to_string().contains("mount_point must not be empty"));
+        assert!(err.to_string().contains("invalid mount point"));
+    }
+
+    // Intent: config deserialization rejects mount points outside
+    //   MountPoint's canonical grammar.
+    // Why it exists: config.json is an external boundary; unsafe mount
+    //   points must fail before any argv builder or lifecycle hook sees them.
+    // Scenario: a hand-edited config contains relative, flag-shaped, or
+    //   space-bearing mount_point text.
+    #[test]
+    fn rejects_invalid_mount_points() {
+        for mount_point in ["mnt/storage", "-o", "/mnt/my drive"] {
+            let raw = format!(r#"{{"mount_point":"{mount_point}"}}"#);
+            let err = serde_json::from_str::<Config>(&raw).expect_err("mount should fail");
+            assert!(
+                err.to_string().contains("invalid mount point"),
+                "got: {err}"
+            );
+        }
     }
 
     // Intent: `mapper_name(&DiskName)` returns the canonical
@@ -352,7 +370,26 @@ mod tests {
         }"#;
         let cfg: Config = serde_json::from_str(raw).expect("config should parse");
         let u = cfg.ups().expect("ups should be Some");
-        assert_eq!(u.name, "ups");
+        assert_eq!(u.name.as_str(), "ups");
+    }
+
+    // Intent: Config rejects UPS names outside the shared Rust/Nix grammar.
+    // Why it exists: ups.name is re-spent as argv and as a Nix-generated NUT
+    //   config key; remote target syntax and whitespace must fail at load.
+    // Scenario: a hand-edited config tries `ups@host:3493`, `ups:1`, or a
+    //   space-bearing name.
+    #[test]
+    fn rejects_invalid_ups_names() {
+        for ups_name in ["ups@host:3493", "ups:1", "with space"] {
+            let raw = format!(
+                r#"{{
+                    "mount_point": "/mnt/storage",
+                    "ups": {{ "name": "{ups_name}" }}
+                }}"#
+            );
+            let err = serde_json::from_str::<Config>(&raw).expect_err("ups name should fail");
+            assert!(err.to_string().contains("invalid UPS name"), "got: {err}");
+        }
     }
 
     // Intent: Config deserializes the auto_suspend block emitted by modules/braid/cli.nix.
@@ -368,7 +405,28 @@ mod tests {
         }"#;
         let cfg: Config = serde_json::from_str(raw).expect("config should parse");
         let auto = cfg.auto_suspend().expect("auto_suspend should be Some");
-        assert_eq!(auto.wol_interface, "eno1");
+        assert_eq!(auto.wol_interface.as_str(), "eno1");
+    }
+
+    // Intent: Config rejects interface names outside the shared Rust/Nix
+    //   grammar.
+    // Why it exists: wol_interface is re-spent as an ethtool positional and
+    //   must not be flag-shaped, too long, or contain characters outside the
+    //   conservative interface allowlist.
+    // Scenario: a hand-edited config tries dot-only, slash, colon, oversized,
+    //   or leading-dash interface text.
+    #[test]
+    fn rejects_invalid_interfaces() {
+        for iface in [".", "..", "eth:0", "eth/0", "abcdefghijklmnop", "-i"] {
+            let raw = format!(
+                r#"{{
+                    "mount_point": "/mnt/storage",
+                    "auto_suspend": {{ "wol_interface": "{iface}" }}
+                }}"#
+            );
+            let err = serde_json::from_str::<Config>(&raw).expect_err("interface should fail");
+            assert!(err.to_string().contains("invalid interface"), "got: {err}");
+        }
     }
 
     // Intent: Config deserializes without systemd_lifecycle and defaults it to false.

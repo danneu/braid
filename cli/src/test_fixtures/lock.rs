@@ -194,7 +194,7 @@ pub(crate) fn lock_with_fsid_probe_mocks(runner: MockRunner) -> MockRunner {
 pub(crate) fn lock_mounted_runner() -> MockRunner {
     lock_with_fsid_probe_mocks(MockRunner::default().with_output(
         CmdRequest::MountpointCheck {
-            path: MountPoint::new("/mnt/storage".to_owned()),
+            path: MountPoint::new("/mnt/storage".to_owned()).into(),
         },
         lock_ok_raw("mountpoint -q /mnt/storage"),
     ))
@@ -220,7 +220,7 @@ pub(crate) fn lock_mounted_runner() -> MockRunner {
 pub(crate) fn lock_umount_failed_runner() -> MockRunner {
     lock_with_fsid_probe_mocks(MockRunner::default().with_output(
         CmdRequest::MountpointCheck {
-            path: MountPoint::new("/mnt/storage".to_owned()),
+            path: MountPoint::new("/mnt/storage".to_owned()).into(),
         },
         lock_ok_raw("mountpoint -q /mnt/storage"),
     ))

@@ -2027,7 +2027,7 @@ fn discover_add_targets_before_mount<R: CommandRunner, F: Filesystem + ?Sized>(
     targets: &LuksUuidMap<journal::AddJournalTarget>,
 ) -> Result<Option<OpenCredential>, RecoverError> {
     let mount_result = runner.run(&CmdRequest::MountpointCheck {
-        path: params.config.mount_point().clone(),
+        path: params.config.mount_point().clone().into(),
     })?;
     if mount_result.exit_status == 0 {
         return Ok(None);
@@ -4367,7 +4367,7 @@ mod tests {
     fn mountpoint_ok() -> (CmdRequest, RawCommandOutput) {
         (
             CmdRequest::MountpointCheck {
-                path: MountPoint::new("/mnt/storage".into()),
+                path: MountPoint::new("/mnt/storage".into()).into(),
             },
             ok_raw_empty("mountpoint"),
         )
@@ -4376,7 +4376,7 @@ mod tests {
     fn mountpoint_fail() -> (CmdRequest, RawCommandOutput) {
         (
             CmdRequest::MountpointCheck {
-                path: MountPoint::new("/mnt/storage".into()),
+                path: MountPoint::new("/mnt/storage".into()).into(),
             },
             err_raw("mountpoint", 1, ""),
         )

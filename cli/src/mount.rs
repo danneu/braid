@@ -202,7 +202,7 @@ fn plan_open_pool_inner<R: CommandRunner, F: Filesystem + ?Sized>(
 
     // 1. If pool already mounted -> None
     let mp_result = runner.run(&CmdRequest::MountpointCheck {
-        path: mount_point.clone(),
+        path: mount_point.clone().into(),
     })?;
     if mp_result.exit_status == 0 {
         events.push(ProbeEvent::AlreadyMounted {
@@ -976,7 +976,7 @@ mod tests {
 
         let runner = MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
-                path: MountPoint::new("/mnt/storage".to_owned()),
+                path: MountPoint::new("/mnt/storage".to_owned()).into(),
             },
             ok_raw("mountpoint"),
         );
@@ -1086,7 +1086,7 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::MountpointCheck {
-                    path: MountPoint::new("/mnt/storage".to_owned()),
+                    path: MountPoint::new("/mnt/storage".to_owned()).into(),
                 },
                 err_raw("mountpoint", 1, ""),
             )
@@ -1166,7 +1166,7 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::MountpointCheck {
-                    path: MountPoint::new("/mnt/storage".to_owned()),
+                    path: MountPoint::new("/mnt/storage".to_owned()).into(),
                 },
                 err_raw("mountpoint", 1, ""),
             )
@@ -1268,7 +1268,7 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::MountpointCheck {
-                    path: MountPoint::new("/mnt/storage".to_owned()),
+                    path: MountPoint::new("/mnt/storage".to_owned()).into(),
                 },
                 err_raw("mountpoint", 1, ""),
             )
@@ -1657,7 +1657,7 @@ mod tests {
 
         let runner = MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
-                path: MountPoint::new("/mnt/storage".to_owned()),
+                path: MountPoint::new("/mnt/storage".to_owned()).into(),
             },
             err_raw("mountpoint", 1, ""),
         );
@@ -1704,7 +1704,7 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::MountpointCheck {
-                    path: MountPoint::new("/mnt/storage".to_owned()),
+                    path: MountPoint::new("/mnt/storage".to_owned()).into(),
                 },
                 err_raw("mountpoint", 1, ""),
             )
@@ -1780,7 +1780,7 @@ mod tests {
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::MountpointCheck {
-                    path: MountPoint::new("/mnt/storage".to_owned()),
+                    path: MountPoint::new("/mnt/storage".to_owned()).into(),
                 },
                 err_raw("mountpoint", 1, ""),
             )
@@ -2140,7 +2140,7 @@ pool already mounted at /mnt/storage
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::MountpointCheck {
-                    path: MountPoint::new("/mnt/storage".to_owned()),
+                    path: MountPoint::new("/mnt/storage".to_owned()).into(),
                 },
                 err_raw("mountpoint", 1, ""),
             )
@@ -2262,7 +2262,7 @@ pool already mounted at /mnt/storage
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::MountpointCheck {
-                    path: MountPoint::new("/mnt/storage".to_owned()),
+                    path: MountPoint::new("/mnt/storage".to_owned()).into(),
                 },
                 err_raw("mountpoint", 1, ""),
             )

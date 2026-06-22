@@ -36,7 +36,7 @@ pub fn run(config_path: &Path, paths: &StatePaths) -> io::Result<()> {
     let disks = DiskIdentity::from_membership(&membership);
     let (model, init_effects) = Model::new(
         disks,
-        config.mount_point().as_str().to_owned(),
+        config.mount_point().clone(),
         config.fan_control().cloned(),
         config.ups().cloned(),
         advisories,
