@@ -528,9 +528,8 @@ locks mid-real-scrub but never checks `Result` -- closing that blind spot in pla
 
 ## Follow Up
 
-- The new `scrub-alert` VM test and the modified `scrub-lifecycle.py` assertion were
-  validated only by `nix eval` of the flake check (derivation builds, module + script
-  compose); the behavioral VM run (`just test-vm scrub-alert`, `just test-vm scrub-lifecycle`)
-  was not executed here because it needs the aarch64-linux builder. Run both on CI / a
-  builder to confirm the end-to-end onFailure -> alert -> ack flow and the real-cancel
-  `Result=success` path.
+- Resolved (2026-06-22): `just test-vm scrub-alert scrub-lifecycle` passed on a builder,
+  exercising the end-to-end onFailure -> alert -> ack flow and the real-cancel
+  `Result=success` path. At commit time both were validated only by `nix eval` of the
+  flake check (derivation builds, module + script compose) because the behavioral VM run
+  needs the aarch64-linux builder, which was unavailable in that session.
