@@ -77,6 +77,7 @@
 - [031: Drive-wake posture](design/decisions/031-drive-wake-posture.md)
 - [032: Pool mount hardening](design/decisions/032-pool-mount-hardening.md)
 - [033: Systemd unit hardening](design/decisions/033-systemd-unit-hardening.md)
+- [034: Subprocess environment discipline](design/decisions/034-subprocess-environment-discipline.md)
 
 # Internals
 

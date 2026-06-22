@@ -117,6 +117,14 @@ against `color_enabled_for_stderr()` so plain stderr captures
 contain unwrapped `[wait]` bytes and TTY output picks up the gray
 ANSI tag. [Why →](decisions/021-wait-in-unlock.md)
 
+## 14. Explicit subprocess environment
+
+Every child process the braid Rust CLI binary spawns runs with an explicit
+environment allowlist: parent PATH forwarded when present, plus `LC_ALL=C`.
+The CLI never passes its inherited environment through to a child. Nix-generated
+unit scripts and wrappers are out of scope; their environment is set by the
+systemd unit and the wrapper. [Why ->](decisions/034-subprocess-environment-discipline.md)
+
 ---
 
 Implementation workflow and conventions are in `AGENTS.md` at the repo root.

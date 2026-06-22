@@ -5,7 +5,7 @@ use crate::alert::{
     save_enospc_ack, snapshot_current,
 };
 use crate::capacity::evaluate_enospc_risk;
-use crate::cmd::{CmdRequest, CommandRunner};
+use crate::cmd::{CmdRequest, CommandRunner, apply_child_env};
 use crate::parse::{parse_btrfs_device_stats, parse_btrfs_device_usage};
 use crate::probe::{AlertPoolState, Filesystem, ProbeError, probe_pool_alerts};
 use crate::state_paths::StatePaths;
@@ -353,9 +353,7 @@ fn stop_beeper() {
 }
 
 fn stop_unit(unit: &str) {
-    let result = std::process::Command::new("systemctl")
-        .args(["stop", unit])
-        .output();
+    let result = stop_beeper_program("systemctl", &["stop", unit]);
     match result {
         Err(e) => {
             eprintln!("warning: could not stop {unit}: {e}");
@@ -366,6 +364,13 @@ fn stop_unit(unit: &str) {
             }
         }
     }
+}
+
+fn stop_beeper_program(program: &str, args: &[&str]) -> std::io::Result<std::process::Output> {
+    let mut command = std::process::Command::new(program);
+    command.args(args);
+    apply_child_env(&mut command);
+    command.output()
 }
 
 fn format_systemctl_stop_failure(unit: &str, output: &std::process::Output) -> Option<String> {
@@ -443,6 +448,22 @@ mod tests {
     #[cfg(unix)]
     use std::process::{ExitStatus, Output};
     use std::time::UNIX_EPOCH;
+
+    // Intent: The ack beeper-stop spawn path gives systemctl only braid's
+    // explicit child-environment allowlist.
+    // Why it exists: stop_beeper bypasses RealRunner; without a boundary test
+    // it could silently regress to inheriting the whole CLI environment or
+    // locale-dependent stderr.
+    // Scenario: Ack cleanup reaches the systemctl spawn seam, but the test
+    // substitutes the real env binary and inspects the environment it received.
+    #[test]
+    fn stop_beeper_program_child_env_is_allowlisted() {
+        let output = stop_beeper_program("env", &[]).expect("env should run through PATH");
+        assert!(output.status.success());
+        let stdout = String::from_utf8(output.stdout).expect("env output should be UTF-8");
+
+        crate::cmd::assert_exact_child_env_dump(&stdout);
+    }
 
     // Intent: The mounted ack confirmation formatter preserves the no-count
     //   fallback and the singular/plural counted forms.

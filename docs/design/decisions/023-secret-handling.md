@@ -9,6 +9,7 @@ status: Active
 > Related:
 > - [004-single-passphrase.md](004-single-passphrase.md)
 > - [018-systemd-lifecycle.md](018-systemd-lifecycle.md)
+> - [034-subprocess-environment-discipline.md](034-subprocess-environment-discipline.md)
 > - `cli/src/secret.rs`
 
 ## Context

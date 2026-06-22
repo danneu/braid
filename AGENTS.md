@@ -38,6 +38,7 @@ scope, refactor, or backwards-compatibility cost.
 
 - systemd units, the wrapper, or systemd tests -> [ADR 018 systemd-lifecycle](docs/design/decisions/018-systemd-lifecycle.md)
 - systemd unit hardening or sandbox directives -> [ADR 033 systemd-unit-hardening](docs/design/decisions/033-systemd-unit-hardening.md)
+- Rust CLI subprocess spawning or child environment -> [ADR 034 subprocess-environment-discipline](docs/design/decisions/034-subprocess-environment-discipline.md)
 - dry-run, preview, or mutating command planning/execution -> [ADR 022 dry-run-preview-model](docs/design/decisions/022-dry-run-preview-model.md)
 - mutation code (invariant placement, fail-closed policy, residual guards, state enums) -> [safety-heuristics.md](docs/dev/safety-heuristics.md)
 - writing or reviewing a plan -> [planning-hygiene.md](docs/dev/planning-hygiene.md)

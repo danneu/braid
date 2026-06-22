@@ -1370,6 +1370,39 @@ fn signal_name(sig: i32) -> &'static str {
     }
 }
 
+/// Central child-environment policy for the Rust CLI: PATH remains the
+/// ADR 010 tool-resolution authority, LC_ALL=C stabilizes parsed output, and
+/// inherited variables are dropped as the env-side companion to ADR 023.
+pub(crate) fn apply_child_env(cmd: &mut std::process::Command) {
+    cmd.env_clear();
+    if let Some(path) = std::env::var_os("PATH") {
+        cmd.env("PATH", path);
+    }
+    cmd.env("LC_ALL", "C");
+}
+
+#[cfg(test)]
+pub(crate) fn parse_env_dump(stdout: &str) -> std::collections::BTreeMap<String, String> {
+    stdout
+        .lines()
+        .map(|line| {
+            let (key, value) = line
+                .split_once('=')
+                .unwrap_or_else(|| panic!("env line should contain '=': {line:?}"));
+            (key.to_owned(), value.to_owned())
+        })
+        .collect()
+}
+
+#[cfg(test)]
+pub(crate) fn assert_exact_child_env_dump(stdout: &str) {
+    let env = parse_env_dump(stdout);
+    let keys: Vec<_> = env.keys().map(String::as_str).collect();
+    assert_eq!(keys, ["LC_ALL", "PATH"]);
+    assert_eq!(env.get("LC_ALL").map(String::as_str), Some("C"));
+    assert!(env.contains_key("PATH"));
+}
+
 fn output_to_raw(
     cmd_str: String,
     output: std::process::Output,
@@ -1402,11 +1435,10 @@ pub struct RealRunner;
 impl RealRunner {
     fn exec(cmd: &CmdArgs) -> Result<RawCommandOutput, CmdError> {
         let cmd_str = format!("{} {}", cmd.program, cmd.args.join(" "));
-        // Force POSIX locale so error strings (strerror, %m) are always English —
-        // braid matches stderr substrings for ENOSPC, device-busy, etc.
-        let output = std::process::Command::new(&cmd.program)
-            .args(&cmd.args)
-            .env("LC_ALL", "C")
+        let mut command = std::process::Command::new(&cmd.program);
+        command.args(&cmd.args);
+        apply_child_env(&mut command);
+        let output = command
             .output()
             .map_err(|e| CmdError::Failed(format!("{cmd_str}: {e}")))?;
 
@@ -1418,11 +1450,10 @@ impl RealRunner {
         use std::process::Stdio;
 
         let cmd_str = format!("{} {}", cmd.program, cmd.args.join(" "));
-        // Force POSIX locale so error strings (strerror, %m) are always English —
-        // braid matches stderr substrings for ENOSPC, device-busy, etc.
-        let mut child = std::process::Command::new(&cmd.program)
-            .args(&cmd.args)
-            .env("LC_ALL", "C")
+        let mut command = std::process::Command::new(&cmd.program);
+        command.args(&cmd.args);
+        apply_child_env(&mut command);
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -1753,6 +1784,47 @@ mod tests {
 
     fn luks_label(name: &str) -> LuksLabel {
         LuksLabel::for_disk(&disk(name))
+    }
+
+    // Intent: RealRunner::exec gives spawned tools only braid's explicit
+    // child-environment allowlist.
+    // Why it exists: The stderr parsers and PATH wrapper rely on LC_ALL=C and
+    // PATH forwarding, while inherited Cargo/user variables must not leak into
+    // subprocesses by accident.
+    // Scenario: A diagnostic command runs through the regular no-stdin spawn
+    // boundary and prints the exact environment the child received.
+    #[test]
+    fn real_runner_exec_child_env_is_allowlisted() {
+        let output = RealRunner::exec(&CmdArgs {
+            program: "env".to_owned(),
+            args: Vec::new(),
+        })
+        .expect("env should run through PATH");
+
+        assert_eq!(output.exit_status, 0);
+        assert_exact_child_env_dump(&output.stdout);
+    }
+
+    // Intent: RealRunner::exec_with_stdin applies the same explicit
+    // child-environment allowlist as the no-stdin execution path.
+    // Why it exists: Secret-bearing subprocesses use run_with_stdin; their
+    // stdin discipline must not be undermined by inheriting unrelated process
+    // environment.
+    // Scenario: A stdin-capable command ignores empty stdin, prints its child
+    // environment, and exits before any secret-bearing path is involved.
+    #[test]
+    fn real_runner_exec_with_stdin_child_env_is_allowlisted() {
+        let output = RealRunner::exec_with_stdin(
+            &CmdArgs {
+                program: "env".to_owned(),
+                args: Vec::new(),
+            },
+            b"",
+        )
+        .expect("env should run through PATH");
+
+        assert_eq!(output.exit_status, 0);
+        assert_exact_child_env_dump(&output.stdout);
     }
 
     #[test]

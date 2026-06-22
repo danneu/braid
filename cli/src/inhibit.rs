@@ -22,6 +22,8 @@ use std::io::{self, Read};
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
 
+use crate::cmd::apply_child_env;
+
 /// Kill the entire process group rooted at `child` and reap the direct
 /// child. Used by both the `Drop` path and the failure path inside
 /// `SleepInhibitor::acquire`, so the systemd-inhibit + sh + sleep tree is
@@ -122,19 +124,33 @@ impl SleepInhibitor {
     /// Returns an io error if `systemd-inhibit` cannot be spawned or exits
     /// before printing the sentinel (e.g. logind is unreachable).
     pub fn acquire(why: &str) -> io::Result<Self> {
+        let why = format!("--why={why}");
+        let argv = [
+            "--what=sleep",
+            "--who=braid",
+            "--mode=block",
+            why.as_str(),
+            "sh",
+            "-c",
+            "printf READY; exec sleep infinity",
+        ];
+        Self::acquire_with("systemd-inhibit", &argv)
+    }
+
+    /// Test seam for the inhibitor process boundary, keeping the production
+    /// READY handshake and process-group ownership while allowing a stand-in
+    /// program that exposes the child environment.
+    pub(crate) fn acquire_with(program: &str, args: &[&str]) -> io::Result<Self> {
         // process_group(0) puts systemd-inhibit (and the sh/sleep child it
         // supervises) in a fresh process group rooted at the systemd-inhibit
         // pid, so teardown can SIGKILL the whole group via `kill(-pgid, ...)`
         // instead of just the direct child. Without this the supervised
         // sleep would survive systemd-inhibit's death and leak as an orphan
         // reparented to init on every replace.
-        let mut child = Command::new("systemd-inhibit")
-            .args(["--what=sleep", "--who=braid", "--mode=block"])
-            .arg(format!("--why={why}"))
-            .args(["sh", "-c", "printf READY; exec sleep infinity"])
-            .stdout(Stdio::piped())
-            .process_group(0)
-            .spawn()?;
+        let mut command = Command::new(program);
+        command.args(args);
+        apply_child_env(&mut command);
+        let mut child = command.stdout(Stdio::piped()).process_group(0).spawn()?;
 
         // Run the handshake in an inner closure so any failure (read_exact
         // EOF/io error, sentinel mismatch) flows through a single cleanup
@@ -169,5 +185,46 @@ impl SleepInhibitor {
 impl Drop for SleepInhibitor {
     fn drop(&mut self) {
         kill_pgroup_and_reap(&mut self.child);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Intent: SleepInhibitor::acquire_with gives the inhibitor child only
+    // braid's explicit environment before the READY handshake runs.
+    // Why it exists: The inhibitor path bypasses RealRunner; a regression
+    // would silently reintroduce inherited process variables at a production
+    // spawn boundary.
+    // Scenario: A stand-in shell prints READY, execs env, and exits, letting
+    // the test read the exact post-handshake environment from the guard child.
+    #[test]
+    fn acquire_with_child_env_is_allowlisted_before_ready_handshake() {
+        let inherited_sentinel = std::env::vars()
+            .map(|(key, _)| key)
+            .find(|key| key.starts_with("CARGO_"))
+            .expect("cargo should provide a CARGO_* sentinel to the test process");
+
+        let mut guard = SleepInhibitor::acquire_with("sh", &["-c", "printf READY; exec env"])
+            .expect("stand-in inhibitor should run through PATH");
+        let mut stdout = String::new();
+        guard
+            .child
+            .stdout
+            .as_mut()
+            .expect("stdout was piped")
+            .read_to_string(&mut stdout)
+            .expect("env dump should be readable");
+
+        let env = crate::cmd::parse_env_dump(&stdout);
+        assert_eq!(env.get("LC_ALL").map(String::as_str), Some("C"));
+        assert!(env.contains_key("PATH"));
+        assert!(
+            !env.contains_key(&inherited_sentinel),
+            "{inherited_sentinel} leaked into inhibitor child"
+        );
+
+        drop(guard);
     }
 }
