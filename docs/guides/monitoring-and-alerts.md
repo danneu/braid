@@ -25,8 +25,8 @@ If any check triggers, braid activates an alert.
 
 When `braid monitor` detects a Critical issue (exit code 1), the systemd wrapper starts `braid-alert.service`, which:
 
-- **Beeps the PC speaker** (if enabled) until acknowledged. The cadence starts at 5 seconds and backs off exponentially (5s, 10s, 20s, 40s, ...) up to once every 15 minutes, so the early beeps are urgent but an ignored alert doesn't stay obnoxious.
-- **Runs your custom alert command** (if configured).
+- **Starts `braid-beep.service`** (if enabled). That service beeps the PC speaker until acknowledged. The cadence starts at 5 seconds and backs off exponentially (5s, 10s, 20s, 40s, ...) up to once every 15 minutes, so the early beeps are urgent but an ignored alert doesn't stay obnoxious.
+- **Runs your custom alert command** (if configured), bounded by a timeout.
 
 The beeping is intentionally persistent and annoying -- you should not be able to ignore a disk problem on a NAS that holds your data.
 
@@ -47,6 +47,7 @@ braid = {
     interval = "5min";    # default: "5min" (systemd time span)
     beep = true;          # default: true (PC speaker alert)
     alertCommand = null;  # default: null (optional custom command)
+    alertCommandTimeoutSec = 60; # default: 60
   };
 };
 ```
@@ -59,6 +60,7 @@ braid = {
 | `monitor.interval` | `"5min"` | How often to check (systemd time span: `"5min"`, `"30s"`, `"1h"`) |
 | `monitor.beep` | `true` | Beep the PC speaker on alert |
 | `monitor.alertCommand` | `null` | Custom command to run on alert (in addition to beep) |
+| `monitor.alertCommandTimeoutSec` | `60` | Seconds before braid stops a custom alert command |
 
 ### Custom alert commands
 
@@ -68,7 +70,7 @@ Set `monitor.alertCommand` to run a script when an alert fires. This runs in add
 braid.monitor.alertCommand = "/home/user/scripts/send-pushover-alert.sh";
 ```
 
-The command runs as root. It should be idempotent -- it may fire on every monitor cycle while the alert is active.
+The command runs as root. It is bounded by `monitor.alertCommandTimeoutSec` (default 60 seconds) on both the Critical path (`braid-alert.service`) and the Warning path (`braid-alert-advisory.service`), so a hung notifier cannot stall the alert latch or wedge the timer-driven monitor service. It should be idempotent; it runs once per alert episode until you acknowledge the alert.
 
 ### Disabling the beep
 
@@ -139,10 +141,16 @@ View the monitor service logs:
 journalctl -u braid-monitor.service --since "1 hour ago"
 ```
 
-View the alert service:
+View the alert orchestrator:
 
 ```sh
 journalctl -u braid-alert.service
+```
+
+View the beep loop:
+
+```sh
+journalctl -u braid-beep.service
 ```
 
 Check if the monitor timer is active:
@@ -156,10 +164,12 @@ systemctl status braid-monitor.timer
 ```
 braid-monitor.timer (every 5 min)
   -> braid-monitor.service
-    -> braid monitor (exit 0 = ok/offline/lock-contended, 1 = alert, 2 = setup error)
+    -> braid monitor (exit 0 = ok/offline/lock-contended, 1 = alert, 3 = advisory, 2 = setup error)
       -> on exit 1: start braid-alert.service
-        -> beep (PC speaker, 5s -> 10s -> ... -> 15min)
+        -> starts braid-beep.service (PC speaker, 5s -> 10s -> ... -> 15min)
         -> alertCommand (if configured)
+      -> on exit 3: start braid-alert-advisory.service
+        -> alertCommand (if configured, no beep)
 
 smartd (always running)
   -> detects SMART issue
@@ -176,7 +186,8 @@ braid-scrub.service (scheduled scrub)
 
 braid ack
   -> clears alert state
-  -> braid-alert.service stops (beeping stops)
+  -> stops braid-alert.service
+    -> cascades to stop braid-beep.service
 ```
 
 ## What's next

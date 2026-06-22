@@ -127,6 +127,7 @@ braid's scrub conflicts with the NixOS built-in `services.btrfs.autoScrub`. If b
 | `braid.monitor.interval` | string | `"5min"` | Polling interval (systemd time span) |
 | `braid.monitor.beep` | bool | `true` | Audible PC speaker beep on alert |
 | `braid.monitor.alertCommand` | string or null | `null` | Custom command to run on alert |
+| `braid.monitor.alertCommandTimeoutSec` | positive int | `60` | Seconds before braid stops a custom alert command |
 
 When `beep = true`, the module unblacklists the `pcspkr` kernel module, creates a `beep` group, and sets up a udev rule for PC speaker access. The beep loops with exponential backoff (5s, 10s, 20s, 40s, ...) capped at once every 15 minutes, until acknowledged with `braid ack`.
 
@@ -135,6 +136,10 @@ When `beep = true`, the module unblacklists the `pcspkr` kernel module, creates 
 ```nix
 braid.monitor.alertCommand = "curl -s -d 'Disk error on NAS' https://ntfy.sh/my-nas-alerts";
 ```
+
+The command runs as root and is bounded by
+`braid.monitor.alertCommandTimeoutSec` (default 60 seconds) on both Critical
+and Warning alert paths.
 
 See [Monitoring and alerts](monitoring-and-alerts.md) for the full workflow.
 
@@ -239,6 +244,7 @@ braid = {
     interval = "5min";   # default
     beep = true;         # default
     alertCommand = null; # default; e.g. "curl -s -d 'alert' https://ntfy.sh/my-nas"
+    alertCommandTimeoutSec = 60; # default
   };
 
   autoUnlock = {

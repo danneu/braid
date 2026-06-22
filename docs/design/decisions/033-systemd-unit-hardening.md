@@ -48,9 +48,9 @@ bounding stays explicit per unit.
 | `braid-monitor.service` | base, `ReadWritePaths=/var/lib/braid /run/braid-pool.lock`, `CapabilityBoundingSet=CAP_SYS_ADMIN`, `RestrictAddressFamilies=AF_UNIX`, ordered after `systemd-tmpfiles-setup.service`; no `PrivateDevices` |
 | `braid-ups-secrets.service` | base, `ReadWritePaths=/var/lib/braid`, empty `CapabilityBoundingSet`, `PrivateNetwork=true`, `PrivateDevices=true` |
 | `braid-seal-mountpoint.service` | base, `ReadWritePaths=<mountpoint parent>`, `CapabilityBoundingSet=CAP_LINUX_IMMUTABLE`, `PrivateNetwork=true`, `PrivateDevices=true` |
-| `braid-alert.service` without a custom command | base, full capability bounding set so the beep wrapper can drop uid/gid with `setpriv` |
-| `braid-alert.service` with a custom command | light alert profile only, leaving filesystem, home, tmp, namespace, W^X, ABI, network, and capability policy open for operator code |
-| `braid-alert-advisory.service` | same profile choice as `braid-alert.service`; it runs the same operator command path for warning-only alerts |
+| `braid-alert.service` | intentionally unsandboxed oneshot+RAE orchestrator; runs the bounded operator `alertCommand`, wants `braid-pcspkr-load.service` and `braid-beep.service` when beeping is enabled |
+| `braid-alert-advisory.service` | intentionally unsandboxed oneshot+RAE Warning path; runs only the bounded operator `alertCommand`, no beep |
+| `braid-beep.service` | base plus `CapabilityBoundingSet=CAP_SETUID CAP_SETGID`, `PrivateNetwork=true`, `ProtectKernelTunables=true`, `ProtectClock=true`, `RestrictAddressFamilies=AF_UNIX`, `RestrictRealtime=true`, `Restart=always`, `StartLimitIntervalSec=0`; no `PrivateDevices` |
 | `braid-scrub-failed.service` | base, `ReadWritePaths=/var/lib/braid`, empty `CapabilityBoundingSet`, `RestrictAddressFamilies=AF_UNIX` |
 | `braid-pcspkr-load.service` | base with `ProtectKernelModules=false`, `CapabilityBoundingSet=CAP_SYS_MODULE`, `PrivateNetwork=true`; no `RemainAfterExit` so alert starts can re-run it |
 | `hddfancontrol-braid.service` | base plus realtime scheduling and restart policy; no `PrivateDevices` |
@@ -96,34 +96,33 @@ operation needs a capability.
 `braid-seal-mountpoint.service` needs `CAP_LINUX_IMMUTABLE` to set the immutable
 flag on the offline mountpoint. `braid-pcspkr-load.service` needs
 `CAP_SYS_MODULE` because it is the only runtime module-load path for enabling
-audible alerts without a reboot. The long-lived alert loop does not get that
-capability.
+audible alerts without a reboot.
 
-## Alert profiles
+`braid-beep.service` keeps only `CAP_SETUID` and `CAP_SETGID`. Its shared
+`braid-beep-probe` wrapper uses
+`setpriv --reuid=nobody --regid=beep --groups=beep`, which calls the uid/gid and
+supplementary-group syscalls before execing `beep`. An empty bounding set would
+make that drop fail, and the loop suppresses probe stderr by design so the
+failure would otherwise be silent. The loop does not get `CAP_SYS_MODULE`;
+runtime module loading stays in `braid-pcspkr-load.service`.
 
-`braid-alert.service` has two profiles because `alertCommand` is an operator
-escape hatch. Without a custom command, the unit runs braid-owned code and uses
-the full base. With a custom command, braid keeps only ambient process-family
-protections:
+## Alert split
 
-- `NoNewPrivileges=true`
-- `ProtectKernelModules=true`
-- `ProtectControlGroups=true`
-- `ProtectKernelLogs=true`
-- `LockPersonality=true`
-- `RestrictSUIDSGID=true`
+`alertCommand` is an operator escape hatch. It may send webhooks, read scripts
+from `/home`, write root-owned files, use interpreters or JITs, or execute
+non-native ABI binaries. A systemd sandbox on the command path would silently
+break valid notifiers, so both command-running units are intentionally
+unsandboxed.
 
-The light profile intentionally omits `ProtectSystem`, `ProtectHome`,
-`PrivateTmp`, `RestrictNamespaces`, `MemoryDenyWriteExecute`,
-`SystemCallArchitectures`, network restrictions, and `CapabilityBoundingSet`.
-Those can break normal operator notifiers such as scripts that write root-owned
-files, send webhooks, use interpreters/JITs, or execute non-native ABI binaries.
+That unsandboxed surface is short-lived. `braid-alert.service` and
+`braid-alert-advisory.service` are oneshot+RAE latches, and both run
+`alertCommand` through the shared bounded timeout wrapper. The persistent
+surface is instead `braid-beep.service`, which contains no operator input and
+uses the hardened profile above.
 
-The strong beep branch also omits a restricted `CapabilityBoundingSet`. The
-beep wrapper uses `setpriv --reuid=nobody --regid=beep --groups=beep`, and an
-empty bounding set would remove the uid/gid-drop capabilities before `setpriv`
-can run. The beep command suppresses stderr, so this is guarded by
-`tests/module/braid-alert-hardened.py`.
+This split is why the module does not carry a "light alert profile" anymore.
+The command path is honest about being an escape hatch; the days-long loop gets
+the sandbox.
 
 ## Device visibility
 
@@ -142,14 +141,22 @@ validates that each resolved path is a block device. `PrivateDevices=true`
 would hide the real disk tree and break drive discovery, so the fan-control VM
 test asserts it remains off.
 
+`braid-beep.service` also omits it. `PrivateDevices=true` hides the real input
+device tree, including the PC Speaker evdev node under `/dev/input`, so the
+hardened beep loop must keep host device visibility. The authorization boundary
+is the udev rule that grants the `beep` group access to the PC Speaker node,
+combined with the wrapper's `nobody:beep` drop.
+
 ## Unsandboxed units
 
 The units still not covered by this hardening base are the ones whose purpose is
-to mutate the pool or system mount/device state: `braid-unlock.service`,
-`braid-auto-unlock.service`, `braid-online.service`, `braid-scrub.service`, and
-the process-less `braid-pool.target`. These need device-mapper, mount
-propagation, broad btrfs operation authority, or lifecycle ownership that does
-not fit this base profile.
+to mutate the pool or system mount/device state, plus the operator-command alert
+escape hatches: `braid-unlock.service`, `braid-auto-unlock.service`,
+`braid-online.service`, `braid-scrub.service`, `braid-alert.service`,
+`braid-alert-advisory.service`, and the process-less `braid-pool.target`. These
+need device-mapper, mount propagation, broad btrfs operation authority,
+lifecycle ownership, or intentionally unrestricted operator command execution
+that does not fit this base profile.
 
 `braid-fan-reload.service`, `braid-scrub-resume-trigger.service`, and
 `braid-scrub-failed.service` are not in that exception set. They are dispatch

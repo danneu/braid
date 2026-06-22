@@ -38,7 +38,6 @@ in
         enable = true;
         package = braid;
         monitor.enable = true;
-        monitor.beep = false;
         monitor.alertCommand = "touch /root/alert-fired";
       };
 

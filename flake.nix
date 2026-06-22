@@ -1021,6 +1021,11 @@
               braid = linuxCrane.braid-cli-unwrapped;
             }
           );
+          braid-alert-slow-command = pkgs.testers.nixosTest (
+            import ./tests/module/braid-alert-slow-command.nix {
+              braid = linuxCrane.braid-cli-unwrapped;
+            }
+          );
           braid-alert-no-beep = pkgs.testers.nixosTest (
             import ./tests/module/braid-alert-no-beep.nix {
               braid = linuxCrane.braid-cli-unwrapped;

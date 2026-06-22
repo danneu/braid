@@ -49,7 +49,7 @@ no active alerts
    - Writes that snapshot as the new acknowledged baseline (`acked-stats.json`). Future monitor runs compare against this baseline, so the same error counts won't trigger again.
    - If a latched `EnospcRisk` is still at risk on a fresh `btrfs device usage` probe, writes a snooze marker (`enospc-ack.json`) with a reminder deadline one interval (7 days) out. This *snoozes* the monitor reminder -- it does not resolve the risk, and `braid status` keeps showing the live advisory. If the pool has recovered by ack time, no marker is written, so a later recurrence alerts immediately.
    - If none of those alert sources is present, exits 0 with `no active alerts` and does not query btrfs or rewrite `acked-stats.json`.
-3. Stops `braid-alert.service` (the beeper), best-effort. This runs first so the stop attempt is reached before any later file-removal I/O error can short-circuit the rest of cleanup.
+3. Stops `braid-alert.service`, best-effort. That cascades through `BindsTo` to stop the `braid-beep.service` loop when beeping is enabled. This runs first so the stop attempt is reached before any later file-removal I/O error can short-circuit the rest of cleanup.
 4. Removes the smartd alert flag (`smartd-alert`) if present.
 5. Removes the scrub-failed flag (`scrub-failed`) if present.
 6. Removes the alert latch file (`alert-latch.json`).

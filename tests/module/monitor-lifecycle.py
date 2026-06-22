@@ -83,6 +83,7 @@ with subtest("No alert side effects before pool mount"):
     machine.succeed("rm -f /root/alert-fired")
     machine.succeed("systemctl start braid-monitor.service")
     machine.fail("systemctl is-active braid-alert.service")
+    machine.fail("systemctl is-active braid-beep.service")
     machine.fail("test -f /root/alert-fired")
 
 # --- Subtest 4: Unlock pool ---
@@ -114,6 +115,7 @@ with subtest("Healthy pool: monitor runs without triggering alert"):
     machine.succeed("rm -f /root/alert-fired")
     machine.succeed("systemctl start braid-monitor.service")
     machine.fail("systemctl is-active braid-alert.service")
+    machine.fail("systemctl is-active braid-beep.service")
     machine.fail("test -f /root/alert-fired")
 
 # --- Subtest 6: Degrade pool ---
@@ -135,6 +137,7 @@ with subtest("Degraded pool: monitor triggers braid-alert.service"):
     # braid-monitor.service always exits 0. When braid monitor returns
     # exit 1, the service script starts braid-alert.service.
     machine.succeed("systemctl is-active braid-alert.service")
+    machine.wait_until_succeeds("systemctl is-active braid-beep.service", timeout=30)
     machine.succeed("test -f /root/alert-fired")
 
 # --- Subtest 8: Ack clears alert via systemd ---
@@ -146,6 +149,9 @@ with subtest("braid ack clears alert and stops alert service"):
         f"expected counted ack confirmation for one latched cause, got: {stdout!r}"
     )
     machine.fail("systemctl is-active braid-alert.service")
+    machine.wait_until_succeeds(
+        "! systemctl is-active --quiet braid-beep.service", timeout=30
+    )
     machine.fail("test -f /var/lib/braid/alert-latch.json")
 
 # --- Subtest 9: No alert side effects after unmount ---
@@ -159,6 +165,7 @@ with subtest("No alert side effects after pool unmount"):
     # ConditionPathIsMountPoint: clean skip, not a dependency failure.
     machine.succeed("systemctl start braid-monitor.service")
     machine.fail("systemctl is-active braid-alert.service")
+    machine.fail("systemctl is-active braid-beep.service")
     machine.fail("test -f /root/alert-fired")
 
 machine.shutdown()

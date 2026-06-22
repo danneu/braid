@@ -9,28 +9,12 @@ let
   beepEnabled = cfg.monitor.beep;
   inherit (import ./hardening.nix { }) base;
   braidWrapped = import ./wrapper.nix { inherit cfg pkgs lib; };
-  lightAlert = {
-    NoNewPrivileges = true;
-    ProtectKernelModules = true;
-    ProtectControlGroups = true;
-    ProtectKernelLogs = true;
-    LockPersonality = true;
-    RestrictSUIDSGID = true;
-  };
-  alertProfile = if cfg.monitor.alertCommand == null then base else lightAlert;
-  alertType =
-    if beepEnabled then
-      {
-        Type = "simple";
-      }
-    else
-      {
-        Type = "oneshot";
-        RemainAfterExit = true;
-      };
+  wrappedAlertCommand = lib.optionalString (cfg.monitor.alertCommand != null) ''
+    ${pkgs.coreutils}/bin/timeout -k 5s ${toString cfg.monitor.alertCommandTimeoutSec}s ${pkgs.runtimeShell} -c ${lib.escapeShellArg cfg.monitor.alertCommand} || true
+  '';
 
   # Canonical privilege-dropped beep wrapper. This is the SINGLE source of
-  # truth for the alert beep argv: both the alert service script and the
+  # truth for the alert beep argv: both the beep service script and the
   # /etc/braid/notifier-config.json file reference this derivation by Nix
   # store path, so they cannot drift. Doctor reads the path from the config
   # file and runs this same wrapper as a subprocess.
@@ -70,6 +54,15 @@ in
         Custom command to run on alert. Runs alongside the beep on a Critical
         alert (disk health), and on its own with no beep for a Warning-only
         alert such as a proactive ENOSPC capacity risk.
+      '';
+    };
+
+    alertCommandTimeoutSec = lib.mkOption {
+      type = lib.types.ints.positive;
+      default = 60;
+      description = ''
+        Seconds before braid stops a custom alert command. The bound applies
+        to both Critical alerts and Warning-only advisory alerts.
       '';
     };
   };
@@ -121,27 +114,52 @@ in
 
     # --- Alert service ---
     systemd.services.braid-alert = {
-      description = "Braid disk health alert (audible beep if enabled)";
-      wants = lib.optionals beepEnabled [ "braid-pcspkr-load.service" ];
+      description = "Braid disk health alert";
+      wants = lib.optionals beepEnabled [
+        "braid-pcspkr-load.service"
+        "braid-beep.service"
+      ];
       after = lib.optionals beepEnabled [ "braid-pcspkr-load.service" ];
-      serviceConfig = alertType // alertProfile;
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+      };
       script = ''
-        ${lib.optionalString (cfg.monitor.alertCommand != null) ''
-          ${cfg.monitor.alertCommand} || true
-        ''}
-        ${lib.optionalString beepEnabled ''
-          # Exponential backoff resets via service stop on `braid ack`.
-          delay=5
-          max_delay=900
-          while true; do
-            ${braidBeepProbe}/bin/braid-beep-probe 2>/dev/null || true
-            sleep "$delay"
-            delay=$((delay * 2))
-            if [ "$delay" -gt "$max_delay" ]; then
-              delay=$max_delay
-            fi
-          done
-        ''}
+        ${wrappedAlertCommand}
+      '';
+    };
+
+    # --- Audible alert loop ---
+    systemd.services.braid-beep = lib.mkIf beepEnabled {
+      description = "Braid audible alert beep loop";
+      bindsTo = [ "braid-alert.service" ];
+      startLimitIntervalSec = 0;
+      serviceConfig = base // {
+        Type = "simple";
+        Restart = "always";
+        RestartSec = 5;
+        CapabilityBoundingSet = [
+          "CAP_SETUID"
+          "CAP_SETGID"
+        ];
+        PrivateNetwork = true;
+        ProtectKernelTunables = true;
+        ProtectClock = true;
+        RestrictAddressFamilies = [ "AF_UNIX" ];
+        RestrictRealtime = true;
+      };
+      script = ''
+        # Exponential backoff resets via service stop on `braid ack`.
+        delay=5
+        max_delay=900
+        while true; do
+          ${braidBeepProbe}/bin/braid-beep-probe 2>/dev/null || true
+          sleep "$delay"
+          delay=$((delay * 2))
+          if [ "$delay" -gt "$max_delay" ]; then
+            delay=$max_delay
+          fi
+        done
       '';
     };
 
@@ -153,14 +171,12 @@ in
     # form). The Critical/exit-1 path (braid-alert.service) is unchanged.
     systemd.services.braid-alert-advisory = {
       description = "Braid capacity-risk advisory (non-beeping)";
-      serviceConfig = alertProfile // {
+      serviceConfig = {
         Type = "oneshot";
         RemainAfterExit = true;
       };
       script = ''
-        ${lib.optionalString (cfg.monitor.alertCommand != null) ''
-          ${cfg.monitor.alertCommand} || true
-        ''}
+        ${wrappedAlertCommand}
         exit 0
       '';
     };

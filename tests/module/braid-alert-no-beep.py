@@ -20,6 +20,9 @@ with subtest("Monitor timer is active"):
 with subtest("Alert service unit exists"):
     machine.succeed("systemctl cat braid-alert.service")
 
+with subtest("Beep unit is absent"):
+    machine.fail("systemctl cat braid-beep.service")
+
 with subtest("Service script omits beep plumbing"):
     # With beep disabled, the rendered script must not reference modprobe,
     # pcspkr, setpriv, or the beep binary.

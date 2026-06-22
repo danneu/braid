@@ -68,27 +68,28 @@ None. Monitor has no flags -- it reads from the braid config and state files.
 
 ```
 braid monitor      --writes--> alert-latch.json --> braid status / braid tui (display)
-(timer, every 5m)  --exit 1--> braid-alert.service (beeper + alertCommand)
+(timer, every 5m)  --exit 1--> braid-alert.service (latched orchestrator + alertCommand)
+                                  --wants--> braid-beep.service (backoff beep loop)
                    --exit 3--> braid-alert-advisory.service (alertCommand only, no beep)
 
-smartd  --start-->  braid-alert.service (beeper)
+smartd  --start-->  braid-alert.service
         --writes--> smartd-alert --> next braid monitor cycle (latches SmartdAlert)
 
 braid-scrub.service --onFailure--> braid-scrub-failed.service
-        --start-->  braid-alert.service (beeper)
+        --start-->  braid-alert.service
         --writes--> scrub-failed --> next braid monitor cycle (latches ScrubFailed)
 ```
 
-On exit 1, the `braid-monitor.service` wrapper starts `braid-alert.service` (the beeper, plus any `alertCommand`); on exit 3 it starts `braid-alert-advisory.service`, which runs only `alertCommand` (no beep). After that, two things stay active until you `braid ack`, each held by a different mechanism:
+On exit 1, the `braid-monitor.service` wrapper starts `braid-alert.service`, a latched orchestrator that runs any `alertCommand` and pulls in `braid-beep.service` when beeping is enabled. On exit 3 it starts `braid-alert-advisory.service`, which runs only `alertCommand` (no beep). After that, two things stay active until you `braid ack`, each held by a different mechanism:
 
 - **The latch and exit 1** -- held by **monitor**. Each cycle it writes the live causes to `alert-latch.json`, merging them into the existing latch, and re-exits 1 while any cause remains. `braid status` and the TUI read the same file for display.
-- **The beep** -- held by **`braid-alert.service` itself**, not the read-back. Once started it stays active on its own (the backoff beep loop when beep is enabled, or a `RemainAfterExit` oneshot when it's off), so the wrapper's per-cycle `systemctl start` is a no-op and a skipped cycle (offline or lock-contended exit 0) does not silence it. The service never reads `alert-latch.json` or the `smartd-alert` flag.
+- **The beep** -- held by **`braid-beep.service`**, not the read-back. `braid-alert.service` remains active as a `RemainAfterExit` latch, while the beep loop stays active in the bound service. The wrapper's per-cycle `systemctl start` is a no-op and a skipped cycle (offline or lock-contended exit 0) does not silence it. Neither service reads `alert-latch.json` or the `smartd-alert` flag.
 
 `smartd` is a second, independent trigger: on a SMART fault it starts `braid-alert.service` directly *and* writes the `smartd-alert` flag, which the next monitor cycle latches as a `SmartdAlert` cause.
 
 A failed scheduled scrub is a third, independent trigger with the same shape: `braid-scrub.service`'s `onFailure` runs `braid-scrub-failed.service`, which starts `braid-alert.service` directly *and* writes the `scrub-failed` flag, which the next monitor cycle latches as a `ScrubFailed` cause. A deliberate cancel (lock/suspend/shutdown) and a corruption-found scrub (btrfs exit 3) are both successes, so neither fires this path. This whole path exists only when `braid.monitor` is enabled.
 
-The beep stops only when `braid ack` clears the latch and runs `systemctl stop braid-alert.service`. The same ack also stops `braid-alert-advisory.service`, so a Warning-tier advisory is silenced too.
+The beep stops only when `braid ack` clears the latch and runs `systemctl stop braid-alert.service`; that stop cascades to `braid-beep.service` through `BindsTo`. The same ack also stops `braid-alert-advisory.service`, so a Warning-tier advisory is silenced too.
 
 ## Related commands
 
