@@ -110,7 +110,11 @@ one.
   run keeps its close target on the observed mapper (`braid-WRONG`, per
   "Cleanup follows observed ownership" above) but labels its
   `disk <name>: locking...`/`locked` progress row from the journaled operator
-  name carried as `close_mapper_best_effort`'s typed `disk_label`.
+  name carried as `close_mapper_best_effort`'s typed `disk_label`. `add`'s
+  pre-commit rollback cleanup uses the same route: `LuksCleanupGuard` carries
+  a typed `DiskName` with each tracked mapper and labels its
+  `disk <name>: ... (cleanup)` rows from that value while closing the tracked
+  mapper.
   `CredentialVerifyTarget`'s two constructors -- a UUID-joined
   `existing_pool_member` and an attested `named_candidate` -- are this same
   split in type form. Either route lets member names survive mapper drift: a
@@ -279,10 +283,12 @@ warns rather than claiming every declared member is assembled.
   `pool: removing <name>...` row -- names the member by its journaled operator
   name (`disk2`), not the mapper basename. `close_mapper_best_effort`'s
   `disk_label` parameter is typed `DiskName`, so no caller can pass a
-  mapper-derived label. Each drives the exit-0 close path; the deliberate
-  carve-out -- that the busy-retry diagnostic still echoes the raw mapper
-  (`cryptsetup close <mapper> busy, retrying...`) because it is a command echo,
-  not a disk-status row -- is pinned by
+  mapper-derived label. `cli/src/add.rs#guard_cleanup_row_uses_disk_name_under_mapper_drift`
+  pins the same label provenance for `add`'s rollback cleanup: the cleanup row
+  names `disk2` while closing the tracked `braid-WRONG` mapper. Each drives the
+  exit-0 close path; the deliberate carve-out -- that the busy-retry diagnostic
+  still echoes the raw mapper (`cryptsetup close <mapper> busy, retrying...`)
+  because it is a command echo, not a disk-status row -- is pinned by
   `cli/src/add.rs#guard_retries_busy_close_before_success`.
 - `cli/src/tui/probe.rs` unit tests pin the TUI Data-tab Bus column's transport
   join to the parent disk's LUKS UUID, so a member open under a drifted mapper

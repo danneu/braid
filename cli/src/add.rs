@@ -412,12 +412,19 @@ fn probe_closed_present_luks_target_uuid<R: CommandRunner>(
     }
 }
 
+/// Pairs the close target with the operator label for rollback cleanup rows.
+/// ADR 024 forbids deriving user-facing disk labels from mapper basenames.
+struct TrackedMapper {
+    name: DiskName,
+    mapper: MapperName,
+}
+
 /// Tracks LUKS mappers opened by this invocation of cmd_add.
 /// On drop (error path), closes them best-effort.
 /// Call `disarm()` on the success path to skip cleanup.
 struct LuksCleanupGuard<'a, R: CommandRunner> {
     runner: &'a R,
-    mappers: Vec<MapperName>,
+    mappers: Vec<TrackedMapper>,
     armed: bool,
 }
 
@@ -430,8 +437,8 @@ impl<'a, R: CommandRunner> LuksCleanupGuard<'a, R> {
         }
     }
 
-    fn track(&mut self, mapper: MapperName) {
-        self.mappers.push(mapper);
+    fn track(&mut self, name: DiskName, mapper: MapperName) {
+        self.mappers.push(TrackedMapper { name, mapper });
     }
 
     fn disarm(&mut self) {
@@ -446,29 +453,26 @@ impl<R: CommandRunner> Drop for LuksCleanupGuard<'_, R> {
         }
         let color_enabled = color_enabled_for_stderr();
         let sleeper = RealSleeper;
-        for mapper in self.mappers.iter().rev() {
-            let label = mapper
-                .as_str()
-                .strip_prefix("braid-")
-                .unwrap_or(mapper.as_str());
+        for tracked in self.mappers.iter().rev() {
+            let name = &tracked.name;
             emit_status(&status_line(
                 StatusTag::Wait,
                 color_enabled,
-                &format!("disk {label}: locking (cleanup)..."),
+                &format!("disk {name}: locking (cleanup)..."),
             ));
-            match close_mapper_with_retry(self.runner, &sleeper, mapper, color_enabled) {
+            match close_mapper_with_retry(self.runner, &sleeper, &tracked.mapper, color_enabled) {
                 Ok(()) => {
                     emit_status(&status_line(
                         StatusTag::Ok,
                         color_enabled,
-                        &format!("disk {label}: locked (cleanup)"),
+                        &format!("disk {name}: locked (cleanup)"),
                     ));
                 }
                 Err(e) => {
                     emit_status(&status_line(
                         StatusTag::Warn,
                         color_enabled,
-                        &format!("disk {label}: lock failed (cleanup, {e})"),
+                        &format!("disk {name}: lock failed (cleanup, {e})"),
                     ));
                 }
             }
@@ -1175,7 +1179,7 @@ impl AddPlan {
                 &passphrase,
             )? == OpenOutcome::Opened
             {
-                luks_guard.track(target.mapper_name.clone());
+                luks_guard.track(target.name.clone(), target.mapper_name.clone());
             }
             emit_status(&status_line(
                 StatusTag::Ok,
@@ -1392,7 +1396,7 @@ impl AddPlan {
                 &passphrase,
             )? == OpenOutcome::Opened
             {
-                luks_guard.track(target.mapper_name.clone());
+                luks_guard.track(name.clone(), target.mapper_name.clone());
             }
             eprint!(
                 "{}",
@@ -4154,8 +4158,8 @@ mod tests {
         let runner = SpyRunner::new(MockRunner::default());
         let captured = crate::status_tag::testing::capture_with_color(false, || {
             let mut guard = LuksCleanupGuard::new(&runner);
-            guard.track(MapperName::from_basename("braid-aaa".into()));
-            guard.track(MapperName::from_basename("braid-bbb".into()));
+            guard.track(disk("aaa"), MapperName::from_basename("braid-aaa".into()));
+            guard.track(disk("bbb"), MapperName::from_basename("braid-bbb".into()));
             // guard drops here while still armed
         });
         let closed = runner.closed.lock().unwrap();
@@ -4195,7 +4199,7 @@ mod tests {
         });
         let captured = crate::status_tag::testing::capture_with_color(false, || {
             let mut guard = LuksCleanupGuard::new(&runner);
-            guard.track(MapperName::from_basename("braid-aaa".into()));
+            guard.track(disk("aaa"), MapperName::from_basename("braid-aaa".into()));
             // guard drops here while still armed
         });
         let wait = "[wait] disk aaa: locking (cleanup)...";
@@ -4235,7 +4239,7 @@ mod tests {
         );
         let captured = crate::status_tag::testing::capture_with_color(false, || {
             let mut guard = LuksCleanupGuard::new(&runner);
-            guard.track(MapperName::from_basename("braid-aaa".into()));
+            guard.track(disk("aaa"), MapperName::from_basename("braid-aaa".into()));
             // guard drops here while still armed
         });
 
@@ -4259,6 +4263,41 @@ mod tests {
         );
     }
 
+    // Intent: cleanup [wait]/[ok] rows label the disk by its operator
+    //   DiskName, never the tracked mapper's basename.
+    // Why it exists: ADR 024 forbids deriving user-facing disk labels from a
+    //   mapper basename; a regression to strip_prefix("braid-") would silently
+    //   re-introduce mapper-derived labels and otherwise slip through.
+    // Scenario: add tracked a mapper opened under a drifted basename
+    //   (braid-WRONG) for the disk the operator named `disk2`; the guard fires
+    //   on unwind and the cleanup rows must say `disk disk2`, not `WRONG`.
+    #[test]
+    fn guard_cleanup_row_uses_disk_name_under_mapper_drift() {
+        let runner = SpyRunner::new(MockRunner::default());
+        let captured = crate::status_tag::testing::capture_with_color(false, || {
+            let mut guard = LuksCleanupGuard::new(&runner);
+            guard.track(
+                disk("disk2"),
+                MapperName::from_basename("braid-WRONG".into()),
+            );
+        });
+
+        assert!(
+            captured.contains("[wait] disk disk2: locking (cleanup)..."),
+            "missing drift-safe wait row: {captured:?}"
+        );
+        assert!(
+            captured.contains("[ok]   disk disk2: locked (cleanup)"),
+            "missing drift-safe ok row: {captured:?}"
+        );
+        assert!(
+            !captured.contains("WRONG"),
+            "cleanup row must not echo drifted mapper basename: {captured:?}"
+        );
+        let closed = runner.closed.lock().unwrap();
+        assert_eq!(*closed, vec!["braid-WRONG"]);
+    }
+
     #[test]
     fn guard_noop_when_disarmed() {
         // Intent: disarm() prevents close on drop.
@@ -4268,7 +4307,7 @@ mod tests {
         let runner = SpyRunner::new(MockRunner::default());
         {
             let mut guard = LuksCleanupGuard::new(&runner);
-            guard.track(MapperName::from_basename("braid-aaa".into()));
+            guard.track(disk("aaa"), MapperName::from_basename("braid-aaa".into()));
             guard.disarm();
             // guard drops here, disarmed
         }
@@ -4291,7 +4330,7 @@ mod tests {
             let mut guard = LuksCleanupGuard::new(&runner);
             // Only track mappers we opened ourselves.
             // Pre-existing mapper "braid-existing" is NOT tracked.
-            guard.track(MapperName::from_basename("braid-new".into()));
+            guard.track(disk("new"), MapperName::from_basename("braid-new".into()));
             // guard drops here while armed — simulates error path
         }
         let closed = runner.closed.lock().unwrap();
@@ -4341,7 +4380,10 @@ mod tests {
             .unwrap()
                 == OpenOutcome::Opened
             {
-                guard.track(MapperName::from_basename("braid-existing".into()));
+                guard.track(
+                    disk("existing"),
+                    MapperName::from_basename("braid-existing".into()),
+                );
             }
             // guard drops here while still armed
         }
