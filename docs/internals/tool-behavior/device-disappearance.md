@@ -28,7 +28,7 @@ Normal operation. Physical drive is present, LUKS mapper is open and points to t
 
 Hot-unplug while mounted. The LUKS mapper (`/dev/mapper/braid-X`) is still open in device-mapper, but the backing block device has vanished. `cryptsetup status` reports `device: (null)`. btrfs still sees the mapper path — it doesn't know the physical drive is gone until I/O fails.
 
-braid handles this correctly: `probe_pool` detects the `(null)` device, records it in `pool.null_underlying`, and `monitor` includes its devid in the alert-local missing set (`AlertDevids.missing`). The stats row reports both the mapper path and the devid; the alert pipeline pairs by devid directly.
+braid handles this correctly: `probe_pool` detects the `(null)` device, records it in `pool.null_underlying`, and `monitor` includes its devid in the alert-local missing set (`AlertDevids.missing`). The stats row reports both the mapper path and the devid; the alert pipeline pairs by devid directly. `braid doctor`'s `pool_missing_devices` check also keys on `missing_count` (which counts null-underlying members), so it **warns** here rather than reporting a green "no missing devices" — and routes the operator to the re-seat or promote-then-`replace` recovery (`braid replace` and `remove-missing` refuse a null-underlying devid until btrfs promotes it to MISSING).
 
 Post-UUID-identity rule: when a mapper is null-underlying, the live LUKS UUID is
 not observable from the missing backing device. braid may bind that live mapper

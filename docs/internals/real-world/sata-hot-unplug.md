@@ -133,12 +133,20 @@ Kernel sees the disk on the same ATA port but assigns a new SCSI device node (`s
 
 ### Recovery path
 
-The broken LUKS mapper cannot self-heal. Recovery requires:
+The broken LUKS mapper cannot self-heal (see the **Key finding** above: it stays broken until closed and reopened). The close-and-reopen primitive is `braid lock` then `braid unlock`, which tears down the zombie mapper and reopens it against the stable `/dev/disk/by-id/` path:
 
-1. `braid ack` to silence the alert
-2. Reboot → `braid unlock` (reopens LUKS mappers using stable `/dev/disk/by-id/` paths)
+1. `braid ack` to silence the alert.
+2. Close and reopen the mapper:
+   - **Disk is back (re-seated or replugged):** `braid lock` then `braid unlock`. Re-plug alone does not help — the mapper is a zombie until closed and reopened — but the by-id reopen rebinds to the disk wherever the kernel re-attached it.
+   - **Disk is truly gone:** `braid lock` then `braid unlock --allow-degraded`, which mounts the pool degraded so btrfs promotes the member to MISSING and `braid replace` can target it.
 
-This is correct behavior — braid uses by-id paths for LUKS open, so a reboot always rebinds to the right device regardless of kernel device node assignment.
+`braid unlock` reopens LUKS against `/dev/disk/by-id/`, the same stable-handle reopen a post-reboot `braid unlock` performs — so the re-seat branch above rests on that mechanistic equivalence, not on a separately observed replug-then-`unlock` test. The reboot path is the hardware-validated instance of that reopen:
+
+- **Reboot → `braid unlock`** (validated on real hardware): the reboot tears down every mapper, and `braid unlock` reopens each against its by-id path.
+
+This is correct behavior — braid uses by-id paths for LUKS open, so the reopen always rebinds to the right device regardless of kernel device node assignment.
+
+`braid doctor`'s `pool_missing_devices` check surfaces this same guidance: a null-underlying member produces a **Warn** (not a green "no missing devices"), routing the operator to the re-seat or promote-then-`replace` path described here.
 
 ## Unanswered Questions
 

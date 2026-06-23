@@ -2008,7 +2008,8 @@ mod tests {
         UpscSpawnFailureRunner, beep_ctx, cls, config_with_ups_enabled, config_without_ups,
         device_usage_raw, device_usage_raw_body, device_usage_three_one_tight,
         device_usage_three_two_tight, device_usage_two_healthy, device_usage_two_tight, df_json,
-        df_json_fail, disk_member_with, human_options, is_luks_ok, isolated_paths, luks_uuid_ok,
+        df_json_fail, disk_member_with, doctor_btrfs_show, doctor_cryptsetup_status_active,
+        doctor_cryptsetup_uuid_ok, human_options, is_luks_ok, isolated_paths, luks_uuid_ok,
         mountpoint_fail, mountpoint_ok, parsed_doctor_ctx, pool_state_runner,
         smart_selftest_runner_for, smartctl_selftest_json, systemctl_show_active_state_output,
         test_uuid, unlock_btrfs_balance_status_idle, unlock_btrfs_balance_status_paused,
@@ -5992,6 +5993,105 @@ mod tests {
         );
         let check = find_check(&report, "pool_missing_devices");
         assert_eq!(check.status, CheckStatus::Skip);
+    }
+
+    // Intent: on a hot-unplugged pool, `run_doctor` warns from
+    //   `pool_missing_devices` AND `declared_disks` in the same assembled
+    //   report -- never "no missing devices" next to a "disk not found" warn.
+    // Why it exists: this is the only test that drives the real probe ->
+    //   report path for the null-underlying case; the injection tests above
+    //   pin message composition but cannot prove that probe wiring still feeds
+    //   the warn arm, nor that the contradiction with `declared_disks` is gone.
+    //   It also makes the Context's "doctor is not silent because
+    //   declared_disks warns" claim a guard rather than narrative.
+    // Scenario: disk2 is hot-unplugged while the pool is mounted -- its LUKS
+    //   mapper stays open with `device: (null)` and its by-id symlink has
+    //   vanished -- while disk1 stays healthy and present.
+    #[test]
+    fn pool_missing_devices_warn_through_full_probe() {
+        let (_dir, paths) = isolated_paths();
+        // Both members are declared; only disk2's by-id symlink is gone (it was
+        // hot-unplugged), so `declared_disks` warns about disk2 alone and
+        // `foreign_luks_uuid` stays Ok (disk1's live UUID is declared).
+        save_doctor_membership(
+            &paths,
+            &[
+                (1, "disk1", "/dev/disk/by-id/disk1", Some(Devid::new(1))),
+                (2, "disk2", "/dev/disk/by-id/disk2", Some(Devid::new(2))),
+            ],
+        );
+        let healthy_uuid = test_uuid(1);
+        let (mp_req, mp_out) = mountpoint_ok();
+        let (by_id_isluks_req, by_id_isluks_out) = is_luks_ok("/dev/disk/by-id/disk1");
+        let (by_id_uuid_req, by_id_uuid_out) =
+            luks_uuid_ok("/dev/disk/by-id/disk1", healthy_uuid.as_str());
+        let runner = MockRunner::default()
+            .with_output(mp_req, mp_out)
+            // No MISSING line: btrfs still lists both mappers, so the warn
+            // arm must derive the degraded state from null-underlying alone.
+            .with_output(
+                CmdRequest::BtrfsFilesystemShow {
+                    mount_point: MountPoint::new("/mnt/storage".to_owned()),
+                },
+                doctor_btrfs_show(&[("braid-disk1", 1), ("braid-disk2", 2)], &[]),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName::from_basename("braid-disk1".to_owned()),
+                },
+                doctor_cryptsetup_status_active("braid-disk1", "/dev/vdb"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vdb".to_owned(),
+                },
+                doctor_cryptsetup_uuid_ok("/dev/vdb", &healthy_uuid),
+            )
+            // disk2's backing device is gone: cryptsetup reports `(null)`, so
+            // `probe_pool` records it as null-underlying, not a `pool.devices`
+            // member -- the empirical first state after a SATA hot-unplug.
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName::from_basename("braid-disk2".to_owned()),
+                },
+                doctor_cryptsetup_status_active("braid-disk2", "(null)"),
+            )
+            .with_output(by_id_isluks_req, by_id_isluks_out)
+            .with_output(by_id_uuid_req, by_id_uuid_out);
+        // disk1's by-id resolves to a block device; disk2's is absent, so
+        // `classify_disk_state` renders disk2 `Missing`.
+        let fs = DoctorMockFs::mounted_btrfs_only().with_block_device("/dev/disk/by-id/disk1");
+        let f = write_temp(valid_config_json());
+
+        let report = run_doctor(f.path(), &runner, &fs, &paths, human_options());
+
+        let missing = find_check(&report, "pool_missing_devices");
+        assert_eq!(missing.status, CheckStatus::Warn, "{}", missing.message);
+        assert!(
+            missing
+                .message
+                .contains("pool has 1 missing device (devid: 2)"),
+            "expected hot-unplug union lead: {}",
+            missing.message
+        );
+        assert!(
+            missing.message.contains("hot-unplugged"),
+            "expected hot-unplug guidance: {}",
+            missing.message
+        );
+        assert!(
+            !missing.message.contains("no missing"),
+            "must not whitewash the hot-unplug as healthy: {}",
+            missing.message
+        );
+
+        let declared = find_check(&report, "declared_disks");
+        assert_eq!(declared.status, CheckStatus::Warn, "{}", declared.message);
+        assert!(
+            declared.message.contains("not found") && declared.message.contains("disk2"),
+            "expected declared_disks to warn that disk2 is not found: {}",
+            declared.message
+        );
     }
 
     // Intent: foreign_luks_uuid fails when the mounted btrfs pool contains a
