@@ -74,8 +74,7 @@ pub struct AddJournalTarget {
 pub enum AddJournalMode {
     /// Adoption of a returning braid-labeled disk whose pool FSID has been
     /// verified at planning time. `verified_pool_fsid` backstops the
-    /// Add-recovery FSID cross-check that the UUID gate does not subsume
-    /// (see plan lines 979-987).
+    /// Add-recovery FSID cross-check that the UUID gate does not subsume.
     RecoverableBraidLabeled {
         verified_pool_fsid: Fsid,
         /// Keyfile to enroll into LUKS slot 1 if `add --enroll DIR` was
@@ -288,8 +287,7 @@ pub fn pending_op_advisories(paths: &StatePaths) -> Vec<String> {
 /// removal so the deletion survives power loss. Returns `Ok` if the file
 /// does not exist. Failures surface as `JournalError::Save` because the
 /// pinned variant inventory does not carry a dedicated Delete role and
-/// the operation is a state-write on `pending-op.json` (see plan lines
-/// 1120-1140).
+/// the operation is a state-write on `pending-op.json`.
 pub fn clear_journal(paths: &StatePaths) -> Result<(), JournalError> {
     let path = paths.pending_op_json();
     match std::fs::remove_file(&path) {
@@ -1249,7 +1247,8 @@ mod tests {
 
     /// An unknown top-level key in `pending-op.json` alongside the valid
     /// Journal fields fails through `Journal`'s `deny_unknown_fields`.
-    /// This pins plan line 446's fourth case.
+    /// Pins the unknown-top-level-key case of the journal's
+    /// deny_unknown_fields contract.
     #[test]
     fn unknown_top_level_key_in_pending_op_json_fails() {
         let tmp = tempfile::TempDir::new().unwrap();

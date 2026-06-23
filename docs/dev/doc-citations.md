@@ -26,8 +26,9 @@ _what_ and the path says _where_:
   rotting silently.
 
 A symbol or heading anchor survives edits and is greppable; a line number is
-neither. This applies to docs and comments -- transient analysis in `plans/wip/`
-is exempt.
+neither. This applies to docs and comments -- transient analysis in `plans/`
+(`plans/wip/` and archived `plans/impl/`) and agent tooling in `prompts/` are
+exempt.
 
 This rule governs braid's own tracked files; external upstream code under
 `reference/` is gitignored and cited differently (by shape, not `path#symbol`) --

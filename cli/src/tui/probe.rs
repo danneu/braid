@@ -535,10 +535,10 @@ pub fn probe_fan_for_tui<R: CommandRunner>(
 
 /// Resolve `<sysfs_root>/devices/platform/<dev>/hwmon/hwmon*/{device/,}pwmN`
 /// to the single directory containing `pwmN` and `fanN_input`. Mirrors the
-/// resolution logic in `modules/braid/fan-control.nix` (lines 166-187):
-/// exactly one match across both `hwmon*/device/pwmN` and `hwmon*/pwmN`
-/// layouts. Zero or more than one → `None` so the UI renders "-/-"
-/// rather than picking arbitrarily.
+/// pwm-resolution script block in `modules/braid/fan-control.nix`: exactly
+/// one match across both `hwmon*/device/pwmN` and `hwmon*/pwmN` layouts.
+/// Zero or more than one → `None` so the UI renders "-/-" rather than
+/// picking arbitrarily.
 fn resolve_pwm_dir(sysfs_root: &Path, fc: &FanControl) -> Option<PathBuf> {
     let base = sysfs_root
         .join("devices/platform")

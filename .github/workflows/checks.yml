@@ -58,6 +58,16 @@ jobs:
           python3 scripts/docs/check-plans-refs.py --selftest
           python3 scripts/docs/check-plans-refs.py
 
+  line-cites:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Guard tracked-file line citations (selftest first)
+        run: |
+          python3 scripts/docs/check-line-cites.py --selftest
+          python3 scripts/docs/check-line-cites.py
+
   doctor-table:
     runs-on: ubuntu-latest
     steps:

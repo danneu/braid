@@ -729,10 +729,12 @@ mod tests {
     //   lossy load_acked_stats) on monitor's mutation path. Without it,
     //   cmd_monitor would treat a corrupt acked-stats.json as an empty
     //   baseline and silently return MonitorResult::Ok against an
-    //   otherwise-healthy pool -- a fail-open hole in the indeterminate-
-    //   state contract pinned by ADR 014:74. The byte-identity assertion
-    //   also pins that monitor must not silently rewrite corrupt files
-    //   (mirrors ack's sentinel-only retry no-rewrite guard).
+    //   otherwise-healthy pool -- a fail-open hole in the fail-closed detector
+    //   contract pinned by
+    //   `docs/design/decisions/014-alerts.md#braid-monitor-is-a-pure-detector`.
+    //   The byte-identity assertion also pins that monitor must not silently
+    //   rewrite corrupt files (mirrors ack's sentinel-only retry no-rewrite
+    //   guard).
     // Scenario: acked-stats.json was hand-edited to invalid JSON; the
     //   pool is mounted and healthy, btrfs device stats reports zero
     //   counters on both members. cmd_monitor must surface the

@@ -1744,8 +1744,7 @@ mod tests {
     /// DiscoverError::DuplicateUuid; both by-id paths and names are
     /// named in the error, and the lexicographic-by-path ordering is
     /// deterministic.
-    /// Why: this is the cloned-disk friendly-error pin from plan
-    /// lines 4123-4129.
+    /// Why: pins the cloned-disk (duplicate-UUID) friendly-error behavior.
     /// Scenario: dd-cloned disk plugged in alongside the original
     /// with a relabel (seed 802).
     #[test]

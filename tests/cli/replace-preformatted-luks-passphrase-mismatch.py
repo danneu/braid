@@ -15,9 +15,11 @@
 #     pending-op.json on disk and forced `braid recover` for what was
 #     conceptually "command never started." That contradicts decision 019's
 #     explicit guidance that a preflight failure aborts cleanly without
-#     stranding pending-op.json. See cli/src/replace.rs -- the reversible
-#     check near line 214 (`PresentLuks { mapper_open: false }`) pairs with
-#     the existing `PresentNotLuks` check one block above.
+#     stranding pending-op.json. See
+#     `cli/src/replace.rs#verify_existing_luks_new_target_preflight`: its
+#     closed-LUKS branch (`ReplaceTargetPrep::ExistingLuks {
+#     mapper_open: false }`) pairs with the fresh-format
+#     (`PresentNotLuks`) branch.
 #   - Complementary to existing coverage:
 #       * replace-passphrase-mismatch.py -- wrong passphrase, fresh (non-LUKS)
 #         new disk (PresentNotLuks path).

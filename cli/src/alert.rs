@@ -132,7 +132,8 @@ pub struct AckedDeviceCounters {
 /// `AckedStats::default()`. Use only for test reload assertions or
 /// strictly read-only inspection. Production mutation paths must use
 /// `load_acked_stats_fallible` so corruption surfaces as
-/// `ComputationError` per ADR 014 (`docs/design/decisions/014-alerts.md:74`).
+/// `ComputationError` per the fail-closed detector contract
+/// (`docs/design/decisions/014-alerts.md#braid-monitor-is-a-pure-detector`).
 pub fn load_acked_stats(paths: &StatePaths) -> AckedStats {
     load_acked_stats_at(&paths.acked_stats_json())
 }

@@ -16,7 +16,7 @@
 # wording drift would silently misclassify in production unless this live-tool
 # behavior-lock fails loudly first. This is the same pattern as
 # `tests/repro/cryptsetup-close-mounted.py` documented in
-# `docs/dev/testing.md:64-72`.
+# `docs/dev/testing.md#live-tool-behavior-locks`.
 #
 # Scenario: 2-of-3 LUKS+btrfs RAID1 (disk1+disk2 pool, disk3 standby) on
 # 4096 MiB disks, with a 3000 MiB urandom payload. Scrub runs unthrottled

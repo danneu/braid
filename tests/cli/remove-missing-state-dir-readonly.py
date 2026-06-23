@@ -21,9 +21,9 @@
 #   (commit a9b7467), save_membership was the FIRST write in
 #   remove-missing and only logged a warning on failure -- the read-only
 #   bind mount caught exactly that. Today journal::write_journal
-#   (cli/src/remove_missing.rs ~line 243) precedes the btrfs mutation,
-#   and save_membership (~line 276) sits after it and propagates errors
-#   via `?`. A post-btrfs save_membership failure is a different
+#   precedes the btrfs mutation (`pool_remove_device_using`), and
+#   save_membership follows it and propagates errors via `?`. A
+#   post-btrfs save_membership failure is a different
 #   failure class: btrfs has committed, the journal survives, and
 #   `braid recover` is responsible for reconciliation per ADR-017
 #   ("Mutation ordering" / recovery model). save_membership's position

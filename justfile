@@ -333,6 +333,11 @@ check-plans-refs:
     python3 scripts/docs/check-plans-refs.py --selftest
     python3 scripts/docs/check-plans-refs.py
 
+# Verify durable docs/code/tests do not cite tracked files by line number (selftest first)
+check-line-cites:
+    python3 scripts/docs/check-line-cites.py --selftest
+    python3 scripts/docs/check-line-cites.py
+
 # Verify decision-doc See-section code-span paths resolve
 check-docs-see-paths:
     python3 scripts/docs/check-see-paths.py

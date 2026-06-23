@@ -153,7 +153,7 @@ deciding question below applied to lock work specifically:
   Rust dispatch post-lock `mark_offline`
   (`cli/src/online_state.rs`) for user-initiated `braid lock`, gated
   on `systemd_lifecycle` (see
-  `docs/design/decisions/018-systemd-lifecycle.md:131` and
+  [ADR 018's Rust dispatch synchronization](018-systemd-lifecycle.md#rust-dispatch-as-synchronization-layer) and
   `modules/braid/storage.nix`'s `braid-online` definition). Those
   paths do not enjoy the shutdown-driven guarantee above; their
   justification is the recoverability + short-duration argument, not
