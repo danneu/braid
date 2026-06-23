@@ -4,7 +4,7 @@ use crate::credential_verify::{
     Credential, CredentialVerifyError, CredentialVerifyTarget, verify_credential_for_targets,
 };
 use crate::luks::{self, BackingPathResolver, LuksError, OpenOutcome};
-use crate::mapper_close::{CloseMapperError, TrackedMapper, close_mapper_with_retry};
+use crate::mapper_close::{CloseContext, CloseMapperError, TrackedMapper, emit_close_progress};
 use crate::membership::PoolMembership;
 use crate::preview::{self, NoteLevel, PerDiskStyle, PreviewNote};
 use crate::probe::{self, Filesystem, ProbeError};
@@ -734,21 +734,17 @@ where
 
     let mut first_error = None;
     for tracked in opened {
-        let name = &tracked.name;
-        emit_status(&status_line(
-            StatusTag::Wait,
+        match emit_close_progress(
+            runner,
+            sleeper,
+            &tracked.mapper,
+            &tracked.name,
+            CloseContext::Normal,
             color_enabled,
-            &format!("disk {name}: locking..."),
-        ));
-        match close_mapper_with_retry(runner, sleeper, &tracked.mapper, color_enabled) {
-            Ok(()) => {
-                emit_status(&status_line(
-                    StatusTag::Ok,
-                    color_enabled,
-                    &format!("disk {name}: locked"),
-                ));
-            }
+        ) {
+            Ok(()) => {}
             Err(e) => {
+                let name = &tracked.name;
                 emit_status(&status_line(
                     StatusTag::Fail,
                     color_enabled,

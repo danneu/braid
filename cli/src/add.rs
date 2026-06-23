@@ -14,7 +14,7 @@ use crate::luks::{
     format_target_keyfile_probe_failure, luks_format, luks_header_backup_path,
     probe_pool_keyfile_enrollment, read_passphrase_with,
 };
-use crate::mapper_close::{TrackedMapper, close_mapper_with_retry};
+use crate::mapper_close::{CloseContext, TrackedMapper, close_mapper_best_effort};
 use crate::membership::{self, DiskMember, LuksUuidMap, PoolMembership};
 use crate::parse::btrfs_filesystem_show::{DeviceBtrfsProbe, classify_btrfs_probe};
 use crate::parse::{parse_btrfs_filesystem_show, parse_cryptsetup_luks_uuid};
@@ -447,28 +447,17 @@ impl<R: CommandRunner> Drop for LuksCleanupGuard<'_, R> {
         let color_enabled = color_enabled_for_stderr();
         let sleeper = RealSleeper;
         for tracked in self.mappers.iter().rev() {
-            let name = &tracked.name;
-            emit_status(&status_line(
-                StatusTag::Wait,
+            // Best-effort in Drop: the returned bool gates a post-success
+            // trailer for pool-maintenance callers, but rollback cleanup has
+            // none, so it is intentionally ignored here.
+            let _ = close_mapper_best_effort(
+                self.runner,
+                &sleeper,
+                &tracked.mapper,
+                &tracked.name,
+                CloseContext::Cleanup,
                 color_enabled,
-                &format!("disk {name}: locking (cleanup)..."),
-            ));
-            match close_mapper_with_retry(self.runner, &sleeper, &tracked.mapper, color_enabled) {
-                Ok(()) => {
-                    emit_status(&status_line(
-                        StatusTag::Ok,
-                        color_enabled,
-                        &format!("disk {name}: locked (cleanup)"),
-                    ));
-                }
-                Err(e) => {
-                    emit_status(&status_line(
-                        StatusTag::Warn,
-                        color_enabled,
-                        &format!("disk {name}: lock failed (cleanup, {e})"),
-                    ));
-                }
-            }
+            );
         }
     }
 }

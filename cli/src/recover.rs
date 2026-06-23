@@ -8,7 +8,7 @@ use crate::credential_verify::{Credential, CredentialVerifyTarget, verify_creden
 use crate::inhibit::AcquireSleepInhibitor;
 use crate::journal::{self, Journal};
 use crate::luks::{self, BackingPathResolver, VerifyOutcome};
-use crate::mapper_close::close_mapper_best_effort;
+use crate::mapper_close::{CloseContext, close_mapper_best_effort, emit_close_progress};
 use crate::membership::{self, DiskMember, LuksUuidMap, PoolMembership};
 use crate::mount::{self, MountError, OpenPlan};
 use crate::mount_check;
@@ -3119,7 +3119,14 @@ fn close_old_mapper_best_effort<R, S>(
     // does not block later resize and journal-clear steps.
     match probe_observed_mapper_uuid(runner, mapper, old_uuid) {
         MapperOwnership::Owned => {
-            if close_mapper_best_effort(runner, sleeper, mapper, disk_label, color_enabled) {
+            if close_mapper_best_effort(
+                runner,
+                sleeper,
+                mapper,
+                disk_label,
+                CloseContext::Normal,
+                color_enabled,
+            ) {
                 eprintln!(
                     "Old device closed. If repurposing the physical disk, wipe it separately."
                 );
@@ -3460,38 +3467,20 @@ fn relock_and_remount<R: CommandRunner, F: Filesystem + ?Sized>(
         if !fs.exists(&mapper_path) {
             continue;
         }
-        eprint!(
-            "{}",
-            status_line(
-                StatusTag::Wait,
-                color_enabled,
-                &format!("disk {name}: locking..."),
-            )
-        );
-        let close = runner
-            .run(&CmdRequest::CryptsetupClose { mapper: mn.clone() })
-            .map_err(|e| {
-                RecoverError::Failed(format!(
-                    "recover remount cycle: cryptsetup close {}: {e}",
-                    mn
-                ))
-            })?;
-        if close.exit_status != 0 {
-            return Err(RecoverError::Failed(format!(
-                "recover remount cycle: cryptsetup close {} failed (exit {}): {}",
-                mn,
-                close.exit_status,
-                close.stderr.trim()
-            )));
-        }
-        eprint!(
-            "{}",
-            status_line(
-                StatusTag::Ok,
-                color_enabled,
-                &format!("disk {name}: locked"),
-            )
-        );
+        // Route through the shared core so this close gets the same busy-retry
+        // as every other close path; failure still hard-aborts the cycle (no
+        // closing row) by mapping the error into RecoverError.
+        emit_close_progress(
+            runner,
+            sleeper,
+            &mn,
+            name,
+            CloseContext::Normal,
+            color_enabled,
+        )
+        .map_err(|e| {
+            RecoverError::Failed(format!("recover remount cycle: cryptsetup close {mn}: {e}"))
+        })?;
     }
 
     // 4. Re-open LUKS and mount via the standard helper. With the dm
@@ -14295,6 +14284,160 @@ mod tests {
             "error should preserve re-mount context: {err}"
         );
         assert_close_retry_sleeps(sleeper.calls());
+    }
+
+    // Intent: relock_and_remount's step-3 mapper close retries a transient
+    //   EBUSY and lets the cycle complete, rather than hard-aborting the
+    //   recovery on the first busy close.
+    // Why it exists: step 3 used to call CryptsetupClose directly, so unlike
+    //   every other close path it failed the whole recovery on the first
+    //   transient busy. Folding it through the shared busy-retry core gave it
+    //   the same resilience; this pins that the retry actually happens here.
+    // Scenario: a short-lived holder keeps braid-disk1 busy for the first
+    //   step-3 close attempt, then releases it; the second attempt succeeds and
+    //   the cycle re-opens and re-mounts as normal.
+    #[test]
+    fn recover_remount_cycle_retries_busy_step3_close() {
+        let config = Config::new(MountPoint::new("/mnt/storage".into())).unwrap();
+        let fs = MockFs::new(&[
+            "/dev/disk/by-id/virtio-disk1",
+            "/dev/disk/by-id/virtio-disk2",
+            "/dev/mapper/braid-disk1",
+            "/dev/mapper/braid-disk2",
+        ]);
+        let membership = membership_from(vec![
+            membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, None),
+            membership_entry("disk2", "/dev/disk/by-id/virtio-disk2", None, None),
+        ]);
+        let (mp_req, mp_out) = mountpoint_fail();
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::Umount {
+                    mount_point: MountPoint::new("/mnt/storage".into()),
+                },
+                ok_raw_empty("umount"),
+            )
+            .with_output(
+                CmdRequest::BtrfsDeviceScanForget {
+                    devices: vec![
+                        "/dev/mapper/braid-disk1".into(),
+                        "/dev/mapper/braid-disk2".into(),
+                    ],
+                },
+                ok_raw_empty("btrfs device scan --forget"),
+            )
+            // Step-3 close of braid-disk1 is busy on the first attempt, then
+            // releases. Pre-fold this exit-5 hard-aborted the cycle.
+            .with_output_sequence(
+                CmdRequest::CryptsetupClose {
+                    mapper: MapperName::from_basename("braid-disk1".into()),
+                },
+                vec![
+                    err_raw("cryptsetup close", 5, "busy"),
+                    ok_raw_empty("cryptsetup close"),
+                ],
+            )
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: MapperName::from_basename("braid-disk2".into()),
+                },
+                ok_raw_empty("cryptsetup close"),
+            )
+            .with_output(mp_req, mp_out)
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/virtio-disk1",
+                    "11111111-1111-1111-1111-111111111111",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/virtio-disk2",
+                    "22222222-2222-2222-2222-222222222222",
+                ),
+            )
+            .with_luks_dump_text_luks2_for(&[
+                "/dev/disk/by-id/virtio-disk1",
+                "/dev/disk/by-id/virtio-disk2",
+            ])
+            .with_mappers_closed(&["braid-disk1", "braid-disk2"])
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw_empty("cryptsetup open --test-passphrase"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                },
+                b"testpass".to_vec(),
+                ok_raw_empty("cryptsetup open --test-passphrase"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupLuksOpen {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                    mapper: MapperName::from_basename("braid-disk1".into()),
+                },
+                b"testpass".to_vec(),
+                ok_raw_empty("cryptsetup open"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupLuksOpen {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                    mapper: MapperName::from_basename("braid-disk2".into()),
+                },
+                b"testpass".to_vec(),
+                ok_raw_empty("cryptsetup open"),
+            )
+            .with_output(
+                CmdRequest::BtrfsDeviceScanAll,
+                ok_raw_empty("btrfs device scan"),
+            )
+            .with_output(
+                CmdRequest::Mount {
+                    device: "/dev/mapper/braid-disk1".into(),
+                    mount_point: MountPoint::new("/mnt/storage".into()),
+                },
+                ok_raw_empty("mount"),
+            );
+        let close_names = vec![disk_name("disk1"), disk_name("disk2")];
+
+        relock_and_remount(
+            &runner,
+            &fs,
+            RelockAndRemountCtx {
+                sleeper: &progress::NoopSleeper,
+                config: &config,
+                membership: &membership,
+                backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(),
+                allow_degraded: false,
+                credential: &OpenCredential::Passphrase(Passphrase::from_zeroizing(
+                    zeroize::Zeroizing::new("testpass".to_owned()),
+                )),
+                close_names: &close_names,
+            },
+        )
+        .expect("remount cycle should complete after retrying the busy step-3 close");
+
+        let disk1_closes = runner
+            .requests()
+            .iter()
+            .filter(|r| {
+                matches!(r, CmdRequest::CryptsetupClose { mapper } if mapper.as_str() == "braid-disk1")
+            })
+            .count();
+        assert_eq!(
+            disk1_closes, 2,
+            "step-3 close of braid-disk1 must retry the transient busy before succeeding"
+        );
     }
 
     /// Intent: When a disk is absent and --allow-degraded is not passed, recover

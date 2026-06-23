@@ -27,6 +27,39 @@ pub(crate) enum CloseMapperError {
     DeviceBusy(String),
 }
 
+/// Distinguishes a steady-state close from `add`'s pre-commit rollback close so
+/// `emit_close_progress` is the single source of both the wait/ok row suffix and
+/// the warn-row failure wording. Encoding the variants here -- rather than
+/// letting each caller pass a free-form suffix -- keeps the two phrasings from
+/// drifting apart across the close-row sites that share this core.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CloseContext {
+    /// Mount unlock cleanup, post-commit maintenance, recover remount cycle: no
+    /// row suffix.
+    Normal,
+    /// `add`'s rollback guard: rows carry a ` (cleanup)` suffix.
+    Cleanup,
+}
+
+impl CloseContext {
+    /// Suffix appended to the `locking`/`locked` wait/ok rows.
+    fn row_suffix(self) -> &'static str {
+        match self {
+            CloseContext::Normal => "",
+            CloseContext::Cleanup => " (cleanup)",
+        }
+    }
+
+    /// Body of the `[warn]` failure row for warn-and-continue callers, embedding
+    /// the underlying close error `e`.
+    fn failure_detail(self, e: &CloseMapperError) -> String {
+        match self {
+            CloseContext::Normal => format!("lock failed ({e})"),
+            CloseContext::Cleanup => format!("lock failed (cleanup, {e})"),
+        }
+    }
+}
+
 /// Close a LUKS mapper, retrying up to 3 times if the error indicates the
 /// device is busy. Non-busy errors fail immediately.
 pub(crate) fn close_mapper_with_retry<R: CommandRunner, S: Sleeper + ?Sized>(
@@ -75,40 +108,64 @@ pub(crate) fn close_mapper_with_retry<R: CommandRunner, S: Sleeper + ?Sized>(
     unreachable!()
 }
 
+/// Emit the `disk <label>: locking<suffix>...` wait row, close the mapper with
+/// busy-retry, and on success emit `disk <label>: locked<suffix>` (suffix from
+/// `context`). On failure returns the error WITHOUT a closing row: each caller
+/// owns its own failure severity (warn-and-continue, fatal `[fail]`, or
+/// hard-abort), so the only part shared across the close-row sites is the
+/// wait + retry-close + ok. `disk_label` is the journaled operator name, never
+/// derived from a mapper basename, so mapper drift cannot leak into the row.
+pub(crate) fn emit_close_progress<R, S>(
+    runner: &R,
+    sleeper: &S,
+    mapper: &MapperName,
+    disk_label: &DiskName,
+    context: CloseContext,
+    color_enabled: bool,
+) -> Result<(), CloseMapperError>
+where
+    R: CommandRunner,
+    S: Sleeper + ?Sized,
+{
+    let suffix = context.row_suffix();
+    emit_status(&status_line(
+        StatusTag::Wait,
+        color_enabled,
+        &format!("disk {disk_label}: locking{suffix}..."),
+    ));
+    close_mapper_with_retry(runner, sleeper, mapper, color_enabled)?;
+    emit_status(&status_line(
+        StatusTag::Ok,
+        color_enabled,
+        &format!("disk {disk_label}: locked{suffix}"),
+    ));
+    Ok(())
+}
+
 /// Best-effort mapper close used by pool maintenance paths that must warn
 /// instead of failing after btrfs has already committed the topology change.
-/// `disk_label` is the journaled operator name, never derived from a mapper
-/// basename, so mapper drift cannot leak into user-facing disk status rows.
+/// Wraps `emit_close_progress` and, on failure, emits the `[warn]` row whose
+/// wording is derived from the same `context`, returning whether the close
+/// succeeded.
 pub(crate) fn close_mapper_best_effort<R, S>(
     runner: &R,
     sleeper: &S,
     mapper: &MapperName,
     disk_label: &DiskName,
+    context: CloseContext,
     color_enabled: bool,
 ) -> bool
 where
     R: CommandRunner,
     S: Sleeper + ?Sized,
 {
-    emit_status(&status_line(
-        StatusTag::Wait,
-        color_enabled,
-        &format!("disk {disk_label}: locking..."),
-    ));
-    match close_mapper_with_retry(runner, sleeper, mapper, color_enabled) {
-        Ok(()) => {
-            emit_status(&status_line(
-                StatusTag::Ok,
-                color_enabled,
-                &format!("disk {disk_label}: locked"),
-            ));
-            true
-        }
+    match emit_close_progress(runner, sleeper, mapper, disk_label, context, color_enabled) {
+        Ok(()) => true,
         Err(e) => {
             emit_status(&status_line(
                 StatusTag::Warn,
                 color_enabled,
-                &format!("disk {disk_label}: lock failed ({e})"),
+                &format!("disk {disk_label}: {}", context.failure_detail(&e)),
             ));
             false
         }
@@ -153,6 +210,7 @@ mod tests {
                 &NoopSleeper,
                 &MapperName::from_basename("braid-disk2".into()),
                 &disk_label,
+                CloseContext::Normal,
                 false,
             );
         });

@@ -119,6 +119,11 @@ one.
   next to each mapper opened by the command, labels its
   `disk <name>: locking...`/`locked` cleanup rows from that value, and closes
   the observed mapper rather than reconstructing `mapper_name(&name)`.
+  `recover`'s remount cycle (`cli/src/recover.rs#relock_and_remount`, step 3)
+  closes its planned `&[DiskName]` set through the same shared
+  `cli/src/mapper_close.rs#emit_close_progress` core, so its
+  `disk <name>: locking...`/`locked` rows stay typed and it inherits the
+  busy-retry close every other close path already had.
   `CredentialVerifyTarget`'s two constructors -- a UUID-joined
   `existing_pool_member` and an attested `named_candidate` -- are this same
   split in type form. Either route lets member names survive mapper drift: a
@@ -300,6 +305,10 @@ warns rather than claiming every declared member is assembled.
   (`cryptsetup close <mapper> busy, retrying...`) because it is a command echo,
   not a disk-status row -- is pinned by
   `cli/src/add.rs#guard_retries_busy_close_before_success`.
+  `cli/src/recover.rs#recover_remount_cycle_retries_busy_step3_close` pins that
+  `recover`'s remount-cycle step-3 close inherits the same busy-retry: a
+  transient EBUSY is retried and the cycle completes, rather than hard-aborting
+  the recovery on the first busy close.
 - `cli/src/tui/probe.rs` unit tests pin the TUI Data-tab Bus column's transport
   join to the parent disk's LUKS UUID, so a member open under a drifted mapper
   (`braid-WRONG`) still renders its bus instead of degrading to `--`.

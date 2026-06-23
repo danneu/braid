@@ -14,7 +14,7 @@ use crate::luks::{
     format_target_keyfile_probe_failure, luks_format, luks_header_backup_path,
     probe_pool_keyfile_enrollment, read_passphrase,
 };
-use crate::mapper_close::close_mapper_best_effort;
+use crate::mapper_close::{CloseContext, close_mapper_best_effort};
 use crate::membership::{self, PoolMembership};
 use crate::parse::{parse_btrfs_device_stats, parse_cryptsetup_luks_uuid};
 use crate::pool::{pool_replace_device, pool_resize_device};
@@ -900,6 +900,7 @@ impl ReplacePlan {
                         params.sleeper,
                         mapper,
                         &old_name,
+                        CloseContext::Normal,
                         color_enabled,
                     ) {
                         eprintln!(

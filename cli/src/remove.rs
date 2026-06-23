@@ -4,7 +4,7 @@ use crate::config::Config;
 use crate::confirm;
 use crate::inhibit::AcquireSleepInhibitor;
 use crate::journal;
-use crate::mapper_close::close_mapper_best_effort;
+use crate::mapper_close::{CloseContext, close_mapper_best_effort};
 use crate::membership;
 use crate::parse::{ParseError, parse_btrfs_device_usage, parse_btrfs_df_json};
 use crate::pool::{
@@ -460,6 +460,7 @@ impl RemovePlan {
                     params.sleeper,
                     &work_plan.target_mapper,
                     &work_plan.name,
+                    CloseContext::Normal,
                     color_enabled,
                 );
             }
