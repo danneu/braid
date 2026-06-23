@@ -26,9 +26,9 @@ def member(pool, name):
 def member_entry(pool, name):
     # Decision 024: the dict key is the member's persistent LUKS UUID identity,
     # distinct from the value-side display name.
-    for uuid, entry in pool["disks"].items():
+    for luks_uuid, entry in pool["disks"].items():
         if entry["name"] == name:
-            return uuid, entry
+            return luks_uuid, entry
     raise AssertionError(f"{name} missing from pool.json: {pool}")
 
 

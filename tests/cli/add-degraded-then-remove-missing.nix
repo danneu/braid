@@ -49,5 +49,8 @@
       };
     };
 
-  testScript = builtins.readFile ./add-degraded-then-remove-missing.py;
+  testScript =
+    builtins.readFile ./member_helpers.py
+    + "\n\n"
+    + builtins.readFile ./add-degraded-then-remove-missing.py;
 }

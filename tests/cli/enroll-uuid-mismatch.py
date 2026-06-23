@@ -16,13 +16,6 @@ import json
 import shlex
 
 
-def member_uuid(pool, name):
-    for uuid, entry in pool["disks"].items():
-        if entry["name"] == name:
-            return uuid
-    raise AssertionError(f"{name} missing from pool.json: {pool}")
-
-
 start_all()
 machine.wait_for_unit("multi-user.target")
 

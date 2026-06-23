@@ -45,7 +45,9 @@
     };
 
   testScript =
-    builtins.readFile ./../module/dm_delay_helpers.py
+    builtins.readFile ./member_helpers.py
+    + "\n\n"
+    + builtins.readFile ./../module/dm_delay_helpers.py
     + "\n\n"
     + builtins.readFile ./../module/balance_helpers.py
     + "\n\n"

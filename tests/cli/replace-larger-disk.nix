@@ -40,5 +40,8 @@
       };
     };
 
-  testScript = builtins.readFile ./replace-larger-disk.py;
+  testScript =
+    builtins.readFile ./member_helpers.py
+    + "\n\n"
+    + builtins.readFile ./replace-larger-disk.py;
 }

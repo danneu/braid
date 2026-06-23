@@ -40,5 +40,8 @@
       };
     };
 
-  testScript = builtins.readFile ./braid-recover-remove.py;
+  testScript =
+    builtins.readFile ./member_helpers.py
+    + "\n\n"
+    + builtins.readFile ./braid-recover-remove.py;
 }

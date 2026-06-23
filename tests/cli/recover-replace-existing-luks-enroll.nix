@@ -48,5 +48,8 @@
       };
     };
 
-  testScript = builtins.readFile ./recover-replace-existing-luks-enroll.py;
+  testScript =
+    builtins.readFile ./member_helpers.py
+    + "\n\n"
+    + builtins.readFile ./recover-replace-existing-luks-enroll.py;
 }

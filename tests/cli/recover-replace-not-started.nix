@@ -43,5 +43,8 @@
       };
     };
 
-  testScript = builtins.readFile ./recover-replace-not-started.py;
+  testScript =
+    builtins.readFile ./member_helpers.py
+    + "\n\n"
+    + builtins.readFile ./recover-replace-not-started.py;
 }

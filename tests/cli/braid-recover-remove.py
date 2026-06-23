@@ -38,13 +38,6 @@ def add_cmd(key):
     )
 
 
-def member_entry(pool, name):
-    for uuid, member in pool["disks"].items():
-        if member["name"] == name:
-            return uuid, member
-    raise AssertionError(f"{name} missing from pool.json: {pool}")
-
-
 def members_except(pool, *names):
     skip = set(names)
     return {

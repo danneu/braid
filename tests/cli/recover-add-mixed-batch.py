@@ -49,13 +49,6 @@ def write_json(path, value, marker):
     )
 
 
-def member_entry(pool, name):
-    for luks_uuid, member in pool["disks"].items():
-        if member["name"] == name:
-            return luks_uuid, member
-    raise AssertionError(f"{name} missing from pool.json: {pool}")
-
-
 def get_devid(mapper_name):
     fi_show = machine.succeed("btrfs filesystem show /mnt/storage")
     for line in fi_show.splitlines():

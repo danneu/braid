@@ -39,5 +39,8 @@
       };
     };
 
-  testScript = builtins.readFile ./recover-remove-missing-completed.py;
+  testScript =
+    builtins.readFile ./member_helpers.py
+    + "\n\n"
+    + builtins.readFile ./recover-remove-missing-completed.py;
 }

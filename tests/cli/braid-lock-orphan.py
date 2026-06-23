@@ -17,10 +17,6 @@
 import json
 import shlex
 
-
-def member_names(pool):
-    return {member["name"] for member in pool["disks"].values()}
-
 start_all()
 machine.wait_for_unit("multi-user.target")
 

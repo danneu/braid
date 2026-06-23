@@ -43,5 +43,8 @@
       };
     };
 
-  testScript = builtins.readFile ./replace-cloned-luks-header-rejected.py;
+  testScript =
+    builtins.readFile ./member_helpers.py
+    + "\n\n"
+    + builtins.readFile ./replace-cloned-luks-header-rejected.py;
 }

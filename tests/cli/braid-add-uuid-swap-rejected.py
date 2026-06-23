@@ -37,10 +37,6 @@ def missing_devid():
     return str(devids[0])
 
 
-def member_names(pool):
-    return {member["name"] for member in pool["disks"].values()}
-
-
 with subtest("Build 3-disk RAID1 pool"):
     machine.succeed(add_cmd("disk1"))
     machine.succeed(add_cmd("disk2"))

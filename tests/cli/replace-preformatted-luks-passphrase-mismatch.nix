@@ -45,5 +45,8 @@
       };
     };
 
-  testScript = builtins.readFile ./replace-preformatted-luks-passphrase-mismatch.py;
+  testScript =
+    builtins.readFile ./member_helpers.py
+    + "\n\n"
+    + builtins.readFile ./replace-preformatted-luks-passphrase-mismatch.py;
 }

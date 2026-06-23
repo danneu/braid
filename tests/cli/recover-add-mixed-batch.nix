@@ -39,5 +39,8 @@
       };
     };
 
-  testScript = builtins.readFile ./recover-add-mixed-batch.py;
+  testScript =
+    builtins.readFile ./member_helpers.py
+    + "\n\n"
+    + builtins.readFile ./recover-add-mixed-batch.py;
 }

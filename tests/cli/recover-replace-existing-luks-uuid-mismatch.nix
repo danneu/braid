@@ -49,5 +49,8 @@
       };
     };
 
-  testScript = builtins.readFile ./recover-replace-existing-luks-uuid-mismatch.py;
+  testScript =
+    builtins.readFile ./member_helpers.py
+    + "\n\n"
+    + builtins.readFile ./recover-replace-existing-luks-uuid-mismatch.py;
 }

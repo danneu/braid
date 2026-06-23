@@ -41,5 +41,8 @@
       };
     };
 
-  testScript = builtins.readFile ./braid-add-persists-before-balance.py;
+  testScript =
+    builtins.readFile ./member_helpers.py
+    + "\n\n"
+    + builtins.readFile ./braid-add-persists-before-balance.py;
 }

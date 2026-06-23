@@ -42,5 +42,8 @@
       };
     };
 
-  testScript = builtins.readFile ./braid-add-cloned-luks-header-race-rejected.py;
+  testScript =
+    builtins.readFile ./member_helpers.py
+    + "\n\n"
+    + builtins.readFile ./braid-add-cloned-luks-header-race-rejected.py;
 }

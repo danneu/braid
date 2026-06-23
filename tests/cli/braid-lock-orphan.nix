@@ -35,5 +35,8 @@
       };
     };
 
-  testScript = builtins.readFile ./braid-lock-orphan.py;
+  testScript =
+    builtins.readFile ./member_helpers.py
+    + "\n\n"
+    + builtins.readFile ./braid-lock-orphan.py;
 }

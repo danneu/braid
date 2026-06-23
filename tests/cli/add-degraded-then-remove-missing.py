@@ -30,10 +30,6 @@ passphrase = "testpassphrase"
 luks_opts = "--pbkdf pbkdf2 --pbkdf-force-iterations 1000"
 
 
-def member_names(pool):
-    return {member["name"] for member in pool["disks"].values()}
-
-
 def read_pool():
     return json.loads(machine.succeed("cat /var/lib/braid/pool.json"))
 

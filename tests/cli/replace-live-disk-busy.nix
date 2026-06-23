@@ -48,5 +48,8 @@
       };
     };
 
-  testScript = builtins.readFile ./replace-live-disk-busy.py;
+  testScript =
+    builtins.readFile ./member_helpers.py
+    + "\n\n"
+    + builtins.readFile ./replace-live-disk-busy.py;
 }

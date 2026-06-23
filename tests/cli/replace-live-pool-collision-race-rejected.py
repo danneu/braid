@@ -48,10 +48,6 @@ def read_pool():
     return json.loads(raw)
 
 
-def member_names(pool):
-    return {member["name"] for member in pool["disks"].values()}
-
-
 with subtest("Build healthy pool and prepare ExistingLuks replacement target"):
     machine.succeed(add_cmd("disk1"))
     machine.succeed(add_cmd("disk2"))

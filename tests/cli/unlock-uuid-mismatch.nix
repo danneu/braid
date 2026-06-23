@@ -35,5 +35,8 @@
       };
     };
 
-  testScript = builtins.readFile ./unlock-uuid-mismatch.py;
+  testScript =
+    builtins.readFile ./member_helpers.py
+    + "\n\n"
+    + builtins.readFile ./unlock-uuid-mismatch.py;
 }

@@ -40,5 +40,8 @@
       };
     };
 
-  testScript = builtins.readFile ./braid-remove-disk.py;
+  testScript =
+    builtins.readFile ./member_helpers.py
+    + "\n\n"
+    + builtins.readFile ./braid-remove-disk.py;
 }

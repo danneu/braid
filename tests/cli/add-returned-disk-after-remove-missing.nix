@@ -41,5 +41,8 @@
       };
     };
 
-  testScript = builtins.readFile ./add-returned-disk-after-remove-missing.py;
+  testScript =
+    builtins.readFile ./member_helpers.py
+    + "\n\n"
+    + builtins.readFile ./add-returned-disk-after-remove-missing.py;
 }

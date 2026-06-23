@@ -40,5 +40,8 @@
       };
     };
 
-  testScript = builtins.readFile ./replace-2disk-pool.py;
+  testScript =
+    builtins.readFile ./member_helpers.py
+    + "\n\n"
+    + builtins.readFile ./replace-2disk-pool.py;
 }

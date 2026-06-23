@@ -37,5 +37,8 @@
       };
     };
 
-  testScript = builtins.readFile ./config-name-immutability.py;
+  testScript =
+    builtins.readFile ./member_helpers.py
+    + "\n\n"
+    + builtins.readFile ./config-name-immutability.py;
 }

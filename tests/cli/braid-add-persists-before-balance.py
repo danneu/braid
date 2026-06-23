@@ -15,17 +15,6 @@
 
 import json
 import uuid
-
-
-def member_names(pool):
-    return {member["name"] for member in pool["disks"].values()}
-
-
-def member(pool, name):
-    for entry in pool["disks"].values():
-        if entry["name"] == name:
-            return entry
-    raise AssertionError(f"{name} missing from pool.json: {pool}")
 import re
 import shlex
 import time
