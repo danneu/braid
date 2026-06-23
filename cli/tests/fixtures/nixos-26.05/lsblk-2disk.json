@@ -6,7 +6,7 @@
          "size": 1073741824,
          "model": null,
          "serial": "disk1",
-         "uuid": "d39bb46f-982a-4b3b-ae5b-ab0e87bce4d4",
+         "uuid": "0b6dc78b-dc0d-4cb4-9f5e-1d89b86e9c73",
          "rota": true,
          "tran": "virtio",
          "children": [
@@ -16,7 +16,7 @@
                "size": 1056964608,
                "model": null,
                "serial": null,
-               "uuid": "5ae3776c-1f8a-4bc6-a647-a34829f033a3",
+               "uuid": "2beb2e2a-9b45-4fee-9f12-75b8afd29969",
                "rota": true,
                "tran": null
             }
@@ -27,7 +27,7 @@
          "size": 1073741824,
          "model": null,
          "serial": "disk2",
-         "uuid": "c97131f7-c616-43d6-b701-e5e47a9c254e",
+         "uuid": "76e16dfc-bf3f-4c9c-91c1-da190fc364e6",
          "rota": true,
          "tran": "virtio",
          "children": [
@@ -37,7 +37,7 @@
                "size": 1056964608,
                "model": null,
                "serial": null,
-               "uuid": "5ae3776c-1f8a-4bc6-a647-a34829f033a3",
+               "uuid": "2beb2e2a-9b45-4fee-9f12-75b8afd29969",
                "rota": true,
                "tran": null
             }

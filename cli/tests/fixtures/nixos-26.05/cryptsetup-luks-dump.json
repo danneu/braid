@@ -17,10 +17,10 @@
       },
       "kdf":{
         "type":"argon2id",
-        "time":8,
-        "memory":377654,
+        "time":7,
+        "memory":377678,
         "cpus":1,
-        "salt":"eavWxE7YVtH/RQXIJeMqnyOQk1/LR8xfkeY1AUwxSc0="
+        "salt":"BO+TBNXL4cFakhnswNQoQxpVPgMu8v1Hy2tNO6rqXI0="
       }
     }
   },
@@ -45,9 +45,9 @@
         "0"
       ],
       "hash":"sha256",
-      "iterations":653725,
-      "salt":"i6sOg1onV/erFAvvJT047FCUFPQYXZR/99EeReVMKfg=",
-      "digest":"bz/5kiBOnmw48Awt2Zvu4jCxLdytlXVk+8fhnkeURLE="
+      "iterations":641723,
+      "salt":"Wh04qhRJcsjY6ANN4gSEhfL0xHMgkS0Ff74yKAkUoPo=",
+      "digest":"9qxDcPdWjYD8ic/qTEOB1Y5xEMOA+BdIyHdVL8kVjvI="
     }
   },
   "config":{

@@ -4,6 +4,7 @@
 // Expects the including file to define:
 //   const FIXTURE_DIR: &str = "...";
 //   const REQUIRE_FIXTURES: bool = true | false;
+//   const EXPECTED_LUKS_LABEL: Option<&str> = Some("braid-vdb") | None;
 //
 // When REQUIRE_FIXTURES is true, missing fixtures panic (unstable lane).
 // When false, missing fixtures skip the test (stable lane).
@@ -252,15 +253,13 @@ golden_test!(
     "cryptsetup luksDump",
     parse::cryptsetup_luks_label::parse_cryptsetup_luks_label,
     |out: parse::types::CryptsetupLuksLabelOutput| {
-        // capture-tool-fixtures.py formats with `cryptsetup luksFormat`
-        // and does not pass --label, so the captured fixture has no
-        // label set. The parser must convert the cryptsetup-rendered
-        // "(no label)" placeholder into None.
-        assert!(
-            out.label.is_none(),
-            "captured fixture has no Label set (got: {:?})",
-            out.label
-        );
+        // capture-tool-fixtures.py formats stable vdb with
+        // `cryptsetup luksFormat --label braid-vdb`, mirroring the
+        // braid-<name> label `braid add` writes (LuksLabel::for_disk).
+        // The stable dump pins the populated-label parse discover joins with
+        // version + UUID over one luksDump body. The unstable dump keeps its
+        // explicit stale-fixture expectation until that lane can be recaptured.
+        assert_eq!(out.label.as_deref(), EXPECTED_LUKS_LABEL);
     }
 );
 

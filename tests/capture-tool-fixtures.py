@@ -12,9 +12,13 @@ machine.wait_for_unit("multi-user.target")
 machine.succeed(f"mkdir -p {FIXTURE_DIR}")
 
 # --- Set up LUKS on both disks ---
+# Label each disk braid-<name>, mirroring what `braid add` writes
+# (LuksLabel::for_disk -> braid-<name>). The captured luksDump of vdb then
+# pins the populated-label parse discover joins with version + UUID; see
+# golden_cryptsetup_luks_label.
 for disk in ["vdb", "vdc"]:
     machine.succeed(
-        f"echo -n '{PASSPHRASE}' | cryptsetup luksFormat --batch-mode /dev/{disk} -"
+        f"echo -n '{PASSPHRASE}' | cryptsetup luksFormat --batch-mode --label braid-{disk} /dev/{disk} -"
     )
     machine.succeed(
         f"echo -n '{PASSPHRASE}' | cryptsetup open /dev/{disk} braid-{disk} -"
