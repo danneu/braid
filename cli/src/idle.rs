@@ -542,6 +542,34 @@ mod tests {
         assert!(runner.requests().is_empty(), "{:?}", runner.requests());
     }
 
+    // Intent: a `/proc/self/mountinfo` body with two entries for the
+    //   configured target must propagate as Busy::Unknown, not silently
+    //   become PoolOffline or be resolved by picking one entry.
+    // Why it exists: ADR 016 and idle.md both name "ambiguous duplicate
+    //   target entries" as a suspend-blocking mountinfo error.
+    //   DuplicateTarget is the one mountinfo anomaly with a distinct code
+    //   path (two parse-clean matches, not zero/garbage), so the Io and
+    //   Malformed siblings above do not stand in for it. A refactor scoped
+    //   to is_btrfs_mounted or this match arm that mapped DuplicateTarget
+    //   to "not mounted" (e.g. "pick the first" / "an overmount means
+    //   offline") would compile, keep every parser test and both sibling
+    //   cmd_idle mountinfo tests green, and silently flip a documented
+    //   block-suspend case to allow-suspend.
+    // Scenario: an overmount or rebind landed a second mount at
+    //   /mnt/storage alongside the pool; autosuspend must refuse to guess
+    //   and block.
+    #[test]
+    fn mountinfo_duplicate_target_is_busy_unknown() {
+        let runner = MockRunner::default();
+        let fs = IdleMockFs::with_mountinfo(
+            "36 35 0:32 / /mnt/storage rw,noatime shared:1 - btrfs /dev/mapper/braid-disk1 rw\n\
+             37 35 0:33 / /mnt/storage rw,noatime shared:1 - btrfs /dev/mapper/braid-disk2 rw\n",
+        );
+        let result = cmd_idle(&runner, &fs, &idle_mp());
+        assert_idle_busy_unknown_prefix(result, "mountinfo:");
+        assert!(runner.requests().is_empty(), "{:?}", runner.requests());
+    }
+
     /* Intent: `/sys/fs/btrfs/` entries named `features` or `debug` are
      *   skipped by name -- the helper never even attempts to read their
      *   `exclusive_operation` (which the kernel does not create for
