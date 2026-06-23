@@ -105,6 +105,7 @@ fn hint_lines(area_width: u16) -> u16 {
     lines
 }
 
+/// Renders local scrub timestamps relative to the frame's naive-local `now`.
 fn timeago(dt: &PrimitiveDateTime, now: PrimitiveDateTime) -> Option<String> {
     let diff = now - *dt;
     if diff.is_negative() {
@@ -513,13 +514,7 @@ fn scrub_terminal_rows(
     rate_bytes_per_sec: Option<u64>,
     now: PrimitiveDateTime,
 ) -> Vec<Row<'static>> {
-    let display = match started_at {
-        Some(started_at) => match timeago(&started_at.0, now) {
-            Some(ago) => format!("{} ({})", format_timestamp(&started_at.0), ago),
-            None => format_timestamp(&started_at.0),
-        },
-        None => "unknown".to_owned(),
-    };
+    let display = scrub_last_run_display(started_at, now);
     let mut rows = vec![Row::new(["Last run".to_owned(), display])];
     if let Some(status) = status {
         rows.push(Row::new(["Status".to_owned(), status.to_owned()]));
@@ -546,6 +541,17 @@ fn scrub_terminal_rows(
         ]));
     }
     rows
+}
+
+/// Builds the Scrub "Last run" cell from an absolute timestamp and optional age.
+fn scrub_last_run_display(started_at: Option<&ScrubTimestamp>, now: PrimitiveDateTime) -> String {
+    match started_at {
+        Some(ts) => match timeago(&ts.0, now) {
+            Some(ago) => format!("{} ({})", format_timestamp(&ts.0), ago),
+            None => format_timestamp(&ts.0),
+        },
+        None => "unknown".to_owned(),
+    }
 }
 
 fn scrub_table(scrub: &ScrubState, now: PrimitiveDateTime) -> Table<'_> {
@@ -1584,6 +1590,81 @@ pub(crate) mod tests {
         let mut pool = sample_pool();
         pool.alert_state = AlertState { causes };
         pool
+    }
+
+    // Intent: verify relative-time text buckets and the future-timestamp None branch.
+    // Why it exists: scrub ages must not regress at day, sub-minute, or future boundaries.
+    // Scenario: the TUI renders last-scrub ages around a fixed frame time.
+    #[test]
+    fn timeago_buckets_and_future_none() {
+        let now = time::macros::datetime!(2026-02-24 12:00:00);
+
+        assert_eq!(
+            timeago(&time::macros::datetime!(2026-02-21 12:00:00), now),
+            Some("3 days ago".to_owned())
+        );
+        assert_eq!(
+            timeago(&time::macros::datetime!(2026-02-22 13:00:00), now),
+            Some("1 day ago".to_owned())
+        );
+        assert_eq!(
+            timeago(&time::macros::datetime!(2026-02-23 12:00:00), now),
+            Some("1 day ago".to_owned())
+        );
+        assert_eq!(
+            timeago(&time::macros::datetime!(2026-02-24 11:30:00), now),
+            Some("30 min ago".to_owned())
+        );
+        assert_eq!(
+            timeago(&time::macros::datetime!(2026-02-24 11:59:30), now),
+            Some("<1 min ago".to_owned())
+        );
+        assert_eq!(
+            timeago(&time::macros::datetime!(2026-02-24 12:00:00), now),
+            Some("<1 min ago".to_owned())
+        );
+        assert_eq!(
+            timeago(&time::macros::datetime!(2026-02-24 12:00:01), now),
+            None
+        );
+    }
+
+    // Intent: verify the Scrub Last run cell includes absolute and relative time for past starts.
+    // Why it exists: this is the user-visible compose boundary for normal scrub history.
+    // Scenario: a completed scrub started 30 minutes before the current TUI frame.
+    #[test]
+    fn scrub_last_run_shows_timestamp_and_ago() {
+        let now = time::macros::datetime!(2026-02-24 12:00:00);
+        let started_at = ScrubTimestamp(time::macros::datetime!(2026-02-24 11:30:00));
+
+        assert_eq!(
+            scrub_last_run_display(Some(&started_at), now),
+            "Tue Feb 24 11:30:00 2026 (30 min ago)"
+        );
+    }
+
+    // Intent: verify the Scrub Last run cell drops the relative suffix for future starts.
+    // Why it exists: negative relative-time diffs indicate clock skew and must not show bogus ages.
+    // Scenario: a scrub timestamp is one second after the current TUI frame time.
+    #[test]
+    fn scrub_last_run_drops_suffix_on_future_started_at() {
+        let now = time::macros::datetime!(2026-02-24 12:00:00);
+        let started_at = ScrubTimestamp(time::macros::datetime!(2026-02-24 12:00:01));
+
+        assert_eq!(
+            scrub_last_run_display(Some(&started_at), now),
+            "Tue Feb 24 12:00:01 2026"
+        );
+    }
+
+    // Intent: verify the Scrub Last run cell renders missing timestamps as unknown.
+    // Why it exists: absent scrub history must erase stale timestamp text rather than inventing an age.
+    // Scenario: the scrub status does not include a started_at timestamp.
+    #[test]
+    fn scrub_last_run_none_is_unknown() {
+        let now = time::macros::datetime!(2026-02-24 12:00:00);
+
+        assert_eq!(scrub_last_run_display(None, now), "unknown");
     }
 
     // Intent: a Warning-only TUI alert (EnospcRisk) renders the lower-urgency

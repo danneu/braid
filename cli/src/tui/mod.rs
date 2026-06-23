@@ -85,6 +85,17 @@ const FRAME_BUDGET: Duration = Duration::from_millis(16);
 const IDLE_REDRAW_INTERVAL: Duration = Duration::from_secs(10);
 const MAX_EVENTS_PER_FRAME: usize = 100;
 
+/// The naive-local wall-clock `now` each frame renders against.
+///
+/// Scrub ctime is naive-local because parse_ctime returns a
+/// PrimitiveDateTime; a UTC-basis `now` would skew relative time text by the
+/// host offset. Passing both inputs keeps the projection unit-testable without
+/// depending on the host timezone.
+fn frame_local_now(utc: time::OffsetDateTime, offset: time::UtcOffset) -> time::PrimitiveDateTime {
+    let local = utc.to_offset(offset);
+    time::PrimitiveDateTime::new(local.date(), local.time())
+}
+
 fn run_loop(
     terminal: &mut ratatui::DefaultTerminal,
     model: &mut Model,
@@ -93,18 +104,11 @@ fn run_loop(
 ) -> io::Result<()> {
     while model.running {
         model.frame = model.frame.wrapping_add(1);
-        // `now` is naive-LOCAL on purpose: it must share a time basis with the scrub
-        // `ctime`, which parse_ctime returns as a naive-local PrimitiveDateTime. A UTC
-        // `now` here would skew the relative timeago text by the host's offset.
-        //
         // current_local_offset() is sound despite the multithreaded TUI: time >= 0.3.37
         // dropped the old "fail when multithreaded" rule and calls localtime_r directly,
         // so unwrap_or(UTC) guards only a genuine localtime failure, not thread count.
-        let now = {
-            let offset = time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC);
-            let local = time::OffsetDateTime::now_utc().to_offset(offset);
-            time::PrimitiveDateTime::new(local.date(), local.time())
-        };
+        let offset = time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC);
+        let now = frame_local_now(time::OffsetDateTime::now_utc(), offset);
         let animating = model.is_animating();
         terminal.draw(|f| view(model, f, now))?;
 
@@ -151,5 +155,31 @@ fn key_context(model: &Model) -> KeyContext {
         show_help: model.show_help,
         show_disk_detail: model.show_disk_detail,
         browse_focus: model.browse.focus,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Intent: verify frame rendering projects UTC instants into naive local wall-clock time.
+    // Why it exists: a UTC-basis `now` or offset sign error would skew scrub relative-time text.
+    // Scenario: the TUI renders a frame on hosts in UTC, negative-offset, and fractional-offset zones.
+    #[test]
+    fn frame_local_now_projects_to_host_wall_clock() {
+        let utc = time::macros::datetime!(2026-02-24 12:00:00 UTC);
+
+        assert_eq!(
+            frame_local_now(utc, time::macros::offset!(-06:00)),
+            time::macros::datetime!(2026-02-24 06:00:00)
+        );
+        assert_eq!(
+            frame_local_now(utc, time::macros::offset!(+05:30)),
+            time::macros::datetime!(2026-02-24 17:30:00)
+        );
+        assert_eq!(
+            frame_local_now(utc, time::UtcOffset::UTC),
+            time::macros::datetime!(2026-02-24 12:00:00)
+        );
     }
 }
