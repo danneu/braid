@@ -99,6 +99,8 @@ sudo braid replace --old toshiba1 --new toshiba4=/dev/disk/by-id/ata-TOSHIBA_MN0
 9. For missing-disk replacements that clear the last missing device: runs a soft RAID1 balance to restore redundancy on any single-profile chunks
 10. Clears the journal
 
+The step-7 mapper close is best-effort, exactly as in [`braid remove`](remove.md): the btrfs replace is already committed, so a failed close prints a `[warn]` row, and a close-time ownership probe that cannot prove the old mapper is the expected disk -- inactive, a probe failure or null backing device, or a foreign LUKS UUID -- skips the close with a `Warning:` line. Neither fails the replace, and a clean exit does not guarantee the old mapper is closed.
+
 The fresh-disk path always produces a local LUKS header backup in step 3; the existing-LUKS path produces one only when `--enroll` actually adds slot 1, so an already-enrolled disk is a no-op with no new backup. See [Pending LUKS header backups](status.md#pending-luks-header-backups) -- copy each `.luksheader` off-system and delete the local copy.
 
 A sleep inhibitor is held throughout the replace to prevent the system from suspending. Suspending mid-replace can corrupt the btrfs topology.
