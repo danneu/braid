@@ -98,9 +98,9 @@ with subtest("braid ack exits 2 on pool-lock I/O failure"):
         f"expected directory-shaped lock I/O diagnostic, got: {output}"
     )
 
-with subtest("Healthy pool: status has no ALERT"):
+with subtest("Healthy pool: status has no alert banner"):
     output = machine.succeed("braid status")
-    assert "ALERT" not in output, f"Expected no ALERT in healthy status, got: {output}"
+    assert "alert --" not in output, f"Expected no alert banner in healthy status, got: {output}"
 
 # /*
 #  * Intent: A mounted healthy-pool `braid ack` with no active alert source
@@ -159,10 +159,10 @@ with subtest("Degraded pool: monitor exit code is exactly 1"):
 with subtest("Degraded pool: latch file created"):
     machine.succeed("test -f /var/lib/braid/alert-latch.json")
 
-with subtest("Degraded pool: status shows ALERT banner"):
+with subtest("Degraded pool: status shows CRITICAL alert banner"):
     output = machine.succeed("braid status")
-    assert "ALERT -- disk health issue detected." in output, (
-        f"Expected ALERT in degraded status, got: {output}"
+    assert "CRITICAL alert -- pool health issue detected." in output, (
+        f"Expected CRITICAL alert in degraded status, got: {output}"
     )
     assert "braid ack" in output, f"Expected 'braid ack' hint in status, got: {output}"
     assert f"missing device: disk2 (devid {disk2_devid})" in output, (
@@ -197,9 +197,9 @@ with subtest("Ack clears alert"):
 with subtest("Ack removes latch file"):
     machine.fail("test -f /var/lib/braid/alert-latch.json")
 
-with subtest("After ack: status has no ALERT"):
+with subtest("After ack: status has no alert banner"):
     output = machine.succeed("braid status")
-    assert "ALERT" not in output, f"Expected no ALERT after ack, got: {output}"
+    assert "alert --" not in output, f"Expected no alert banner after ack, got: {output}"
 
 with subtest("After ack: monitor exits 0"):
     machine.succeed("braid monitor")
@@ -249,7 +249,7 @@ with subtest("Corrupt latch (mounted): monitor surfaces and quarantines"):
 # Why it exists: Pre-fix, std::fs::rename atomically replaced the .corrupt
 #   sidecar on every quarantine, silently destroying the original failure
 #   event's bytes whenever a second corruption occurred before braid ack.
-# Scenario: Operator misses the first ALERT; meanwhile the latch corrupts
+# Scenario: Operator misses the first alert; meanwhile the latch corrupts
 #   again (FS damage, manual edit, slow tampering). The second monitor cycle
 #   must keep the first sidecar and surface the lost-evidence condition in
 #   braid status's JSON output.
@@ -305,7 +305,7 @@ with subtest("MissingDevice alert acked offline does not re-fire on remount"):
     machine.succeed("cryptsetup close braid-disk3")
     # Status should still show the latched alert
     output = machine.succeed("braid status")
-    assert "ALERT" in output, f"Expected ALERT in offline status, got: {output}"
+    assert "CRITICAL alert" in output, f"Expected CRITICAL alert in offline status, got: {output}"
     # Offline ack should succeed and persist missing_acked into acked-stats
     machine.succeed("braid ack >/tmp/ack-offline.out 2>/tmp/ack-offline.err")
     stdout = machine.succeed("cat /tmp/ack-offline.out")
@@ -341,7 +341,7 @@ with subtest("MissingDevice alert acked offline does not re-fire on remount"):
 #   captured from live `btrfs device stats` output, which is impossible
 #   with the pool locked. A buggy partial-apply that marked
 #   missing_acked=true before checking for BtrfsDeviceErrors would leave
-#   the user in an inconsistent state ("I acked but it still says ALERT").
+#   the user in an inconsistent state ("I acked but it still shows an alert").
 #   Starting from acked-stats.json absent makes a partial-apply visible:
 #   the file would appear.
 # Scenario: a hand-crafted latch fixture simulates a pool that had btrfs

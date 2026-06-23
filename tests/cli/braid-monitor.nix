@@ -10,7 +10,7 @@
 #
 # Scenario: 3-disk RAID1 pool. Operator loses a disk (LUKS mapper closed,
 # simulating a failed drive). `braid monitor` detects the missing device
-# and exits 1. `braid status` shows the ALERT banner. `braid ack`
+# and exits 1. `braid status` shows the CRITICAL alert banner. `braid ack`
 # acknowledges the alert, silencing it. Subsequent `braid monitor` exits 0.
 { braid }:
 {

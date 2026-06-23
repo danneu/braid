@@ -85,9 +85,9 @@ with subtest("Monitor detects null-underlying as missing (exit 1)"):
 with subtest("Alert latch created"):
     machine.succeed("test -f /var/lib/braid/alert-latch.json")
 
-with subtest("Status shows ALERT with missing device"):
+with subtest("Status shows CRITICAL alert with missing device"):
     output = machine.succeed("braid status")
-    assert "ALERT" in output, f"Expected ALERT in status, got: {output}"
+    assert "CRITICAL alert" in output, f"Expected CRITICAL alert in status, got: {output}"
     assert "missing device" in output, f"Expected 'missing device' cause, got: {output}"
 
 with subtest("Status JSON shows alert"):

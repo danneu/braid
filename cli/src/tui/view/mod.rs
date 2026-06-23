@@ -1434,8 +1434,8 @@ pub fn view(model: &Model, frame: &mut Frame, now: PrimitiveDateTime) {
     let area = frame.area();
     let advisory_height = model.advisories.len() as u16;
     // Severity drives both whether the banner shows and which banner: a
-    // Warning-only state (ENOSPC risk) renders a non-beeping amber NOTICE, never
-    // the red dying-disk ALERT. `severity().is_some()` is exactly `active()`.
+    // Warning-only state (ENOSPC risk) renders a non-beeping amber WARNING alert,
+    // never the red CRITICAL alert. `severity().is_some()` is exactly `active()`.
     let alert_severity = model.pool.current().and_then(|p| p.alert_state.severity());
     let alert_active = alert_severity.is_some();
     let alert_height: u16 = if alert_active { 1 } else { 0 };
@@ -1461,18 +1461,18 @@ pub fn view(model: &Model, frame: &mut Frame, now: PrimitiveDateTime) {
     let mut off: usize = 0;
 
     if alert_active {
-        // Warning-only renders an amber NOTICE; any Critical cause -- or the
-        // unreachable None, fail-closed -- renders the red ALERT.
+        // Warning-only renders an amber WARNING alert; any Critical cause -- or
+        // the unreachable None, fail-closed -- renders the red CRITICAL alert.
         let (text, style) = match alert_severity {
             Some(AlertSeverity::Warning) => (
-                " NOTICE -- capacity risk detected. Run 'braid ack' to acknowledge. ",
+                " WARNING alert -- capacity risk detected. Run 'braid ack' to acknowledge. ",
                 Style::default()
                     .bg(Color::Yellow)
                     .fg(Color::Black)
                     .add_modifier(Modifier::BOLD),
             ),
             _ => (
-                " ALERT -- disk health issue detected. Run 'braid ack' to acknowledge and silence. ",
+                " CRITICAL alert -- pool health issue detected. Run 'braid ack' to acknowledge and silence. ",
                 Style::default()
                     .bg(Color::Red)
                     .fg(Color::White)
@@ -1668,15 +1668,15 @@ pub(crate) mod tests {
     }
 
     // Intent: a Warning-only TUI alert (EnospcRisk) renders the lower-urgency
-    //   NOTICE banner, not the critical ALERT banner.
-    // Why it exists (F3): the TUI banner was hardcoded to the critical ALERT
+    //   WARNING alert banner, not the CRITICAL alert banner.
+    // Why it exists (F3): the TUI banner was hardcoded to the CRITICAL alert
     //   line for any active alert; a non-beeping capacity warning must read as
-    //   NOTICE. buffer_to_string drops styles, so this asserts the banner *text*
+    //   Warning. buffer_to_string drops styles, so this asserts the banner *text*
     //   (the behavioral, structure-insensitive signal) -- the amber color is out
     //   of scope per the project test bar.
     // Scenario: the live pool carries only an EnospcRisk cause.
     #[test]
-    fn tui_warning_only_renders_notice_banner() {
+    fn tui_warning_only_renders_warning_banner() {
         let pool = pool_with_alert(vec![AlertCause::EnospcRisk {
             margin: -1,
             count_below: 1,
@@ -1685,22 +1685,22 @@ pub(crate) mod tests {
         let model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(pool));
         let out = buffer_to_string(&render(&model, 90, 24));
         assert!(
-            out.contains("NOTICE -- capacity risk detected"),
-            "warning-only must render the NOTICE banner, got:\n{out}"
+            out.contains("WARNING alert -- capacity risk detected"),
+            "warning-only must render the WARNING alert banner, got:\n{out}"
         );
         assert!(
-            !out.contains("ALERT -- disk health issue detected"),
-            "warning-only must NOT render the critical ALERT banner, got:\n{out}"
+            !out.contains("CRITICAL alert"),
+            "warning-only must NOT render the CRITICAL alert banner, got:\n{out}"
         );
     }
 
-    // Intent: a Critical TUI alert still renders the critical ALERT banner, and a
-    //   mixed Warning+Critical state also renders ALERT (max severity wins).
+    // Intent: a Critical TUI alert still renders the CRITICAL alert banner, and a
+    //   mixed Warning+Critical state also renders Critical (max severity wins).
     // Why it exists: the severity split must not regress the existing critical
     //   banner, and a mixed state must escalate to the louder signal.
     // Scenario: a MissingDevice cause alone, then EnospcRisk + MissingDevice.
     #[test]
-    fn tui_critical_and_mixed_render_alert_banner() {
+    fn tui_critical_and_mixed_render_critical_banner() {
         for causes in [
             vec![AlertCause::MissingDevice {
                 devid: Devid::new(2),
@@ -1720,12 +1720,12 @@ pub(crate) mod tests {
             let model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(pool));
             let out = buffer_to_string(&render(&model, 90, 24));
             assert!(
-                out.contains("ALERT -- disk health issue detected"),
-                "critical/mixed must render the ALERT banner, got:\n{out}"
+                out.contains("CRITICAL alert -- pool health issue detected"),
+                "critical/mixed must render the CRITICAL alert banner, got:\n{out}"
             );
             assert!(
-                !out.contains("NOTICE -- capacity risk detected"),
-                "critical/mixed must NOT render the NOTICE banner, got:\n{out}"
+                !out.contains("WARNING alert -- capacity risk detected"),
+                "critical/mixed must NOT render the WARNING alert banner, got:\n{out}"
             );
         }
     }

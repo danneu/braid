@@ -1414,16 +1414,16 @@ fn format_status_human(
     let mut out = String::new();
 
     // Alert banner (before everything else). Severity-aware so a non-beeping
-    // Warning (ENOSPC risk) is not rendered as the critical dying-disk line --
+    // Warning (ENOSPC risk) is not rendered as the critical pool-health line --
     // the exact mis-signal the severity tier exists to prevent. `None` is
     // unreachable while `alert_active` is true but fails closed to Critical.
     if report.alert_active {
         match report.alert_causes.iter().map(AlertCause::severity).max() {
             Some(AlertSeverity::Warning) => out.push_str(
-                "NOTICE -- capacity risk detected. Run 'braid ack' to acknowledge.\n",
+                "WARNING alert -- capacity risk detected. Run 'braid ack' to acknowledge.\n",
             ),
             _ => out.push_str(
-                "ALERT -- disk health issue detected. Run 'braid ack' to acknowledge and silence.\n",
+                "CRITICAL alert -- pool health issue detected. Run 'braid ack' to acknowledge and silence.\n",
             ),
         }
         for cause in &report.alert_causes {
@@ -6851,14 +6851,13 @@ mod tests {
     }
 
     // Intent: a Warning-only active alert (EnospcRisk) renders the lower-urgency
-    //   NOTICE banner and the ENOSPC line -- NOT the critical "ALERT -- disk
-    //   health issue detected" text.
+    //   WARNING alert banner and the ENOSPC line -- NOT the CRITICAL alert text.
     // Why it exists (F3): the severity tier exists precisely so a non-beeping
     //   capacity warning is not mis-signaled as a dying disk. A regression to the
     //   hardcoded critical banner would re-introduce that mis-signal.
     // Scenario: the monitor latched only EnospcRisk; status renders the banner.
     #[test]
-    fn status_human_warning_only_renders_notice_not_alert() {
+    fn status_human_warning_only_renders_warning_not_critical() {
         let report = status_report_with_alerts(
             vec![],
             vec![AlertCause::EnospcRisk {
@@ -6871,12 +6870,14 @@ mod tests {
         let human = format_status_human(&report, None, None, None);
 
         assert!(
-            human.contains("NOTICE -- capacity risk detected. Run 'braid ack' to acknowledge."),
-            "warning-only must render the NOTICE banner, got:\n{human}"
+            human.contains(
+                "WARNING alert -- capacity risk detected. Run 'braid ack' to acknowledge."
+            ),
+            "warning-only must render the WARNING alert banner, got:\n{human}"
         );
         assert!(
-            !human.contains("ALERT -- disk health issue detected"),
-            "warning-only must NOT render the critical ALERT banner, got:\n{human}"
+            !human.contains("CRITICAL alert"),
+            "warning-only must NOT render the CRITICAL alert banner, got:\n{human}"
         );
         assert!(
             human.contains(
@@ -6886,12 +6887,12 @@ mod tests {
         );
     }
 
-    // Intent: a Critical active alert still renders the critical ALERT banner.
+    // Intent: a Critical active alert still renders the CRITICAL alert banner.
     // Why it exists: the severity split must not regress the existing critical
-    //   path -- a dying disk must still read as ALERT, not NOTICE.
+    //   path -- a dying disk must still read as Critical, not Warning.
     // Scenario: the monitor latched a btrfs device-error cause.
     #[test]
-    fn status_human_critical_renders_alert_not_notice() {
+    fn status_human_critical_renders_critical_not_warning() {
         let report = status_report_with_alerts(
             vec![],
             vec![AlertCause::BtrfsDeviceErrors {
@@ -6902,35 +6903,35 @@ mod tests {
         let human = format_status_human(&report, None, None, None);
 
         assert!(
-            human.contains("ALERT -- disk health issue detected"),
-            "critical must render the ALERT banner, got:\n{human}"
+            human.contains("CRITICAL alert -- pool health issue detected"),
+            "critical must render the CRITICAL alert banner, got:\n{human}"
         );
         assert!(
-            !human.contains("NOTICE -- capacity risk detected"),
-            "critical must NOT render the NOTICE banner, got:\n{human}"
+            !human.contains("WARNING alert -- capacity risk detected"),
+            "critical must NOT render the WARNING alert banner, got:\n{human}"
         );
     }
 
-    // Intent: a ScrubFailed-only active alert renders the critical ALERT banner
-    //   plus the scrub-failure cause line -- never the Warning NOTICE banner.
+    // Intent: a ScrubFailed-only active alert renders the CRITICAL alert banner
+    //   plus the scrub-failure cause line -- never the WARNING alert banner.
     // Why it exists (F1, pinned to the rendered line): ScrubFailed is Critical,
-    //   so a misclassification to Warning would flip this banner to NOTICE and
+    //   so a misclassification to Warning would flip this banner to WARNING and
     //   route the latch to the non-beeping advisory. This pins the tier all the
     //   way through to the human output.
     // Scenario: the monitor latched only ScrubFailed; status renders the banner.
     #[test]
-    fn status_human_scrub_failed_renders_alert_not_notice() {
+    fn status_human_scrub_failed_renders_critical_not_warning() {
         let report = status_report_with_alerts(vec![], vec![AlertCause::ScrubFailed]);
 
         let human = format_status_human(&report, None, None, None);
 
         assert!(
-            human.contains("ALERT -- disk health issue detected"),
-            "scrub-failure must render the critical ALERT banner, got:\n{human}"
+            human.contains("CRITICAL alert -- pool health issue detected"),
+            "scrub-failure must render the CRITICAL alert banner, got:\n{human}"
         );
         assert!(
-            !human.contains("NOTICE -- capacity risk detected"),
-            "scrub-failure must NOT render the NOTICE banner, got:\n{human}"
+            !human.contains("WARNING alert -- capacity risk detected"),
+            "scrub-failure must NOT render the WARNING alert banner, got:\n{human}"
         );
         assert!(
             human.contains("scheduled scrub failed -- check journalctl -u braid-scrub.service"),
@@ -6938,13 +6939,13 @@ mod tests {
         );
     }
 
-    // Intent: a mixed Warning+Critical active alert renders the critical ALERT
+    // Intent: a mixed Warning+Critical active alert renders the CRITICAL alert
     //   banner (max severity wins).
     // Why it exists: when a pool is both at ENOSPC risk and has a dying disk, the
     //   louder Critical signal must win the banner.
     // Scenario: EnospcRisk and MissingDevice are both latched.
     #[test]
-    fn status_human_mixed_severity_renders_alert() {
+    fn status_human_mixed_severity_renders_critical() {
         let report = status_report_with_alerts(
             vec![],
             vec![
@@ -6962,12 +6963,12 @@ mod tests {
         let human = format_status_human(&report, None, None, None);
 
         assert!(
-            human.contains("ALERT -- disk health issue detected"),
-            "mixed severity must render the critical ALERT banner, got:\n{human}"
+            human.contains("CRITICAL alert -- pool health issue detected"),
+            "mixed severity must render the CRITICAL alert banner, got:\n{human}"
         );
         assert!(
-            !human.contains("NOTICE -- capacity risk detected"),
-            "mixed severity must NOT render the NOTICE banner, got:\n{human}"
+            !human.contains("WARNING alert -- capacity risk detected"),
+            "mixed severity must NOT render the WARNING alert banner, got:\n{human}"
         );
     }
 

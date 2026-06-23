@@ -3,7 +3,7 @@
 # Intent: Verify the full proactive-capacity-alert lifecycle through the real
 #   systemd path: a filling RAID1 pool crosses the ENOSPC threshold, monitor
 #   exits 3 (Warning), the wrapper routes that to the non-beeping advisory
-#   service, status shows the NOTICE banner + enospc_risk cause, and ack snoozes
+#   service, status shows the WARNING alert banner + enospc_risk cause, and ack snoozes
 #   the reminder (clears the latch + stops the advisory unit) without resolving --
 #   status keeps showing the live advisory, the monitor stays quiet within the
 #   snooze window, re-alerts once the reminder interval elapses, and goes quiet
@@ -73,16 +73,16 @@ with subtest("Wrapper routes exit 3 to the non-beeping advisory service"):
     machine.succeed("systemctl is-active braid-alert-advisory.service")
     machine.fail("systemctl is-active braid-alert.service")
 
-with subtest("Status shows the enospc_risk cause and the NOTICE (not ALERT) banner"):
+with subtest("Status shows the enospc_risk cause and the WARNING (not Critical) alert banner"):
     report = json.loads(machine.succeed("braid status --json"))
     assert report["alert_active"] is True, f"expected alert_active, got {report}"
     cause_types = [c["type"] for c in report["alert_causes"]]
     assert "enospc_risk" in cause_types, f"expected enospc_risk cause, got {cause_types}"
     human = machine.succeed("braid status")
-    assert "NOTICE -- capacity risk detected" in human, (
-        f"expected NOTICE banner, got:\n{human}"
+    assert "WARNING alert -- capacity risk detected" in human, (
+        f"expected WARNING alert banner, got:\n{human}"
     )
-    assert "ALERT -- disk health issue detected" not in human, (
+    assert "CRITICAL alert" not in human, (
         f"a Warning must not render the critical banner:\n{human}"
     )
     assert "ENOSPC risk: pool is one disk-loss" in human, (

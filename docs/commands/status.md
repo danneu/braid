@@ -78,28 +78,37 @@ when `btrfs filesystem df` failed.
 ### Alert banner
 
 When a health alert is active, a banner appears at the top of the output. Critical
-causes render the disk-health alert banner:
+causes render the pool-health alert banner:
 
 ```
-ALERT -- disk health issue detected. Run 'braid ack' to acknowledge and silence.
+CRITICAL alert -- pool health issue detected. Run 'braid ack' to acknowledge and silence.
   - btrfs device errors on toshiba1 (devid 1)
+  - missing device: toshiba2 (devid 2)
   - SMART health warning
   - scheduled scrub failed -- check journalctl -u braid-scrub.service
+  - alert computation error: <detail>
 ```
 
-A Warning-only ENOSPC-risk state renders the capacity-risk notice instead:
+A Warning-only ENOSPC-risk state renders the capacity-risk alert instead:
 
 ```
-NOTICE -- capacity risk detected. Run 'braid ack' to acknowledge.
+WARNING alert -- capacity risk detected. Run 'braid ack' to acknowledge.
   - ENOSPC risk: pool is one disk-loss from being unable to restore RAID1 redundancy
 ```
 
 The banner reflects the highest cause severity: an ENOSPC-risk-only state shows
-`NOTICE`, while any Critical cause present -- even alongside ENOSPC risk -- keeps
-the `ALERT` banner. Alert causes include btrfs device errors, missing devices,
-SMART health warnings, a failed scheduled scrub, and ENOSPC capacity risk. Alerts
-are latched -- they persist until acknowledged with `braid ack`, even if the
-underlying condition resolves.
+`WARNING alert`, while any Critical cause present -- even alongside ENOSPC risk --
+keeps the `CRITICAL alert` banner. Critical alerts beep, so `braid ack`
+acknowledges and silences them; Warning alerts do not beep, so `braid ack`
+only acknowledges them. Alert causes include btrfs device errors, missing devices,
+SMART health warnings, a failed scheduled scrub, alert computation errors, and
+ENOSPC capacity risk. Alerts are latched -- they persist until acknowledged with
+`braid ack`, even if the underlying condition resolves.
+
+For ENOSPC risk, `braid ack` clears the latched banner and snoozes the monitor
+reminder when the pool is still at risk. `braid status` still prints the live
+`warning: ENOSPC risk: ...` advisory every run; see
+[ENOSPC risk on RAID1 pool](#enospc-risk-on-raid1-pool).
 
 ### Allocation table
 

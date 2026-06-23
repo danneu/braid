@@ -2528,7 +2528,8 @@ mod tests {
     //   ScrubFailed reports Some(Critical).
     // Why it exists (F1 regression): the moment ScrubFailed is misclassified
     //   Warning, the monitor routes its latch to exit 3 (the non-beeping
-    //   advisory) and status renders NOTICE instead of ALERT -- silently
+    //   advisory) and status renders WARNING alert instead of CRITICAL alert --
+    //   silently
     //   contradicting the beeping onFailure source it mirrors. This fails the
     //   instant the tier is wrong.
     // Scenario: a failed scrub is the sole latched cause.

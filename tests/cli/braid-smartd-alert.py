@@ -34,9 +34,9 @@ with subtest("Create 2-disk RAID1 pool"):
     machine.succeed("mount /dev/mapper/braid-disk1 /mnt/storage")
     machine.succeed("mkdir -p /var/lib/braid")
 
-with subtest("Healthy pool: no ALERT"):
+with subtest("Healthy pool: no alert banner"):
     output = machine.succeed("braid status")
-    assert "ALERT" not in output, f"Expected no ALERT, got: {output}"
+    assert "alert --" not in output, f"Expected no alert banner, got: {output}"
 
 # This pins the smartd-only mounted ack path before monitor has latched the
 # flag. It must report that an alert was acknowledged, not the healthy no-op
@@ -64,7 +64,7 @@ with subtest("After smartd alert: monitor exits 1"):
 
 with subtest("After smartd alert: status shows SMART warning"):
     output = machine.succeed("braid status")
-    assert "ALERT" in output, f"Expected ALERT, got: {output}"
+    assert "CRITICAL alert" in output, f"Expected CRITICAL alert, got: {output}"
     assert "SMART health warning" in output, f"Expected SMART cause, got: {output}"
 
 with subtest("Ack clears smartd alert"):
@@ -81,20 +81,20 @@ with subtest("Ack clears smartd alert"):
     # Flag file should be removed
     machine.fail("test -f /var/lib/braid/smartd-alert")
 
-with subtest("After ack: no ALERT"):
+with subtest("After ack: no alert banner"):
     output = machine.succeed("braid status")
-    assert "ALERT" not in output, f"Expected no ALERT after ack, got: {output}"
+    assert "alert --" not in output, f"Expected no alert banner after ack, got: {output}"
 
 with subtest("After ack: monitor exits 0"):
     machine.succeed("braid monitor")
 
-with subtest("Pool offline with smartd alert: status shows ALERT"):
+with subtest("Pool offline with smartd alert: status shows CRITICAL alert"):
     machine.succeed("umount /mnt/storage")
     machine.succeed("cryptsetup close braid-disk1")
     machine.succeed("cryptsetup close braid-disk2")
     machine.succeed("touch /var/lib/braid/smartd-alert")
     output = machine.succeed("braid status")
-    assert "ALERT" in output, f"Expected ALERT, got: {output}"
+    assert "CRITICAL alert" in output, f"Expected CRITICAL alert, got: {output}"
     assert "SMART health warning" in output, f"Expected SMART cause, got: {output}"
 
 with subtest("Pool offline with smartd alert: ack succeeds"):

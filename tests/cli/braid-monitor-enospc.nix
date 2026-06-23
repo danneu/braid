@@ -3,7 +3,7 @@
 # Intent: Validate the proactive-capacity-alert lifecycle through the real
 # systemd path: a filling RAID1 pool crosses the ENOSPC threshold, `braid
 # monitor` exits 3, the wrapper routes that to the non-beeping advisory service,
-# `braid status` shows the NOTICE banner + enospc_risk cause, `braid ack` clears
+# `braid status` shows the WARNING alert banner + enospc_risk cause, `braid ack` clears
 # it and stops the advisory unit, a re-arm cycle exits 0, and a degraded pool
 # raises MissingDevice (Critical) but never EnospcRisk.
 #

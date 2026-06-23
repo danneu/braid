@@ -48,9 +48,9 @@ with subtest("Create 2-disk RAID1 pool"):
     machine.succeed("mount /dev/mapper/braid-disk1 /mnt/storage")
     machine.succeed("mkdir -p /var/lib/braid")
 
-with subtest("Healthy pool: no ALERT"):
+with subtest("Healthy pool: no alert banner"):
     output = machine.succeed("braid status")
-    assert "ALERT" not in output, f"Expected no ALERT, got: {output}"
+    assert "alert --" not in output, f"Expected no alert banner, got: {output}"
 
 # Produce: force a cleanup failure after the sentinel is marked. The smartd
 # flag drives a mounted ack past the `no active alerts` no-op into the
@@ -90,7 +90,7 @@ with subtest("ack fails mid-cleanup, leaving the sentinel"):
 # correct here.
 with subtest("status reports the cleanup-pending cause"):
     out = machine.succeed("braid status")
-    assert "ALERT" in out, f"expected ALERT, got: {out}"
+    assert "CRITICAL alert" in out, f"expected CRITICAL alert, got: {out}"
     assert "ack cleanup pending -- re-run `braid ack` to resume" in out, (
         f"expected the cleanup-pending cause string, got: {out}"
     )
@@ -114,9 +114,9 @@ with subtest("retry clears the sentinel"):
     )
     machine.fail("test -f /var/lib/braid/alert-cleanup-pending")
 
-with subtest("After retry: no ALERT"):
+with subtest("After retry: no alert banner"):
     out = machine.succeed("braid status")
-    assert "ALERT" not in out, f"expected no ALERT after retry, got: {out}"
+    assert "alert --" not in out, f"expected no alert banner after retry, got: {out}"
     assert "ack cleanup pending" not in out, (
         f"expected no cleanup-pending cause after retry, got: {out}"
     )

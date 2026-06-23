@@ -24,14 +24,16 @@
           pkgs = nixpkgs.legacyPackages.${system};
           craneLib = crane.mkLib pkgs;
           # Source from repo root so crane sees the workspace Cargo.toml + Cargo.lock,
-          # while still including cli/ sources, test fixtures, and snapshots.
+          # while still including cli/ sources, test fixtures, snapshots, and
+          # compile-time doc fixtures read by Rust tests.
           src = pkgs.lib.cleanSourceWith {
             src = ./.;
             filter =
               path: type:
               (craneLib.filterCargoSources path type)
               || (builtins.match ".*tests/fixtures/.*" path != null)
-              || (builtins.match ".*\\.snap$" path != null);
+              || (builtins.match ".*\\.snap$" path != null)
+              || (builtins.match ".*/docs/commands/status\\.md" path != null);
           };
           # Shared by both the unwrapped CLI and the wrapped `braid`. The wrapped
           # package extends this with `platforms = linux` since it shells out to

@@ -30,7 +30,7 @@ A single shared computation produces an `AlertState` consumed by all surfaces �
 - `ComputationError { detail }` — probe or parse failed before a structured cause could be determined
 - `EnospcRisk { margin, count_below, device_count }` — pool is one disk-loss away from RAID1 chunk-pair ENOSPC (cannot allocate the chunk pairs to restore redundancy). `margin` is the signed risk magnitude (negative = at-risk depth); the cause deliberately carries no pool identity, so the public `status --json` cause stays a clean risk descriptor and keying lives in `enospc-ack.json` (see [Severity tiers and the ENOSPC baseline](#severity-tiers-and-the-enospc-baseline))
 
-Critical causes render the cause-neutral `ALERT` banner ("ALERT -- disk health issue detected. Run 'braid ack' to acknowledge and silence."), while a Warning-only `EnospcRisk` state renders the lower-urgency `NOTICE` capacity banner ("NOTICE -- capacity risk detected. Run 'braid ack' to acknowledge."); cause details still appear below the banner and in JSON output. See [Severity tiers and the ENOSPC baseline](#severity-tiers-and-the-enospc-baseline).
+Critical causes render the cause-neutral `CRITICAL alert` banner ("CRITICAL alert -- pool health issue detected. Run 'braid ack' to acknowledge and silence."), while a Warning-only `EnospcRisk` state renders the lower-urgency `WARNING alert` capacity banner ("WARNING alert -- capacity risk detected. Run 'braid ack' to acknowledge."); cause details still appear below the banner and in JSON output. See [Severity tiers and the ENOSPC baseline](#severity-tiers-and-the-enospc-baseline).
 
 ### Two detection sources, one alert model
 
@@ -97,7 +97,7 @@ Fail closed: any failure inside `cmd_monitor` that leaves pool state indetermina
 
 ### Severity tiers and the ENOSPC baseline
 
-`AlertSeverity` has two tiers, `Warning < Critical`. Every cause has a severity (see the cause list above), and `AlertState::severity()` is the max over its causes. The split exists so a proactive, non-beeping capacity warning is not delivered through the audible channel built for a dying disk: the beep is reserved for Critical, `braid status` and the TUI render a distinct lower-urgency banner for a Warning-only alert, and the monitor routes a Warning-only cycle to exit 3.
+`AlertSeverity` has two tiers, `Warning < Critical`. Every cause has a severity (see the cause list above), and `AlertState::severity()` is the max over its causes. The split exists so a proactive, non-beeping capacity warning is not delivered through the audible channel built for a dying disk: the beep is reserved for Critical, `braid status` and the TUI render `CRITICAL alert -- ...` for Critical and a distinct lower-urgency `WARNING alert -- ...` banner for a Warning-only alert, and the monitor routes a Warning-only cycle to exit 3.
 
 `EnospcRisk` uses a **time-based snooze/reminder** model for ack/re-alert, stored in a dedicated `enospc-ack.json`, not `acked-stats.json` (the two key on different things — error counters vs pool geometry). ("baseline" survives here only as this heading's stable anchor and `enospc-ack.json`'s historical nickname; the margin-baseline model it once named is gone.) Ack = **snooze**, not resolve: it silences the *reminder* for an interval, and `braid status` keeps showing the live ENOSPC advisory the whole time (`build_status` recomputes risk independently of the marker).
 
@@ -173,7 +173,7 @@ Ack cleanup preserves three invariants. First, the beeper stop hook is attempted
 For genuine offline ack, the persistence layer has an asymmetry by cause type:
 
 - `MissingDevice { devid }` -- offline ack reads the latch and applies `missing_acked = true` to that devid in `acked-stats.json` (insert-or-update; existing `device_stats` baselines are preserved). The next mounted monitor cycle suppresses the cause, and `reconcile_acked_stats` self-heals `missing_acked` back to `false` if the device returns.
-- `BtrfsDeviceErrors { devid }` -- offline ack refuses with an actionable error ("cannot ack btrfs device errors while pool is offline -- unlock the pool first"). The counter baseline that suppresses re-firing is the *current* output of `btrfs device stats`, which requires a mounted pool. Refusing the *whole* ack (not partial-acking other causes) avoids leaving the operator in an "I acked but it still says ALERT" state.
+- `BtrfsDeviceErrors { devid }` -- offline ack refuses with an actionable error ("cannot ack btrfs device errors while pool is offline -- unlock the pool first"). The counter baseline that suppresses re-firing is the *current* output of `btrfs device stats`, which requires a mounted pool. Refusing the *whole* ack (not partial-acking other causes) avoids leaving the operator in an "I acked but it still shows an alert" state.
 - `SmartdAlert` -- offline ack removes the smartd flag file (the authoritative trigger source); no `acked-stats.json` write is needed.
 - `ScrubFailed` -- offline ack removes the scrub-failed flag file (mirroring `SmartdAlert`); no `acked-stats.json` write is needed. It falls through the `BtrfsDeviceErrors` offline refusal and the `MissingDevice` filter unchanged.
 - `ComputationError` -- offline ack removes the latch; the cause re-fires on the next monitor cycle only if the underlying computation still fails.

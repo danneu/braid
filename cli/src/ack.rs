@@ -183,7 +183,7 @@ fn ack_offline(
     // baseline that suppresses re-firing requires live `btrfs device stats`
     // output, which we cannot produce with the pool offline. Refusing the
     // *whole* ack (rather than partial-acking other causes) avoids leaving
-    // the user in an ambiguous "I acked but it still says ALERT" state.
+    // the user in an ambiguous "I acked but it still shows an alert" state.
     // ScrubFailed falls through this refusal and the MissingDevice filter
     // unchanged (no new arm), exactly as SmartdAlert does -- offline ack just
     // removes the flag and writes no acked-stats.
