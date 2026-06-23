@@ -19,17 +19,6 @@ impl Passphrase {
     pub fn expose_secret(&self) -> &str {
         self.0.as_str()
     }
-
-    /// Byte length used by validation tests without exposing plaintext.
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    /// Empty-state query used by tests and validators without exposing
-    /// plaintext.
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
 }
 
 impl std::fmt::Debug for Passphrase {
