@@ -305,14 +305,9 @@ fn validate_missing_id_target(pool: &PoolState, missing_id: Devid) -> Result<(),
         return Ok(());
     }
     if pool.null_underlying.iter().any(|d| d.devid == missing_id) {
-        return Err(format!(
-            "devid {missing_id} is hot-unplugged but btrfs has not yet \
-             promoted it to MISSING (LUKS mapper open, backing device \
-             gone). `braid remove-missing` only operates on \
-             btrfs-authoritative MISSING devids. Confirm the disk is \
-             truly gone, then relock and re-unlock the pool degraded \
-             (`braid lock` then `braid unlock --allow-degraded`) so \
-             btrfs promotes devid {missing_id}, and retry."
+        return Err(repair_hint::hot_unplug_not_yet_missing(
+            missing_id,
+            "braid remove-missing",
         ));
     }
     Err(format!(

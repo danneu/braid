@@ -36,6 +36,21 @@ pub(crate) fn optional_missing_id_cross_check_phrase() -> String {
     format!("Optionally add `{placeholder_arg}` as a cross-check.")
 }
 
+/// Operator remediation for a member btrfs has not yet promoted to MISSING.
+///
+/// `actor` names the command that only acts on btrfs-authoritative MISSING
+/// devids so the promote-then-retry guidance points back at the right command.
+pub(crate) fn hot_unplug_not_yet_missing(devid: Devid, actor: &str) -> String {
+    format!(
+        "devid {devid} is hot-unplugged but btrfs has not yet promoted it to \
+         MISSING (LUKS mapper open, backing device gone). `{actor}` only \
+         operates on btrfs-authoritative MISSING devids. Confirm the disk is \
+         truly gone, then relock and re-unlock the pool degraded (`braid lock` \
+         then `braid unlock --allow-degraded`) so btrfs promotes devid {devid}, \
+         and retry."
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -104,6 +119,32 @@ mod tests {
         assert_eq!(
             optional_missing_id_cross_check_phrase(),
             "Optionally add `--missing-id <devid>` as a cross-check."
+        );
+    }
+
+    // Intent: hot-unplug targets render the promote-then-act guidance with the
+    // caller command named in the refusal.
+    // Why it exists: replace, remove-missing, and doctor should not drift into
+    // conflicting null-underlying remediation.
+    // Scenario: an operator targets a hot-unplugged devid before btrfs has
+    // promoted it to MISSING.
+    #[test]
+    fn hot_unplug_not_yet_missing_renders_actor_specific_guidance() {
+        assert_eq!(
+            hot_unplug_not_yet_missing(Devid::new(2), "braid replace"),
+            "devid 2 is hot-unplugged but btrfs has not yet promoted it to MISSING \
+             (LUKS mapper open, backing device gone). `braid replace` only operates on \
+             btrfs-authoritative MISSING devids. Confirm the disk is truly gone, then \
+             relock and re-unlock the pool degraded (`braid lock` then `braid unlock \
+             --allow-degraded`) so btrfs promotes devid 2, and retry."
+        );
+        assert_eq!(
+            hot_unplug_not_yet_missing(Devid::new(2), "braid remove-missing"),
+            "devid 2 is hot-unplugged but btrfs has not yet promoted it to MISSING \
+             (LUKS mapper open, backing device gone). `braid remove-missing` only \
+             operates on btrfs-authoritative MISSING devids. Confirm the disk is truly \
+             gone, then relock and re-unlock the pool degraded (`braid lock` then \
+             `braid unlock --allow-degraded`) so btrfs promotes devid 2, and retry."
         );
     }
 }

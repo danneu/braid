@@ -804,39 +804,96 @@ fn check_pool_missing_devices<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) 
         .as_ref()
         .expect("ensure_pool_state seeds the cache when config is present and mounted")
     {
-        Ok(pool) if pool.missing_devids.is_empty() => {
+        Ok(pool) if pool.missing_count == 0 => {
             CheckResult::ok("pool_missing_devices", "no missing devices")
         }
         Ok(pool) => {
-            let n = pool.missing_devids.len();
-            let (suffix, cross_check, cross_check_target) = match pool.missing_devids.as_slice() {
-                [devid] => (
-                    "",
-                    format!(
-                        "Optional cross-check: `{}`.",
-                        repair_hint::missing_replace_command_with_devid(None, *devid)
-                    ),
-                    "Use the listed ID.",
-                ),
-                _ => (
-                    "s",
-                    repair_hint::optional_missing_id_cross_check_phrase(),
-                    "Use one of the listed IDs.",
-                ),
-            };
-            let repair_command = repair_hint::missing_replace_command(None);
-            let devids = pool
-                .missing_devids
+            let n = pool.missing_count;
+            let suffix = if n == 1 { "" } else { "s" };
+            let lead_devids = pool
+                .alert_missing_devids()
                 .iter()
                 .map(|d| d.to_string())
                 .collect::<Vec<_>>()
                 .join(", ");
+            let lead =
+                format!("pool has {n} missing device{suffix} (devid{suffix}: {lead_devids})");
+
+            let missing_devid_set = pool.missing_devids.iter().copied().collect::<HashSet<_>>();
+            let mut null_underlying_devids = pool
+                .null_underlying
+                .iter()
+                .filter_map(|device| {
+                    (!missing_devid_set.contains(&device.devid)).then_some(device.devid)
+                })
+                .collect::<Vec<_>>();
+            null_underlying_devids.sort();
+            null_underlying_devids.dedup();
+
+            let mut parts = Vec::new();
+            if !pool.missing_devids.is_empty() {
+                let (cross_check, cross_check_target) = match pool.missing_devids.as_slice() {
+                    [devid] => (
+                        format!(
+                            "Optional cross-check: `{}`.",
+                            repair_hint::missing_replace_command_with_devid(None, *devid)
+                        ),
+                        if null_underlying_devids.is_empty() {
+                            "Use the listed ID.".to_owned()
+                        } else {
+                            format!("Use devid {devid}.")
+                        },
+                    ),
+                    _ => (
+                        repair_hint::optional_missing_id_cross_check_phrase(),
+                        if null_underlying_devids.is_empty() {
+                            "Use one of the listed IDs.".to_owned()
+                        } else {
+                            format!(
+                                "Use one of the btrfs-MISSING devids: {}.",
+                                pool.missing_devids
+                                    .iter()
+                                    .map(|d| d.to_string())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            )
+                        },
+                    ),
+                };
+                let repair_command = repair_hint::missing_replace_command(None);
+                parts.push(format!(
+                    "replace with: `{repair_command}`; {cross_check} {cross_check_target}"
+                ));
+            }
+
+            if !null_underlying_devids.is_empty() {
+                let unlock_command = if pool.missing_devids.is_empty() {
+                    "braid unlock"
+                } else {
+                    "braid unlock --allow-degraded"
+                };
+                let recover_target = if null_underlying_devids.len() == 1 {
+                    "the hot-unplugged disk is healthy, re-plug it"
+                } else {
+                    "the hot-unplugged disks are healthy, re-plug them"
+                };
+                let mut hot_unplug_parts = vec![format!(
+                    "If {recover_target} then run `braid lock` and `{unlock_command}` \
+                     to close and reopen the mapper (it does not self-heal on re-plug alone)."
+                )];
+                hot_unplug_parts.extend(
+                    null_underlying_devids.iter().map(|devid| {
+                        repair_hint::hot_unplug_not_yet_missing(*devid, "braid replace")
+                    }),
+                );
+                parts.push(hot_unplug_parts.join(" "));
+            }
+
             CheckResult::warn(
                 "pool_missing_devices",
                 format!(
-                    "pool has {n} missing device{suffix} (devid{suffix}: {devids}); replace with: \
-                     `{repair_command}`; {cross_check} {cross_check_target} \
-                     Use `braid status` to see the missing disk's name",
+                    "{lead}; {} Use `braid status` to see the missing disk's name",
+                    parts.join("; ")
                 ),
             )
         }
@@ -1957,7 +2014,7 @@ mod tests {
         test_uuid, unlock_btrfs_balance_status_idle, unlock_btrfs_balance_status_paused,
         unlock_btrfs_balance_status_paused_skip_balance, ups_ctx, valid_config_json, write_temp,
     };
-    use crate::types::{Devid, MountPoint};
+    use crate::types::{Devid, MapperName, MountPoint, NullUnderlyingDevice};
 
     fn find_check<'a>(report: &'a DoctorReport, name: &str) -> &'a CheckResult {
         report
@@ -5554,6 +5611,37 @@ mod tests {
 
     // --- pool_missing_devices tests ---
 
+    fn pool_missing_devices_with_cached_pool_state(pool_state: PoolState) -> CheckResult {
+        let (mp_req, mp_out) = mountpoint_ok();
+        let runner = MockRunner::default().with_output(mp_req, mp_out);
+        let (_dir, paths) = isolated_paths();
+        let mut ctx = parsed_doctor_ctx(&runner, &paths);
+        ctx.pool_state = Some(Ok(pool_state));
+        check_pool_missing_devices(&mut ctx)
+    }
+
+    fn pool_missing_devices_pool_state(
+        missing_count: u64,
+        missing_devids: Vec<Devid>,
+        null_underlying: Vec<Devid>,
+    ) -> PoolState {
+        PoolState {
+            mounted: true,
+            devices: vec![],
+            missing_count,
+            total_devices: missing_count,
+            fsid: None,
+            missing_devids,
+            null_underlying: null_underlying
+                .into_iter()
+                .map(|devid| NullUnderlyingDevice {
+                    mapper: MapperName::from_basename(format!("braid-disk{devid}")),
+                    devid,
+                })
+                .collect(),
+        }
+    }
+
     // Intent: pool_missing_devices reports Ok when no devices are missing.
     // Why: ensures the check doesn't false-positive on a healthy pool.
     // Scenario: healthy 1-disk pool, all present.
@@ -5569,10 +5657,10 @@ mod tests {
     }
 
     /* Intent: pool_missing_devices can run without querying `btrfs filesystem df`.
-     * Why it exists: missing-device detection now reads `pool_state.missing_devids`
-     * (sourced from `BtrfsFilesystemShow` via `probe::probe_pool`); tying the
-     * check to df would make an unrelated parser or command failure hide the
-     * more specific live-pool probe.
+     * Why it exists: missing-device detection now reads live `PoolState`
+     * fields sourced from `probe::probe_pool`; tying the check to df would make
+     * an unrelated parser or command failure hide the more specific live-pool
+     * probe.
      * Scenario: the pool is mounted and healthy, while the df command would fail
      * if this check accidentally requested it.
      */
@@ -5726,6 +5814,163 @@ mod tests {
         assert!(
             !check.message.contains("braid replace --missing-id"),
             "must not render bare replace --missing-id guidance: {}",
+            check.message
+        );
+    }
+
+    // Intent: pool_missing_devices warns when a hot-unplugged mapper has not
+    // been promoted to btrfs MISSING.
+    // Why it exists: a null-underlying member must not produce a false
+    // "no missing devices" result or a replace command that braid rejects.
+    // Scenario: one pool member was hot-unplugged while its LUKS mapper stayed
+    // open with `device: (null)`.
+    #[test]
+    fn pool_missing_devices_warns_hot_unplug_when_null_underlying() {
+        let check = pool_missing_devices_with_cached_pool_state(pool_missing_devices_pool_state(
+            1,
+            vec![],
+            vec![Devid::new(2)],
+        ));
+
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert!(
+            check
+                .message
+                .contains("pool has 1 missing device (devid: 2)"),
+            "expected singular union lead: {}",
+            check.message
+        );
+        assert!(
+            check.message.contains("hot-unplugged"),
+            "expected hot-unplug guidance: {}",
+            check.message
+        );
+        assert!(
+            check.message.contains("braid unlock --allow-degraded"),
+            "expected promote path with degraded unlock: {}",
+            check.message
+        );
+        assert!(
+            check.message.contains(
+                "If the hot-unplugged disk is healthy, re-plug it then run `braid lock` and \
+                 `braid unlock` to close"
+            ),
+            "expected plain unlock recover step: {}",
+            check.message
+        );
+        assert!(
+            !check.message.contains(
+                "If the hot-unplugged disk is healthy, re-plug it then run `braid lock` and \
+                 `braid unlock --allow-degraded` to close"
+            ),
+            "pure hot-unplug recover step must not use degraded unlock: {}",
+            check.message
+        );
+        assert!(
+            !check
+                .message
+                .contains("replace with: `braid replace --old <missing-name>"),
+            "null-underlying-only devices must not get a direct replace command: {}",
+            check.message
+        );
+    }
+
+    // Intent: mixed degraded pools list the union while keeping replacement
+    // cross-checks scoped to btrfs-MISSING devids.
+    // Why it exists: status reports btrfs MISSING and null-underlying devids
+    // together, but only btrfs-MISSING devids are accepted by replace.
+    // Scenario: one member is hot-unplugged and two other members are already
+    // btrfs-authoritative MISSING.
+    #[test]
+    fn pool_missing_devices_warns_mixed_plural_btrfs_missing_and_null_underlying() {
+        let check = pool_missing_devices_with_cached_pool_state(pool_missing_devices_pool_state(
+            3,
+            vec![Devid::new(3), Devid::new(4)],
+            vec![Devid::new(2)],
+        ));
+
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert!(
+            check
+                .message
+                .contains("pool has 3 missing devices (devids: 2, 3, 4)"),
+            "expected plural union lead: {}",
+            check.message
+        );
+        assert!(
+            check
+                .message
+                .contains("Use one of the btrfs-MISSING devids: 3, 4."),
+            "expected btrfs-only cross-check target: {}",
+            check.message
+        );
+        assert!(
+            !check.message.contains("--missing-id 2"),
+            "null-underlying devid must not be offered as a missing-id cross-check: {}",
+            check.message
+        );
+        assert!(
+            check.message.contains("devid 2 is hot-unplugged"),
+            "expected hot-unplug guidance for devid 2: {}",
+            check.message
+        );
+        assert!(
+            check.message.contains(
+                "If the hot-unplugged disk is healthy, re-plug it then run `braid lock` and \
+                 `braid unlock --allow-degraded` to close"
+            ),
+            "mixed recover step must use degraded unlock: {}",
+            check.message
+        );
+    }
+
+    // Intent: mixed pools with one btrfs-MISSING devid name that devid rather
+    // than falling back to "the listed ID" wording.
+    // Why it exists: the lead includes null-underlying devids, so "listed ID"
+    // would imply the hot-unplugged devid is replaceable.
+    // Scenario: devid 2 is null-underlying while devid 3 is btrfs MISSING.
+    #[test]
+    fn pool_missing_devices_warns_mixed_single_btrfs_missing_names_only_its_devid() {
+        let check = pool_missing_devices_with_cached_pool_state(pool_missing_devices_pool_state(
+            2,
+            vec![Devid::new(3)],
+            vec![Devid::new(2)],
+        ));
+
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert!(
+            check
+                .message
+                .contains("pool has 2 missing devices (devids: 2, 3)"),
+            "expected mixed union lead: {}",
+            check.message
+        );
+        assert!(
+            check.message.contains("Use devid 3."),
+            "expected btrfs-only single target: {}",
+            check.message
+        );
+        assert!(
+            !check.message.contains("Use the listed ID."),
+            "mixed single target must not reuse non-mixed wording: {}",
+            check.message
+        );
+        assert!(
+            !check.message.contains("--missing-id 2"),
+            "null-underlying devid must not be offered as a missing-id cross-check: {}",
+            check.message
+        );
+        assert!(
+            check.message.contains("devid 2 is hot-unplugged"),
+            "expected hot-unplug guidance for devid 2: {}",
+            check.message
+        );
+        assert!(
+            check.message.contains(
+                "If the hot-unplugged disk is healthy, re-plug it then run `braid lock` and \
+                 `braid unlock --allow-degraded` to close"
+            ),
+            "mixed recover step must use degraded unlock: {}",
             check.message
         );
     }

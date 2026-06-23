@@ -1871,14 +1871,9 @@ fn resolve_replace_source(
     };
 
     let null_underlying_refusal = |devid: Devid| {
-        ReplaceError::Validation(format!(
-            "devid {devid} is hot-unplugged but btrfs has not yet \
-             promoted it to MISSING (LUKS mapper open, backing device \
-             gone). `braid replace` only operates on btrfs-authoritative \
-             MISSING devids. Confirm the disk is truly gone, then relock \
-             and re-unlock the pool degraded (`braid lock` then `braid \
-             unlock --allow-degraded`) so btrfs promotes devid {devid}, \
-             and retry."
+        ReplaceError::Validation(repair_hint::hot_unplug_not_yet_missing(
+            devid,
+            "braid replace",
         ))
     };
 
