@@ -608,6 +608,11 @@
               braid = linuxCrane.braid;
             }
           );
+          enroll-uuid-mismatch-midprompt = pkgs.testers.nixosTest (
+            import ./tests/cli/enroll-uuid-mismatch-midprompt.nix {
+              braid = linuxCrane.braid;
+            }
+          );
           braid-recover = pkgs.testers.nixosTest (
             import ./tests/cli/braid-recover.nix {
               braid = linuxCrane.braid;

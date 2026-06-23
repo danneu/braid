@@ -854,6 +854,8 @@ mod tests {
         enroll_test_passphrase_fail, enroll_test_passphrase_ok, enroll_with_mountpoint_fail,
         enroll_with_mountpoint_ok, isolated_paths, mock_ok, test_uuid,
     };
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU8, Ordering};
 
     fn disk(name: &str) -> DiskName {
         DiskName::parse(name).expect("test disk name")
@@ -871,6 +873,14 @@ mod tests {
             by_id: enroll_by_id(by_id),
             uuid: test_uuid(500),
         }
+    }
+
+    fn count_luksuuid_for(runner: &MockRunner, target: &str) -> usize {
+        runner
+            .requests()
+            .iter()
+            .filter(|r| matches!(r, CmdRequest::CryptsetupLuksUuid { device } if device == target))
+            .count()
     }
 
     // ---- plan_enroll discovery tests ----
@@ -3629,11 +3639,11 @@ mod tests {
     // Why it exists: decision-024 mandates a UUID re-check at every
     //   mutation boundary. The enroll passphrase prompt is an
     //   operator-controlled window in which a disk can be swapped to a
-    //   foreign LUKS container that shares the pool passphrase; this pins
-    //   the guard's reject arm. No VM test -- an in-window physical swap
-    //   during the passphrase prompt is not deterministically reproducible
-    //   in a NixOS VM (tests/cli/enroll-uuid-mismatch.py covers the
-    //   pre-command discovery case).
+    //   foreign LUKS container that shares the pool passphrase; this unit
+    //   pins the guard's reject arm. tests/cli/enroll-uuid-mismatch-midprompt.py
+    //   covers the post-passphrase swap end-to-end with a cryptsetup PATH
+    //   shim, and tests/cli/enroll-uuid-mismatch.py covers the pre-command
+    //   discovery case.
     // Scenario: the by-id slot now points at a different LUKS volume than
     //   the one discovery captured; the re-probe reads the foreign UUID.
     #[test]
@@ -3678,8 +3688,10 @@ mod tests {
     //   unreadable at probe time), and issues no enrollment mutation.
     // Why it exists: a mid-prompt disappearance is indistinguishable from
     //   a swap in progress, so the re-probe must hard-fail rather than
-    //   proceed -- the fail-closed arm of the decision-024 guard. Same
-    //   no-VM-test rationale as the mismatch sibling.
+    //   proceed -- the fail-closed arm of the decision-024 guard. This unit
+    //   pins that branch; tests/cli/enroll-uuid-mismatch-midprompt.py covers
+    //   the post-passphrase window end-to-end, and tests/cli/enroll-uuid-mismatch.py
+    //   covers the pre-command discovery case.
     // Scenario: the disk was disconnected or reformatted to a non-LUKS
     //   device during the passphrase prompt, so luksUUID exits non-zero.
     #[test]
@@ -3719,11 +3731,10 @@ mod tests {
     //   passphrase prompt that follows is an operator-controlled window.
     //   Without the execute-boundary re-probe (decision-024), a swap in
     //   that window silently lands the keyfile in the wrong container
-    //   while the intended member's slot 1 stays empty. No VM test -- an
-    //   in-window physical swap during the passphrase prompt is not
-    //   deterministically reproducible in a NixOS VM;
-    //   tests/cli/enroll-uuid-mismatch.py covers the pre-command reformat
-    //   (discovery) case.
+    //   while the intended member's slot 1 stays empty.
+    //   tests/cli/enroll-uuid-mismatch-midprompt.py covers this window
+    //   end-to-end; this unit test keeps the in-process guard wiring and
+    //   no-mutation assertions precise.
     // Scenario: 2-disk pool, --generate. disk1's by-id slot still matches
     //   at discovery but is swapped to a foreign LUKS volume before
     //   execute re-probes it.
@@ -3738,21 +3749,27 @@ mod tests {
         let d2 = "/dev/disk/by-id/d2";
         let foreign = "ffffffff-ffff-ffff-ffff-ffffffffffff";
 
-        // Mappers closed => discovery issues exactly one luksUUID per disk,
-        // so the 2nd sequence element below is consumed by the execute
-        // re-probe. A mapper-open disk would pop both at discovery and
-        // silently invert the test -- the mismatch would surface at plan
-        // time rather than at the execute boundary under test.
+        // The phase gate decouples the returned UUID from discovery's probe
+        // count: discovery always sees the pool UUID, then execute sees the
+        // foreign UUID after the phase flip below.
+        let phase = Arc::new(AtomicU8::new(0));
         let (_, d1_match) = enroll_luks_uuid_ok(d1, test_uuid(500).as_str());
         let (_, d1_swapped) = enroll_luks_uuid_ok(d1, foreign);
         let (d2_req, d2_out) = enroll_luks_uuid_ok(d2, test_uuid(501).as_str());
         let runner = MockRunner::default()
-            .with_output_sequence(
-                CmdRequest::CryptsetupLuksUuid {
-                    device: d1.to_owned(),
-                },
-                vec![d1_match, d1_swapped],
-            )
+            .with_handler({
+                let phase = Arc::clone(&phase);
+                move |req| match req {
+                    CmdRequest::CryptsetupLuksUuid { device } if device == d1 => {
+                        if phase.load(Ordering::SeqCst) == 0 {
+                            Some(Ok(d1_match.clone()))
+                        } else {
+                            Some(Ok(d1_swapped.clone()))
+                        }
+                    }
+                    _ => None,
+                }
+            })
             .with_output(d2_req, d2_out)
             .with_luks_dump_text_luks2_for(&[d1, d2])
             .with_mappers_closed(&["braid-disk1", "braid-disk2"]);
@@ -3774,10 +3791,20 @@ mod tests {
 
         let plan =
             plan_enroll(&runner, &fs, &params).expect("discovery must succeed with matching UUIDs");
+        let discovery_d1 = count_luksuuid_for(&runner, d1);
+        phase.store(1, Ordering::SeqCst);
         let err = plan
             .execute(&runner, &params)
             .expect_err("execute re-probe must reject the swapped disk")
             .to_string();
+        let total_d1 = count_luksuuid_for(&runner, d1);
+
+        assert!(discovery_d1 >= 1, "discovery must probe disk1's UUID");
+        assert_eq!(
+            total_d1 - discovery_d1,
+            1,
+            "the execute re-probe must issue exactly one luksUUID for disk1"
+        );
 
         assert!(
             err.contains("LUKS UUID mismatch"),
@@ -3813,10 +3840,9 @@ mod tests {
     //   would pass every other test while silently dropping the decision-024
     //   mutation-boundary guard for the more common existing-keyfile operation
     //   (braid enroll DIR against a USB keyfile already on disk). This pins the
-    //   guard's mode-independence. No VM test -- an in-window physical swap
-    //   during the passphrase prompt is not deterministically reproducible in a
-    //   NixOS VM; tests/cli/enroll-uuid-mismatch.py covers the pre-command
-    //   discovery case (--generate only).
+    //   guard's mode-independence. tests/cli/enroll-uuid-mismatch-midprompt.py
+    //   covers the post-passphrase --generate path end-to-end, while this unit
+    //   test pins the existing-keyfile path.
     // Scenario: 2-disk pool, existing braid.key on the USB. disk1's by-id slot
     //   still matches at discovery but is swapped to a foreign LUKS volume
     //   before execute re-probes it.
@@ -3831,20 +3857,27 @@ mod tests {
         let d2 = "/dev/disk/by-id/d2";
         let foreign = "ffffffff-ffff-ffff-ffff-ffffffffffff";
 
-        // Mappers closed => discovery issues exactly one luksUUID per disk, so
-        // the 2nd sequence element below is consumed by the execute re-probe.
-        // A mapper-open disk would pop both at discovery and surface the
-        // mismatch at plan time rather than at the execute boundary under test.
+        // The phase gate decouples the returned UUID from discovery's probe
+        // count: discovery always sees the pool UUID, then execute sees the
+        // foreign UUID after the phase flip below.
+        let phase = Arc::new(AtomicU8::new(0));
         let (_, d1_match) = enroll_luks_uuid_ok(d1, test_uuid(500).as_str());
         let (_, d1_swapped) = enroll_luks_uuid_ok(d1, foreign);
         let (d2_req, d2_out) = enroll_luks_uuid_ok(d2, test_uuid(501).as_str());
         let runner = MockRunner::default()
-            .with_output_sequence(
-                CmdRequest::CryptsetupLuksUuid {
-                    device: d1.to_owned(),
-                },
-                vec![d1_match, d1_swapped],
-            )
+            .with_handler({
+                let phase = Arc::clone(&phase);
+                move |req| match req {
+                    CmdRequest::CryptsetupLuksUuid { device } if device == d1 => {
+                        if phase.load(Ordering::SeqCst) == 0 {
+                            Some(Ok(d1_match.clone()))
+                        } else {
+                            Some(Ok(d1_swapped.clone()))
+                        }
+                    }
+                    _ => None,
+                }
+            })
             .with_output(d2_req, d2_out)
             .with_luks_dump_text_luks2_for(&[d1, d2])
             .with_mappers_closed(&["braid-disk1", "braid-disk2"]);
@@ -3867,10 +3900,20 @@ mod tests {
 
         let plan =
             plan_enroll(&runner, &fs, &params).expect("discovery must succeed with matching UUIDs");
+        let discovery_d1 = count_luksuuid_for(&runner, d1);
+        phase.store(1, Ordering::SeqCst);
         let err = plan
             .execute(&runner, &params)
             .expect_err("execute re-probe must reject the swapped disk")
             .to_string();
+        let total_d1 = count_luksuuid_for(&runner, d1);
+
+        assert!(discovery_d1 >= 1, "discovery must probe disk1's UUID");
+        assert_eq!(
+            total_d1 - discovery_d1,
+            1,
+            "the execute re-probe must issue exactly one luksUUID for disk1"
+        );
 
         assert!(
             err.contains("LUKS UUID mismatch"),
@@ -3918,9 +3961,9 @@ mod tests {
     //   (UNCONSUMED in correct code, since the re-probe rejects first) so that
     //   under (A)/(B) plan_enrollment fully classifies the disk AlreadyEnrolled
     //   and the regression surfaces as a clean failed assertion here, not a
-    //   MissingMock error. No VM test -- an in-window physical swap during the
-    //   passphrase prompt is not deterministically reproducible in a NixOS VM;
-    //   tests/cli/enroll-uuid-mismatch.py covers the pre-command discovery case.
+    //   MissingMock error. tests/cli/enroll-uuid-mismatch-midprompt.py covers
+    //   the post-passphrase swap end-to-end; this unit test pins that
+    //   already-enrolled candidates are still re-probed before keyfile probes.
     // Scenario: 1-disk pool, existing braid.key on the USB, idempotent re-run.
     //   disk1's by-id slot matches at discovery but is swapped to a foreign
     //   LUKS volume (whose slot 1 already holds the keyfile and shares the
@@ -3936,8 +3979,10 @@ mod tests {
         let d1 = "/dev/disk/by-id/d1";
         let foreign = "ffffffff-ffff-ffff-ffff-ffffffffffff";
 
-        // Mapper closed => discovery issues exactly one luksUUID for d1, so the
-        // 2nd sequence element is consumed by the execute-time re-probe.
+        // The phase gate decouples the returned UUID from discovery's probe
+        // count: discovery always sees the pool UUID, then execute sees the
+        // foreign UUID after the phase flip below.
+        let phase = Arc::new(AtomicU8::new(0));
         let (_, d1_match) = enroll_luks_uuid_ok(d1, test_uuid(500).as_str());
         let (_, d1_swapped) = enroll_luks_uuid_ok(d1, foreign);
 
@@ -3949,12 +3994,19 @@ mod tests {
         let (tkf_req, tkf_out) = enroll_test_keyfile_ok(d1, &kf_str);
 
         let runner = MockRunner::default()
-            .with_output_sequence(
-                CmdRequest::CryptsetupLuksUuid {
-                    device: d1.to_owned(),
-                },
-                vec![d1_match, d1_swapped],
-            )
+            .with_handler({
+                let phase = Arc::clone(&phase);
+                move |req| match req {
+                    CmdRequest::CryptsetupLuksUuid { device } if device == d1 => {
+                        if phase.load(Ordering::SeqCst) == 0 {
+                            Some(Ok(d1_match.clone()))
+                        } else {
+                            Some(Ok(d1_swapped.clone()))
+                        }
+                    }
+                    _ => None,
+                }
+            })
             .with_luks_dump_text_luks2(d1)
             .with_mappers_closed(&["braid-disk1"])
             .with_output_stdin(tp_req, tp_stdin, tp_out)
@@ -3977,10 +4029,20 @@ mod tests {
 
         let plan = plan_enroll(&runner, &fs, &params)
             .expect("discovery must succeed with the matching UUID");
+        let discovery_d1 = count_luksuuid_for(&runner, d1);
+        phase.store(1, Ordering::SeqCst);
         let err = plan
             .execute(&runner, &params)
             .expect_err("execute re-probe must reject the swap even on an already-enrolled disk")
             .to_string();
+        let total_d1 = count_luksuuid_for(&runner, d1);
+
+        assert!(discovery_d1 >= 1, "discovery must probe disk1's UUID");
+        assert_eq!(
+            total_d1 - discovery_d1,
+            1,
+            "the execute re-probe must issue exactly one luksUUID for disk1"
+        );
 
         assert!(
             err.contains("LUKS UUID mismatch"),
