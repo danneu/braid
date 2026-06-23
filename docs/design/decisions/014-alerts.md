@@ -30,7 +30,7 @@ A single shared computation produces an `AlertState` consumed by all surfaces �
 - `ComputationError { detail }` — probe or parse failed before a structured cause could be determined
 - `EnospcRisk { margin, count_below, device_count }` — pool is one disk-loss away from RAID1 chunk-pair ENOSPC (cannot allocate the chunk pairs to restore redundancy). `margin` is the signed risk magnitude (negative = at-risk depth); the cause deliberately carries no pool identity, so the public `status --json` cause stays a clean risk descriptor and keying lives in `enospc-ack.json` (see [Severity tiers and the ENOSPC baseline](#severity-tiers-and-the-enospc-baseline))
 
-The status banner is cause-neutral ("disk health issue detected"); cause details appear below it and in JSON output.
+Critical causes render the cause-neutral `ALERT` banner ("ALERT -- disk health issue detected. Run 'braid ack' to acknowledge and silence."), while a Warning-only `EnospcRisk` state renders the lower-urgency `NOTICE` capacity banner ("NOTICE -- capacity risk detected. Run 'braid ack' to acknowledge."); cause details still appear below the banner and in JSON output. See [Severity tiers and the ENOSPC baseline](#severity-tiers-and-the-enospc-baseline).
 
 ### Two detection sources, one alert model
 

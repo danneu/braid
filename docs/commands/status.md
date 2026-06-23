@@ -77,7 +77,8 @@ when `btrfs filesystem df` failed.
 
 ### Alert banner
 
-When a health alert is active, a banner appears at the top of the output:
+When a health alert is active, a banner appears at the top of the output. Critical
+causes render the disk-health alert banner:
 
 ```
 ALERT -- disk health issue detected. Run 'braid ack' to acknowledge and silence.
@@ -86,7 +87,19 @@ ALERT -- disk health issue detected. Run 'braid ack' to acknowledge and silence.
   - scheduled scrub failed -- check journalctl -u braid-scrub.service
 ```
 
-Alert causes include btrfs device errors, missing devices, SMART health warnings, and a failed scheduled scrub (`--json` cause value `{"type":"scrub_failed"}`). Alerts are latched -- they persist until acknowledged with `braid ack`, even if the underlying condition resolves.
+A Warning-only ENOSPC-risk state renders the capacity-risk notice instead:
+
+```
+NOTICE -- capacity risk detected. Run 'braid ack' to acknowledge.
+  - ENOSPC risk: pool is one disk-loss from being unable to restore RAID1 redundancy
+```
+
+The banner reflects the highest cause severity: an ENOSPC-risk-only state shows
+`NOTICE`, while any Critical cause present -- even alongside ENOSPC risk -- keeps
+the `ALERT` banner. Alert causes include btrfs device errors, missing devices,
+SMART health warnings, a failed scheduled scrub, and ENOSPC capacity risk. Alerts
+are latched -- they persist until acknowledged with `braid ack`, even if the
+underlying condition resolves.
 
 ### Allocation table
 
@@ -516,8 +529,16 @@ is lost until `pool.json` is rebuilt.
   - `{ "type": "missing_device", "devid": <number> }` -- a device counted
     as missing.
   - `{ "type": "smartd_alert" }` -- a SMART health warning from smartd.
+  - `{ "type": "scrub_failed" }` -- the scheduled maintenance scrub
+    (`braid-scrub.service`) failed to run or complete. No payload fields.
   - `{ "type": "computation_error", "detail": "<string>" }` -- braid could
     not compute alert state; `detail` explains.
+  - `{ "type": "enospc_risk", "margin": <number>, "count_below": <number>,
+    "device_count": <number> }` -- the pool is one disk-loss away from RAID1
+    chunk-pair ENOSPC. `margin` is the signed risk magnitude (negative = at-risk
+    depth); `count_below` of `device_count` devices sit below the per-device
+    unallocated threshold. This is the only Warning-tier (non-beeping) cause; the
+    others are Critical.
 
 > **The per-disk `smart` field does not feed the alert latch.** The
 > `smartd_alert` cause is driven by the **smartd** daemon's flag

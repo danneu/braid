@@ -2569,4 +2569,71 @@ mod tests {
         let reloaded = load_alert_latch(&paths).unwrap();
         assert_eq!(reloaded, Some(state));
     }
+
+    // Intent: docs/commands/status.md's alert_causes schema lists every
+    //   serialized AlertCause discriminator emitted by status --json.
+    // Why it exists: the command reference is a hand-maintained mirror of the
+    //   public wire contract, and ScrubFailed plus EnospcRisk previously drifted
+    //   in code without landing in that schema reference.
+    // Scenario: adding or renaming an AlertCause variant must force the
+    //   documentation list to be updated in the same change.
+    #[test]
+    fn status_docs_list_every_alert_cause_discriminator() {
+        let status_docs = include_str!("../../docs/commands/status.md");
+        let causes = [
+            AlertCause::BtrfsDeviceErrors {
+                devid: Devid::new(1),
+            },
+            AlertCause::MissingDevice {
+                devid: Devid::new(2),
+            },
+            AlertCause::SmartdAlert,
+            AlertCause::ScrubFailed,
+            AlertCause::ComputationError {
+                detail: "probe failed".to_string(),
+            },
+            AlertCause::EnospcRisk {
+                margin: -1,
+                count_below: 1,
+                device_count: 2,
+            },
+        ];
+
+        // On failure, update BOTH this match and the docs/commands/status.md
+        // `alert_causes` cause list.
+        for cause in causes {
+            let serialized = match cause {
+                AlertCause::BtrfsDeviceErrors { devid } => {
+                    serde_json::to_value(AlertCause::BtrfsDeviceErrors { devid })
+                }
+                AlertCause::MissingDevice { devid } => {
+                    serde_json::to_value(AlertCause::MissingDevice { devid })
+                }
+                AlertCause::SmartdAlert => serde_json::to_value(AlertCause::SmartdAlert),
+                AlertCause::ScrubFailed => serde_json::to_value(AlertCause::ScrubFailed),
+                AlertCause::ComputationError { detail } => {
+                    serde_json::to_value(AlertCause::ComputationError { detail })
+                }
+                AlertCause::EnospcRisk {
+                    margin,
+                    count_below,
+                    device_count,
+                } => serde_json::to_value(AlertCause::EnospcRisk {
+                    margin,
+                    count_below,
+                    device_count,
+                }),
+            }
+            .expect("AlertCause serialization must succeed");
+            let cause_type = serialized
+                .get("type")
+                .and_then(|value| value.as_str())
+                .expect("AlertCause serialization must include a type discriminator");
+
+            assert!(
+                status_docs.contains(cause_type),
+                "docs/commands/status.md alert_causes list must document {cause_type}"
+            );
+        }
+    }
 }
