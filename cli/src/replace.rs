@@ -90,13 +90,16 @@ pub enum ReplaceError {
         expected: LuksUuid,
         observed: String,
     },
+    /// Carries the conflicting mapper handle so remediation can close the exact
+    /// open device that blocked the replace.
     #[error(
         "replace target '{by_id}' open mapper backing mismatch: mapper is backed by \
          '{found_path}', expected '{expected_path}' -- close the conflicting mapper \
-         with 'sudo cryptsetup close braid-<name>' and re-run."
+         with 'sudo cryptsetup close {mapper}' and re-run."
     )]
     NewTargetMapperBackingMismatch {
         by_id: ByIdPath,
+        mapper: MapperName,
         expected_path: String,
         found_path: String,
     },
@@ -1051,6 +1054,7 @@ fn verify_existing_luks_open_mapper_target<R: CommandRunner>(
             ..
         } => ReplaceError::NewTargetMapperBackingMismatch {
             by_id: new_by_id.clone(),
+            mapper: new_mapper.clone(),
             expected_path,
             found_path,
         },
@@ -8167,13 +8171,20 @@ mod tests {
         )
         .unwrap_err();
 
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("sudo cryptsetup close braid-disk3"),
+            "remediation must name the resolved mapper, got: {rendered}"
+        );
         match err {
             ReplaceError::NewTargetMapperBackingMismatch {
                 by_id: err_by_id,
+                mapper,
                 expected_path,
                 found_path,
             } => {
                 assert_eq!(err_by_id, by_id);
+                assert_eq!(mapper, MapperName::from_basename("braid-disk3".into()));
                 assert_eq!(expected_path, "/dev/vdb");
                 assert_eq!(found_path, "/dev/vdz");
             }
