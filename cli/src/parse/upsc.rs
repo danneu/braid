@@ -281,7 +281,7 @@ mod tests {
         // the whole parse degraded to empty.
         assert_eq!(out.battery.charge_pct, Some(55));
         // The empty status line routes to the typed arm, not `extra`.
-        assert!(out.extra.get("ups.status").is_none());
+        assert!(!out.extra.contains_key("ups.status"));
     }
 
     // Intent: parse_upsc populates the full typed model when all expected

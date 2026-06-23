@@ -5619,14 +5619,13 @@ mod tests {
             if !self.omit_new_mapper_from_probe {
                 mappers.extend(added.iter().cloned());
             }
-            if let Some(vanished) = &self.vanished_after_later_add {
-                if added
+            if let Some(vanished) = &self.vanished_after_later_add
+                && added
                     .last()
                     .map(|mapper| mapper != vanished)
                     .unwrap_or(false)
-                {
-                    mappers.retain(|mapper| mapper != vanished);
-                }
+            {
+                mappers.retain(|mapper| mapper != vanished);
             }
             let mut out = format!(
                 "Label: none  uuid: {POOL_FSID}\n\
