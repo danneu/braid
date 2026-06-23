@@ -44,5 +44,6 @@
       };
     };
 
-  testScript = builtins.readFile ./replace-new-already-luks.py;
+  testScript =
+    builtins.readFile ./member_helpers.py + "\n\n" + builtins.readFile ./replace-new-already-luks.py;
 }

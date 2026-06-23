@@ -44,5 +44,6 @@
       };
     };
 
-  testScript = builtins.readFile ./recover-replace-completed.py;
+  testScript =
+    builtins.readFile ./member_helpers.py + "\n\n" + builtins.readFile ./recover-replace-completed.py;
 }

@@ -42,5 +42,6 @@
       };
     };
 
-  testScript = builtins.readFile ./replace-preserves-devid.py;
+  testScript =
+    builtins.readFile ./member_helpers.py + "\n\n" + builtins.readFile ./replace-preserves-devid.py;
 }

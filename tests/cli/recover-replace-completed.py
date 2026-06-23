@@ -4,14 +4,16 @@
 # replace completed but the system crashed before pool.json was updated.
 # The live pool has the new disk (disk4); the stale pool.json still references
 # the old disk (disk2). Recovery must discover disk4 in the live pool and
-# resolve its by_id from the journal's target_membership union.
+# resolve its by_id from the journal's target_membership union, keyed by the
+# new disk's live LUKS UUID.
 #
 # Why it exists: This is the most dangerous replace crash state. The pool's
 # actual topology diverges from what pool.json says. Recovery must probe the
 # live btrfs filesystem, find disk4, and look up its by_id in the journal's
 # target_membership — not the stale pool.json. A bug here (e.g. wrong by_id,
 # including both old and new, or neither) would corrupt pool.json and break
-# subsequent unlock/lock cycles.
+# subsequent unlock/lock cycles. A wrong object key would also violate the
+# canonical LUKS UUID identity used to find members later.
 #
 # Scenario: 3-disk RAID1 pool. Operator runs `braid replace disk2 disk4`.
 # The btrfs replace operation completes (pool now has disk1+disk3+disk4), but
@@ -43,13 +45,6 @@ def replace_cmd(old, new):
         f"braid replace --luks-format-arg=--pbkdf --luks-format-arg=pbkdf2 --luks-format-arg=--pbkdf-force-iterations --luks-format-arg=1000 --old {old} --new {new}=/dev/disk/by-id/virtio-{new} "
         f"--passphrase-stdin --yes"
     )
-
-
-def member_entry(pool, name):
-    for uuid, member in pool["disks"].items():
-        if member["name"] == name:
-            return uuid, member
-    raise AssertionError(f"{name} missing from pool.json: {pool}")
 
 
 def members_except(pool, *names):
@@ -193,6 +188,10 @@ with subtest("braid recover rebuilds pool.json from live pool"):
         assert actual_by_id == expected_by_id, (
             f"{name} by_id mismatch: expected {expected_by_id}, got {actual_by_id}"
         )
+    assert_member_keyed_by_uuid(recovered, "disk4", new_uuid)
+    assert old_uuid not in recovered["disks"], (
+        f"old disk2 UUID key {old_uuid} still present: {recovered}"
+    )
 
     # Must NOT contain disk2 (replaced and no longer in btrfs)
     assert all(member["name"] != "disk2" for member in recovered["disks"].values()), (

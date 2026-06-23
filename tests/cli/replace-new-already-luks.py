@@ -5,14 +5,14 @@
 #   - When the new disk is already LUKS-formatted (but mapper closed, not in
 #     pool), `braid replace` opens the existing LUKS container and proceeds
 #     without re-formatting. The replace completes successfully with data
-#     intact.
+#     intact, and pool.json is keyed by the adopted disk's live LUKS UUID.
 #
 # Why it exists:
 # - What risk/regression this protects against.
 #   - Crash recovery: if a previous `braid replace` crashed after LUKS format
 #     but before pool add, retrying should not re-format (destroying the LUKS
 #     header). This exercises the `ConfigDiskState::PresentLuks { mapper_open:
-#     false }` → `ensure_luks_open` path.
+#     false }` -> `ensure_luks_open` path and guards the adopted UUID identity.
 #
 # Scenario:
 # - Real-world situation this models.
@@ -20,17 +20,6 @@
 #     the new disk was LUKS-formatted. Operator retries the replace command.
 
 import json
-
-
-def member_names(pool):
-    return {member["name"] for member in pool["disks"].values()}
-
-
-def member(pool, name):
-    for entry in pool["disks"].values():
-        if entry["name"] == name:
-            return entry
-    raise AssertionError(f"{name} missing from pool.json: {pool}")
 
 start_all()
 machine.wait_for_unit("multi-user.target")
@@ -68,6 +57,9 @@ with subtest("Setup: build 3-drive pool"):
     machine.succeed(add_cmd("disk1"))
     machine.succeed(add_cmd("disk2"))
     machine.succeed(add_cmd("disk3"))
+    disk2_uuid = machine.succeed(
+        "cryptsetup luksUUID /dev/disk/by-id/virtio-disk2"
+    ).strip()
 
     fi_show = machine.succeed("btrfs fi show /mnt/storage")
     for name in ["braid-disk1", "braid-disk2", "braid-disk3"]:
@@ -155,5 +147,9 @@ with subtest("Pool membership updated"):
     pm = read_pool()
     assert "disk2" not in member_names(pm), f"disk2 still in pool: {pm}"
     assert "disk4" in member_names(pm), f"disk4 missing from pool: {pm}"
+    assert_member_keyed_by_uuid(pm, "disk4", luks_uuid_after)
+    assert disk2_uuid not in pm["disks"], (
+        f"old disk2 UUID key {disk2_uuid} still present: {pm}"
+    )
 
 machine.shutdown()

@@ -5,13 +5,15 @@
 #   - After `braid replace --old <live> --new <larger>`, the new device
 #     inherits the old device's btrfs devid. This proves `btrfs replace start`
 #     was used (not add+balance+remove, which assigns a new devid). Also
-#     verifies that the new larger disk reports its full capacity.
+#     verifies that the new larger disk reports its full capacity and that
+#     pool.json is keyed by the new disk's live LUKS UUID.
 #
 # Why it exists:
 # - What risk/regression this protects against.
 #   - If the code regresses to add+balance+remove, the devid changes (e.g.,
 #     from 2 to 3). This test catches that regression. It also catches any
-#     failure to resize the new device to its full capacity.
+#     failure to resize the new device to its full capacity, or to persist the
+#     replacement under the canonical LUKS UUID identity.
 #
 # Scenario:
 # - Real-world situation this models.
@@ -19,17 +21,6 @@
 #     The new drive should keep the same devid and use its full capacity.
 
 import json
-
-
-def member_names(pool):
-    return {member["name"] for member in pool["disks"].values()}
-
-
-def member(pool, name):
-    for entry in pool["disks"].values():
-        if entry["name"] == name:
-            return entry
-    raise AssertionError(f"{name} missing from pool.json: {pool}")
 import re
 
 start_all()
@@ -114,6 +105,11 @@ with subtest("Record disk2 devid"):
     disk2_devid = get_devid("braid-disk2")
     print(f"disk2 devid before replace: {disk2_devid}")
 
+    disk2_uuid = machine.succeed(
+        "cryptsetup luksUUID /dev/disk/by-id/virtio-disk2"
+    ).strip()
+    print(f"disk2 LUKS UUID before replace: {disk2_uuid}")
+
     old_size = get_device_size_mib("braid-disk2")
     print(f"disk2 size before replace: {old_size:.1f} MiB")
 
@@ -183,5 +179,12 @@ with subtest("Pool membership updated"):
     assert "disk2" not in member_names(pm), f"disk2 still in pool: {pm}"
     assert "disk3" in member_names(pm), f"disk3 missing from pool: {pm}"
     assert "disk1" in member_names(pm), f"disk1 missing from pool: {pm}"
+    disk3_uuid = machine.succeed(
+        "cryptsetup luksUUID /dev/disk/by-id/virtio-disk3"
+    ).strip()
+    assert_member_keyed_by_uuid(pm, "disk3", disk3_uuid)
+    assert disk2_uuid not in pm["disks"], (
+        f"old disk2 UUID key {disk2_uuid} still present: {pm}"
+    )
 
 machine.shutdown()
