@@ -4,13 +4,13 @@ use crate::credential_verify::{
     Credential, CredentialVerifyError, CredentialVerifyTarget, verify_credential_for_targets,
 };
 use crate::luks::{self, BackingPathResolver, LuksError, OpenOutcome};
-use crate::mapper_close::{CloseMapperError, close_mapper_with_retry};
+use crate::mapper_close::{CloseMapperError, TrackedMapper, close_mapper_with_retry};
 use crate::membership::PoolMembership;
 use crate::preview::{self, NoteLevel, PerDiskStyle, PreviewNote};
 use crate::probe::{self, Filesystem, ProbeError};
 use crate::progress::Sleeper;
 use crate::status_tag::{StatusTag, color_enabled_for_stderr, emit_status, status_line};
-use crate::types::{ByIdPath, ConfigDiskState, DiskName, MapperName, MountPoint};
+use crate::types::{ByIdPath, ConfigDiskState, DiskName, MountPoint};
 use std::path::Path;
 
 const DEGRADED_MOUNT_WARNING: &str =
@@ -32,10 +32,15 @@ pub enum MountError {
     DegradedRefused(String),
 }
 
+/// Failure returned after unlock-and-mount has opened zero or more mappers.
+/// The opened set is restricted to mappers owned by this invocation so callers
+/// can fail closed without touching operator-owned mappers.
 #[derive(Debug)]
 pub struct UnlockAndMountFailure {
+    /// Primary error from credential verification, LUKS open, scan, mkdir, or mount.
     pub error: MountError,
-    pub opened_mappers: Vec<MapperName>,
+    /// Mappers this invocation opened, paired with the names used for cleanup rows.
+    pub(crate) opened_mappers: Vec<TrackedMapper>,
 }
 
 /// Why a membership disk is missing from the pool at unlock time.
@@ -483,7 +488,7 @@ fn open_disks_with_credential<R: CommandRunner>(
     backing_path_resolver: &dyn BackingPathResolver,
     credential: Credential<'_>,
     color_enabled: bool,
-    opened: &mut Vec<MapperName>,
+    opened: &mut Vec<TrackedMapper>,
 ) -> Result<(), MountError> {
     let noun = credential_noun(credential);
     let targets = credential_verify_targets(to_unlock);
@@ -542,7 +547,10 @@ fn open_disks_with_credential<R: CommandRunner>(
             }
         };
         match outcome {
-            Ok(OpenOutcome::Opened) => opened.push(mapper_name(name)),
+            Ok(OpenOutcome::Opened) => opened.push(TrackedMapper {
+                name: name.clone(),
+                mapper: mapper_name(name),
+            }),
             Ok(OpenOutcome::AlreadyOwned) => {}
             Err(e) => {
                 // Re-probe at failure time -- see fn doc.
@@ -673,11 +681,14 @@ pub fn execute_unlock_and_mount<R: CommandRunner, F: Filesystem + ?Sized>(
     })
 }
 
+/// Close mappers opened by this mount command after a post-open failure.
+/// Cleanup rows render from the carried operator `DiskName`; the close target
+/// remains the observed mapper handle opened by this invocation.
 pub(crate) fn close_opened_mappers<R, S, F>(
     runner: &R,
     sleeper: &S,
     fs: &F,
-    opened: &[MapperName],
+    opened: &[TrackedMapper],
     color_enabled: bool,
 ) -> Result<(), CloseMapperError>
 where
@@ -691,7 +702,7 @@ where
 
     let forget_devs: Vec<String> = opened
         .iter()
-        .map(|mapper| mapper.dev_path())
+        .map(|tracked| tracked.mapper.dev_path())
         .filter(|path| fs.exists(path))
         .collect();
     if !forget_devs.is_empty() {
@@ -722,29 +733,26 @@ where
     }
 
     let mut first_error = None;
-    for mapper in opened {
-        let label = mapper
-            .as_str()
-            .strip_prefix("braid-")
-            .unwrap_or(mapper.as_str());
+    for tracked in opened {
+        let name = &tracked.name;
         emit_status(&status_line(
             StatusTag::Wait,
             color_enabled,
-            &format!("disk {label}: locking..."),
+            &format!("disk {name}: locking..."),
         ));
-        match close_mapper_with_retry(runner, sleeper, mapper, color_enabled) {
+        match close_mapper_with_retry(runner, sleeper, &tracked.mapper, color_enabled) {
             Ok(()) => {
                 emit_status(&status_line(
                     StatusTag::Ok,
                     color_enabled,
-                    &format!("disk {label}: locked"),
+                    &format!("disk {name}: locked"),
                 ));
             }
             Err(e) => {
                 emit_status(&status_line(
                     StatusTag::Fail,
                     color_enabled,
-                    &format!("disk {label}: {e}"),
+                    &format!("disk {name}: {e}"),
                 ));
                 if first_error.is_none() {
                     first_error = Some(e);
@@ -853,11 +861,18 @@ mod tests {
         luks_uuid_ok, mount_fs, ok_raw, open_and_mount_for_test, test_config, test_passphrase,
         test_passphrase_fail, three_disk_membership, two_disk_membership,
     };
-    use crate::types::{ByIdPath, MountPoint};
+    use crate::types::{ByIdPath, MapperName, MountPoint};
     use zeroize::Zeroizing;
 
     fn disk(name: &str) -> DiskName {
         DiskName::parse(name).expect("test disk name")
+    }
+
+    fn tracked_mapper(name: &str, mapper: &str) -> TrackedMapper {
+        TrackedMapper {
+            name: disk(name),
+            mapper: MapperName::from_basename(mapper.to_owned()),
+        }
     }
 
     /// Intent: `execute_unlock_and_mount` must reject an empty `to_unlock`
@@ -2661,8 +2676,8 @@ pool already mounted at /mnt/storage
         assert_eq!(
             failure.opened_mappers,
             vec![
-                MapperName::from_basename("braid-disk1".into()),
-                MapperName::from_basename("braid-disk2".into()),
+                tracked_mapper("disk1", "braid-disk1"),
+                tracked_mapper("disk2", "braid-disk2"),
             ]
         );
 
@@ -2724,8 +2739,8 @@ pool already mounted at /mnt/storage
         assert_eq!(
             failure.opened_mappers,
             vec![
-                MapperName::from_basename("braid-disk1".into()),
-                MapperName::from_basename("braid-disk2".into()),
+                tracked_mapper("disk1", "braid-disk1"),
+                tracked_mapper("disk2", "braid-disk2"),
             ]
         );
     }
@@ -2811,7 +2826,7 @@ pool already mounted at /mnt/storage
         .expect_err("scan should fail");
         assert_eq!(
             failure.opened_mappers,
-            vec![MapperName::from_basename("braid-disk2".into())],
+            vec![tracked_mapper("disk2", "braid-disk2")],
             "unexpected failure: {}",
             failure.error
         );
@@ -2877,7 +2892,7 @@ pool already mounted at /mnt/storage
         );
         assert_eq!(
             failure.opened_mappers,
-            vec![MapperName::from_basename("braid-disk1".into())]
+            vec![tracked_mapper("disk1", "braid-disk1")]
         );
 
         close_opened_mappers(&runner, &NoopSleeper, &fs, &failure.opened_mappers, false).unwrap();
@@ -2892,8 +2907,8 @@ pool already mounted at /mnt/storage
     fn cleanup_busy_close_attempts_later_mappers_and_reports_guidance() {
         let fs = direct_two_disk_fs_with_mappers();
         let opened = vec![
-            MapperName::from_basename("braid-disk1".into()),
-            MapperName::from_basename("braid-disk2".into()),
+            tracked_mapper("disk1", "braid-disk1"),
+            tracked_mapper("disk2", "braid-disk2"),
         ];
         let runner = MockRunner::default()
             .with_output(
@@ -2936,6 +2951,64 @@ pool already mounted at /mnt/storage
                 |r| matches!(r, CmdRequest::CryptsetupClose { mapper } if mapper.as_str() == "braid-disk2")
             ),
             "cleanup must still attempt disk2"
+        );
+    }
+
+    // Intent: cleanup rows for mount-owned mappers render the carried
+    // operator name, not the mapper basename.
+    // Why it exists: ADR 024 forbids deriving user-facing disk rows from
+    // mapper names, even when cleanup must close an observed drifted mapper.
+    // Scenario: cleanup owns `disk1` but the runtime mapper handle is
+    // `braid-WRONG`; the row names disk1 while forget and close target WRONG.
+    #[test]
+    fn cleanup_row_uses_disk_name_under_mapper_drift() {
+        let fs = mount_fs(&["/dev/mapper/braid-WRONG"]);
+        let opened = vec![tracked_mapper("disk1", "braid-WRONG")];
+        let wrong_mapper = MapperName::from_basename("braid-WRONG".into());
+        let wrong_dev = "/dev/mapper/braid-WRONG".to_owned();
+        let expected_forget = vec![wrong_dev.clone()];
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::BtrfsDeviceScanForget {
+                    devices: vec![wrong_dev.clone()],
+                },
+                ok_raw("btrfs device scan --forget"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: wrong_mapper.clone(),
+                },
+                ok_raw("cryptsetup close"),
+            );
+
+        let captured = crate::status_tag::testing::capture_with_color(false, || {
+            close_opened_mappers(&runner, &NoopSleeper, &fs, &opened, false).unwrap();
+        });
+
+        assert!(
+            captured.contains("[wait] disk disk1: locking..."),
+            "missing wait row from carried disk name: {captured:?}"
+        );
+        assert!(
+            captured.contains("[ok]   disk disk1: locked"),
+            "missing ok row from carried disk name: {captured:?}"
+        );
+        assert!(
+            !captured.contains("WRONG"),
+            "cleanup disk rows must not leak mapper basename: {captured:?}"
+        );
+        let requests = runner.requests();
+        assert!(
+            requests.iter().any(
+                |request| matches!(request, CmdRequest::BtrfsDeviceScanForget { devices } if devices == &expected_forget)
+            ),
+            "forget must target the observed mapper path"
+        );
+        assert!(
+            requests.iter().any(
+                |request| matches!(request, CmdRequest::CryptsetupClose { mapper } if mapper == &wrong_mapper)
+            ),
+            "close must target the observed mapper"
         );
     }
 
@@ -3137,8 +3210,8 @@ pool already mounted at /mnt/storage
         assert_eq!(
             failure.opened_mappers,
             vec![
-                MapperName::from_basename("braid-disk1".into()),
-                MapperName::from_basename("braid-disk2".into()),
+                tracked_mapper("disk1", "braid-disk1"),
+                tracked_mapper("disk2", "braid-disk2"),
             ]
         );
 
@@ -3284,8 +3357,8 @@ pool already mounted at /mnt/storage
         assert_eq!(
             failure.opened_mappers,
             vec![
-                MapperName::from_basename("braid-disk1".into()),
-                MapperName::from_basename("braid-disk2".into()),
+                tracked_mapper("disk1", "braid-disk1"),
+                tracked_mapper("disk2", "braid-disk2"),
             ],
             "both opened mappers must be cleanup-owned when mkdir fails after opens"
         );
@@ -3316,8 +3389,8 @@ pool already mounted at /mnt/storage
     fn cleanup_forget_failure_warns_and_still_closes_all_mappers() {
         let fs = direct_two_disk_fs_with_mappers();
         let opened = vec![
-            MapperName::from_basename("braid-disk1".into()),
-            MapperName::from_basename("braid-disk2".into()),
+            tracked_mapper("disk1", "braid-disk1"),
+            tracked_mapper("disk2", "braid-disk2"),
         ];
         let runner = MockRunner::default()
             .with_output(

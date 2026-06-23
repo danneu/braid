@@ -123,11 +123,12 @@ not the typed chokepoint, so the regression test (not the compiler) is their gua
   genuinely-identical parts (`probe_observed_mapper_uuid`, `warn_close_skipped_inactive`)
   are already shared in `cli/src/probe_mapper_uuid.rs`. Leave the per-command policy
   inlined and commented where it is.
-- **`add.rs` and `mount.rs` rollback paths.** Both use the same strip idiom but call
-  `close_mapper_with_retry` directly (not `close_mapper_best_effort`) to roll back
-  mappers they opened *this same run* via `mapper_name(&name)`. There is no
-  plan/execute drift window, so the basename equals the freshest name available and no
-  journaled `DiskName` is in scope. Not the ADR 024 violation; left unchanged.
+- **Superseded follow-up: `add.rs` and `mount.rs` rollback paths.** This plan left
+  both paths out on the premise that no attested `DiskName` was in scope and the
+  mapper basename equaled the freshest available name. Follow-up work found that both
+  sites already have a typed `DiskName` at the open site, so the label-provenance
+  footgun applies identically: `add` landed in commit `324fee31`, and `mount` is
+  covered by `plans/impl/2026-06-23-mount-cleanup-disk-name.md`.
 - **`config::name_from_mapper`** stays -- it is the sanctioned display-only mapper
   parser for diagnostics. This refactor just stops the close sites from reinventing it
   inline. (If the refactor orphans it, that is a separate cleanup, not this change.)

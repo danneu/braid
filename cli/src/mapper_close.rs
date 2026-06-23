@@ -7,6 +7,16 @@ use std::time::Duration;
 pub(crate) const CLOSE_RETRY_ATTEMPTS: u32 = 3;
 pub(crate) const CLOSE_RETRY_DELAY: Duration = Duration::from_millis(500);
 
+/// Pairs the operator label for cleanup rows with the runtime mapper handle
+/// this command actually opened and must close.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TrackedMapper {
+    /// Operator identity used to render every `disk <name>: ...` cleanup row.
+    pub(crate) name: DiskName,
+    /// Observed dm handle closed during cleanup; never reconstructed from `name`.
+    pub(crate) mapper: MapperName,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum CloseMapperError {
     #[error("command failed: {0}")]

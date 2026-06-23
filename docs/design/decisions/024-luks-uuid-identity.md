@@ -114,7 +114,11 @@ one.
   pre-commit rollback cleanup uses the same route: `LuksCleanupGuard` carries
   a typed `DiskName` with each tracked mapper and labels its
   `disk <name>: ... (cleanup)` rows from that value while closing the tracked
-  mapper.
+  mapper. `mount`'s fail-closed unlock cleanup
+  (`cli/src/mount.rs#close_opened_mappers`) also carries a typed `DiskName`
+  next to each mapper opened by the command, labels its
+  `disk <name>: locking...`/`locked` cleanup rows from that value, and closes
+  the observed mapper rather than reconstructing `mapper_name(&name)`.
   `CredentialVerifyTarget`'s two constructors -- a UUID-joined
   `existing_pool_member` and an attested `named_candidate` -- are this same
   split in type form. Either route lets member names survive mapper drift: a
@@ -122,9 +126,11 @@ one.
   `passphrase: checking against ...` line, the
   `... does not match existing pool member '...'` rejection, and the close
   progress row, instead of blanking to `--` or echoing the drifted mapper
-  basename. The low-level `cryptsetup close <mapper>` busy-retry diagnostic is
-  the deliberate exception: it still names the real mapper because it is a
-  command echo, not a disk-status row.
+  basename. The remaining basename-derived strings are deliberate carve-outs:
+  the low-level `cryptsetup close <mapper>` busy-retry diagnostic still names
+  the real mapper because it is a command echo, not a disk-status row, and
+  `cli/src/config.rs#name_from_mapper` / `cli/src/config.rs#braid_disk_name`
+  remain the documented display-only mapper parsers.
 
 ## Runtime Handles And Labels
 
@@ -285,10 +291,14 @@ warns rather than claiming every declared member is assembled.
   `disk_label` parameter is typed `DiskName`, so no caller can pass a
   mapper-derived label. `cli/src/add.rs#guard_cleanup_row_uses_disk_name_under_mapper_drift`
   pins the same label provenance for `add`'s rollback cleanup: the cleanup row
-  names `disk2` while closing the tracked `braid-WRONG` mapper. Each drives the
-  exit-0 close path; the deliberate carve-out -- that the busy-retry diagnostic
-  still echoes the raw mapper (`cryptsetup close <mapper> busy, retrying...`)
-  because it is a command echo, not a disk-status row -- is pinned by
+  names `disk2` while closing the tracked `braid-WRONG` mapper.
+  `cli/src/mount.rs#cleanup_row_uses_disk_name_under_mapper_drift` pins the
+  same label provenance for `mount`'s fail-closed cleanup: the cleanup rows
+  name `disk1` while scoped forget and close target the observed
+  `braid-WRONG` mapper. Each drives the exit-0 close path; the deliberate
+  carve-out -- that the busy-retry diagnostic still echoes the raw mapper
+  (`cryptsetup close <mapper> busy, retrying...`) because it is a command echo,
+  not a disk-status row -- is pinned by
   `cli/src/add.rs#guard_retries_busy_close_before_success`.
 - `cli/src/tui/probe.rs` unit tests pin the TUI Data-tab Bus column's transport
   join to the parent disk's LUKS UUID, so a member open under a drifted mapper

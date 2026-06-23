@@ -14,7 +14,7 @@ use crate::luks::{
     format_target_keyfile_probe_failure, luks_format, luks_header_backup_path,
     probe_pool_keyfile_enrollment, read_passphrase_with,
 };
-use crate::mapper_close::close_mapper_with_retry;
+use crate::mapper_close::{TrackedMapper, close_mapper_with_retry};
 use crate::membership::{self, DiskMember, LuksUuidMap, PoolMembership};
 use crate::parse::btrfs_filesystem_show::{DeviceBtrfsProbe, classify_btrfs_probe};
 use crate::parse::{parse_btrfs_filesystem_show, parse_cryptsetup_luks_uuid};
@@ -410,13 +410,6 @@ fn probe_closed_present_luks_target_uuid<R: CommandRunner>(
             observed: format!("probe parse failed: {e}"),
         }),
     }
-}
-
-/// Pairs the close target with the operator label for rollback cleanup rows.
-/// ADR 024 forbids deriving user-facing disk labels from mapper basenames.
-struct TrackedMapper {
-    name: DiskName,
-    mapper: MapperName,
 }
 
 /// Tracks LUKS mappers opened by this invocation of cmd_add.
