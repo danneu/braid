@@ -156,10 +156,13 @@ impl UnlockPlan {
             )),
         }
 
-        // Best-effort: warn if a paused balance was found on mount.
-        // skip_balance prevents the kernel from resuming it silently, but the
-        // user should know so they can resume or cancel explicitly.
-        crate::status::emit_paused_balance_warning(runner, mount_point, &mut std::io::stderr());
+        // Best-effort: warn if a paused balance was found on mount. skip_balance
+        // prevents the kernel from resuming it silently, but the user should know
+        // so they can resume or cancel explicitly. Route through the canonical
+        // status seam so this matches the sibling enrichment warnings.
+        if let Some(warning) = crate::status::paused_balance_warning(runner, mount_point) {
+            crate::status_tag::emit_status(&warning);
+        }
 
         Ok(())
     }
@@ -615,31 +618,29 @@ mod tests {
     }
 
     // Intent: the unlock_btrfs_balance_status_paused fixture body is the
-    //   bytes that classify as Paused through the same parser and emitter path
-    //   cmd_unlock takes post-mount, and the warning text matches production.
-    // Why it exists: unlock_warns_on_paused_balance only asserts Ok(()), so
-    //   parser, fixture-body, or warning-literal drift could otherwise silently
-    //   downgrade the warning.
-    // Scenario: feed the fixture output through status::emit_paused_balance_warning
-    //   against a Vec<u8> writer; expect the warning flag and exact output.
+    //   bytes that classify as Paused through the same parser and warning
+    //   renderer cmd_unlock takes post-mount.
+    // Why it exists: unlock_warns_on_paused_balance captures only the header
+    //   substring, so this test pins the exact full warning block including
+    //   resume/cancel commands and formatting.
+    // Scenario: feed the fixture output through status::paused_balance_warning;
+    //   expect the exact production warning text.
     #[test]
     fn unlock_btrfs_balance_status_paused_classifies_as_paused() {
         let mp = MountPoint::new("/mnt/storage".to_owned());
         let (req, out) = unlock_btrfs_balance_status_paused(&mp);
         let runner = MockRunner::default().with_output(req, out);
-        let mut sink = Vec::new();
 
-        let warned = crate::status::emit_paused_balance_warning(&runner, &mp, &mut sink);
-
-        assert!(warned, "fixture body should classify as paused balance");
-        let output = String::from_utf8(sink).expect("warning is utf-8");
         let expected = concat!(
             "\n",
             "  paused balance detected -- will not auto-resume\n",
             "    resume:  btrfs balance resume /mnt/storage\n",
             "    cancel:  btrfs balance cancel /mnt/storage\n",
         );
-        assert_eq!(output, expected);
+        assert_eq!(
+            crate::status::paused_balance_warning(&runner, &mp),
+            Some(expected.to_owned())
+        );
     }
 
     // Intent: when a paused balance is detected after mount, unlock must still
@@ -704,25 +705,35 @@ mod tests {
             .with_output(balance_req, balance_out);
         let tmp = unlock_passphrase_file();
 
-        let result = cmd_unlock(
-            &runner,
-            &fs,
-            &UnlockParams {
-                config: &config,
-                membership: &membership,
-                paths: &sp,
-                passphrase_stdin: false,
-                passphrase_file: Some(tmp.path()),
-                key_file: None,
-                allow_degraded: false,
-                dry_run: false,
-                sleeper: &crate::progress::NoopSleeper,
-                backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(),
-            },
-        );
+        let mut result = None;
+        let captured = crate::status_tag::testing::capture_with_color(false, || {
+            result = Some(cmd_unlock(
+                &runner,
+                &fs,
+                &UnlockParams {
+                    config: &config,
+                    membership: &membership,
+                    paths: &sp,
+                    passphrase_stdin: false,
+                    passphrase_file: Some(tmp.path()),
+                    key_file: None,
+                    allow_degraded: false,
+                    dry_run: false,
+                    sleeper: &crate::progress::NoopSleeper,
+                    backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(
+                    ),
+                },
+            ));
+        });
 
         // The paused balance warning must not cause unlock to fail.
-        result.expect("unlock should succeed even with paused balance");
+        result
+            .expect("cmd_unlock should run")
+            .expect("unlock should succeed even with paused balance");
+        assert!(
+            captured.contains("paused balance detected -- will not auto-resume"),
+            "expected paused-balance warning on stderr, got: {captured:?}"
+        );
     }
 
     // Intent: dry-run success for two closed disks pins the full positional

@@ -977,27 +977,23 @@ pub(crate) fn paused_balance_advice(mount_point: &MountPoint) -> PausedBalanceAd
     }
 }
 
-/// Check for a paused balance and emit a warning to `out` if found.
-/// Returns true if a warning was emitted. Best-effort: command or parse
-/// failures emit nothing and return false.
-pub fn emit_paused_balance_warning<R: CommandRunner>(
+/// Returns operator warning text for a paused balance; caller owns the sink.
+/// Best-effort: command or parse failures produce no warning.
+pub(crate) fn paused_balance_warning<R: CommandRunner>(
     runner: &R,
     mount_point: &MountPoint,
-    out: &mut dyn std::io::Write,
-) -> bool {
-    if matches!(
+) -> Option<String> {
+    matches!(
         get_balance_report(runner, mount_point),
         BalanceReport::Paused { .. }
-    ) {
+    )
+    .then(|| {
         let advice = paused_balance_advice(mount_point);
-        writeln!(out).ok();
-        writeln!(out, "  {}", advice.header).ok();
-        writeln!(out, "    resume:  {}", advice.resume_cmd).ok();
-        writeln!(out, "    cancel:  {}", advice.cancel_cmd).ok();
-        true
-    } else {
-        false
-    }
+        format!(
+            "\n  {}\n    resume:  {}\n    cancel:  {}\n",
+            advice.header, advice.resume_cmd, advice.cancel_cmd,
+        )
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -3930,7 +3926,7 @@ mod tests {
     }
 
     #[test]
-    fn emit_paused_balance_warning_writes_to_buffer() {
+    fn paused_balance_warning_returns_block_when_paused() {
         let runner = MockRunner::default().with_output(
             CmdRequest::BtrfsBalanceStatus {
                 mount_point: MountPoint::new("/mnt/storage".to_owned()),
@@ -3944,21 +3940,20 @@ mod tests {
                 exit_status: 1,
             },
         );
-        let mut buf = Vec::new();
-        let warned = emit_paused_balance_warning(&runner, &status_mp(), &mut buf);
-        assert!(warned, "should return true for paused balance");
-        let output = String::from_utf8(buf).unwrap();
         let expected = concat!(
             "\n",
             "  paused balance detected -- will not auto-resume\n",
             "    resume:  btrfs balance resume /mnt/storage\n",
             "    cancel:  btrfs balance cancel /mnt/storage\n",
         );
-        assert_eq!(output, expected);
+        assert_eq!(
+            paused_balance_warning(&runner, &status_mp()),
+            Some(expected.to_owned())
+        );
     }
 
     #[test]
-    fn emit_paused_balance_warning_silent_when_idle() {
+    fn paused_balance_warning_none_when_idle() {
         let runner = MockRunner::default().with_output(
             CmdRequest::BtrfsBalanceStatus {
                 mount_point: MountPoint::new("/mnt/storage".to_owned()),
@@ -3968,10 +3963,7 @@ mod tests {
                 "No balance found on '/mnt/storage'\n",
             ),
         );
-        let mut buf = Vec::new();
-        let warned = emit_paused_balance_warning(&runner, &status_mp(), &mut buf);
-        assert!(!warned, "should return false when no balance is paused");
-        assert!(buf.is_empty(), "should write nothing when idle");
+        assert_eq!(paused_balance_warning(&runner, &status_mp()), None);
     }
 
     #[test]
