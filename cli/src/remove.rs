@@ -1023,12 +1023,14 @@ mod tests {
 
     // Intent: a 2->1 remove confirm shows the single-survivor warning exactly
     //   once, on the named target's prompt with the correct pool transition.
-    // Why it exists: this is the ONLY coverage of the warning prompt -- the VM
-    //   suite's only redundancy-reducing remove runs `--yes`, which bypasses
-    //   the prompt. Asserting behavior (warning present once, correct target,
-    //   correct transition) instead of byte-exact assembly keeps the test
-    //   pinned to the contract, not to cosmetic prompt layout, while the
-    //   literal still catches wording regressions.
+    // Why it exists: this pins the warning-prompt ASSEMBLY at the in-process
+    //   Confirm seam (warning present once, correct target, correct
+    //   transition). The end-to-end stdin/stderr path -- RealConfirm reading a
+    //   piped answer, the warning landing on stderr, and `--yes` staying off
+    //   the interactive path -- is covered by the interactive decline + accept
+    //   subtests in tests/cli/braid-remove-disk.py. Asserting behavior instead of
+    //   byte-exact assembly keeps the test pinned to the contract, not cosmetic
+    //   layout, while the literal still catches wording regressions.
     // Scenario: removing disk2 from a two-disk pool leaves one disk, so the
     //   operator sees the normal remove prompt and the no-RAID1 warning.
     #[test]

@@ -130,15 +130,79 @@ with subtest("Data intact after graceful remove"):
 
 # --- Phase 3: Redundancy warning ---
 # Pool has disk1 + disk2. Removing disk2 leaves 1 disk (no redundancy).
-# With --yes, the interactive redundancy confirmation is bypassed.
+# Phase 3 drives the real interactive prompt twice: first "no" aborts with no
+# mutation, then "yes" proceeds. The 2->1 `--yes` bypass is pinned by the
+# `two_to_one_remove_invokes_survivor_capacity_preflight` unit test, whose
+# unarmed confirm would panic if that path prompted.
 
-with subtest("Redundancy-reducing remove with --yes succeeds"):
+with subtest("Interactive 2->1 remove: declining at the real prompt aborts with the no-RAID1 warning"):
+    # Intent: the real stdin/stderr confirm path (RealConfirm, not the
+    #   in-process RecordingConfirm seam) shows the single-survivor warning on
+    #   stderr, and a piped "no" aborts before any mutation.
+    # Why it exists: this warning is the last human checkpoint before an
+    #   irreversible, redundancy-losing remove. The Rust unit tests only cover
+    #   the in-process Confirm seam. This half pins that yes=false is honored
+    #   (a piped "no" aborts -- no --yes leak) and that the warning lands on
+    #   stderr, not the wrong stream. The paired interactive-accept subtest below
+    #   pins the other half: that the piped answer is actually consumed.
+    # Scenario: operator runs `braid remove disk2` on a healthy 2-disk pool,
+    #   sees the no-RAID1 warning, types "no", and the pool is untouched.
+    # Snapshot pool.json immediately before the rejected op so the no-mutation
+    # check below can assert it is byte-identical (repo idiom).
+    machine.succeed("cp /var/lib/braid/pool.json /tmp/pool-before-rm2-decline.json")
+    (status, _) = machine.execute(
+        "printf 'no\\n' | braid remove disk2 >/tmp/rm2-decline.out 2>/tmp/rm2-decline.err"
+    )
+    assert status != 0, (
+        "declining the prompt must abort with non-zero exit; "
+        "exit 0 would mean --yes leaked into the interactive path"
+    )
+    decline_err = machine.succeed("cat /tmp/rm2-decline.err")
+    warning = "WARNING: Pool will have 1 disk -- no RAID1 redundancy."
+    assert warning in decline_err, (
+        f"single-survivor warning must appear on stderr at the real prompt; got: {decline_err!r}"
+    )
+    assert "aborted by user" in decline_err, (
+        f"decline must report the abort reason; got: {decline_err!r}"
+    )
+
+with subtest("Declined 2->1 remove leaves pool.json, the RAID1 topology, and recovery state untouched"):
+    # Membership names present -- readable first-failure signal...
+    pm = read_pool()
+    assert "disk2" in member_names(pm), f"declined remove must keep disk2 in pool.json: {pm}"
+    assert "disk1" in member_names(pm), f"disk1 must remain in pool.json: {pm}"
+    # ...and pool.json byte-identical, so a declined remove cannot rewrite or
+    # corrupt any membership field (devid, by_id, mapper, luks_uuid, added_at)
+    # while leaving the names in place. `cmp` exits non-zero on any difference.
+    machine.succeed("cmp /tmp/pool-before-rm2-decline.json /var/lib/braid/pool.json")
+
+    fi_show = machine.succeed("btrfs fi show /mnt/storage")
+    devid_count = fi_show.count("devid")
+    assert devid_count == 2, f"declined remove must leave 2 devices, got {devid_count}:\n{fi_show}"
+    for name in ["braid-disk1", "braid-disk2"]:
+        assert f"/dev/mapper/{name}" in fi_show, f"{name} missing after declined remove:\n{fi_show}"
+
+    df_output = machine.succeed("btrfs fi df /mnt/storage")
+    assert "RAID1" in df_output, f"declined remove must keep the RAID1 profile:\n{df_output}"
+
+    # No recovery state stranded: the decline aborts above journal::write_journal.
+    machine.fail("test -e /var/lib/braid/pending-op.json")
+    # The LUKS mapper must NOT have been torn down on a declined remove.
+    machine.succeed("test -e /dev/mapper/braid-disk2")
+
+    content = machine.succeed("cat /mnt/storage/precious.txt").strip()
+    assert content == "important data", f"data must survive a declined remove, got '{content}'"
+
+with subtest("Interactive 2->1 remove: piping 'yes' at the real prompt proceeds (stdin consumed)"):
     machine.succeed(
-        f"{remove_cmd('disk2')} >/tmp/rm2.out 2>/tmp/rm2.err"
+        "printf 'yes\\n' | braid remove disk2 >/tmp/rm2.out 2>/tmp/rm2.err"
     )
     # Principle 13: 2->1 remove triggers pool_balance_single (RAID1 -> single)
     # and pool_remove_device. Pin the [wait]/[ok] rows.
     rm2_err = machine.succeed("cat /tmp/rm2.err")
+    assert "WARNING: Pool will have 1 disk -- no RAID1 redundancy." in rm2_err, (
+        f"interactive accept must still show the no-RAID1 warning; got: {rm2_err!r}"
+    )
     bal_wait = "[wait] pool: balancing RAID1 to single profile..."
     bal_ok = "[ok]   pool: balanced to single profile"
     assert bal_wait in rm2_err and bal_ok in rm2_err, (
