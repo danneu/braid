@@ -188,6 +188,7 @@ braid ack
   -> clears alert state
   -> stops braid-alert.service
     -> cascades to stop braid-beep.service
+  -> stops braid-alert-advisory.service (Warning/ENOSPC tier, no beep)
 ```
 
 ## What's next

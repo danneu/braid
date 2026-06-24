@@ -233,11 +233,11 @@ fn ack_offline(
 /// `remove_*` then short-circuits the remaining removals via `?` and
 /// propagates the error.
 ///
-/// The beeper stop is best-effort: production issues `systemctl stop
-/// braid-alert.service`, logs a warning when spawning `systemctl` fails or it
-/// exits non-zero, and returns no error to cleanup. The ordering guarantees the
-/// hook is invoked on every cleanup call, not that the audible alert was
-/// silenced.
+/// The beeper stop is best-effort: production issues `systemctl stop` for both
+/// alert units (`braid-alert.service` and `braid-alert-advisory.service`), logs
+/// a warning when spawning `systemctl` fails or a unit exits non-zero, and
+/// returns no error to cleanup. The ordering guarantees the hook is invoked on
+/// every cleanup call, not that the audible alert was silenced.
 ///
 /// `cmd_ack_impl` derives `remove_smartd` / `remove_scrub_failed` once from
 /// inputs snapshotted at entry. Cleanup deletes each flag only when the snapshot
