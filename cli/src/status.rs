@@ -1172,9 +1172,11 @@ fn build_disk_views<R: CommandRunner>(
 
     // Unpooled config disks (not matched to pool)
     for cd in config_disks {
-        let membership_uuid_live = membership
-            .by_name(&cd.name)
-            .is_some_and(|(uuid, _)| pool_uuid_set.contains(uuid));
+        // `cd.name` comes from the member name that produced this ConfigDisk,
+        // and membership names are unique. Resolve it once so the live skip,
+        // UUID classifier, and compact devid all use the same recorded member.
+        let recorded = membership.by_name(&cd.name);
+        let membership_uuid_live = recorded.is_some_and(|(uuid, _)| pool_uuid_set.contains(uuid));
         if membership_uuid_live {
             continue;
         }
@@ -1187,10 +1189,7 @@ fn build_disk_views<R: CommandRunner>(
                 // Compare the on-disk UUID against the recorded membership UUID
                 // via the shared classifier so this detail surface agrees with
                 // the TUI and doctor on swap/reformat detection (decision 024).
-                match luks::classify_member_luks_identity(
-                    uuid,
-                    membership.by_name(&cd.name).map(|(u, _)| u),
-                ) {
+                match luks::classify_member_luks_identity(uuid, recorded.map(|(u, _)| u)) {
                     // Surface the observed UUID only on a mismatch, so the
                     // human `LUKS:` line can show what the disk now reports.
                     luks::MemberLuksIdentity::Mismatch => {
@@ -1259,8 +1258,7 @@ fn build_disk_views<R: CommandRunner>(
             CompactDrive {
                 name: cd.name.as_str().to_owned(),
                 device_short: "-".to_owned(),
-                devid: membership
-                    .by_name(&cd.name)
+                devid: recorded
                     .and_then(|(_, m)| m.devid)
                     .filter(|d| alert_devids.contains(d)),
                 status,
@@ -1276,9 +1274,8 @@ fn build_disk_views<R: CommandRunner>(
     // state," so the member is neither silently dropped nor mislabeled
     // `missing`.
     for failure in probe_failures {
-        let membership_uuid_live = membership
-            .by_name(&failure.name)
-            .is_some_and(|(uuid, _)| pool_uuid_set.contains(uuid));
+        let recorded = membership.by_name(&failure.name);
+        let membership_uuid_live = recorded.is_some_and(|(uuid, _)| pool_uuid_set.contains(uuid));
         if membership_uuid_live {
             continue;
         }
@@ -1310,8 +1307,7 @@ fn build_disk_views<R: CommandRunner>(
             CompactDrive {
                 name: failure.name.as_str().to_owned(),
                 device_short: "-".to_owned(),
-                devid: membership
-                    .by_name(&failure.name)
+                devid: recorded
                     .and_then(|(_, m)| m.devid)
                     .filter(|d| alert_devids.contains(d)),
                 status: DiskStatus::Unknown,
@@ -5734,6 +5730,50 @@ mod tests {
             "duplicate Unknown row leaked; got:\n{human}"
         );
         assert!(!human.contains("LUKS HEADER UNREADABLE"), "got:\n{human}");
+    }
+
+    // Intent: a probe-failure member whose membership UUID is already live in
+    //   the pool renders only the Present row from the live pool device.
+    // Why it exists: config-probe faults are status diagnostics, not identity
+    //   evidence. A live-and-healthy member must not also leak a duplicate
+    //   Unknown unpooled row just because its configured probe path errored.
+    // Scenario: membership expects disk1 at UUID U1, the mounted pool reports
+    //   U1 present, and disk1 lands in the probe-failure partition instead of
+    //   config_disks.
+    #[test]
+    fn build_disk_views_skips_probe_failure_row_when_membership_uuid_live() {
+        let pool = PoolState {
+            mounted: true,
+            devices: vec![PoolDevice {
+                mapper: MapperName::from_basename("braid-disk1".to_owned()),
+                luks_uuid: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
+                devid: Devid::new(1),
+                underlying: "/dev/vda".to_owned(),
+            }],
+            missing_count: 0,
+            missing_devids: vec![],
+            total_devices: 1,
+            fsid: None,
+            null_underlying: vec![],
+        };
+        let probe_failures = vec![ConfigProbeFailure {
+            name: DiskName::parse("disk1").unwrap(),
+            by_id: ByIdPath::parse("/dev/disk/by-id/disk1").unwrap(),
+        }];
+        let membership = status_membership_1disk();
+        let runner = MockRunner::default();
+        let stats = BtrfsDeviceStatsOutput { devices: vec![] };
+
+        let ctx = build_disk_views(&runner, &membership, &[], &probe_failures, &pool, &stats);
+
+        assert_eq!(ctx.disks.len(), 1, "disks: {:?}", ctx.disks);
+        assert_eq!(ctx.disks[0].status, DiskStatus::Present);
+        assert_eq!(ctx.disks[0].name, "disk1");
+        assert_eq!(ctx.human_details.len(), 1);
+        assert_eq!(ctx.human_details[0].name, "disk1");
+        assert_eq!(ctx.compact_drives.len(), 1);
+        assert_eq!(ctx.compact_drives[0].name, "disk1");
+        assert_eq!(ctx.compact_drives[0].status, DiskStatus::Present);
     }
 
     /*
