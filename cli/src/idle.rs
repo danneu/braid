@@ -2,7 +2,7 @@ use crate::cmd::{CmdRequest, CommandRunner};
 use crate::parse::{ScrubState, parse_btrfs_scrub_status};
 use crate::preflight::{ExclusiveOp, ExclusiveOpError, check_any_btrfs_exclusive_op};
 use crate::probe::Filesystem;
-use crate::progress::pct_from_bytes;
+use crate::progress::scrub_running_pct;
 use crate::types::MountPoint;
 
 /// Tri-state result of the `braid idle` autosuspend gate: `PoolOffline`
@@ -93,17 +93,10 @@ pub fn cmd_idle<R: CommandRunner, F: Filesystem + ?Sized>(
         Ok(scrub) => scrub,
         Err(e) => return busy_unknown("scrub", e),
     };
+    let running_pct = scrub_running_pct(&scrub.state);
     match scrub.state {
-        ScrubState::Running {
-            bytes_scrubbed,
-            total_bytes,
-            ..
-        } => {
-            let pct = match (bytes_scrubbed, total_bytes) {
-                (Some(scrubbed), Some(total)) => pct_from_bytes(scrubbed, total),
-                _ => None,
-            };
-            IdleResult::Busy(BusyReason::ScrubRunning { pct })
+        ScrubState::Running { .. } => {
+            IdleResult::Busy(BusyReason::ScrubRunning { pct: running_pct })
         }
         ScrubState::Never
         | ScrubState::Finished { .. }
@@ -234,9 +227,9 @@ mod tests {
         assert_eq!(result, IdleResult::Idle);
     }
 
-    // Intent: Scrub running -> Busy with percentage from subprocess parser.
-    // Why: Scrub is not in the kernel exclop set; only `btrfs scrub status`
-    //   sees it. Suspending mid-scrub interrupts data integrity verification.
+    // Intent: Scrub running -> Busy(ScrubRunning) with a percentage present.
+    // Why it exists: idle owns the running-scrub busy wiring, while the
+    //   bytes-to-pct mapping is owned by progress.rs#scrub_running_pct.
     // Scenario: Monthly auto-scrub is in progress when autosuspend checks.
     // Pre-condition: sysfs is seeded clean so the scrub probe is actually
     //   reached -- the sysfs-first order is exercised by
@@ -248,9 +241,12 @@ mod tests {
         let fs = IdleMockFs::with_exclop("none");
 
         let result = cmd_idle(&runner, &fs, &idle_mp());
-        assert_eq!(
-            result,
-            IdleResult::Busy(BusyReason::ScrubRunning { pct: Some(45) })
+        assert!(
+            matches!(
+                result,
+                IdleResult::Busy(BusyReason::ScrubRunning { pct: Some(_) })
+            ),
+            "expected running scrub with pct, got {result:?}"
         );
     }
 
@@ -264,7 +260,8 @@ mod tests {
     //   cannot be computed -- would compile, keep parser tests green (they
     //   classify ScrubState, not IdleResult), keep busy_when_scrub_running
     //   green, and silently allow suspend whenever pct is unknowable. Same
-    //   wiring-pin contract as idle_when_scrub_{never,aborted,interrupted}.
+    //   wiring-pin contract as idle_when_scrub_{never,aborted,interrupted};
+    //   the bytes-to-pct mapping itself is owned by scrub_running_pct.
     // Scenario: btrfs-progs output drift (parser-compatibility risk) keeps
     //   `Status: running` but reshapes/omits the `Total to scrub` /
     //   `Bytes scrubbed` lines braid parses; the parser tolerates this

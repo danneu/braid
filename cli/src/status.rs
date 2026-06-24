@@ -19,7 +19,7 @@ use crate::parse::{
 };
 use crate::probe::{Filesystem, ProbeError, probe_config_disk, probe_pool};
 use crate::profile_summary::{self, ProfileJson, Redundancy};
-use crate::progress::pct_from_bytes;
+use crate::progress::scrub_running_pct;
 use crate::repair_hint;
 use crate::state_paths::StatePaths;
 use crate::types::*;
@@ -818,63 +818,56 @@ fn get_scrub_report<R: CommandRunner>(runner: &R, mount_point: &MountPoint) -> S
     };
 
     match parse_btrfs_scrub_status(&raw) {
-        Ok(out) => match out.state {
-            ScrubState::Never => ScrubReport::Never,
-            ScrubState::Running {
-                bytes_scrubbed,
-                total_bytes,
-                ..
-            } => {
-                let pct = match (bytes_scrubbed, total_bytes) {
-                    (Some(scrubbed), Some(total)) => pct_from_bytes(scrubbed, total),
-                    _ => None,
-                };
-                ScrubReport::Running { pct }
-            }
-            ScrubState::Finished {
-                started_at,
-                error_count,
-                ..
-            } => {
-                let (started_at, started_at_human, journal_since) =
-                    format_scrub_report_timestamps(started_at.as_ref());
-                ScrubReport::Finished {
+        Ok(out) => {
+            let running_pct = scrub_running_pct(&out.state);
+            match out.state {
+                ScrubState::Never => ScrubReport::Never,
+                ScrubState::Running { .. } => ScrubReport::Running { pct: running_pct },
+                ScrubState::Finished {
                     started_at,
-                    started_at_human,
                     error_count,
-                    journal_since,
+                    ..
+                } => {
+                    let (started_at, started_at_human, journal_since) =
+                        format_scrub_report_timestamps(started_at.as_ref());
+                    ScrubReport::Finished {
+                        started_at,
+                        started_at_human,
+                        error_count,
+                        journal_since,
+                    }
                 }
-            }
-            ScrubState::Aborted {
-                started_at,
-                error_count,
-                ..
-            } => {
-                let (started_at, started_at_human, journal_since) =
-                    format_scrub_report_timestamps(started_at.as_ref());
-                ScrubReport::Aborted {
+                ScrubState::Aborted {
                     started_at,
-                    started_at_human,
                     error_count,
-                    journal_since,
+                    ..
+                } => {
+                    let (started_at, started_at_human, journal_since) =
+                        format_scrub_report_timestamps(started_at.as_ref());
+                    ScrubReport::Aborted {
+                        started_at,
+                        started_at_human,
+                        error_count,
+                        journal_since,
+                    }
                 }
-            }
-            ScrubState::Interrupted {
-                started_at,
-                error_count,
-                ..
-            } => {
-                let (started_at, started_at_human, journal_since) =
-                    format_scrub_report_timestamps(started_at.as_ref());
-                ScrubReport::Interrupted {
+                ScrubState::Interrupted {
                     started_at,
-                    started_at_human,
                     error_count,
-                    journal_since,
+                    ..
+                } => {
+                    let (started_at, started_at_human, journal_since) =
+                        format_scrub_report_timestamps(started_at.as_ref());
+                    ScrubReport::Interrupted {
+                        started_at,
+                        started_at_human,
+                        error_count,
+                        journal_since,
+                    }
                 }
+                ScrubState::Unknown => ScrubReport::Unknown,
             }
-            ScrubState::Unknown => ScrubReport::Unknown,
-        },
+        }
         Err(_) => ScrubReport::Unknown,
     }
 }
@@ -1766,15 +1759,15 @@ mod tests {
         err_raw as status_err_raw, isolated_paths, mock_ok, status_btrfs_device_usage_raw_1disk,
         status_btrfs_df_single, status_btrfs_scrub_aborted, status_btrfs_scrub_aborted_no_start,
         status_btrfs_scrub_finished, status_btrfs_scrub_finished_with_errors,
-        status_btrfs_scrub_interrupted, status_btrfs_scrub_never, status_btrfs_show_1disk,
-        status_btrfs_show_3disk_1missing, status_btrfs_show_3disk_1null_underlying_1missing,
-        status_btrfs_show_3disk_missing_devid3, status_btrfs_usage_raw, status_cfg_absent,
-        status_cfg_present_not_luks, status_config, status_cryptsetup_status_active,
-        status_cryptsetup_uuid_ok, status_disk_report_missing, status_disk_report_named,
-        status_fs_ext4, status_fs_mounted, status_fs_not_mounted, status_fs_one_disk,
-        status_fs_three_disk, status_is_luks_raw, status_lsblk_field_ok, status_membership_1disk,
-        status_membership_3disk, status_mp, status_pool_empty, status_report_with_alerts,
-        status_report_with_scrub, status_runner_healthy_3disk_base,
+        status_btrfs_scrub_interrupted, status_btrfs_scrub_never, status_btrfs_scrub_running,
+        status_btrfs_show_1disk, status_btrfs_show_3disk_1missing,
+        status_btrfs_show_3disk_1null_underlying_1missing, status_btrfs_show_3disk_missing_devid3,
+        status_btrfs_usage_raw, status_cfg_absent, status_cfg_present_not_luks, status_config,
+        status_cryptsetup_status_active, status_cryptsetup_uuid_ok, status_disk_report_missing,
+        status_disk_report_named, status_fs_ext4, status_fs_mounted, status_fs_not_mounted,
+        status_fs_one_disk, status_fs_three_disk, status_is_luks_raw, status_lsblk_field_ok,
+        status_membership_1disk, status_membership_3disk, status_mp, status_pool_empty,
+        status_report_with_alerts, status_report_with_scrub, status_runner_healthy_3disk_base,
         status_runner_healthy_3disk_verbose,
     };
 
@@ -3396,6 +3389,27 @@ mod tests {
             }
             other => panic!("expected Finished, got: {other:?}"),
         }
+    }
+
+    // Intent: `get_scrub_report` maps a running scrub to Running with a pct present.
+    // Why it exists: status has its own scrub-status wiring path, and JSON-only
+    //   tests that hand-build ScrubReport::Running do not prove it reaches the
+    //   shared scrub_running_pct owner.
+    // Scenario: a user runs `braid status` while a monthly scrub is in progress.
+    #[test]
+    fn status_scrub_running_reports_pct() {
+        let runner = MockRunner::default().with_output(
+            CmdRequest::BtrfsScrubStatus {
+                mount_point: status_mp(),
+            },
+            status_btrfs_scrub_running(),
+        );
+
+        let result = get_scrub_report(&runner, &status_mp());
+        assert!(
+            matches!(result, ScrubReport::Running { pct: Some(_) }),
+            "expected running scrub with pct, got {result:?}"
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, RawCommandOutput};
 use crate::parse::{
-    BalanceState, ReplaceState, parse_btrfs_balance_status, parse_btrfs_replace_status,
+    BalanceState, ReplaceState, ScrubState, parse_btrfs_balance_status, parse_btrfs_replace_status,
 };
 use crate::types::MountPoint;
 use std::io::Write;
@@ -144,6 +144,30 @@ pub fn pct_from_bytes(done: u64, total: u64) -> Option<u8> {
     }
     let pct = (u128::from(done) * 100) / u128::from(total);
     Some(pct.min(100) as u8)
+}
+
+/// Owns the running-scrub `u8` progress mapping shared by `idle` and `status`.
+///
+/// The boundary takes the parsed `ScrubState` instead of two same-typed byte
+/// counters so call sites cannot transpose `total_bytes` and `bytes_scrubbed`;
+/// field selection and the absent-counter policy stay in one place.
+/// Keep callers on `&ScrubState`: the parser declares `total_bytes` before
+/// `bytes_scrubbed`, so a positional-counter helper would make the swap easy
+/// to reintroduce at the command boundary.
+pub(crate) fn scrub_running_pct(state: &ScrubState) -> Option<u8> {
+    let ScrubState::Running {
+        bytes_scrubbed,
+        total_bytes,
+        ..
+    } = state
+    else {
+        return None;
+    };
+
+    match (bytes_scrubbed, total_bytes) {
+        (Some(scrubbed), Some(total)) => pct_from_bytes(*scrubbed, *total),
+        _ => None,
+    }
 }
 
 pub fn format_bytes(bytes: u64) -> String {
@@ -405,6 +429,7 @@ pub fn run_replace_with_progress<R: CommandRunner + Sync>(
 mod tests {
     use super::*;
     use crate::cmd::{MockRunner, RawCommandOutput};
+    use crate::parse::ScrubState;
     use crate::types::Devid;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Condvar, Mutex};
@@ -519,6 +544,77 @@ mod tests {
     #[test]
     fn pct_from_bytes_clamps_above_100() {
         assert_eq!(pct_from_bytes(300, 100), Some(100));
+    }
+
+    // Intent: running scrub progress uses bytes_scrubbed over total_bytes.
+    // Why it exists: idle and status both defer to this single owner for the
+    //   bytes-to-pct mapping, so the exact value and field order are pinned
+    //   here instead of duplicated at each command boundary.
+    // Scenario: btrfs reports 45.00% progress for a monthly scrub in flight.
+    #[test]
+    fn scrub_running_pct_uses_scrubbed_over_total() {
+        let state = ScrubState::Running {
+            started_at: None,
+            duration_secs: None,
+            time_left_secs: None,
+            eta: None,
+            total_bytes: Some(30_408_704_000),
+            bytes_scrubbed: Some(13_683_916_800),
+            rate_bytes_per_sec: None,
+            error_count: 0,
+        };
+
+        assert_eq!(scrub_running_pct(&state), Some(45));
+    }
+
+    // Intent: running scrub progress is absent when bytes_scrubbed is absent.
+    // Why it exists: idle and status should share the same sparse-parser
+    //   behavior instead of each hand-rolling its own missing-counter policy.
+    // Scenario: btrfs-progs still reports `Status: running` but omits the
+    //   `Bytes scrubbed` line braid normally parses.
+    #[test]
+    fn scrub_running_pct_is_none_without_scrubbed_bytes() {
+        let state = ScrubState::Running {
+            started_at: None,
+            duration_secs: None,
+            time_left_secs: None,
+            eta: None,
+            total_bytes: Some(30_408_704_000),
+            bytes_scrubbed: None,
+            rate_bytes_per_sec: None,
+            error_count: 0,
+        };
+
+        assert_eq!(scrub_running_pct(&state), None);
+    }
+
+    // Intent: running scrub progress is absent when total_bytes is absent.
+    // Why it exists: this helper owns the shared bytes-to-pct availability
+    //   contract for both command surfaces, including the no-denominator case.
+    // Scenario: btrfs-progs reports scrubbed bytes before total work is known.
+    #[test]
+    fn scrub_running_pct_is_none_without_total_bytes() {
+        let state = ScrubState::Running {
+            started_at: None,
+            duration_secs: None,
+            time_left_secs: None,
+            eta: None,
+            total_bytes: None,
+            bytes_scrubbed: Some(13_683_916_800),
+            rate_bytes_per_sec: None,
+            error_count: 0,
+        };
+
+        assert_eq!(scrub_running_pct(&state), None);
+    }
+
+    // Intent: non-running scrub states do not report running progress.
+    // Why it exists: callers use this helper before matching the full scrub
+    //   state, so the helper must fail closed to `None` outside Running.
+    // Scenario: status asks for progress after a pool that has never scrubbed.
+    #[test]
+    fn scrub_running_pct_is_none_when_not_running() {
+        assert_eq!(scrub_running_pct(&ScrubState::Never), None);
     }
 
     // --- resolve_progress_output tests ---

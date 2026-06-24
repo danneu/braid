@@ -343,6 +343,23 @@ pub(crate) fn status_btrfs_scrub_finished() -> RawCommandOutput {
     )
 }
 
+/// Concrete 45% running scrub output for status scrub-progress wiring tests.
+pub(crate) fn status_btrfs_scrub_running() -> RawCommandOutput {
+    mock_ok(
+        "btrfs scrub status --raw",
+        "UUID:             aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
+         Scrub started:    Mon Feb 23 10:00:00 2026\n\
+         Status:           running\n\
+         Duration:         0:00:05\n\
+         Time left:        0:00:06\n\
+         ETA:              Mon Feb 23 10:00:11 2026\n\
+         Total to scrub:   30408704000\n\
+         Bytes scrubbed:   13683916800  (45.00%)\n\
+         Rate:             2736783360/s\n\
+         Error summary:    no errors found\n",
+    )
+}
+
 /// Scrub-status output for a completed scrub with csum errors.
 pub(crate) fn status_btrfs_scrub_finished_with_errors() -> RawCommandOutput {
     mock_ok(
