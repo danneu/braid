@@ -376,12 +376,14 @@ ups.test.result: Done and passed\n\
     }
 
     // Intent: watts_estimated handles maximum parsed nominal wattage without overflow.
-    // Why it exists: NUT driver output is an ungated u32, and debug overflow
-    // checks must not panic on syntactically valid values.
+    // Why it exists: NUT driver output is an ungated u32, and re-narrowing the
+    // widened arithmetic back to u32 would overflow-panic in debug here.
     // Scenario: buggy driver emits u32::MAX while load is 100%.
     #[test]
     fn watts_estimated_handles_max_nominal_watts() {
         let out = parse_upsc("ups.load: 100\nups.realpower.nominal: 4294967295\n");
+        // At 100% load, est == nominal: (100 * 4294967295 + 50) / 100 = 4294967295
+        // = u32::MAX. This is the lossless boundary, not a saturating clamp.
         assert_eq!(out.watts_estimated(), Some(u32::MAX));
     }
 

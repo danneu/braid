@@ -871,6 +871,11 @@ impl UpscOutput {
     /// `realpower_nominal_watts` are available. Returns `None` otherwise
     /// (we do not synthesize a figure from a single input -- callers
     /// must render the missing case explicitly).
+    ///
+    /// The u64 widening and `as u32` cast are lossless, not truncating:
+    /// `parse_pct` gates `load_pct` to `0..=100`, so the rounded quotient
+    /// `(pct * nominal + 50) / 100` is at most `nominal` (equal at 100% load)
+    /// and always fits `u32`. `+ 50` before `/ 100` rounds to nearest.
     pub fn watts_estimated(&self) -> Option<u32> {
         match (self.load_pct, self.realpower_nominal_watts) {
             (Some(pct), Some(nominal)) => {
