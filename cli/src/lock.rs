@@ -7,7 +7,7 @@ use crate::parse::types::{BackingDevice, CryptsetupStatusOutput};
 use crate::parse::{parse_cryptsetup_luks_uuid, parse_cryptsetup_status};
 use crate::pool_lock::StopCoordinatorGuard;
 use crate::preflight;
-use crate::preview::{Preview, PreviewCompleteness, PreviewNote};
+use crate::preview::{self, PerDiskStyle, Preview, PreviewCompleteness, PreviewNote};
 use crate::probe::{Filesystem, ProbeError, probe_fsid, probe_pool};
 use crate::progress::{RealSleeper, Sleeper};
 use crate::status_tag::{StatusTag, color_enabled_for_stderr, emit_status, status_line};
@@ -502,19 +502,16 @@ where
         let line = |t, body: &str| status_line(t, color_enabled, body);
         let paren = if is_orphan { " (orphan)" } else { "" };
 
-        eprint!(
-            "{}",
-            line(
-                StatusTag::Wait,
-                &format!("disk {disk_label}: locking{paren}..."),
-            )
-        );
+        emit_status(&line(
+            StatusTag::Wait,
+            &format!("disk {disk_label}: locking{paren}..."),
+        ));
         match close_mapper_with_retry(self.runner, self.sleeper, mapper, color_enabled) {
             Ok(()) => {
-                eprint!(
-                    "{}",
-                    line(StatusTag::Ok, &format!("disk {disk_label}: locked{paren}"))
-                );
+                emit_status(&line(
+                    StatusTag::Ok,
+                    &format!("disk {disk_label}: locked{paren}"),
+                ));
             }
             Err(CloseMapperError::DeviceBusy(msg)) if self.umount_error.is_some() => {
                 let phrase = if is_orphan {
@@ -522,24 +519,18 @@ where
                 } else {
                     "close failed"
                 };
-                eprint!(
-                    "{}",
-                    line(
-                        StatusTag::Warn,
-                        &format!("disk {disk_label}: {phrase} (umount was stuck): {msg}")
-                    )
-                );
+                emit_status(&line(
+                    StatusTag::Warn,
+                    &format!("disk {disk_label}: {phrase} (umount was stuck): {msg}"),
+                ));
             }
             Err(e) => {
                 let err = LockError::from(e);
                 let prefix = if is_orphan { "orphan: " } else { "" };
-                eprint!(
-                    "{}",
-                    line(
-                        StatusTag::Fail,
-                        &format!("disk {disk_label}: {prefix}{err}")
-                    )
-                );
+                emit_status(&line(
+                    StatusTag::Fail,
+                    &format!("disk {disk_label}: {prefix}{err}"),
+                ));
                 if self.first_mapper_error.is_none() {
                     *self.first_mapper_error = Some(err);
                 }
@@ -670,15 +661,10 @@ impl LockPlan {
         let color_enabled = color_enabled_for_stderr();
         let line = |t, body: &str| status_line(t, color_enabled, body);
 
-        // Emit accumulated Warn notes to stderr before any mutation.
-        // The plan carries scan-failure, orphan, fallback, and skip
-        // warnings as PreviewNote::Warn; this loop is the single emit
-        // point for all of them.
-        for note in &self.notes {
-            if let PreviewNote::Warn(body) = note {
-                eprint!("{}", line(StatusTag::Warn, body));
-            }
-        }
+        // Render accumulated plan notes to stderr through the shared preview
+        // renderer before any mutation. Dry-run and real-run share one
+        // renderer, so future Info, Skip, or PerDisk notes also surface here.
+        preview::emit_notes_to_stderr(&self.notes, PerDiskStyle::Bracketed);
 
         let mount_point = &self.mount_point;
 
@@ -687,25 +673,19 @@ impl LockPlan {
         let mut first_mapper_error: Option<LockError> = None;
         if self.pool_was_mounted {
             if self.pause_balance_before_unmount {
-                eprint!(
-                    "{}",
-                    line(StatusTag::Wait, "pool: pausing btrfs balance..."),
-                );
+                emit_status(&line(StatusTag::Wait, "pool: pausing btrfs balance..."));
                 let pause_result = runner.run(&CmdRequest::BtrfsBalancePause {
                     mount_point: mount_point.clone(),
                 })?;
                 if pause_result.exit_status == 0 {
-                    eprint!("{}", line(StatusTag::Ok, "pool: balance paused"));
+                    emit_status(&line(StatusTag::Ok, "pool: balance paused"));
                 } else {
                     let stderr = pause_result.stderr.trim();
                     if pause_result.exit_status == 2 && stderr.contains("Not running") {
-                        eprint!(
-                            "{}",
-                            line(
-                                StatusTag::Warn,
-                                "pool: balance was no longer running -- continuing",
-                            )
-                        );
+                        emit_status(&line(
+                            StatusTag::Warn,
+                            "pool: balance was no longer running -- continuing",
+                        ));
                     } else {
                         return Err(LockError::Failed(format!(
                             "btrfs balance pause {mount_point} failed (exit {}): {stderr}",
@@ -715,13 +695,10 @@ impl LockPlan {
                 }
             }
 
-            eprint!(
-                "{}",
-                line(
-                    StatusTag::Wait,
-                    &format!("pool: unmounting {mount_point}..."),
-                )
-            );
+            emit_status(&line(
+                StatusTag::Wait,
+                &format!("pool: unmounting {mount_point}..."),
+            ));
             match umount_with_retry(
                 runner,
                 sleeper,
@@ -730,10 +707,10 @@ impl LockPlan {
                 self.umount_retry_attempts,
             ) {
                 Ok(()) => {
-                    eprint!(
-                        "{}",
-                        line(StatusTag::Ok, &format!("pool: unmounted {mount_point}"))
-                    );
+                    emit_status(&line(
+                        StatusTag::Ok,
+                        &format!("pool: unmounted {mount_point}"),
+                    ));
 
                     // Clear btrfs kernel scan registry so that cryptsetup close
                     // doesn't race against stale device references on multi-device
@@ -749,42 +726,31 @@ impl LockPlan {
                         match forget_result {
                             Ok(r) if r.exit_status == 0 => {}
                             Ok(r) => {
-                                eprint!(
-                                    "{}",
-                                    line(
-                                        StatusTag::Warn,
-                                        &format!(
-                                            "btrfs device scan --forget failed (exit {}): {} (continuing)",
-                                            r.exit_status,
-                                            r.stderr.trim()
-                                        )
-                                    )
-                                );
+                                emit_status(&line(
+                                    StatusTag::Warn,
+                                    &format!(
+                                        "btrfs device scan --forget failed (exit {}): {} (continuing)",
+                                        r.exit_status,
+                                        r.stderr.trim()
+                                    ),
+                                ));
                             }
                             Err(e) => {
-                                eprint!(
-                                    "{}",
-                                    line(
-                                        StatusTag::Warn,
-                                        &format!(
-                                            "btrfs device scan --forget failed: {e} (continuing)"
-                                        )
-                                    )
-                                );
+                                emit_status(&line(
+                                    StatusTag::Warn,
+                                    &format!("btrfs device scan --forget failed: {e} (continuing)"),
+                                ));
                             }
                         }
                     }
                 }
                 Err(err @ LockError::Cmd(_)) => return Err(err),
                 Err(err) => {
-                    eprint!("{}", line(StatusTag::Fail, &format!("{err}")));
-                    eprint!(
-                        "{}",
-                        line(
-                            StatusTag::Warn,
-                            "attempting to close LUKS mappers despite umount failure..."
-                        )
-                    );
+                    emit_status(&line(StatusTag::Fail, &format!("{err}")));
+                    emit_status(&line(
+                        StatusTag::Warn,
+                        "attempting to close LUKS mappers despite umount failure...",
+                    ));
                     umount_error = Some(err);
                 }
             }
@@ -803,10 +769,10 @@ impl LockPlan {
                 first_mapper_error: &mut first_mapper_error,
             };
             for name in &self.members_known_closed {
-                eprint!(
-                    "{}",
-                    line(StatusTag::Ok, &format!("disk {name}: already closed"))
-                );
+                emit_status(&line(
+                    StatusTag::Ok,
+                    &format!("disk {name}: already closed"),
+                ));
             }
             // Planned closes, observed-mapper-first.
             for entry in self.close_set.entries() {
@@ -815,13 +781,10 @@ impl LockPlan {
                     if entry.is_orphan() {
                         continue;
                     }
-                    eprint!(
-                        "{}",
-                        line(
-                            StatusTag::Ok,
-                            &format!("disk {}: already closed", entry.disk_label())
-                        )
-                    );
+                    emit_status(&line(
+                        StatusTag::Ok,
+                        &format!("disk {}: already closed", entry.disk_label()),
+                    ));
                     continue;
                 }
                 // Accepted risk: in-process member-owned close
@@ -843,7 +806,7 @@ impl LockPlan {
 
         // 5. If nothing was done → short message
         if !self.pool_was_mounted && all_already_closed && !self.cleanup_uncertain {
-            eprintln!("pool already locked");
+            emit_status("pool already locked\n");
         }
 
         Ok(())
@@ -2074,6 +2037,11 @@ mod tests {
         );
     }
 
+    // Intent: lock reports the documented terminal line when the pool is
+    //   already unmounted and every mapper is already closed.
+    // Why it exists: the terminal line is plain, not tagged, and should stay
+    //   observable through the fast capture sink.
+    // Scenario: a user runs `braid lock` against an already-offline pool.
     #[test]
     fn lock_already_locked() {
         let runner = MockRunner::default().with_output(
@@ -2086,13 +2054,31 @@ mod tests {
         let config = lock_test_config();
         let membership = lock_test_membership();
 
-        cmd_lock_impl(&runner, &fs, &LockNoopSleeper, &config, &membership, false)
+        let mut result = None;
+        let captured = crate::status_tag::testing::capture_with_color(false, || {
+            result = Some(cmd_lock_impl(
+                &runner,
+                &fs,
+                &LockNoopSleeper,
+                &config,
+                &membership,
+                false,
+            ));
+        });
+
+        result
+            .expect("lock result should be captured")
             .expect("lock should succeed (already locked)");
+        assert_eq!(captured.lines().last(), Some("pool already locked"));
     }
 
+    // Intent: lock suppresses the already-locked terminal line when it had to
+    //   close a real mapper, while still emitting close progress rows.
+    // Why it exists: the all-already-closed guard and the close progress rows
+    //   must both stay visible to fast capture tests.
+    // Scenario: the pool is unmounted, but disk `aaa` still has an open mapper.
     #[test]
     fn lock_partial_state() {
-        // Pool not mounted, only aaa mapper open
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::MountpointCheck {
@@ -2111,8 +2097,24 @@ mod tests {
         let config = lock_test_config();
         let membership = lock_test_membership();
 
-        cmd_lock_impl(&runner, &fs, &LockNoopSleeper, &config, &membership, false)
+        let mut result = None;
+        let captured = crate::status_tag::testing::capture_with_color(false, || {
+            result = Some(cmd_lock_impl(
+                &runner,
+                &fs,
+                &LockNoopSleeper,
+                &config,
+                &membership,
+                false,
+            ));
+        });
+
+        result
+            .expect("lock result should be captured")
             .expect("lock should succeed (partial)");
+        assert!(!captured.contains("pool already locked"));
+        assert!(captured.contains("[wait] disk aaa: locking..."));
+        assert!(captured.contains("[ok]   disk aaa: locked"));
     }
 
     // Intent: lock fails when umount reports the mount is busy.
@@ -2356,6 +2358,10 @@ mod tests {
         assert!(
             captured.contains(warn),
             "missing umount retry warning {warn:?} in {captured:?}"
+        );
+        assert!(
+            captured.contains("[ok]   pool: unmounted /mnt/storage"),
+            "missing unmount success row in {captured:?}"
         );
     }
 
@@ -3272,6 +3278,49 @@ mod tests {
         assert!(
             !output.contains("nothing to do."),
             "uncertain warning-only preview must not render clean no-op, got:\n{output}"
+        );
+    }
+
+    // Intent: real lock suppresses the already-locked terminal line when
+    //   cleanup is uncertain.
+    // Why it exists: skipped unverified mappers mean cleanup may be incomplete,
+    //   so reporting a clean already-locked state would mislead operators.
+    // Scenario: the pool is unmounted and `/dev/mapper/braid-aaa` exists, but
+    //   its backing LUKS UUID cannot be verified before execution.
+    #[test]
+    fn lock_uncertain_cleanup_warns_without_already_locked_line() {
+        let runner = MockRunner::default().with_output(
+            CmdRequest::MountpointCheck {
+                path: MountPoint::new("/mnt/storage".to_owned()).into(),
+            },
+            lock_err_raw("mountpoint -q /mnt/storage", 1, ""),
+        );
+        let fs = lock_fs(&["/dev/mapper/braid-aaa"]);
+        let config = lock_test_config();
+        let membership = lock_test_membership();
+
+        let mut result = None;
+        let captured = crate::status_tag::testing::capture_with_color(false, || {
+            result = Some(cmd_lock_impl(
+                &runner,
+                &fs,
+                &LockNoopSleeper,
+                &config,
+                &membership,
+                false,
+            ));
+        });
+
+        result
+            .expect("lock result should be captured")
+            .expect("lock should succeed with uncertain cleanup");
+        assert!(
+            captured.contains("[warn] skipping mapper braid-aaa: cannot verify backing LUKS UUID"),
+            "missing uncertain cleanup warning in {captured:?}"
+        );
+        assert!(
+            !captured.contains("pool already locked"),
+            "uncertain cleanup must not report a clean already-locked state: {captured:?}"
         );
     }
 
