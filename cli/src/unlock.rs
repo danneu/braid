@@ -9,14 +9,22 @@ use crate::state_paths::StatePaths;
 use crate::status_tag::color_enabled_for_stderr;
 use std::path::Path;
 
+/// Errors surfaced by `braid unlock` planning and execution. Two shapes only:
+/// `Mount` delegates every probe/open/mount/credential failure to its typed
+/// `MountError` source (whose `DegradedRefused` arm `main.rs` matches to set
+/// exit code 2); `PendingOperation` carries the canonical recovery-mode message
+/// from `preflight::check_no_pending_operation`, shared verbatim with
+/// add/remove/replace/discover (ADR 017) so unlock refuses an interrupted
+/// operation in the same words.
 #[derive(Debug, thiserror::Error)]
 pub enum UnlockError {
     #[error("{0}")]
     Mount(#[from] MountError),
+    /// Pending-operation journal is present or unreadable; message forwarded
+    /// from `preflight::check_no_pending_operation`. Mirrors
+    /// `discover::DiscoverWriteError::PendingOperation`.
     #[error("{0}")]
-    Membership(#[from] membership::MembershipError),
-    #[error("{0}")]
-    Failed(String),
+    PendingOperation(String),
 }
 
 pub struct UnlockParams<'a> {
@@ -187,7 +195,7 @@ pub fn plan_unlock<R: CommandRunner, F: Filesystem + ?Sized>(
     // authoritative on entry. See the "Contract:" block in
     // `UnlockPlan::execute`.
     if let Err(msg) = preflight::check_no_pending_operation(params.paths) {
-        return Err(PlanFailure::empty(UnlockError::Failed(msg)));
+        return Err(PlanFailure::empty(UnlockError::PendingOperation(msg)));
     }
 
     let report = mount::plan_open_pool(
@@ -919,6 +927,73 @@ mod tests {
         assert_eq!(
             rendered, "pool already mounted at /mnt/storage\n",
             "note-only success must render exactly the Info note",
+        );
+    }
+
+    // Intent: plan_unlock refuses at the preflight gate when a pending-op
+    //   journal exists, surfacing UnlockError::PendingOperation before any
+    //   probe runs.
+    // Why it exists: check_no_pending_operation is the sole producer of
+    //   PendingOperation and had no unlock-level test; a regression that
+    //   dropped it or reordered it past mount::plan_open_pool would unlock
+    //   against possibly inconsistent membership and start emitting probe
+    //   notes before the refusal.
+    // Scenario: an add was interrupted, leaving pending-op.json on disk; the
+    //   operator runs `braid unlock` and must be routed to `braid recover`
+    //   instead.
+    #[test]
+    fn plan_unlock_refuses_when_pending_operation_present() {
+        let (_state_dir, sp) = isolated_paths();
+        let config = test_config();
+        let membership = two_disk_membership();
+        let fs = unlock_storage_fs(&[
+            "/dev/disk/by-id/virtio-disk1",
+            "/dev/disk/by-id/virtio-disk2",
+        ]);
+        let journal = crate::journal::build_journal(
+            crate::membership::PoolMembership::empty(),
+            crate::membership::PoolMembership::empty(),
+            crate::journal::OpKind::Add {
+                phase: crate::journal::AddPhase::PoolMutation,
+                targets: crate::membership::LuksUuidMap::new(),
+            },
+        );
+        crate::journal::write_journal(&sp, &journal).expect("seed pending-op.json");
+
+        let runner = MockRunner::default();
+        let params = UnlockParams {
+            config: &config,
+            membership: &membership,
+            paths: &sp,
+            passphrase_stdin: false,
+            passphrase_file: None,
+            key_file: None,
+            allow_degraded: false,
+            dry_run: true,
+            sleeper: &crate::progress::NoopSleeper,
+            backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(),
+        };
+
+        let failure = match plan_unlock(&runner, &fs, &params) {
+            Ok(_) => panic!("pending operation must refuse plan_unlock"),
+            Err(failure) => failure,
+        };
+        assert!(
+            failure.notes.is_empty(),
+            "preflight refusal precedes probe, so notes must be empty, got: {:?}",
+            failure.notes,
+        );
+        match &failure.error {
+            UnlockError::PendingOperation(msg) => assert!(
+                msg.contains("interrupted operation detected"),
+                "expected canonical preflight message, got: {msg}",
+            ),
+            other => panic!("expected PendingOperation, got: {other:?}"),
+        }
+        assert!(
+            runner.requests().is_empty(),
+            "refusal must precede any subprocess, got: {:?}",
+            runner.requests(),
         );
     }
 
