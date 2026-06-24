@@ -1607,6 +1607,53 @@ mod tests {
         );
     }
 
+    // Intent: a predicate-healthy re-arm clears only the post-ack snooze marker;
+    //   a previously-latched EnospcRisk cause stays latched (sticky-until-ack)
+    //   and round-trips.
+    // Why it exists: ADR 014 says re-arm differs from sticky-latch only in the
+    //   post-ack marker. Existing integration coverage drives this branch with a
+    //   MissingDevice latch, while EnospcRisk carry-forward is pinned only at the
+    //   merge helper. A cause-specific re-arm filter that drops only EnospcRisk
+    //   would leave those tests green.
+    // Scenario: a prior cycle latched EnospcRisk and the operator snoozed it
+    //   (marker on disk); the pool's predicate margin then recovers to healthy.
+    #[test]
+    fn cmd_monitor_rearm_carries_forward_latched_enospc_risk() {
+        let (_dir, paths) = isolated_paths();
+        let latched = AlertCause::EnospcRisk {
+            margin: -42,
+            count_below: 1,
+            device_count: 2,
+        };
+        alert::save_alert_latch(
+            &alert::AlertState {
+                causes: vec![latched.clone()],
+            },
+            &paths,
+        )
+        .unwrap();
+        seed_enospc_baseline(&paths, matching_pool_key(), open_snooze_deadline());
+        let runner = MonitorTestRunner::with_usage_payload(usage_4disk_one_low());
+
+        let result = cmd_monitor(&runner, &monitor_fs_btrfs(), &monitor_mp(), &paths);
+
+        assert!(
+            !paths.enospc_ack_json().exists(),
+            "re-arm must remove the snooze marker"
+        );
+        let state = alert_state(&result);
+        assert_eq!(
+            state.causes,
+            vec![latched],
+            "latched EnospcRisk must carry forward across re-arm (sticky-until-ack)"
+        );
+        let saved = alert::load_alert_latch(&paths).unwrap().unwrap();
+        assert_eq!(
+            &saved, state,
+            "latch must round-trip the carried-forward EnospcRisk"
+        );
+    }
+
     // Intent: a baseline whose pool_key no longer matches the live pool is
     //   discarded (not allowed to suppress), across all three mismatch axes:
     //   changed devid set, changed FS UUID, and same-devid changed device_size.
