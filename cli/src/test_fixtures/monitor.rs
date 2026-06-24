@@ -386,11 +386,9 @@ impl CommandRunner for MonitorReconcileRunner {
                 other => panic!("unexpected CryptsetupStatus mapper: {other}"),
             },
             CmdRequest::BtrfsDeviceStatsJson { .. } => Ok(ok_output(STATS_2DISK_HEALTHY)),
-            // Healthy usage payload. This runner's topology is degraded (devid 3
-            // MISSING), so the monitor skips ENOSPC before probing usage and this
-            // arm is unreached -- present defensively so a future non-degraded
-            // reconcile fixture cannot panic here.
-            CmdRequest::BtrfsDeviceUsageRaw { .. } => Ok(ok_output(&usage_2disk_healthy())),
+            // No BtrfsDeviceUsageRaw arm: this runner's degraded topology (devid 3
+            // MISSING) makes the monitor skip ENOSPC before the usage probe, so a
+            // usage request here is a bug -- let it hit the catch-all panic below.
             other => panic!("unexpected CmdRequest in monitor reconcile test: {other:?}"),
         }
     }
