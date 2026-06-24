@@ -1,4 +1,3 @@
-use crate::add::find_added_device_by_uuid;
 use crate::alert;
 use crate::by_id::{ByIdResolver, by_id_priority, is_partition_entry};
 use crate::cmd::{CmdRequest, CommandRunner, Step};
@@ -2587,12 +2586,12 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
                 }
             }
             pool = probe::probe_pool(runner, fs, mount_point)?;
-            let dev = find_added_device_by_uuid(&pool, target_uuid).ok_or_else(|| {
-                RecoverError::AckCleanupFailed {
-                    stage: "live-pool add recovery",
-                    detail: format!("{}: not found in pool after replayed add", target.name),
-                }
-            })?;
+            let dev =
+                pool.device_by_uuid(target_uuid)
+                    .ok_or_else(|| RecoverError::AckCleanupFailed {
+                        stage: "live-pool add recovery",
+                        detail: format!("{}: not found in pool after replayed add", target.name),
+                    })?;
             alert::drop_ghost_acked_for_devids(params.paths, &[dev.devid]).map_err(|e| {
                 RecoverError::AckCleanupFailed {
                     stage: "live-pool add recovery",
@@ -2655,12 +2654,12 @@ fn sweep_recovered_add_acked_stats(
 ) -> Result<(), RecoverError> {
     let mut sweep_devids: Vec<Devid> = Vec::with_capacity(targets.len());
     for (uuid, target) in targets {
-        let dev = find_added_device_by_uuid(pool, uuid).ok_or_else(|| {
-            RecoverError::AckCleanupFailed {
+        let dev = pool
+            .device_by_uuid(uuid)
+            .ok_or_else(|| RecoverError::AckCleanupFailed {
                 stage: "live-pool add recovery (target sweep)",
                 detail: format!("{}: not found in live pool", target.name),
-            }
-        })?;
+            })?;
         sweep_devids.push(dev.devid);
     }
     alert::drop_ghost_acked_for_devids(paths, &sweep_devids).map_err(|e| {
@@ -3214,7 +3213,7 @@ where
         close_old_mapper_best_effort(runner, sleeper, old_mapper, old_name, old_uuid);
     }
 
-    let Some(dev) = pool.devices.iter().find(|d| &d.luks_uuid == new_uuid) else {
+    let Some(dev) = pool.device_by_uuid(new_uuid) else {
         return Err(RecoverError::Failed(format!(
             "post-replace recovery could not find new disk '{}' in the live pool",
             new_name

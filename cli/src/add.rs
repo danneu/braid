@@ -980,15 +980,6 @@ fn format_add_done(names: &[DiskName]) -> String {
     )
 }
 
-/// Shared post-add resolver so `cmd_add` and `cmd_recover` prove live
-/// btrfs membership with the journaled LUKS UUID instead of mapper labels.
-pub(crate) fn find_added_device_by_uuid<'a>(
-    pool: &'a PoolState,
-    uuid: &LuksUuid,
-) -> Option<&'a PoolDevice> {
-    pool.devices.iter().find(|device| device.luks_uuid == *uuid)
-}
-
 /// Dry-run preview source of truth for `braid add` plus the execute
 /// inputs pre-computed during planning. `preview()` renders accumulated
 /// notes plus steps from the semantic work plan; `execute()` renders
@@ -1503,12 +1494,11 @@ impl AddPlan {
                         detail: format!("{}: {e}", target.name),
                     }
                 })?;
-                let dev =
-                    find_added_device_by_uuid(&probe, &target.luks_uuid).ok_or_else(|| {
-                        AddError::PostAddProbeFailed {
-                            detail: format!("{}: not found in pool after add", target.name),
-                        }
-                    })?;
+                let dev = probe.device_by_uuid(&target.luks_uuid).ok_or_else(|| {
+                    AddError::PostAddProbeFailed {
+                        detail: format!("{}: not found in pool after add", target.name),
+                    }
+                })?;
                 alert::drop_ghost_acked_for_devids(params.paths, &[dev.devid]).map_err(|e| {
                     AddError::AckCleanupFailed {
                         stage: "live-pool add",
@@ -1537,7 +1527,7 @@ impl AddPlan {
             // post-commit lifecycle point and same braid recover remediation,
             // regardless of detection site.
             for (uuid, target) in journal_targets.iter() {
-                if find_added_device_by_uuid(&pool_after, uuid).is_none() {
+                if pool_after.device_by_uuid(uuid).is_none() {
                     return Err(AddError::PostAddProbeFailed {
                         detail: format!(
                             "{}: no longer present in the live pool after all disks were added",
@@ -2010,7 +2000,7 @@ fn build_add_credential_prelude(
         let PresentConfigDiskState::PresentLuks { uuid, .. } = &probed.state else {
             return None;
         };
-        if input.pool.devices.iter().any(|d| d.luks_uuid == *uuid) {
+        if input.pool.device_by_uuid(uuid).is_some() {
             return None;
         }
         Some(CredentialVerifyTarget::named_candidate(
@@ -2353,7 +2343,7 @@ fn assert_fresh_uuid_absent_from_live_pool(
     name: &DiskName,
     by_id: &ByIdPath,
 ) -> Result<(), AddError> {
-    if live_pool.devices.iter().any(|d| d.luks_uuid == *uuid) {
+    if live_pool.device_by_uuid(uuid).is_some() {
         return Err(duplicate_live_pool_uuid_error(uuid, name, by_id));
     }
     Ok(())
@@ -3573,40 +3563,6 @@ mod tests {
         assert_eq!(resolver.calls_to(BY_ID), 0);
         assert_eq!(inhibitor.acquire_count(), 0);
         assert!(journal::load_journal(&paths).unwrap().is_none());
-    }
-
-    // Intent: find_added_device_by_uuid resolves the live PoolDevice by LUKS
-    // UUID, tolerating mapper drift.
-    //
-    // Why it exists: post-add ack-cleanup and presence verification must key
-    // on the persistent LUKS UUID per decision 024, not on a reconstructed
-    // `braid-<name>` mapper.
-    //
-    // Scenario: post-add probe reports the new device under a drifted mapper
-    // with the journaled UUID; the resolver still matches and exposes devid 4.
-    #[test]
-    fn find_added_device_by_uuid_tolerates_drifted_mapper() {
-        let pool = PoolState {
-            mounted: true,
-            devices: vec![PoolDevice {
-                mapper: MapperName::from_basename("braid-WRONG".into()),
-                luks_uuid: LuksUuid::parse("22222222-2222-2222-2222-222222222222").unwrap(),
-                devid: Devid::new(4),
-                underlying: "/dev/vdc".into(),
-            }],
-            missing_count: 0,
-            total_devices: 1,
-            fsid: Some(Fsid::parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").unwrap()),
-            missing_devids: vec![],
-            null_underlying: vec![],
-        };
-        let uuid = LuksUuid::parse("22222222-2222-2222-2222-222222222222").unwrap();
-        let missing = LuksUuid::parse("99999999-9999-9999-9999-999999999999").unwrap();
-
-        let dev = find_added_device_by_uuid(&pool, &uuid).expect("uuid should match");
-        assert_eq!(dev.devid, Devid::new(4));
-        assert_eq!(dev.mapper, MapperName::from_basename("braid-WRONG".into()));
-        assert!(find_added_device_by_uuid(&pool, &missing).is_none());
     }
 
     // --- add work-plan identity tests ---

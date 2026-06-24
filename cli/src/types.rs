@@ -936,14 +936,21 @@ pub struct PoolState {
 }
 
 impl PoolState {
+    /// Shared first-match lookup for a live pool member by LUKS UUID so
+    /// plan-time, execute-time, and recovery surfaces cannot drift on the
+    /// same predicate. `probe_pool` records one row per live btrfs member
+    /// without UUID dedupe, so cloned disks can produce duplicate rows; this
+    /// returns only the first and duplicate-sensitive code like add clone
+    /// detection must scan all rows itself.
+    pub fn device_by_uuid(&self, uuid: &LuksUuid) -> Option<&PoolDevice> {
+        self.devices.iter().find(|d| d.luks_uuid == *uuid)
+    }
+
     /// Live backing path for a present pool device identified by LUKS UUID.
     /// Hardware queries must prefer this over persisted by-id paths because
     /// those setup/repair handles can drift while the member is still present.
     pub fn underlying_for_uuid(&self, uuid: &LuksUuid) -> Option<&str> {
-        self.devices
-            .iter()
-            .find(|d| d.luks_uuid == *uuid)
-            .map(|d| d.underlying.as_str())
+        self.device_by_uuid(uuid).map(|d| d.underlying.as_str())
     }
 
     /// Devids that must fire `MissingDevice` alert causes: the btrfs-
@@ -1477,6 +1484,70 @@ mod tests {
                 "{raw:?} should fail"
             );
         }
+    }
+
+    // -- PoolState ---------------------------------------------------------
+
+    // Intent: device_by_uuid resolves a live PoolDevice by first matching
+    // LUKS UUID, tolerating mapper drift and duplicate live rows.
+    //
+    // Why it exists: plan-time, execute-time, and recovery callers must key
+    // on the persistent LUKS UUID per decision 024 without each hand-rolling
+    // the same first-match predicate.
+    //
+    // Scenario: a live probe reports one member under a drifted mapper and
+    // two rows for a cloned UUID; the accessor ignores mapper text, returns
+    // the first cloned row, and reports a missing UUID as absent.
+    #[test]
+    fn pool_state_device_by_uuid_returns_first_uuid_match() {
+        let target_uuid = LuksUuid::parse("22222222-2222-2222-2222-222222222222").unwrap();
+        let duplicate_uuid = LuksUuid::parse("33333333-3333-3333-3333-333333333333").unwrap();
+        let missing_uuid = LuksUuid::parse("99999999-9999-9999-9999-999999999999").unwrap();
+        let pool = PoolState {
+            mounted: true,
+            devices: vec![
+                PoolDevice {
+                    mapper: MapperName::from_basename("braid-WRONG".into()),
+                    luks_uuid: target_uuid.clone(),
+                    devid: Devid::new(4),
+                    underlying: "/dev/vdc".into(),
+                },
+                PoolDevice {
+                    mapper: MapperName::from_basename("braid-clone-a".into()),
+                    luks_uuid: duplicate_uuid.clone(),
+                    devid: Devid::new(5),
+                    underlying: "/dev/vdd".into(),
+                },
+                PoolDevice {
+                    mapper: MapperName::from_basename("braid-clone-b".into()),
+                    luks_uuid: duplicate_uuid.clone(),
+                    devid: Devid::new(6),
+                    underlying: "/dev/vde".into(),
+                },
+            ],
+            missing_count: 0,
+            total_devices: 3,
+            fsid: Some(Fsid::parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").unwrap()),
+            missing_devids: vec![],
+            null_underlying: vec![],
+        };
+
+        let drifted = pool
+            .device_by_uuid(&target_uuid)
+            .expect("uuid should match despite mapper drift");
+        assert_eq!(drifted.devid, Devid::new(4));
+        assert_eq!(
+            drifted.mapper,
+            MapperName::from_basename("braid-WRONG".into())
+        );
+
+        let duplicate_first = pool
+            .device_by_uuid(&duplicate_uuid)
+            .expect("duplicate uuid should return first row");
+        assert_eq!(duplicate_first.devid, Devid::new(5));
+        assert_eq!(duplicate_first.underlying, "/dev/vdd");
+
+        assert!(pool.device_by_uuid(&missing_uuid).is_none());
     }
 
     // Intent: MapperName::from_basename debug-asserts on option-like and

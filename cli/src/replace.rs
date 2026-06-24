@@ -975,7 +975,7 @@ fn verify_replace_execute_live_pool_uuid<R: CommandRunner, F: Filesystem + ?Size
         )));
     }
 
-    if fresh_pool.devices.iter().any(|d| d.luks_uuid == *new_uuid) {
+    if fresh_pool.device_by_uuid(new_uuid).is_some() {
         return Err(ReplaceError::DuplicateUuid {
             uuid: new_uuid.clone(),
             scope: DuplicateUuidScope::LivePool,
@@ -1584,7 +1584,7 @@ fn assert_new_uuid_unique(
             scope: DuplicateUuidScope::Membership,
         });
     }
-    if pool.devices.iter().any(|d| d.luks_uuid == *new_uuid) {
+    if pool.device_by_uuid(new_uuid).is_some() {
         return Err(ReplaceError::DuplicateUuid {
             uuid: new_uuid.clone(),
             scope: DuplicateUuidScope::LivePool,
@@ -1840,7 +1840,7 @@ fn resolve_replace_source(
     pool: &PoolState,
 ) -> Result<ReplaceSource, ReplaceError> {
     // Pattern 4: find by UUID, not by reconstructed mapper.
-    if let Some(matched) = pool.devices.iter().find(|d| d.luks_uuid == *old_uuid) {
+    if let Some(matched) = pool.device_by_uuid(old_uuid) {
         // Live old disk in pool.
         if missing_id.is_some() {
             return Err(ReplaceError::Validation(

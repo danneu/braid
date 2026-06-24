@@ -554,7 +554,7 @@ pub fn plan_remove<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         };
 
     // Is the disk present in the live pool under that UUID?
-    let target = match pool.devices.iter().find(|d| d.luks_uuid == target_uuid) {
+    let target = match pool.device_by_uuid(&target_uuid) {
         Some(d) => d,
         None => {
             let mut msg = format!("disk '{}' not found in pool.", params.name);
