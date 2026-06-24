@@ -741,8 +741,7 @@ impl BrowseState {
     /// full viewport start.
     pub(crate) fn page_down(&mut self) {
         let page = self.viewport_height.get() as usize;
-        let max_scroll = self.output.len().saturating_sub(page);
-        self.scroll_offset = (self.scroll_offset + page).min(max_scroll);
+        self.scroll_offset = (self.scroll_offset + page).min(self.max_scroll());
     }
 
     /// Page the content area up by one viewport.
@@ -756,6 +755,15 @@ impl BrowseState {
     /// and page movement clamp to the actual visible Browse body.
     pub(crate) fn set_viewport_height(&self, height: u16) {
         self.viewport_height.set(height);
+    }
+
+    /// Largest `scroll_offset` that still fills the content viewport, so
+    /// paging and line scrolling clamp here instead of revealing a blank
+    /// tail past the last line.
+    fn max_scroll(&self) -> usize {
+        self.output
+            .len()
+            .saturating_sub(self.viewport_height.get() as usize)
     }
 
     pub(crate) fn focus(&self) -> BrowseFocus {
@@ -1270,11 +1278,7 @@ impl BrowseState {
             let max = self.systemd_units.len().saturating_sub(1);
             self.systemd_unit_selected = (self.systemd_unit_selected + 1).min(max);
         } else {
-            let max_scroll = self
-                .output
-                .len()
-                .saturating_sub(self.viewport_height.get() as usize);
-            self.scroll_offset = (self.scroll_offset + 1).min(max_scroll);
+            self.scroll_offset = (self.scroll_offset + 1).min(self.max_scroll());
         }
     }
 
@@ -1382,6 +1386,69 @@ mod tests {
         ]
         .into_iter()
         .collect()
+    }
+
+    // Intent: page scrolling clamps to the last full content viewport and
+    // the start of content.
+    // Why it exists: without this guard, Ctrl-D can reveal a blank tail and
+    // Ctrl-U can underflow past the start of Browse output.
+    // Scenario: user pages through ten lines of Browse output in a three-line
+    // viewport, then pages back to the top.
+    #[test]
+    fn page_scroll_clamps_to_content_bounds() {
+        let mut state = BrowseState {
+            output: (0..10).map(|line| format!("line {line}")).collect(),
+            ..Default::default()
+        };
+        state.set_viewport_height(3);
+
+        state.page_down();
+        assert_eq!(state.scroll_offset(), 3);
+        state.page_down();
+        assert_eq!(state.scroll_offset(), 6);
+        state.page_down();
+        assert_eq!(state.scroll_offset(), 7);
+        state.page_down();
+        assert_eq!(state.scroll_offset(), 7);
+
+        state.page_up();
+        assert_eq!(state.scroll_offset(), 4);
+        state.page_up();
+        assert_eq!(state.scroll_offset(), 1);
+        state.page_up();
+        assert_eq!(state.scroll_offset(), 0);
+        state.page_up();
+        assert_eq!(state.scroll_offset(), 0);
+    }
+
+    // Intent: content line scrolling clamps to the same content bounds as
+    // page scrolling.
+    // Why it exists: j/k use a sibling path to Ctrl-D/Ctrl-U, so their clamp
+    // can drift unless the routed Content movement is pinned directly.
+    // Scenario: user line-scrolls through ten lines in a three-line Browse
+    // viewport and keeps pressing j/k past both endpoints.
+    #[test]
+    fn content_scroll_clamps_to_content_bounds() {
+        let mut state = BrowseState {
+            focus: BrowseFocus::Content,
+            output: (0..10).map(|line| format!("line {line}")).collect(),
+            ..Default::default()
+        };
+        state.set_viewport_height(3);
+
+        for expected in 1..=7 {
+            state.select_next();
+            assert_eq!(state.scroll_offset(), expected);
+        }
+        state.select_next();
+        assert_eq!(state.scroll_offset(), 7);
+
+        for expected in (0..7).rev() {
+            state.select_prev();
+            assert_eq!(state.scroll_offset(), expected);
+        }
+        state.select_prev();
+        assert_eq!(state.scroll_offset(), 0);
     }
 
     // Intent: the default Btrfs Browse selection renders the command it

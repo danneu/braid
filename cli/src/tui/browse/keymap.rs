@@ -108,6 +108,25 @@ mod tests {
         ));
     }
 
+    // Intent: Ctrl-D/Ctrl-U map to Browse full-page scroll messages.
+    // Why it exists: the documented Browse page scroll must keep emitting
+    // BrowsePageDown/BrowsePageUp; nothing else guards this binding.
+    // Scenario: user pages through long Browse output with Ctrl-D then
+    // Ctrl-U.
+    #[test]
+    fn ctrl_d_u_emit_page_messages() {
+        let down = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL);
+        let up = KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL);
+        assert!(matches!(
+            handle_key(down, &ctx(BrowseFocus::Content)),
+            Some(Message::BrowsePageDown)
+        ));
+        assert!(matches!(
+            handle_key(up, &ctx(BrowseFocus::Content)),
+            Some(Message::BrowsePageUp)
+        ));
+    }
+
     // Intent: j/k outside content still drive sidebar selection.
     // Why it exists: selecting in Program, Command, and Subview columns
     // immediately loads the corresponding content.
