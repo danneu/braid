@@ -1912,14 +1912,24 @@ fn foreign_live_device_not_admitted(dev: &PoolDevice) -> RecoverError {
     ))
 }
 
+/// Single foreign-admission gate for recovery rebuilds so standalone
+/// pre-mutation checks and membership builders cannot drift on the
+/// phase-aware admission predicate.
+fn admitted_live_member<'a>(
+    admission: &'a PoolMembership,
+    dev: &PoolDevice,
+) -> Result<&'a DiskMember, RecoverError> {
+    admission
+        .by_uuid(&dev.luks_uuid)
+        .ok_or_else(|| foreign_live_device_not_admitted(dev))
+}
+
 fn validate_live_members_allowed(
     pool: &PoolState,
     allowed: &PoolMembership,
 ) -> Result<(), RecoverError> {
     for dev in &pool.devices {
-        if allowed.by_uuid(&dev.luks_uuid).is_none() {
-            return Err(foreign_live_device_not_admitted(dev));
-        }
+        admitted_live_member(allowed, dev)?;
     }
     Ok(())
 }
@@ -1940,9 +1950,7 @@ fn build_membership_from_live_pool(
 ) -> Result<PoolMembership, RecoverError> {
     let mut recovered = PoolMembership::empty();
     for dev in &pool.devices {
-        let Some(admission_member) = admission_membership.by_uuid(&dev.luks_uuid) else {
-            return Err(foreign_live_device_not_admitted(dev));
-        };
+        let admission_member = admitted_live_member(admission_membership, dev)?;
         let by_id = resolve_by_id_for_underlying(by_id_resolver, &dev.underlying)?;
         let added_at = resolve_added_at(prior, admission_member, &dev.luks_uuid);
         recovered.insert(
@@ -2598,6 +2606,9 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
                     detail: format!("devid {}: {e}", dev.devid),
                 }
             })?;
+            // Per-target fail-closed gate: a foreign device surfacing mid-batch
+            // stops further pool_add_device here rather than at the terminal
+            // builder, which remains the final admission gate.
             validate_live_members_allowed(&pool, union)?;
         }
 
@@ -4446,6 +4457,29 @@ mod tests {
         )
     }
 
+    fn btrfs_show_disk1_disk2_devid4_and_foreign() -> RawCommandOutput {
+        ok_raw(
+            "btrfs filesystem show /mnt/storage",
+            "Label: none  uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
+             \tTotal devices 3 FS bytes used 1.00GiB\n\
+             \tdevid    1 size 10.00GiB used 2.00GiB path /dev/mapper/braid-disk1\n\
+             \tdevid    4 size 10.00GiB used 2.00GiB path /dev/mapper/braid-disk2\n\
+             \tdevid    9 size 10.00GiB used 2.00GiB path /dev/mapper/luks-foreign\n",
+        )
+    }
+
+    fn btrfs_show_disk1_disk2_devid4_disk3_devid5_and_foreign() -> RawCommandOutput {
+        ok_raw(
+            "btrfs filesystem show /mnt/storage",
+            "Label: none  uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
+             \tTotal devices 4 FS bytes used 1.00GiB\n\
+             \tdevid    1 size 10.00GiB used 2.00GiB path /dev/mapper/braid-disk1\n\
+             \tdevid    4 size 10.00GiB used 2.00GiB path /dev/mapper/braid-disk2\n\
+             \tdevid    5 size 10.00GiB used 2.00GiB path /dev/mapper/braid-disk3\n\
+             \tdevid    9 size 10.00GiB used 2.00GiB path /dev/mapper/luks-foreign\n",
+        )
+    }
+
     fn btrfs_show_one_disk() -> RawCommandOutput {
         ok_raw(
             "btrfs filesystem show /mnt/storage",
@@ -6228,6 +6262,222 @@ mod tests {
         assert_eq!(reloaded.0.get("1"), Some(&control));
         assert!(!reloaded.0.contains_key("4"));
         assert!(!reloaded.0.contains_key("5"));
+    }
+
+    // Intent: add PoolMutation recovery stops replaying a multi-target batch
+    // when a foreign live member appears after one target is re-added.
+    // Why it exists: the per-target fail-closed gate must stop further
+    // pool_add_device mutations before the terminal membership builder fails.
+    // Scenario: disk2 is replayed, a stray LUKS mapper joins the live btrfs
+    // pool during the re-probe, and recovery must not add disk3 afterward.
+    #[test]
+    fn live_add_recovery_stops_mid_batch_when_foreign_member_surfaces() {
+        let f = PoolFixture::empty();
+        let journal = two_target_recoverable_pool_mutation_add_journal();
+        journal::write_journal(&f.paths, &journal).unwrap();
+        let union = test_recovery_admission_membership(&journal);
+        let targets = match &journal.op {
+            OpKind::Add { targets, .. } => targets,
+            _ => unreachable!("test journal is Add"),
+        };
+        let mount_point = MountPoint::new("/mnt/storage".into());
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/virtio-disk2",
+                    "22222222-2222-2222-2222-222222222222",
+                ),
+            )
+            .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk2")
+            .with_mapper_open(
+                "braid-disk2",
+                "/dev/vdb",
+                "22222222-2222-2222-2222-222222222222",
+            )
+            .with_output(
+                CmdRequest::BtrfsFilesystemShowTarget {
+                    target: "/dev/mapper/braid-disk2".into(),
+                },
+                btrfs_show_target_no_btrfs("/dev/mapper/braid-disk2"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/disk/by-id/virtio-disk2".into(),
+                },
+                TEST_PASSPHRASE_BYTES.to_vec(),
+                ok_raw_empty("cryptsetup open --test-passphrase"),
+            )
+            .with_output(
+                CmdRequest::BtrfsDeviceScanForget {
+                    devices: vec!["/dev/mapper/braid-disk2".into()],
+                },
+                ok_raw_empty("btrfs device scan --forget"),
+            )
+            .with_output(
+                CmdRequest::WipefsBtrfs {
+                    device: "/dev/mapper/braid-disk2".into(),
+                },
+                ok_raw_empty("wipefs"),
+            )
+            .with_output(
+                CmdRequest::BtrfsDeviceAdd {
+                    device: "/dev/mapper/braid-disk2".into(),
+                    mount_point: mount_point.clone(),
+                    force: true,
+                },
+                ok_raw_empty("btrfs device add"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk3".into(),
+                },
+                cryptsetup_uuid_ok(
+                    "/dev/disk/by-id/virtio-disk3",
+                    "33333333-3333-3333-3333-333333333333",
+                ),
+            )
+            .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk3")
+            .with_mapper_open(
+                "braid-disk3",
+                "/dev/vdc",
+                "33333333-3333-3333-3333-333333333333",
+            )
+            .with_output(
+                CmdRequest::BtrfsFilesystemShowTarget {
+                    target: "/dev/mapper/braid-disk3".into(),
+                },
+                btrfs_show_target_no_btrfs("/dev/mapper/braid-disk3"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/disk/by-id/virtio-disk3".into(),
+                },
+                TEST_PASSPHRASE_BYTES.to_vec(),
+                ok_raw_empty("cryptsetup open --test-passphrase"),
+            )
+            .with_output(
+                CmdRequest::BtrfsDeviceScanForget {
+                    devices: vec!["/dev/mapper/braid-disk3".into()],
+                },
+                ok_raw_empty("btrfs device scan --forget"),
+            )
+            .with_output(
+                CmdRequest::WipefsBtrfs {
+                    device: "/dev/mapper/braid-disk3".into(),
+                },
+                ok_raw_empty("wipefs"),
+            )
+            .with_output(
+                CmdRequest::BtrfsDeviceAdd {
+                    device: "/dev/mapper/braid-disk3".into(),
+                    mount_point: mount_point.clone(),
+                    force: true,
+                },
+                ok_raw_empty("btrfs device add"),
+            )
+            .with_output_sequence(
+                CmdRequest::BtrfsFilesystemShow {
+                    mount_point: mount_point.clone(),
+                },
+                vec![
+                    btrfs_show_disk1_disk2_devid4_and_foreign(),
+                    btrfs_show_disk1_disk2_devid4_disk3_devid5_and_foreign(),
+                ],
+            )
+            .with_output(
+                CmdRequest::BtrfsFilesystemShow {
+                    mount_point: mount_point.clone(),
+                },
+                btrfs_show_disk1_disk2_devid4_disk3_devid5_and_foreign(),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName::from_basename("braid-disk1".into()),
+                },
+                cryptsetup_status_active("braid-disk1", "/dev/vda"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vda".into(),
+                },
+                cryptsetup_uuid_ok("/dev/vda", "11111111-1111-1111-1111-111111111111"),
+            )
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/vda".into(),
+                },
+                TEST_PASSPHRASE_BYTES.to_vec(),
+                ok_raw_empty("cryptsetup open --test-passphrase"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName::from_basename("luks-foreign".into()),
+                },
+                cryptsetup_status_active("luks-foreign", "/dev/vdz"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vdz".into(),
+                },
+                cryptsetup_uuid_ok("/dev/vdz", "99999999-9999-9999-9999-999999999999"),
+            );
+        let resolver = resolver_for(&[
+            ("/dev/vda", "virtio-disk1"),
+            ("/dev/vdb", "virtio-disk2"),
+            ("/dev/vdc", "virtio-disk3"),
+        ]);
+        let params = f.recover_params().build();
+
+        let err = execute_add_pool_mutation_recovery(
+            &runner,
+            &MockFs::new(&[
+                "/dev/disk/by-id/virtio-disk2",
+                "/dev/mapper/braid-disk2",
+                "/dev/disk/by-id/virtio-disk3",
+                "/dev/mapper/braid-disk3",
+            ]),
+            &resolver,
+            &params,
+            AddPoolReplayCtx {
+                credential: None,
+                journal: &journal,
+                union: &union,
+                targets,
+                pool: pool_state_one_disk(),
+            },
+        )
+        .unwrap_err();
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("recovery admission membership"),
+            "foreign member must fail through the recovery admission gate, got: {msg}"
+        );
+        assert!(
+            f.paths.pending_op_json().exists(),
+            "journal must remain for operator recovery after the fail-closed stop"
+        );
+        let requests = runner.requests();
+        let device_adds: Vec<&CmdRequest> = requests
+            .iter()
+            .filter(|request| matches!(request, CmdRequest::BtrfsDeviceAdd { .. }))
+            .collect();
+        assert_eq!(
+            device_adds.len(),
+            1,
+            "foreign member surfacing mid-batch must stop before adding disk3: {device_adds:?}"
+        );
+        assert!(
+            device_adds.iter().any(|request| matches!(
+                request,
+                CmdRequest::BtrfsDeviceAdd { device, .. }
+                    if device == "/dev/mapper/braid-disk2"
+            )),
+            "disk2 is the only target that should be replayed: {device_adds:?}"
+        );
     }
 
     // Intent
