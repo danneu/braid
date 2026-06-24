@@ -453,9 +453,17 @@ pub fn plan_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     // device's data. Without this check, btrfs will either ENOSPC or
     // crash the filesystem to read-only mid-relocation (see tests/repro/).
     //
-    // Skip when only 1 present device survives: in 2-device RAID1, the
-    // survivor already has all data (every chunk is mirrored). This does
-    // not match the reproduced relocation-failure mode.
+    // Skip when only 1 present device survives (devices.len() == 1). The
+    // clean 2-device RAID1 + 1 missing case -- where the survivor mirrors
+    // every chunk and no relocation is needed -- is already rejected by the
+    // 2-device guard above, so the only single-survivor state that reaches
+    // here is multi-missing (total_devices > 2, >= 2 missing). There the
+    // survivor is NOT guaranteed to hold every chunk: data mirrored only
+    // across the simultaneously-dead devices is already lost and cannot be
+    // relocated, so a relocation-space preflight has nothing to prove. Per
+    // the scope block above, that case is deliberately delegated to the
+    // kernel min-devices check and device_remove_error (pool.rs), not
+    // proven safe here.
     if pool.devices.len() >= 2
         && let Err(e) = check_relocation_space(runner, config.mount_point(), params.missing_id)
     {
