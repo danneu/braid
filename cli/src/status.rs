@@ -624,6 +624,9 @@ fn build_status<R: CommandRunner, F: Filesystem>(
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Read-only pool status renderer for JSON and human output.
+/// It reports the persisted alert latch plus live topology/capacity and leaves
+/// corrupt-latch quarantine to the monitor.
 pub fn cmd_status<R: CommandRunner, F: Filesystem>(
     runner: &R,
     fs: &F,

@@ -12,6 +12,9 @@ call-site coupling -- not the signature.
 Prefer one to three lines. If removing the comment would not lose any
 information a reader could not recover from the code, do not write it.
 
+The `pub fn cmd_*` and `pub(crate) fn cmd_*` subset is CI-enforced by
+`scripts/docs/check-cmd-doc-comments.py`.
+
 Skip:
 
 - Trait impls whose purpose is the trait (`Display`, `Debug`, `From`,

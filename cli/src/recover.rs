@@ -1573,6 +1573,9 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     Ok(RecoverPlan { notes, work_plan })
 }
 
+/// Plan-then-execute interrupted-operation recovery; dry-run renders the plan.
+/// Planning loads the journal, resolves admission membership, and plans mount/open;
+/// execute verifies credentials and replays journal actions.
 pub fn cmd_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,

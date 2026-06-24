@@ -40,6 +40,9 @@ fn folded_computation_error_detail(
     }
 }
 
+/// Headless monitor cycle that latches alert state from live pool probes and
+/// acked baselines; probe uncertainty becomes an alert except for the ENOSPC
+/// risk fail-open carve-out.
 pub fn cmd_monitor<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,

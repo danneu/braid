@@ -1628,6 +1628,9 @@ fn absent_from_membership_error(name: &str) -> ReplaceError {
     ))
 }
 
+/// Plan-then-execute device replacement; dry-run renders the same typed plan
+/// built from membership, mount/preflight, duplicate-UUID, and target probes.
+/// Real execution verifies the passphrase and holds a sleep inhibitor.
 pub fn cmd_replace<R, F, D>(
     runner: &R,
     fs: &F,

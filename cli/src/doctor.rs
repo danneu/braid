@@ -1908,6 +1908,9 @@ impl DoctorReport {
     }
 }
 
+/// Non-mutating diagnostic entry point that wires production IO into
+/// `run_doctor`, renders JSON or human output, and returns the report's
+/// overall-status exit contract.
 pub fn cmd_doctor(
     config_path: &Path,
     paths: &StatePaths,

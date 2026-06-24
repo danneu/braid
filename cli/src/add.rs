@@ -1930,6 +1930,9 @@ pub fn plan_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     Ok(plan)
 }
 
+/// Plan-then-execute device enrollment through LUKS format and btrfs add.
+/// Dry-run renders the same typed plan; planning fails closed on duplicate
+/// LUKS UUID/name preflight before any mutation.
 pub fn cmd_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,

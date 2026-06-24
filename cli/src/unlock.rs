@@ -223,6 +223,9 @@ pub fn plan_unlock<R: CommandRunner, F: Filesystem + ?Sized>(
     }
 }
 
+/// Plan-then-execute LUKS open and pool mount; dry-run renders the plan.
+/// Probe notes render before any mutation, and credential resolution is skipped
+/// when every required mapper is already open.
 pub fn cmd_unlock<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,

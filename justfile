@@ -328,6 +328,11 @@ check-code-doc-anchors:
     python3 scripts/docs/check-code-doc-anchors.py --selftest
     python3 scripts/docs/check-code-doc-anchors.py
 
+# Verify public Rust command entry points carry boundary doc comments (selftest first)
+check-cmd-doc-comments:
+    python3 scripts/docs/check-cmd-doc-comments.py --selftest
+    python3 scripts/docs/check-cmd-doc-comments.py
+
 # Verify durable docs/code/tests do not cite transient plans/wip files (selftest first)
 check-plans-refs:
     python3 scripts/docs/check-plans-refs.py --selftest

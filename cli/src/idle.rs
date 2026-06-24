@@ -52,6 +52,8 @@ impl std::fmt::Display for BusyReason {
     }
 }
 
+/// Autosuspend gate: probes mount, host-wide sysfs exclop, then pool scrub,
+/// and maps every unknowable probe to `Busy` so suspend fails closed.
 pub fn cmd_idle<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,

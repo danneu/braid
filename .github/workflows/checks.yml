@@ -28,6 +28,16 @@ jobs:
           python3 scripts/docs/check-output-ascii.py --selftest
           python3 scripts/docs/check-output-ascii.py
 
+  cmd-doc-comments:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Guard command doc comments (selftest first)
+        run: |
+          python3 scripts/docs/check-cmd-doc-comments.py --selftest
+          python3 scripts/docs/check-cmd-doc-comments.py
+
   doc-links:
     runs-on: ubuntu-latest
     steps:

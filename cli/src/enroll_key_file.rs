@@ -815,6 +815,9 @@ pub fn plan_enroll<R: CommandRunner, F: Filesystem + ?Sized>(
     })
 }
 
+/// Plan-then-execute keyfile enrollment; dry-run classifies candidates without
+/// reading the passphrase, while real execution re-probes and classifies after
+/// credential verification.
 pub fn cmd_enroll_key_file<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,

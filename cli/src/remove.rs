@@ -621,6 +621,9 @@ pub fn plan_remove<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     Ok(plan)
 }
 
+/// Plan-then-execute device removal; dry-run renders the same typed plan.
+/// Relocation-space preflight soft-warns on uncertain >=2-survivor checks,
+/// but fails closed for 2-to-1 single-survivor capacity uncertainty.
 pub fn cmd_remove<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,

@@ -1123,6 +1123,9 @@ struct LockOptions {
     mode: LockMode,
 }
 
+/// User lock entry point; systemd ExecStop goes through `cmd_lock_systemd_stop`.
+/// Runs the shared lock implementation in `LockMode::User`, so exclusive ops
+/// such as a running balance block the lock instead of being paused for shutdown.
 pub fn cmd_lock<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,

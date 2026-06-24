@@ -487,6 +487,9 @@ pub fn plan_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     })
 }
 
+/// Plan-then-execute missing-device removal in a degraded array.
+/// Relocation-space uncertainty fails closed because there is no healthy-pool
+/// soft-warn branch to fall back to.
 pub fn cmd_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
