@@ -282,3 +282,14 @@ just test-vm                         # full VM suite -- catches any recovery-flo
 ```
 
 A passing `just test-rust` after fixture regeneration confirms parsing of real `nixos-25.11` btrfs-progs output for never-started, canceled, finished, and running states. The inline `suspended_with_percentage` test guards the upstream-deterministic format string for the one state that's impractical to capture. The new recover-level abort test pins the recover-blocking contract that motivated the typed Result.
+- Follow-up ([plans/impl/2026-06-24-recover-canceled-dev-replace-warn.md](2026-06-24-recover-canceled-dev-replace-warn.md)):
+  the `Cancelled` arm was reclassified from `[fail]` to `[warn] pool:
+  kernel dev_replace canceled -- proceeding` while still returning `Ok(())`,
+  restoring the `[fail]` <-> `Err` invariant stated by
+  `cli/src/recover.rs#wait_for_kernel_replace_to_finish` and matching
+  [docs/design/principles.md#13-announce-long-running-work](../../docs/design/principles.md#13-announce-long-running-work)'s
+  `[warn]` closer.
+  The canceled tests were renamed to
+  `wait_for_kernel_replace_emits_warn_on_canceled_returns_ok` and
+  `wait_for_kernel_replace_emits_warn_on_canceled_first_poll`; the `[fail]`
+  references above are superseded.

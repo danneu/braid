@@ -3249,15 +3249,15 @@ const REPLACE_WAIT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 /// waited on by umount, so without this wait the relock_and_remount cycle can
 /// race the resume worker and the second mount sees the same in-flight state.
 ///
-/// Two failure modes are handled differently. A subprocess error from
-/// `runner.run` (transient races, ENOMEM, signals) is best-effort: emit
-/// `[warn]` and proceed, since a transient runner Err on a never-replaced
-/// pool would otherwise force-fail every recover. `Suspended` and a parser
-/// `Err` (unrecognised zero-exit stdout, e.g. an upstream wording change)
-/// both mean we cannot reason about kernel replace state, so they emit
-/// `[fail]` and return `RecoverError::Failed` -- preserving the journal so
-/// the next `braid recover` can retry instead of racing the resume worker
-/// and clearing `pending-op.json`.
+/// Recoverable status problems emit `[warn]` and proceed: a subprocess error
+/// from `runner.run` (transient races, ENOMEM, signals) or `Cancelled`, where
+/// the kernel has reverted the topology and downstream recovery can clean up
+/// the journal. Hard stops emit `[fail]` and return `RecoverError::Failed`:
+/// `Suspended`, because the kernel still treats the replace as ongoing, or
+/// any parser `Err`, including a non-zero `btrfs replace status` exit
+/// classified by the parser and unrecognised zero-exit stdout such as an
+/// upstream wording change. In this stream, `[fail]` always pairs with
+/// `RecoverError::Failed`.
 ///
 /// The `Running` arm is intentionally unbounded. Proceeding past it would
 /// race the resume kthread this barrier exists to close; a fail-returning
@@ -3312,9 +3312,9 @@ fn wait_for_kernel_replace_to_finish<R: CommandRunner>(
             }
             ReplaceState::Cancelled => {
                 emit_status(&status_line(
-                    StatusTag::Fail,
+                    StatusTag::Warn,
                     color_enabled,
-                    "pool: kernel dev_replace canceled",
+                    "pool: kernel dev_replace canceled -- proceeding",
                 ));
                 return Ok(());
             }
@@ -3966,13 +3966,13 @@ mod tests {
     }
 
     #[test]
-    // Intent: canceled kernel dev_replace reports a fail row but does not abort
+    // Intent: canceled kernel dev_replace reports a warn row but does not abort
     // recovery after an observed in-flight wait.
     // Why it exists: canceled means the kernel rolled topology back; downstream
     // replace recovery can still classify and clean up the journal safely.
     // Scenario: recover observes one running poll, then the kernel reports
     // "canceled on" for the same replace.
-    fn wait_for_kernel_replace_emits_fail_on_canceled_returns_ok() {
+    fn wait_for_kernel_replace_emits_warn_on_canceled_returns_ok() {
         let runner = ReplaceStatusSequenceRunner::new(vec![
             ReplaceStatusItem::Output(ok_raw(
                 "btrfs replace status -1 /mnt/storage",
@@ -3999,7 +3999,7 @@ mod tests {
             vec![
                 "[wait] pool: waiting for kernel dev_replace to finish...",
                 "  ... 5.0%",
-                "[fail] pool: kernel dev_replace canceled",
+                "[warn] pool: kernel dev_replace canceled -- proceeding",
             ],
         );
     }
@@ -4055,13 +4055,13 @@ mod tests {
     }
 
     #[test]
-    // Intent: canceled kernel dev_replace reports a fail row even when it is
+    // Intent: canceled kernel dev_replace reports a warn row even when it is
     // the first status observed.
-    // Why it exists: canceled is terminal and diagnostic, not a normal
-    // "nothing to wait for" condition gated by a prior wait row.
+    // Why it exists: canceled is surfaced unconditionally, unlike the silent
+    // Finished/NotStarted fast path that only emits [ok] after a wait row.
     // Scenario: recover mounts after the kernel already transitioned the
     // resumed replace to CANCELED.
-    fn wait_for_kernel_replace_emits_fail_on_canceled_first_poll() {
+    fn wait_for_kernel_replace_emits_warn_on_canceled_first_poll() {
         let runner = ReplaceStatusSequenceRunner::new(vec![ReplaceStatusItem::Output(ok_raw(
             "btrfs replace status -1 /mnt/storage",
             "Started on 27.Feb 10:30:00, canceled on 27.Feb 10:35:00 at 0.0%, 0 write errs, 0 uncorr. read errs\n",
@@ -4079,7 +4079,7 @@ mod tests {
         assert!(result.unwrap().is_ok(), "canceled replace should proceed");
         assert_eq!(
             captured.lines().collect::<Vec<_>>(),
-            vec!["[fail] pool: kernel dev_replace canceled"],
+            vec!["[warn] pool: kernel dev_replace canceled -- proceeding"],
         );
     }
 
