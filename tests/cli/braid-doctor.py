@@ -186,7 +186,7 @@ def add_cmd(key):
         f"braid add --luks-format-arg=--pbkdf --luks-format-arg=pbkdf2 --luks-format-arg=--pbkdf-force-iterations --luks-format-arg=1000 {key}=/dev/disk/by-id/virtio-{key} --passphrase-stdin --yes"
     )
 
-# Intent: lock the pinned util-linux mountpoint exit-code behavior.
+# Intent: lock the host util-linux mountpoint exit-code behavior.
 # Why it exists: this is the behavior lock for the exit-code classifier in
 # cli/src/online_state.rs; a nixpkgs bump that changed mountpoint(1)'s exit
 # codes would silently misclassify production state while mocked tests passed.

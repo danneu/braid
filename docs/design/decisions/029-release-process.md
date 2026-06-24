@@ -134,7 +134,9 @@ Setting `follows = "nixpkgs"` rebuilds `braid-cli-unwrapped` against the
 consumer's nixpkgs, producing a different store path and a cache miss (the NAS
 recompiles Rust, defeating the cache). `follows` remains a valid advanced opt-out
 (smaller closure via nixpkgs dedup) at the cost of release-cache path identity;
-it also moves the pinned tool versions onto the consumer's nixpkgs (see ADR 010).
+it also moves the five pinned tool versions onto the consumer's nixpkgs (see ADR
+010). util-linux and systemd resolve from the consumer's nixpkgs regardless of
+`follows`.
 
 This aligns docs with reality: the deployed consumer already runs no-follows with
 a deliberate "do NOT set follows" tool-version-boundary comment.
@@ -186,4 +188,4 @@ merges.
 - `cliff.toml` -- git-cliff template + commit-group config for the GitHub release-notes body.
 - `tests/eval/version-matches-cargo.nix` -- the version single-source-of-truth eval guard.
 - [Releasing](../../dev/releasing.md) -- the operator runbook.
-- [Toolchain pinning](010-toolchain-pinning.md) -- no-follows default and parser-critical tool pinning.
+- [Toolchain pinning](010-toolchain-pinning.md) -- no-follows default and pinned fragile-parser toolchain.

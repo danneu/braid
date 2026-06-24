@@ -138,6 +138,51 @@ mod tests {
         assert!(matches!(err, ParseError::InvalidJson { .. }));
     }
 
+    // Intent: lsblk JSON may include columns braid did not request.
+    // Why it exists: util-linux is host-provided, so added JSON keys must not
+    //   break the stable contract braid relies on.
+    // Scenario: a newer host lsblk emits extra top-level and per-device fields.
+    #[test]
+    fn lsblk_accepts_unknown_extra_keys() {
+        let out = parse_lsblk_json(&raw_lsblk(
+            r#"{
+                "blockdevices": [{
+                    "name": "vdb",
+                    "type": "disk",
+                    "size": 1073741824,
+                    "model": null,
+                    "serial": "disk-a",
+                    "uuid": null,
+                    "rota": true,
+                    "tran": "sata",
+                    "extra_device_key": "ignored",
+                    "children": [{
+                        "name": "dm-0",
+                        "type": "crypt",
+                        "size": 1072693248,
+                        "model": null,
+                        "serial": null,
+                        "uuid": "11111111-2222-3333-4444-555555555555",
+                        "rota": true,
+                        "tran": null,
+                        "extra_child_key": { "nested": true }
+                    }]
+                }],
+                "extra_top_level_key": "ignored"
+            }"#,
+        ))
+        .unwrap();
+
+        assert_eq!(out.blockdevices.len(), 1);
+        assert_eq!(out.blockdevices[0].name, "vdb");
+        assert_eq!(out.blockdevices[0].serial.as_deref(), Some("disk-a"));
+        assert_eq!(out.blockdevices[0].children.len(), 1);
+        assert_eq!(
+            out.blockdevices[0].children[0].uuid.as_deref(),
+            Some("11111111-2222-3333-4444-555555555555")
+        );
+    }
+
     // Intent: lsblk JSON must include the requested SIZE column.
     // Why it exists: serde Option<T> would otherwise turn a missing key
     // into None and hide command/output drift.

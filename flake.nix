@@ -59,8 +59,6 @@
           toolPath = pkgs.lib.makeBinPath [
             pkgs.cryptsetup
             pkgs.btrfs-progs
-            pkgs.util-linux
-            pkgs.systemd
             pkgs.smartmontools
             pkgs.nut
             pkgs.ethtool
@@ -935,6 +933,9 @@
           eval-nixos-module-default-supplies-package = import ./tests/eval/nixos-module-default-package.nix {
             inherit pkgs self nixpkgs;
           };
+          eval-nixos-module-util-linux-host = import ./tests/eval/nixos-module-default-util-linux-host.nix {
+            inherit pkgs self nixpkgs;
+          };
           eval-version-matches-cargo = import ./tests/eval/version-matches-cargo.nix {
             inherit pkgs self system;
             cargoToml = ./cli/Cargo.toml; # resolves relative to flake.nix = repo root
@@ -1130,17 +1131,17 @@
       nixosModules.default =
         { pkgs, lib, ... }:
         let
-          # Storage toolchain from braid's `nixpkgs` flake input, instantiated
-          # cleanly (no consumer overlays). NOTE: the install docs now recommend
-          # NOT setting `braid.inputs.nixpkgs.follows`. The default (no follows)
-          # keeps this input on braid's pinned nixos-26.05 -- the exact nixpkgs the
-          # release binary cache is built against -- so consumers get a cache hit
-          # instead of recompiling braid-cli. `follows = "nixpkgs"` is the
-          # closure-dedup opt-out: it redirects this input to the consumer's
-          # nixpkgs (smaller closure) but forfeits release-cache path identity and
-          # moves tool versions onto the consumer's nixpkgs, so parser-output
-          # stability then holds only while that nixpkgs is on the same stable
-          # release braid pins. See docs/design/decisions/010-toolchain-pinning.md
+          # Fragile parser toolchain from braid's `nixpkgs` flake input,
+          # instantiated cleanly (no consumer overlays). NOTE: the install docs
+          # now recommend NOT setting `braid.inputs.nixpkgs.follows`. The default
+          # (no follows) keeps this input on braid's pinned nixos-26.05 -- the
+          # exact nixpkgs the release binary cache is built against -- so
+          # consumers get a cache hit instead of recompiling braid-cli. `follows =
+          # "nixpkgs"` is the closure-dedup opt-out: it redirects this input to
+          # the consumer's nixpkgs (smaller closure) but forfeits release-cache
+          # path identity and moves the five pinned tool versions onto the
+          # consumer's nixpkgs. util-linux and systemd always resolve from the
+          # consumer's pkgs. See docs/design/decisions/010-toolchain-pinning.md
           # and docs/design/decisions/029-release-process.md.
           braidPkgs = import self.inputs.nixpkgs { system = pkgs.stdenv.hostPlatform.system; };
         in
@@ -1151,7 +1152,6 @@
             packages = {
               cryptsetup = lib.mkDefault braidPkgs.cryptsetup;
               btrfsProgs = lib.mkDefault braidPkgs.btrfs-progs;
-              utilLinux = lib.mkDefault braidPkgs.util-linux;
               nut = lib.mkDefault braidPkgs.nut;
               smartmontools = lib.mkDefault braidPkgs.smartmontools;
               ethtool = lib.mkDefault braidPkgs.ethtool;

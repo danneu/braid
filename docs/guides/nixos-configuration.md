@@ -76,7 +76,7 @@ When `braid.enable = true`, the module sets up:
 
 - **Monthly btrfs scrub** -- timer + service tied to pool lifecycle. Configurable via `braid.autoScrub`.
 - **Resilient boot** -- a dead drive never blocks boot. LUKS open and btrfs mount are deferred to `braid unlock`, not wired into `boot.initrd`.
-- **Pinned toolchain** -- btrfs-progs, cryptsetup, util-linux, NUT, smartmontools, and ethtool are pinned to NixOS stable versions. Override with `braid.packages.*` if needed.
+- **Pinned toolchain** -- btrfs-progs, cryptsetup, NUT, smartmontools, and ethtool are pinned to NixOS stable versions. util-linux and systemd are host-provided stable contracts. Override package-backed tools with `braid.packages.*` if needed.
 - **Shell completions** -- bash, zsh, and fish completions registered automatically via `clap_complete`.
 - **smartd integration** -- `services.smartd` enabled by default with a braid-owned alert script. SMART failures trigger the braid alert service.
 - **Storage group** -- a `storage` group is created; mount point is set to `root:storage 2770` after unlock. See [Sharing and permissions](sharing-and-permissions.md).
@@ -106,7 +106,7 @@ When `braid.enable = true`, the module sets up:
 | `braid.packages.smartmontools` | package | `pkgs.smartmontools` | smartmontools package |
 | `braid.packages.ethtool` | package | `pkgs.ethtool` | ethtool package |
 
-Override these only if you need a specific version for compatibility testing. The recommended setup omits `braid.inputs.nixpkgs.follows` (the Minimal config example above), so `nixosModules.default` sources these defaults from braid's own pinned `nixpkgs` (nixos-26.05) -- the same versions the release binary cache is built against, so braid is a cache hit. Adding `braid.inputs.nixpkgs.follows = "nixpkgs"` is an advanced opt-out: it dedups your closure but rebuilds braid against your nixpkgs (a cache miss) and sources these tools from your nixpkgs instead. If you take it, keep your nixpkgs on the same NixOS stable release braid targets so the parsed tool output stays compatible -- see [Toolchain pinning](../design/decisions/010-toolchain-pinning.md).
+Override these only if you need a specific version for compatibility testing. The recommended setup omits `braid.inputs.nixpkgs.follows` (the Minimal config example above), so `nixosModules.default` sources the five pinned tool defaults from braid's own pinned `nixpkgs` (nixos-26.05) -- the same versions the release binary cache is built against, so braid is a cache hit. util-linux defaults to your system's `pkgs.util-linux` either way. Adding `braid.inputs.nixpkgs.follows = "nixpkgs"` is an advanced opt-out: it dedups your closure but rebuilds braid against your nixpkgs (a cache miss) and sources the five pinned tools from your nixpkgs instead. If you take it, keep your nixpkgs on the same NixOS stable release braid targets so the parsed tool output stays compatible -- see [Toolchain pinning](../design/decisions/010-toolchain-pinning.md).
 
 ### Auto-scrub
 
@@ -225,8 +225,9 @@ braid = {
   lockSystemdStopDeadlineSecs = 270;  # default; must stay below braid-online TimeoutStopSec
 
   # Tool version overrides -- the recommended setup omits nixpkgs `follows`, so
-  # defaults come from braid's pinned nixos-26.05 (cache hit); `follows` is an
-  # opt-out that tracks your nixpkgs but rebuilds braid (cache miss). See "Tool overrides".
+  # five pinned defaults come from braid's pinned nixos-26.05 (cache hit), while
+  # util-linux comes from your pkgs. `follows` tracks your nixpkgs for the pinned
+  # tools but rebuilds braid (cache miss). See "Tool overrides".
   # packages.cryptsetup = pkgs.cryptsetup;
   # packages.btrfsProgs = pkgs.btrfs-progs;
   # packages.utilLinux = pkgs.util-linux;

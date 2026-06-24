@@ -4,9 +4,9 @@ intent: How braid validates its tool-output parsers against version drift -- sta
 
 # Parser compatibility
 
-braid parses output from btrfs-progs, cryptsetup, util-linux, smartmontools, NUT, and ethtool. These parsers can break when tool versions change. Two validation lanes exist:
+braid parses output from btrfs-progs, cryptsetup, util-linux, smartmontools, NUT, and ethtool. The fragile parser/safety set (btrfs-progs, cryptsetup, NUT, smartmontools, ethtool) is pinned by default; util-linux is host-provided because `lsblk --json` is a stable structured contract. All parsed tools remain fixture-covered because parser contracts can still drift when tool versions change. Two validation lanes exist:
 
-## Stable lane (pinned contract)
+## Stable lane (pinned and stable contracts)
 
 - `just test-parsers` — CLI parser canary. Exercises CLI-reachable parsers against live tool output in VMs (including `braid-status-ups`, the NUT canary).
 - `just test-rust` — validates golden fixtures for the full parser set, including `parse_upsc`. Fixture-backed coverage stays current only after running `just capture-all-fixtures` when parser-critical tool versions change (e.g. nixpkgs bump).
@@ -37,7 +37,7 @@ braid parses output from btrfs-progs, cryptsetup, util-linux, smartmontools, NUT
   fixtures, and wrapper provenance is covered by the override-based VM
   tests in `tool-versions` and `braid-auto-suspend`.
 
-Parser-critical tool versions are the pinned `nixpkgs` versions of `btrfs-progs`, `cryptsetup`, `util-linux`, `nut`, `smartmontools`, and `ethtool`. Treat any change to the `nixpkgs` node in `flake.lock`, any `flake.nix` change that alters the `nixpkgs` input, or any change to `braid.packages.{btrfsProgs,cryptsetup,utilLinux,nut,smartmontools,ethtool}` as a required fixture-refresh event.
+Parser-critical tool versions are the pinned `nixpkgs` versions of `btrfs-progs`, `cryptsetup`, `nut`, `smartmontools`, and `ethtool`, plus host-provided util-linux's `lsblk --json` stable contract. Treat any change to the `nixpkgs` node in `flake.lock`, any `flake.nix` change that alters the `nixpkgs` input, or any change to `braid.packages.{btrfsProgs,cryptsetup,utilLinux,nut,smartmontools,ethtool}` as a required fixture-refresh event.
 
 When parser-critical tool versions change, run:
 

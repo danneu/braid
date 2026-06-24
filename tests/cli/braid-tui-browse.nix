@@ -51,6 +51,13 @@ in
 
       systemd.services.braid-tui-canary = {
         description = "Run braid tui on tty2 for the Browse VM canary";
+        # This service intentionally runs the standalone wrapper directly. After
+        # unbundling util-linux/systemd from that wrapper, the unit must provide
+        # the same host-tool ambient PATH that an interactive `nix run` shell has.
+        path = [
+          pkgs.util-linux
+          pkgs.systemd
+        ];
         serviceConfig = {
           Type = "simple";
           ExecStart = "${braid}/bin/braid tui";

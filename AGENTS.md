@@ -86,9 +86,11 @@ exists** (regression guarded), **Scenario** (real-world story / inspiring incide
 Literal form, the `flake.nix` `checks` registration rule, and framework gotchas:
 [testing.md](docs/dev/testing.md).
 
-**Parser compatibility:** braid parses btrfs-progs, cryptsetup, util-linux, NUT,
-smartmontools, and ethtool output; version drift breaks the parsers. Any change to
-the `nixpkgs` node in `flake.lock` (or to `braid.packages.{btrfsProgs,cryptsetup,utilLinux,nut,smartmontools,ethtool}`)
+**Parser compatibility:** braid parses btrfs-progs, cryptsetup, NUT,
+smartmontools, ethtool, and util-linux's `lsblk --json`. The five fragile
+parser/safety tools are pinned; util-linux is host-provided through a stable JSON
+contract, but stays fixture-covered. Any change to the `nixpkgs` node in
+`flake.lock` (or to `braid.packages.{btrfsProgs,cryptsetup,utilLinux,nut,smartmontools,ethtool}`)
 is a fixture-refresh event: `just capture-all-fixtures` -> `just test-rust` ->
 `just test-parsers`. Lanes and caveats: [parser-compatibility.md](docs/dev/parser-compatibility.md).
 

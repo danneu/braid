@@ -1,13 +1,13 @@
 # Test: tool provenance + configured-version alignment
 #
-# What: Validates that runtime tools (btrfs-progs, cryptsetup,
+# What: Validates that configured runtime tools (btrfs-progs, cryptsetup,
 # util-linux, nut, smartmontools, ethtool) resolve to /nix/store/ paths via the
 # VM's PATH and that each binary's self-reported version matches
 # pkgs.<tool>.version from this same evaluation. Separately, validates
-# that the braid wrapper can resolve upsc and ethtool with an empty
-# ambient PATH.
+# that the braid wrapper can resolve the still-pinned upsc and ethtool with an
+# empty ambient PATH.
 #
-# Why: Catches ambient binaries shadowing the pinned toolchain on the
+# Why: Catches ambient binaries shadowing configured tool packages on the
 # VM PATH and package/binary version mismatches (e.g. a patched binary
 # whose --version string drifts from pkgs.<tool>.version). Does NOT
 # catch nixpkgs version moves -- expected versions read from the same

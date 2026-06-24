@@ -7,55 +7,58 @@ status: Active
 
 ## Context
 
-Braid's parser-critical runtime tools (btrfs-progs, cryptsetup, util-linux, NUT, smartmontools, ethtool) are parsed by the Rust CLI. Output formats change between tool versions -- a flake update to nixpkgs-unstable could silently break parsers. Generic helpers (coreutils, systemd) are used for basic system operations and are outside braid's parser contract. Browse has one tolerant UI-only systemd exception: it parses `systemctl list-units --output=json` for a picker and falls back to raw output on parse failure.
+Braid's runtime parser surface covers btrfs-progs, cryptsetup, util-linux (`lsblk`), NUT, smartmontools, and ethtool. Most of those tools expose fragile text or safety-critical behavior where version drift can silently break parsers. util-linux is different: braid consumes `lsblk --json` through tolerant serde, accepts added keys, and fails closed only when a requested column disappears. Generic helpers (coreutils, systemd) are used for basic system operations and are outside braid's parser contract. Browse has one tolerant UI-only systemd exception: it parses `systemctl list-units --output=json` for a picker and falls back to raw output on parse failure.
 
 ## Decision
 
-Pin `flake.nix` to a specific NixOS stable release (nixos-26.05). Pin only parser-critical tools — those whose output braid parses or whose behavior is part of braid's correctness model. Generic helpers come from the consumer's system package set.
+Pin `flake.nix` to a specific NixOS stable release (nixos-26.05). Pin the fragile parser/safety tools whose output format or behavior is part of braid's correctness model: btrfs-progs, cryptsetup, NUT, smartmontools, and ethtool. Source util-linux and systemd from the consumer's package set because braid uses them through stable contracts.
 
 ### How it works
 
-- **Flake input**: `nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05"` — braid's own pinned channel, and the source of parser-critical tool packages unless the consumer redirects braid's `nixpkgs` input (see the follows note below).
-- **Module options**: `braid.packages.*` (cryptsetup, btrfsProgs, utilLinux, nut, smartmontools, ethtool) default to braid's `nixpkgs` flake input but can be overridden per-system.
-- **PATH wrapping**: The wrapper injects `cfg.packages.*` into PATH. Generic helpers (coreutils, systemd) are resolved from the consumer's `pkgs`, not pinned.
-- **Two wrapping sites**: flake.nix wraps with `pkgs.*` defaults (for `nix run` and tests); the module wraps `cfg.package` with `cfg.packages.*` (for deployed NixOS systems where package options may be overridden).
+- **Flake input**: `nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05"` -- braid's own pinned channel, and the source of the five pinned fragile parser/safety packages unless the consumer redirects braid's `nixpkgs` input (see the follows note below).
+- **Module options**: `braid.packages.*` keeps override knobs for cryptsetup, btrfsProgs, utilLinux, nut, smartmontools, and ethtool. `nixosModules.default` defaults the five pinned tools to braid's `nixpkgs` flake input; `utilLinux` falls back to the option's consumer-`pkgs` default.
+- **PATH wrapping**: The module wrapper injects `cfg.packages.*` into PATH. util-linux is present there through `cfg.packages.utilLinux`, but its default is the consumer's `pkgs.util-linux`. Generic helpers (coreutils, systemd) are resolved from the consumer's `pkgs`, not pinned.
+- **Two wrapping sites**: flake.nix wraps only the five pinned tools for `nix run` and tests, relying on the caller-supplied ambient host PATH for util-linux and systemd. The module wraps `cfg.package` with `cfg.packages.*` for deployed NixOS systems where package options may be overridden.
 
 ### Consumer `follows` decides the actual source
 
-`nixosModules.default` builds the `braid.packages.*` defaults with `import self.inputs.nixpkgs` -- braid's `nixpkgs` flake input, instantiated cleanly (no consumer overlays). Whether the consumer sets `braid.inputs.nixpkgs.follows = "nixpkgs"` decides where the pinned tools actually come from.
+`nixosModules.default` builds the five pinned `braid.packages.*` defaults with `import self.inputs.nixpkgs` -- braid's `nixpkgs` flake input, instantiated cleanly (no consumer overlays). `braid.packages.utilLinux` falls back to the option default from the consumer's `pkgs`, and systemd has no braid package option. Whether the consumer sets `braid.inputs.nixpkgs.follows = "nixpkgs"` decides where the five pinned tools actually come from.
 
-**The recommended default is no follows.** With no follows, braid's `nixpkgs` input stays on its pinned nixos-26.05, so the pinned tools resolve from braid's release channel and `braid-cli-unwrapped` matches the exact binary the release cache publishes -- a cache hit instead of a from-source rebuild on the NAS. [ADR 029](029-release-process.md) is the authoritative home for that cache-path-identity rationale; the short version is that `follows` rebuilds braid against the consumer's nixpkgs, changing the store path and forcing a recompile.
+**The recommended default is no follows.** With no follows, braid's `nixpkgs` input stays on its pinned nixos-26.05, so the five pinned tools resolve from braid's release channel and `braid-cli-unwrapped` matches the exact binary the release cache publishes -- a cache hit instead of a from-source rebuild on the NAS. [ADR 029](029-release-process.md) is the authoritative home for that cache-path-identity rationale; the short version is that `follows` rebuilds braid against the consumer's nixpkgs, changing the store path and forcing a recompile.
 
-`follows = "nixpkgs"` is a valid advanced opt-out (smaller closure via nixpkgs dedup), but it redirects braid's `nixpkgs` input to the consumer's nixpkgs, so the pinned tools then resolve from the *consumer's* nixpkgs. The pin therefore guarantees stable parser output only while the consumer's nixpkgs stays on the same NixOS stable release braid targets (currently nixos-26.05). Within one stable release tool output formats change only for security fixes, so a consumer aligned on braid's release is safe; a consumer who bumps nixpkgs ahead of braid moves the storage toolchain with it and re-introduces the parser-drift risk this decision otherwise prevents. If you do opt into `follows`, mitigate by keeping nixpkgs aligned with braid's release or pinning `braid.packages.*`.
+`follows = "nixpkgs"` is a valid advanced opt-out (smaller closure via nixpkgs dedup), but it redirects braid's `nixpkgs` input to the consumer's nixpkgs, so the five pinned tools then resolve from the *consumer's* nixpkgs. The pin therefore guarantees stable parser output only while the consumer's nixpkgs stays on the same NixOS stable release braid targets (currently nixos-26.05). Within one stable release tool output formats change only for security fixes, so a consumer aligned on braid's release is safe; a consumer who bumps nixpkgs ahead of braid moves the fragile storage toolchain with it and re-introduces the parser-drift risk this decision otherwise prevents. util-linux and systemd resolve from the consumer's nixpkgs regardless of `follows`. If you do opt into `follows`, mitigate by keeping nixpkgs aligned with braid's release or pinning `braid.packages.*`.
 
 ### Operational escape hatch
 
-Parser-critical tools are pinned by default to the flake's nixpkgs release, but `braid.packages.*` overrides are intentional -- operators may need a newer upstream version for urgent bugfixes or security patches before braid's next nixpkgs bump. The override takes precedence. Operator-set `braid.packages.*` overrides sit outside braid's committed parser contract: the standard fixture-capture and golden-test recipes build fixed flake checks against the flake's `pkgs`, so they do not validate an arbitrary override. Treating an override as supported requires a maintainer to reproduce the fixture-refresh workflow under a temporary local input swap (e.g. `--override-input nixpkgs` on the capture/test commands, or a local flake edit) at the override's package version, then re-run `just test-rust` against the resulting fixtures. Operators who skip this step are running unverified parser inputs.
+The five fragile parser/safety tools are pinned by default to the flake's nixpkgs release, but `braid.packages.*` overrides are intentional -- operators may need a newer upstream version for urgent bugfixes or security patches before braid's next nixpkgs bump. The override takes precedence. Operator-set overrides for parsed tools sit outside braid's committed parser contract: the standard fixture-capture and golden-test recipes build fixed flake checks against the flake's `pkgs`, so they do not validate an arbitrary override. Treating an override as supported requires a maintainer to reproduce the fixture-refresh workflow under a temporary local input swap (e.g. `--override-input nixpkgs` on the capture/test commands, or a local flake edit) at the override's package version, then re-run `just test-rust` against the resulting fixtures. Operators who skip this step are running unverified parser inputs.
 
 ### Classification guideline
 
-**Pin** when: braid parses the tool's output, or the tool's behavior is part of braid's correctness/safety model.
+**Pin** when: braid parses fragile output, or the tool's behavior is part of braid's correctness/safety model.
 
-**Use system `pkgs`** when: the tool is a generic helper, braid doesn't parse its output as a correctness contract, and version drift is unlikely to affect correctness. The Browse Systemd picker is a UI-only exception because it parses `systemctl list-units --output=json` tolerantly and disables drill-in on parse failure.
+**Use system `pkgs` for a stable parsed contract** when: braid parses the tool, but only through a contract stable enough that pinning is unnecessary: tolerant structured JSON, fail-closed on missing requested keys, and fixture-covered. util-linux is in this category for `lsblk --json`.
 
-New runtime dependencies must be classified into one of these two groups when added.
+**Use system `pkgs` for a generic helper** when: the tool is a generic helper, braid doesn't parse its output as a correctness contract, and version drift is unlikely to affect correctness. The Browse Systemd picker is a UI-only exception because it parses `systemctl list-units --output=json` tolerantly and disables drill-in on parse failure.
+
+New runtime dependencies must be classified into one of these three groups when added.
 
 | Tool | Pinned by default? | Overrideable? | Reason |
 |------|-------------------|---------------|--------|
 | btrfs-progs | Yes | Yes (`braid.packages.btrfsProgs`) | Output parsed by nom combinators and serde JSON |
 | cryptsetup | Yes | Yes (`braid.packages.cryptsetup`) | Output parsed by nom combinators |
-| util-linux (lsblk) | Yes | Yes (`braid.packages.utilLinux`) | `lsblk` JSON output parsed by serde |
+| util-linux (lsblk) | No -- host `pkgs` | Yes (`braid.packages.utilLinux`) | `lsblk --json` is a stable structured contract: serde tolerates added columns and fails closed only when a requested column is missing |
 | NUT (`upsc`) | Yes | Yes (`braid.packages.nut`) | `upsc` key: value output parsed by `parse_upsc` for preflight safety and operator visibility |
 | smartmontools | Yes | Yes (`braid.packages.smartmontools`) | `smartctl --json` output parsed by `parse_smartctl` |
 | ethtool | Yes | Yes (`braid.packages.ethtool`) | `Wake-on:` line parsed by the doctor `wake_on_lan` check |
-| coreutils | No — system `pkgs` | No option | chown/chmod/realpath/stat — output not parsed |
-| systemd | No — system `pkgs` | No option | systemctl/ask-password commodity behavior; Browse's list-units JSON picker is tolerant UI-only, not parser-critical |
+| coreutils | No -- system `pkgs` | No option | chown/chmod/realpath/stat -- output not parsed |
+| systemd | No -- system `pkgs` | No option | systemctl/ask-password commodity behavior; Browse's list-units JSON picker is tolerant UI-only, not parser-critical |
 
 ### Upgrading tools
 
-A nixpkgs bump can move parser-critical tools to new output formats, so an
-upgrade must refresh fixtures and re-run every parser-validation lane -- not
-just confirm tool provenance. These steps mirror the canonical sequence in
+A nixpkgs bump can move parser-critical tools to new output formats, including
+the host-provided `lsblk --json` contract, so an upgrade must refresh fixtures
+and re-run every parser-validation lane -- not just confirm tool provenance.
+These steps mirror the canonical sequence in
 [dev/overview.md](../../dev/overview.md) ("Refresh fixtures and run tests");
 keep the two in sync.
 
@@ -69,14 +72,14 @@ keep the two in sync.
    - `just test-rust` -- golden-fixture parser tests.
    - `just test-parsers` -- live-tool parser canary.
    - `just test-vm` -- VM suite. Its `tool-versions` check verifies provenance:
-     each pinned tool resolves to a `/nix/store/` path on the VM's PATH and its
+     each configured tool resolves to a `/nix/store/` path on the VM's PATH and its
      self-reported version matches `pkgs.<tool>.version` from the same
      evaluation. Provenance only -- `tool-versions` does not detect that nixpkgs
      moved a tool to a new version (both sides advance together), so the fixture
      and parser tests above are the actual drift gate. Run it alone with
      `just test-vm tool-versions` for a quick provenance-only check.
 
-NUT specifically: `parse_upsc` depends on the `key: value` shape emitted by `pkgs.nut`'s `upsc` client (see `reference/nut/clients/upsc.c`). A nixpkgs bump that touches `networkupstools` triggers the same fixture-refresh obligation as the other pinned tools -- run `just capture-ups-fixtures` and `just test-rust` before merging. The `braid-status-ups` check under `just test-parsers` is the live-tool mirror of the golden fixtures.
+NUT specifically: `parse_upsc` depends on the `key: value` shape emitted by `pkgs.nut`'s `upsc` client (see `reference/nut/clients/upsc.c`). A nixpkgs bump that touches `networkupstools` triggers the same fixture-refresh obligation as the other pinned parser tools -- run `just capture-ups-fixtures` and `just test-rust` before merging. The `braid-status-ups` check under `just test-parsers` is the live-tool mirror of the golden fixtures.
 
 ethtool specifically: `wake_on_lan` depends on the `Supports Wake-on:` and `Wake-on:` lines emitted by `pkgs.ethtool`. VM virtio NICs do not provide useful Wake-on-LAN state, so there is no live fixture-capture lane; parser coverage is hand-authored in Rust unit tests, and wrapper provenance is covered by the `tool-versions` and `braid-auto-suspend` VM tests.
 
