@@ -4921,6 +4921,62 @@ mod tests {
         assert!(built.mounted_extras.is_none());
     }
 
+    // Intent: a non-NotBtrfs probe_pool error aborts build_status with Err
+    // because the core pool data is untrustworthy.
+    // Why it exists: this is the fatal sibling of
+    // build_status_not_btrfs_surfaces_fstype_advisory and the opposite of
+    // status_surfaces_mapper_conflict. probe_pool faults are fatal because
+    // core pool data cannot be trusted, while config-disk faults degrade to
+    // per-disk advisories; a refactor that unified those styles would flip one
+    // side of that invariant and otherwise pass the suite.
+    // Scenario: mountinfo and btrfs filesystem show still identify a pool at
+    // /mnt/storage with /dev/mapper/disk1, but cryptsetup reports that mapper
+    // inactive after it was closed or torn down out from under the mounted
+    // pool. This is not the hot-unplug/null-underlying case, where the mapper
+    // remains active with device: (null) and probe_pool takes the soft path
+    // pinned by probe_pool_device_null_underlying.
+    #[test]
+    fn build_status_probe_pool_fault_is_fatal() {
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::BtrfsFilesystemShow {
+                    mount_point: MountPoint::new("/mnt/storage".to_owned()),
+                },
+                status_btrfs_show_1disk(),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName::from_basename("disk1".into()),
+                },
+                status_err_raw(
+                    "cryptsetup status disk1",
+                    4,
+                    "/dev/mapper/disk1 is not active.\n",
+                ),
+            );
+        let fs = status_fs_one_disk();
+        let config = status_config();
+        let (_tmp, paths) = isolated_paths();
+
+        let result = build_status(
+            &runner,
+            &fs,
+            &config,
+            &paths,
+            crate::test_fixtures::mock_virtio_backing_path_resolver(),
+        );
+
+        match result {
+            Err(StatusError::Probe(ProbeError::PoolDevice { detail, .. })) => {
+                assert_eq!(detail, "not active");
+            }
+            Ok(_) => panic!(
+                "a non-NotBtrfs probe_pool fault must abort build_status, but it returned Ok"
+            ),
+            Err(other) => panic!("expected StatusError::Probe(PoolDevice), got: {other}"),
+        }
+    }
+
     // Intent: mounted-pool status surfaces a valid pending-op journal as a recovery advisory.
     // Why it exists: a stranded journal can coexist with a mounted pool after partial recovery or manual mounting.
     // Scenario: operator runs `braid status` on an online pool and needs to see that `braid recover` is still owed.
