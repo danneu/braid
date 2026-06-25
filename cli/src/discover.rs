@@ -519,6 +519,11 @@ fn discover_from_dir_inner<R: CommandRunner>(
     // name them; PoolMembership::insert's generic Conflict cannot.
     let mut seen_uuids: BTreeMap<&LuksUuid, (&DiskName, &str)> = BTreeMap::new();
     for (name, cand) in &members {
+        // `members` is keyed by DiskName, and this pass returns on the
+        // first UUID collision. With 3+ shared-UUID disks, that means the
+        // reported pair is the two name-smallest members; the rest surface
+        // on the next scan. Keep that deterministic selection intentional:
+        // the path sort below only orders the selected pair for display.
         if let Some((prev_name, prev_path)) =
             seen_uuids.insert(&cand.luks_uuid, (name, cand.by_id.as_str()))
         {
@@ -1916,6 +1921,66 @@ mod tests {
         assert!(
             matches!(err, DiscoverError::LabelCollision { .. }),
             "expected LabelCollision before DuplicateUuid, got: {err:?}"
+        );
+    }
+
+    // Intent: with 3+ disks sharing one LUKS UUID, DuplicateUuid reports the
+    //   two name-smallest members in path-sorted order; the name-largest disk
+    //   is excluded.
+    // Why it exists: two-disk tests pin only the within-pair tie-break,
+    //   leaving pair selection (name-ordered BTreeMap iteration plus
+    //   first-collision early return) unguarded against a refactor to a
+    //   HashMap/path-order accumulator.
+    // Scenario: an original plus two dd-clones, or a clone left mid-swap, all
+    //   present at once; the friendly error must name a stable pair every
+    //   scan (seed 804).
+    #[test]
+    fn discover_duplicate_uuid_three_disks_report_name_order_pair() {
+        let dir = tempfile::tempdir().unwrap();
+        let target_a = discover_create_target(dir.path(), "fake-original");
+        let target_b = discover_create_target(dir.path(), "fake-clone-a");
+        let target_c = discover_create_target(dir.path(), "fake-clone-b");
+        let path_a = discover_create_by_id_symlink(dir.path(), "ata-zzz", &target_a);
+        let path_b = discover_create_by_id_symlink(dir.path(), "ata-mmm", &target_b);
+        let path_c = discover_create_by_id_symlink(dir.path(), "ata-aaa", &target_c);
+        let shared_uuid = "33333333-4444-5555-6666-777788889999";
+        let runner = DiscoverLabelMap::new(&[
+            (&path_a, "braid-disk1"),
+            (&path_b, "braid-disk2"),
+            (&path_c, "braid-disk3"),
+        ])
+        .with_uuid(&path_a, shared_uuid)
+        .with_uuid(&path_b, shared_uuid)
+        .with_uuid(&path_c, shared_uuid);
+
+        let scan = discover_from_dir(&runner, dir.path());
+        let err = scan
+            .result
+            .expect_err("duplicate UUID must surface as DuplicateUuid");
+
+        let DiscoverError::DuplicateUuid {
+            uuid,
+            name1,
+            path1,
+            name2,
+            path2,
+        } = &err
+        else {
+            panic!("expected DuplicateUuid, got {err:?}");
+        };
+        assert_eq!(uuid.as_str(), shared_uuid);
+        assert_eq!(name1.as_str(), "disk2");
+        assert_eq!(name2.as_str(), "disk1");
+        assert!(path1.ends_with("ata-mmm"), "path1 was {path1}");
+        assert!(path2.ends_with("ata-zzz"), "path2 was {path2}");
+        assert!(
+            !path1.ends_with("ata-aaa") && !path2.ends_with("ata-aaa"),
+            "name-largest disk must be excluded: path1={path1}, path2={path2}",
+        );
+        let msg = err.to_string();
+        assert!(
+            !msg.contains("braid-disk3"),
+            "name-largest disk must not be reported: {msg}",
         );
     }
 
