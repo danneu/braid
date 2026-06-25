@@ -1129,6 +1129,52 @@ mod tests {
         );
     }
 
+    // Intent: An already-active alert latch survives a monitor cycle that
+    //   concludes PoolOffline; the early Ok(None) return must leave
+    //   alert-latch.json byte-for-byte untouched, and it must still reload to
+    //   the seeded alert.
+    // Why it exists: The PoolOffline early return fires before the latch
+    //   load/merge/save path, so ADR 014's sticky-latch invariant here rests on
+    //   that path not touching the file. Existing offline tests start with no
+    //   latch and only assert none is created. A refactor that moved the latch
+    //   load above the early return, or called alert::remove_alert_latch on the
+    //   offline path as cmd_ack does for a genuine offline ack, would silently
+    //   drop an in-flight alert: the beeper keeps sounding while `braid status`
+    //   goes quiet.
+    // Scenario: A prior cycle latched MissingDevice { devid: 7 } and the
+    //   beeper is sounding; the operator's pool briefly unmounts so the next
+    //   cycle sees an empty mountinfo.
+    #[test]
+    fn unmounted_pool_preserves_existing_alert_latch() {
+        let (_dir, paths) = isolated_paths();
+        let existing = alert::AlertState {
+            causes: vec![AlertCause::MissingDevice {
+                devid: Devid::new(7),
+            }],
+        };
+        alert::save_alert_latch(&existing, &paths).unwrap();
+        let before = std::fs::read(paths.alert_latch_json()).unwrap();
+
+        let result = cmd_monitor(
+            &MonitorTestRunner::with_stale_mapper_stats(),
+            &monitor_fs_not_mounted(),
+            &monitor_mp(),
+            &paths,
+        );
+
+        assert_eq!(result, MonitorResult::PoolOffline);
+        let after = std::fs::read(paths.alert_latch_json()).unwrap();
+        assert_eq!(
+            after, before,
+            "an offline cycle must leave an active alert latch byte-for-byte untouched"
+        );
+        assert_eq!(
+            alert::load_alert_latch(&paths).unwrap().unwrap(),
+            existing,
+            "the latched MissingDevice alert must survive the offline cycle"
+        );
+    }
+
     /*
      * Intent: When btrfs filesystem show exits non-zero with non-empty
      * stderr, parse_btrfs_filesystem_show maps that to
