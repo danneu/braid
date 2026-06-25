@@ -1179,11 +1179,20 @@ fn execute_generic_live_pool_recovery<R: CommandRunner + Sync>(
         })?;
     }
 
+    let _guard = if replay_raid1_maintenance {
+        Some(
+            params
+                .sleep_inhibitor
+                .acquire("finishing interrupted add balance")
+                .map_err(|e| {
+                    RecoverError::Failed(format!("could not acquire sleep inhibitor: {e}"))
+                })?,
+        )
+    } else {
+        None
+    };
+
     if replay_raid1_maintenance {
-        let _guard = params
-            .sleep_inhibitor
-            .acquire("finishing interrupted add balance")
-            .map_err(|e| RecoverError::Failed(format!("could not acquire sleep inhibitor: {e}")))?;
         replay_owed_raid1_maintenance(runner, &plan.mount_point, "add", &pool, params.progress)?;
     }
 
@@ -5762,6 +5771,182 @@ mod tests {
         assert!(
             !f.paths.acked_stats_json().exists(),
             "bootstrap recovery must delete stale acked-stats.json"
+        );
+    }
+
+    // Intent
+    // Bootstrap-add GenericLivePool recovery holds a sleep inhibitor while it
+    // replays the owed RAID1 soft balance.
+    //
+    // Why it exists
+    // The generic live-pool recovery path is easy to miss because the sibling
+    // post-maintenance replay paths acquire their inhibitors at separate call
+    // sites. This pins the direct helper contract instead of relying only on
+    // cmd_recover entry-point coverage.
+    //
+    // Scenario
+    // A 2-disk bootstrap add crashed after btrfs created the filesystem.
+    // Recovery rebuilds membership from the live pool and replays the owed
+    // post-add soft balance under a sleep inhibitor.
+    #[test]
+    fn bootstrap_recovery_holds_inhibitor_across_balance() {
+        let f = PoolFixture::empty();
+        let journal = bootstrap_pool_mutation_add_journal();
+        journal::write_journal(&f.paths, &journal).unwrap();
+        let runner = with_balance_replay(MockRunner::default());
+        let inhibitor = RequestCountInhibitor::new(runner.clone());
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
+        let params = f
+            .recover_params()
+            .passphrase_file(None)
+            .sleep_inhibitor(&inhibitor)
+            .build();
+        let plan = recover_work_plan_for_journal(journal);
+
+        execute_generic_live_pool_recovery(
+            &runner,
+            &resolver,
+            &params,
+            &plan,
+            pool_state_two_disks(),
+            true,
+        )
+        .expect("bootstrap recovery should replay owed maintenance under inhibitor");
+
+        let requests = runner.requests();
+        let balance_index = requests
+            .iter()
+            .position(|r| {
+                matches!(
+                    r,
+                    CmdRequest::BtrfsBalanceRaid1Soft { mount_point }
+                        if mount_point.as_str() == "/mnt/storage"
+                )
+            })
+            .expect("generic bootstrap recovery must issue post-add soft RAID1 balance");
+        assert_eq!(
+            inhibitor.acquire_count(),
+            1,
+            "bootstrap recovery must acquire one sleep inhibitor"
+        );
+        assert!(
+            inhibitor.first_acquire_request_count().unwrap() <= balance_index,
+            "sleep inhibitor must be acquired before the soft balance; \
+             balance_index={balance_index}, requests={requests:?}"
+        );
+        assert!(
+            inhibitor.drop_request_count().unwrap() > balance_index,
+            "sleep inhibitor guard must stay held across the soft balance; \
+             balance_index={balance_index}, requests={requests:?}"
+        );
+        assert!(
+            !f.paths.pending_op_json().exists(),
+            "journal must clear after successful maintenance replay"
+        );
+    }
+
+    // Intent
+    // GenericLivePool Remove recovery does not acquire a sleep inhibitor when
+    // it has no owed RAID1 maintenance to replay.
+    //
+    // Why it exists
+    // The generic helper handles both bootstrap-add replay and remove cleanup.
+    // A future unconditional acquire would expand inhibitor coverage onto a
+    // local-file-only remove tail that performs no interruptible btrfs work.
+    //
+    // Scenario
+    // A remove journal reaches the generic live-pool path with the live pool
+    // still showing both disks. Recovery rebuilds membership and clears the
+    // journal without replaying btrfs maintenance.
+    #[test]
+    fn generic_recovery_remove_arm_does_not_acquire_inhibitor() {
+        let f = PoolFixture::empty();
+        let journal = remove_2to1_journal_with_target_devid();
+        journal::write_journal(&f.paths, &journal).unwrap();
+        let runner = MockRunner::default();
+        let inhibitor = RequestCountInhibitor::new(runner.clone());
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
+        let params = f
+            .recover_params()
+            .passphrase_file(None)
+            .sleep_inhibitor(&inhibitor)
+            .build();
+        let plan = recover_work_plan_for_journal(journal);
+
+        execute_generic_live_pool_recovery(
+            &runner,
+            &resolver,
+            &params,
+            &plan,
+            pool_state_two_disks(),
+            false,
+        )
+        .expect("generic remove recovery should finish without inhibitor");
+
+        assert_eq!(
+            inhibitor.acquire_count(),
+            0,
+            "remove recovery without owed RAID1 replay must not acquire a sleep inhibitor"
+        );
+        assert!(
+            !f.paths.pending_op_json().exists(),
+            "journal must clear after generic remove recovery"
+        );
+    }
+
+    // Intent
+    // Bootstrap-add GenericLivePool recovery aborts before balance replay when
+    // sleep-inhibitor acquisition fails.
+    //
+    // Why it exists
+    // Calling acquire is not enough: recovery must propagate acquisition
+    // failure so it never runs interruptible btrfs work without a valid
+    // inhibitor, and the journal must remain for retry.
+    //
+    // Scenario
+    // A 2-disk bootstrap add crashed after btrfs created the filesystem.
+    // Recovery rebuilds membership from the live pool, but logind refuses the
+    // sleep inhibitor immediately before the owed soft balance would start.
+    #[test]
+    fn bootstrap_recovery_inhibitor_failure_aborts_before_balance() {
+        let f = PoolFixture::empty();
+        let journal = bootstrap_pool_mutation_add_journal();
+        journal::write_journal(&f.paths, &journal).unwrap();
+        let runner = with_balance_replay(MockRunner::default());
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
+        let inhibitor = FailingInhibitor;
+        let params = f
+            .recover_params()
+            .passphrase_file(None)
+            .sleep_inhibitor(&inhibitor)
+            .build();
+        let plan = recover_work_plan_for_journal(journal);
+
+        let err = execute_generic_live_pool_recovery(
+            &runner,
+            &resolver,
+            &params,
+            &plan,
+            pool_state_two_disks(),
+            true,
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("could not acquire sleep inhibitor"),
+            "expected sleep inhibitor failure, got: {err}",
+        );
+        assert!(
+            !runner.requests().iter().any(|r| matches!(
+                r,
+                CmdRequest::BtrfsBalanceStatus { .. } | CmdRequest::BtrfsBalanceRaid1Soft { .. }
+            )),
+            "inhibitor failure must stop before balance probing or replay"
+        );
+        assert!(
+            f.paths.pending_op_json().exists(),
+            "journal must survive for an idempotent retry"
         );
     }
 
