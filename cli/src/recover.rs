@@ -1180,6 +1180,10 @@ fn execute_generic_live_pool_recovery<R: CommandRunner + Sync>(
     }
 
     if replay_raid1_maintenance {
+        let _guard = params
+            .sleep_inhibitor
+            .acquire("finishing interrupted add balance")
+            .map_err(|e| RecoverError::Failed(format!("could not acquire sleep inhibitor: {e}")))?;
         replay_owed_raid1_maintenance(runner, &plan.mount_point, "add", &pool, params.progress)?;
     }
 
@@ -3819,14 +3823,30 @@ mod tests {
 
     struct RequestCountInhibitor {
         runner: MockRunner,
+        drop_request_count: std::rc::Rc<std::cell::Cell<Option<usize>>>,
         first_acquire_request_count: std::cell::Cell<Option<usize>>,
         acquire_count: std::cell::Cell<usize>,
+    }
+
+    struct RequestCountSleepGuard {
+        runner: MockRunner,
+        drop_request_count: std::rc::Rc<std::cell::Cell<Option<usize>>>,
+    }
+
+    impl Drop for RequestCountSleepGuard {
+        fn drop(&mut self) {
+            if self.drop_request_count.get().is_none() {
+                self.drop_request_count
+                    .set(Some(self.runner.requests().len()));
+            }
+        }
     }
 
     impl RequestCountInhibitor {
         fn new(runner: MockRunner) -> Self {
             Self {
                 runner,
+                drop_request_count: std::rc::Rc::new(std::cell::Cell::new(None)),
                 first_acquire_request_count: std::cell::Cell::new(None),
                 acquire_count: std::cell::Cell::new(0),
             }
@@ -3839,6 +3859,10 @@ mod tests {
         fn acquire_count(&self) -> usize {
             self.acquire_count.get()
         }
+
+        fn drop_request_count(&self) -> Option<usize> {
+            self.drop_request_count.get()
+        }
     }
 
     impl AcquireSleepInhibitor for RequestCountInhibitor {
@@ -3848,7 +3872,10 @@ mod tests {
                 self.first_acquire_request_count
                     .set(Some(self.runner.requests().len()));
             }
-            Ok(Box::new(()))
+            Ok(Box::new(RequestCountSleepGuard {
+                runner: self.runner.clone(),
+                drop_request_count: std::rc::Rc::clone(&self.drop_request_count),
+            }))
         }
     }
 
@@ -17205,14 +17232,23 @@ mod tests {
         // remove path.
 
         let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
+        let inhibitor = RequestCountInhibitor::new(runner.clone());
         let result = cmd_recover(
             &runner,
             &fs,
             &resolver,
-            &f.recover_params().passphrase_file(None).build(),
+            &f.recover_params()
+                .passphrase_file(None)
+                .sleep_inhibitor(&inhibitor)
+                .build(),
         );
 
         result.expect("recover should succeed without resuming the paused remove balance");
+        assert_eq!(
+            inhibitor.acquire_count(),
+            0,
+            "remove recovery without owed RAID1 replay must not acquire a sleep inhibitor"
+        );
 
         let recovered = membership::load_membership(&f.paths).unwrap();
         assert!(
@@ -17297,26 +17333,133 @@ mod tests {
         );
 
         let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
+        let inhibitor = RequestCountInhibitor::new(runner.clone());
         cmd_recover(
             &runner,
             &fs,
             &resolver,
-            &f.recover_params().passphrase_file(None).build(),
+            &f.recover_params()
+                .passphrase_file(None)
+                .sleep_inhibitor(&inhibitor)
+                .build(),
         )
         .expect("bootstrap-Add recovery should replay owed maintenance");
 
         let requests = runner.requests();
+        let balance_index = requests
+            .iter()
+            .position(|r| {
+                matches!(
+                    r,
+                    CmdRequest::BtrfsBalanceRaid1Soft { mount_point }
+                        if mount_point.as_str() == "/mnt/storage"
+                )
+            })
+            .expect("cmd_recover Add path must issue post-mutation soft RAID1 balance");
+        assert_eq!(
+            inhibitor.acquire_count(),
+            1,
+            "bootstrap-Add owed RAID1 replay must acquire a sleep inhibitor"
+        );
         assert!(
-            requests.iter().any(|r| matches!(
-                r,
-                CmdRequest::BtrfsBalanceRaid1Soft { mount_point }
-                    if mount_point.as_str() == "/mnt/storage"
-            )),
-            "cmd_recover Add path must issue post-mutation soft RAID1 balance"
+            inhibitor.first_acquire_request_count().unwrap() <= balance_index,
+            "sleep inhibitor must be acquired before the soft balance; \
+             balance_index={balance_index}, requests={requests:?}"
+        );
+        assert!(
+            inhibitor.drop_request_count().unwrap() > balance_index,
+            "sleep inhibitor guard must stay held across the soft balance; \
+             balance_index={balance_index}, requests={requests:?}"
         );
         assert!(
             !f.paths.pending_op_json().exists(),
             "journal must clear after successful maintenance replay"
+        );
+    }
+
+    // Intent
+    // Bootstrap-add GenericLivePool recovery fails closed when it cannot
+    // acquire the sleep inhibitor for the owed RAID1 soft balance.
+    //
+    // Why it exists
+    // The GenericLivePool branch writes pool.json before replaying owed
+    // maintenance. If inhibitor acquisition fails, recovery must leave
+    // pending-op.json intact and stop before any balance probing or replay so
+    // the operator can rerun the idempotent recovery path.
+    //
+    // Scenario
+    // A 2-disk bootstrap-Add crashed after btrfs created the filesystem.
+    // Recovery rebuilds membership from the live pool, then logind inhibitor
+    // acquisition fails before the owed post-add RAID1 maintenance starts.
+    #[test]
+    fn bootstrap_add_inhibitor_failure_stops_before_balance_and_preserves_journal() {
+        let f = PoolFixture::empty();
+        let fs = MockFs::new(&[]);
+
+        let journal = bootstrap_pool_mutation_add_journal();
+        journal::write_journal(&f.paths, &journal).unwrap();
+
+        let (mp_req, mp_out) = mountpoint_ok();
+        let runner = MockRunner::default()
+            .with_output(mp_req, mp_out)
+            .with_output(
+                CmdRequest::BtrfsFilesystemShow {
+                    mount_point: MountPoint::new("/mnt/storage".into()),
+                },
+                btrfs_show_two_disks(),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName::from_basename("braid-disk1".into()),
+                },
+                cryptsetup_status_active("braid-disk1", "/dev/vda"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vda".into(),
+                },
+                cryptsetup_uuid_ok("/dev/vda", "11111111-1111-1111-1111-111111111111"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName::from_basename("braid-disk2".into()),
+                },
+                cryptsetup_status_active("braid-disk2", "/dev/vdb"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vdb".into(),
+                },
+                cryptsetup_uuid_ok("/dev/vdb", "22222222-2222-2222-2222-222222222222"),
+            );
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
+        let inhibitor = FailingInhibitor;
+
+        let err = cmd_recover(
+            &runner,
+            &fs,
+            &resolver,
+            &f.recover_params()
+                .passphrase_file(None)
+                .sleep_inhibitor(&inhibitor)
+                .build(),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("could not acquire sleep inhibitor"),
+            "expected bootstrap-add inhibitor failure, got: {err}",
+        );
+        assert!(
+            !runner.requests().iter().any(|r| matches!(
+                r,
+                CmdRequest::BtrfsBalanceStatus { .. } | CmdRequest::BtrfsBalanceRaid1Soft { .. }
+            )),
+            "bootstrap-add inhibitor failure must stop before balance"
+        );
+        assert!(
+            f.paths.pending_op_json().exists(),
+            "journal must survive for an idempotent retry"
         );
     }
 

@@ -117,6 +117,7 @@ As with `remove-missing`, the inhibitor is acquired unconditionally before journ
 The no-op early-return path (all requested disks already in the pool) returns before the inhibitor seam fires — no journal is written, so no protection is required.
 
 `braid recover` follows the same boundary for replayed destructive work. In particular, add `PoolMutation` recovery resolves and verifies the needed passphrase before acquiring a sleep inhibitor; the inhibitor is acquired only after reversible credential checks pass and immediately before replaying target preparation or btrfs membership work.
+Bootstrap-add `GenericLivePool` recovery likewise acquires the inhibitor immediately before replaying its owed post-add RAID1 soft balance, so every recover balance-replay path holds the inhibitor across the interruptible btrfs work.
 
 ### Excluded: `braid lock`
 
