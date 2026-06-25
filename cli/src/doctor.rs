@@ -512,26 +512,23 @@ fn summarize_declared_disks(
         ));
     }
 
-    let message = if disk_problem_count > 0 {
-        let mut message = format!(
+    let mut segments: Vec<String> = Vec::new();
+    if disk_problem_count > 0 {
+        segments.push(format!(
             "{}/{} {} problems: {}",
             disk_problem_count,
             total,
             if total == 1 { "disk has" } else { "disks have" },
             parts.join("; ")
-        );
-        if let Some(reason) = topology_unavailable {
-            message.push_str(&format!(
-                "; could not compare declared disks to live pool: {reason}"
-            ));
-        }
-        message
-    } else {
-        format!(
-            "could not compare declared disks to live pool: {}",
-            topology_unavailable.expect("non-ok path with zero disk problems implies unavailable")
-        )
-    };
+        ));
+    }
+    if let Some(reason) = topology_unavailable {
+        segments.push(format!(
+            "could not compare declared disks to live pool: {reason}"
+        ));
+    }
+    let message = segments.join("; ");
+
     if uuid_mismatch.is_empty() {
         CheckResult::warn("declared_disks", message)
     } else {
@@ -3684,6 +3681,74 @@ mod tests {
         let result = summarize_declared_disks(&inputs, None);
         assert_eq!(result.status, CheckStatus::Ok);
         assert_eq!(result.message, "all 2 declared disks present");
+    }
+
+    #[test]
+    fn summarize_exact_message_problems_only() {
+        /*
+         * Intent: declared_disks renders the exact single problem-segment
+         *   message when disk problems exist and live topology is available.
+         * Why it exists: locks the segment-join formatting contract this
+         *   refactor preserves, including absence of a trailing separator.
+         * Scenario: a declared disk is present and identity-verified, but is
+         *   absent from the mounted live pool.
+         */
+        let inputs = [cls("disk1", "/dev/disk/by-id/wwn-0x1", DiskState::Offline)];
+
+        let result = summarize_declared_disks(&inputs, None);
+
+        assert_eq!(result.status, CheckStatus::Warn);
+        assert_eq!(
+            result.message,
+            "1/1 disk has problems: 1 present but not in the live pool: disk1 (/dev/disk/by-id/wwn-0x1)"
+        );
+    }
+
+    #[test]
+    fn summarize_exact_message_problems_with_topology_unavailable() {
+        /*
+         * Intent: declared_disks renders the exact two-segment message when
+         *   disk problems coexist with unavailable live topology.
+         * Why it exists: locks the segment-join formatting contract this
+         *   refactor preserves, including segment order and the "; "
+         *   separator reproduced in docs/commands/doctor.md examples.
+         * Scenario: a declared disk is absent from the mounted live pool while
+         *   doctor also cannot complete the live topology probe.
+         */
+        let inputs = [cls("disk1", "/dev/disk/by-id/wwn-0x1", DiskState::Offline)];
+
+        let result = summarize_declared_disks(&inputs, Some("boom"));
+
+        assert_eq!(result.status, CheckStatus::Warn);
+        assert_eq!(
+            result.message,
+            "1/1 disk has problems: 1 present but not in the live pool: disk1 (/dev/disk/by-id/wwn-0x1); could not compare declared disks to live pool: boom"
+        );
+    }
+
+    #[test]
+    fn summarize_exact_message_topology_unavailable_only() {
+        /*
+         * Intent: declared_disks renders the exact topology-only message when
+         *   every disk is healthy but live topology cannot be probed.
+         * Why it exists: locks the segment-join formatting contract this
+         *   refactor preserves, including absence of a leading separator.
+         * Scenario: all declared members verify as LUKS devices, but btrfs
+         *   topology probing fails while the pool is mounted.
+         */
+        let inputs = [cls(
+            "disk1",
+            "/dev/disk/by-id/wwn-0x1",
+            DiskState::LuksHeaderOk,
+        )];
+
+        let result = summarize_declared_disks(&inputs, Some("boom"));
+
+        assert_eq!(result.status, CheckStatus::Warn);
+        assert_eq!(
+            result.message,
+            "could not compare declared disks to live pool: boom"
+        );
     }
 
     #[test]
