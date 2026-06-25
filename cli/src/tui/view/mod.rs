@@ -105,23 +105,12 @@ fn hint_lines(area_width: u16) -> u16 {
     lines
 }
 
-/// Renders local scrub timestamps relative to the frame's naive-local `now`.
+/// Renders local scrub timestamps relative to the frame's naive-local `now`,
+/// delegating to the shared `util::humanize_ago` so the TUI and `braid status`
+/// bucket ages identically -- including the hours bucket the old TUI-local
+/// version lacked (a 5-hour age read as "300 min ago").
 fn timeago(dt: &PrimitiveDateTime, now: PrimitiveDateTime) -> Option<String> {
-    let diff = now - *dt;
-    if diff.is_negative() {
-        return None;
-    }
-    let days = diff.whole_days();
-    let minutes = diff.whole_minutes();
-    Some(if days > 1 {
-        format!("{days} days ago")
-    } else if days == 1 {
-        "1 day ago".to_owned()
-    } else if minutes < 1 {
-        "<1 min ago".to_owned()
-    } else {
-        format!("{minutes} min ago")
-    })
+    crate::util::humanize_ago(now - *dt)
 }
 
 #[derive(Clone, Copy)]
@@ -1436,7 +1425,10 @@ pub fn view(model: &Model, frame: &mut Frame, now: PrimitiveDateTime) {
     // Severity drives both whether the banner shows and which banner: a
     // Warning-only state (ENOSPC risk) renders a non-beeping amber WARNING alert,
     // never the red CRITICAL alert. `severity().is_some()` is exactly `active()`.
-    let alert_severity = model.pool.current().and_then(|p| p.alert_state.severity());
+    let alert_severity = model
+        .pool
+        .current()
+        .and_then(|p| p.alert_causes.iter().map(|c| c.cause.severity()).max());
     let alert_active = alert_severity.is_some();
     let alert_height: u16 = if alert_active { 1 } else { 0 };
     let stale_msg = model.pool.stale_error();
@@ -1554,9 +1546,10 @@ pub(crate) mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
-    use crate::alert::{AlertCause, AlertState};
+    use crate::alert::AlertCause;
     use crate::parse::types::{BtrfsBgType, BtrfsDfEntry, BtrfsProfile};
     use crate::parse::types::{ScrubState, ScrubTimestamp, SmartProbe};
+    use crate::status::AlertCauseReport;
     use crate::tui::demo::{sample_disk_luks_states, sample_disk_names, sample_pool};
     use crate::tui::test_support::{buffer_to_string, snap};
     use crate::types::Devid;
@@ -1588,7 +1581,7 @@ pub(crate) mod tests {
 
     fn pool_with_alert(causes: Vec<AlertCause>) -> PoolState {
         let mut pool = sample_pool();
-        pool.alert_state = AlertState { causes };
+        pool.alert_causes = causes.into_iter().map(AlertCauseReport::bridge).collect();
         pool
     }
 
@@ -1610,6 +1603,17 @@ pub(crate) mod tests {
         assert_eq!(
             timeago(&time::macros::datetime!(2026-02-23 12:00:00), now),
             Some("1 day ago".to_owned())
+        );
+        // Hours bucket (1h-23h): the regression the timeago -> util::humanize_ago
+        // delegation fixes. The old TUI-local timeago jumped straight from days
+        // to minutes, so a 5-hour age read as "300 min ago".
+        assert_eq!(
+            timeago(&time::macros::datetime!(2026-02-24 07:00:00), now),
+            Some("5 hours ago".to_owned())
+        );
+        assert_eq!(
+            timeago(&time::macros::datetime!(2026-02-24 11:00:00), now),
+            Some("1 hour ago".to_owned())
         );
         assert_eq!(
             timeago(&time::macros::datetime!(2026-02-24 11:30:00), now),

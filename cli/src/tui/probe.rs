@@ -351,7 +351,7 @@ pub fn probe_pool_for_tui<R: CommandRunner, F: Filesystem + ?Sized>(
         }
     }
 
-    let alert_state = resolve_alert_state(paths);
+    let alert_causes = resolve_alert_state(paths);
 
     let capacity_total_bytes = if domain.missing_count == 0 {
         let sizes: Vec<u64> = dev_usage.devices.iter().map(|d| d.device_size).collect();
@@ -478,7 +478,7 @@ pub fn probe_pool_for_tui<R: CommandRunner, F: Filesystem + ?Sized>(
             disk_underlying: present_underlying,
             device_errors,
             unpooled_disks: unpooled_by_name,
-            alert_state,
+            alert_causes,
             scrub,
             balance,
             capacity_total_bytes,

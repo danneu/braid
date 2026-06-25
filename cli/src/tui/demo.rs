@@ -275,7 +275,7 @@ pub(crate) fn sample_pool() -> PoolState {
             ),
         ]),
         unpooled_disks: HashMap::new(),
-        alert_state: crate::alert::AlertState::default(),
+        alert_causes: Vec::new(),
         scrub: ScrubState::Finished {
             started_at: Some(ScrubTimestamp(time::macros::datetime!(2026-02-24 02:00:07))),
             error_count: 0,

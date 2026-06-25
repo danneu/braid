@@ -2357,26 +2357,26 @@ mod tests {
         // (the missing set) and no BtrfsDeviceErrors for devid 1.
         let alert = compute_alert_state(&stats, &acked, &devids, false, false);
         assert!(
-            alert.causes.contains(&AlertCause::MissingDevice {
+            alert.contains(&AlertCause::MissingDevice {
                 devid: Devid::new(2)
             }),
             "btrfs-MISSING devid must latch MissingDevice"
         );
         assert!(
-            alert.causes.contains(&AlertCause::MissingDevice {
+            alert.contains(&AlertCause::MissingDevice {
                 devid: Devid::new(3)
             }),
             "null-underlying devid must latch MissingDevice"
         );
         assert!(
-            !alert.causes.iter().any(|c| matches!(
+            !alert.iter().any(|c| matches!(
                 c,
                 AlertCause::BtrfsDeviceErrors { devid } if *devid == Devid::new(1)
             )),
             "present devid must not produce BtrfsDeviceErrors"
         );
         assert!(
-            !alert.causes.iter().any(|c| matches!(
+            !alert.iter().any(|c| matches!(
                 c,
                 AlertCause::MissingDevice { devid } if *devid == Devid::new(1)
             )),

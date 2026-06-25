@@ -49,6 +49,20 @@ pub fn cmd_monitor<R: CommandRunner, F: Filesystem + ?Sized>(
     mount_point: &MountPoint,
     paths: &StatePaths,
 ) -> MonitorResult {
+    cmd_monitor_at(runner, fs, mount_point, paths, SystemTime::now())
+}
+
+/// `cmd_monitor` with the cycle clock injected (the established `_at` convention,
+/// e.g. `membership.rs`). The single `now` feeds both the ENOSPC snooze compare
+/// and the latch merge's first-detection stamp, so tests pin both against one
+/// fixed instant and a cause first detected this cycle shares that clock.
+pub fn cmd_monitor_at<R: CommandRunner, F: Filesystem + ?Sized>(
+    runner: &R,
+    fs: &F,
+    mount_point: &MountPoint,
+    paths: &StatePaths,
+    now: SystemTime,
+) -> MonitorResult {
     let classified = (|| -> Result<Option<Vec<AlertCause>>, String> {
         // 1. Check if pool is mounted.
         //
@@ -119,7 +133,7 @@ pub fn cmd_monitor<R: CommandRunner, F: Filesystem + ?Sized>(
         // 7. Compute live alert state. Identity is the devid carried on each
         //    stats row by btrfs -- no path-to-devid map needed.
         let mut live_causes =
-            compute_alert_state(&device_stats, &acked, &devids, smartd_active, scrub_failed).causes;
+            compute_alert_state(&device_stats, &acked, &devids, smartd_active, scrub_failed);
 
         // 7b. Best-effort ENOSPC-risk evaluation. This is the single documented
         //     exception to the fail-closed mandate: ADR 014's pure-detector
@@ -130,7 +144,6 @@ pub fn cmd_monitor<R: CommandRunner, F: Filesystem + ?Sized>(
         //     device-error / missing-device alerting in this same cycle is
         //     untouched if the usage probe fails.
         let missing_count = devids.missing.len() as u64;
-        let now = SystemTime::now();
         if let Some(cause) = evaluate_enospc_for_monitor(
             runner,
             mount_point,
@@ -167,7 +180,7 @@ pub fn cmd_monitor<R: CommandRunner, F: Filesystem + ?Sized>(
     }
 
     // 10. Merge: existing latch + live causes
-    let merged = merge_into_latch(existing_latch.as_ref(), &live_causes);
+    let merged = merge_into_latch(existing_latch.as_ref(), &live_causes, now);
 
     // 11. If merged state active -> write latch
     if merged.active()
@@ -389,11 +402,11 @@ mod tests {
     }
 
     fn has_enospc_cause(result: &MonitorResult) -> bool {
-        matches!(result, MonitorResult::Alert(s) if s.causes.iter().any(|c| matches!(c, AlertCause::EnospcRisk { .. })))
+        matches!(result, MonitorResult::Alert(s) if s.causes.iter().any(|c| matches!(c.cause, AlertCause::EnospcRisk { .. })))
     }
 
     fn has_computation_error(result: &MonitorResult) -> bool {
-        matches!(result, MonitorResult::Alert(s) if s.causes.iter().any(|c| matches!(c, AlertCause::ComputationError { .. })))
+        matches!(result, MonitorResult::Alert(s) if s.causes.iter().any(|c| matches!(c.cause, AlertCause::ComputationError { .. })))
     }
 
     fn acked_disk(missing_acked: bool, read_io_errs: u64) -> alert::AckedDisk {
@@ -417,11 +430,23 @@ mod tests {
         state
             .causes
             .iter()
-            .filter_map(|cause| match cause {
+            .filter_map(|cause| match &cause.cause {
                 AlertCause::ComputationError { detail } => Some(detail.as_str()),
                 _ => None,
             })
             .collect()
+    }
+
+    /// The latched causes stripped of their `detected_at` stamp, so cause-set
+    /// assertions stay agnostic to the wall-clock timestamp the merge records.
+    fn causes_only(state: &alert::AlertState) -> Vec<AlertCause> {
+        state.causes.iter().map(|c| c.cause.clone()).collect()
+    }
+
+    /// Wrap a cause as a latched entry with a fixed first-detection stamp, for
+    /// seeding an existing latch in tests where the timestamp is incidental.
+    fn latch_entry(cause: AlertCause) -> alert::LatchedCause {
+        alert::LatchedCause::new(cause, "2023-11-14T22:13:20Z".to_owned())
     }
 
     /*
@@ -711,7 +736,7 @@ mod tests {
         // contributed nothing and no spurious ComputationError was folded in.
         let state = alert_state(&result);
         assert_eq!(
-            state.causes,
+            causes_only(state),
             vec![AlertCause::BtrfsDeviceErrors {
                 devid: Devid::new(1),
             }],
@@ -976,9 +1001,9 @@ mod tests {
     fn stats_failure_merges_existing_non_computation_latch_once() {
         let (_dir, paths) = isolated_paths();
         let existing = alert::AlertState {
-            causes: vec![AlertCause::MissingDevice {
+            causes: vec![latch_entry(AlertCause::MissingDevice {
                 devid: Devid::new(7),
-            }],
+            })],
         };
         alert::save_alert_latch(&existing, &paths).unwrap();
         let runner = MonitorTestRunner::with_override(MonitorOverride::StatsResult(Err(
@@ -991,7 +1016,7 @@ mod tests {
             state
                 .causes
                 .iter()
-                .filter(|cause| matches!(cause, AlertCause::MissingDevice { devid } if *devid == Devid::new(7)))
+                .filter(|cause| matches!(&cause.cause, AlertCause::MissingDevice { devid } if *devid == Devid::new(7)))
                 .count(),
             1,
             "original MissingDevice cause must remain latched"
@@ -1038,9 +1063,9 @@ mod tests {
     fn healthy_cycle_carries_forward_existing_non_computation_latch() {
         let (_dir, paths) = isolated_paths();
         let existing = alert::AlertState {
-            causes: vec![AlertCause::MissingDevice {
+            causes: vec![latch_entry(AlertCause::MissingDevice {
                 devid: Devid::new(7),
-            }],
+            })],
         };
         alert::save_alert_latch(&existing, &paths).unwrap();
 
@@ -1053,7 +1078,7 @@ mod tests {
 
         let state = alert_state(&result);
         assert_eq!(
-            state.causes,
+            causes_only(state),
             vec![AlertCause::MissingDevice {
                 devid: Devid::new(7),
             }],
@@ -1148,9 +1173,9 @@ mod tests {
     fn unmounted_pool_preserves_existing_alert_latch() {
         let (_dir, paths) = isolated_paths();
         let existing = alert::AlertState {
-            causes: vec![AlertCause::MissingDevice {
+            causes: vec![latch_entry(AlertCause::MissingDevice {
                 devid: Devid::new(7),
-            }],
+            })],
         };
         alert::save_alert_latch(&existing, &paths).unwrap();
         let before = std::fs::read(paths.alert_latch_json()).unwrap();
@@ -1271,7 +1296,7 @@ mod tests {
             &paths,
         );
         let state = alert_state(&result);
-        assert_eq!(state.causes, vec![AlertCause::SmartdAlert]);
+        assert_eq!(causes_only(state), vec![AlertCause::SmartdAlert]);
 
         let saved = alert::load_alert_latch(&paths).unwrap().unwrap();
         assert_eq!(
@@ -1299,7 +1324,7 @@ mod tests {
             &paths,
         );
         let state = alert_state(&result);
-        assert_eq!(state.causes, vec![AlertCause::ScrubFailed]);
+        assert_eq!(causes_only(state), vec![AlertCause::ScrubFailed]);
         assert_eq!(
             state.severity(),
             Some(AlertSeverity::Critical),
@@ -1334,7 +1359,10 @@ mod tests {
             &monitor_mp(),
             &paths,
         );
-        assert_eq!(alert_state(&first).causes, vec![AlertCause::ScrubFailed]);
+        assert_eq!(
+            causes_only(alert_state(&first)),
+            vec![AlertCause::ScrubFailed]
+        );
 
         // Flag still set (monitor never removes it -- only ack does).
         let second = cmd_monitor(
@@ -1344,9 +1372,60 @@ mod tests {
             &paths,
         );
         assert_eq!(
-            alert_state(&second).causes,
+            causes_only(alert_state(&second)),
             vec![AlertCause::ScrubFailed],
             "a flag across two cycles must latch exactly one ScrubFailed, not grow the latch"
+        );
+    }
+
+    // Intent: cmd_monitor_at stamps a newly latched cause with the injected
+    //   cycle clock, and a later cycle that re-detects the same cause leaves
+    //   detected_at at the first cycle's time on disk.
+    // Why it exists: the first-detection guarantee must hold end-to-end across
+    //   real monitor cycles (load -> merge -> save), not only in the merge
+    //   helper. A regression that re-stamped on the refresh path would make every
+    //   latched alert read as freshly detected on the next cycle, defeating the
+    //   "historical incident vs live fact" signal the timestamp exists to give.
+    // Scenario: smartd's flag is set; the monitor runs at t0 (latching
+    //   SmartdAlert) and again at t1 > t0 with the flag still present.
+    #[test]
+    fn cmd_monitor_at_stamps_first_detection_and_keeps_it_across_cycles() {
+        let (_dir, paths) = isolated_paths();
+        std::fs::write(paths.smartd_alert(), b"").unwrap();
+        let t0 = UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        let t1 = t0 + std::time::Duration::from_secs(7200);
+        let expected_ts = crate::util::format_rfc3339_utc_seconds(t0);
+
+        let first = cmd_monitor_at(
+            &MonitorTestRunner::with_stale_mapper_stats(),
+            &monitor_fs_btrfs(),
+            &monitor_mp(),
+            &paths,
+            t0,
+        );
+        let first_state = alert_state(&first);
+        assert_eq!(causes_only(first_state), vec![AlertCause::SmartdAlert]);
+        assert_eq!(
+            first_state.causes[0].detected_at, expected_ts,
+            "cycle 1 must stamp detected_at with the t0 clock"
+        );
+
+        let second = cmd_monitor_at(
+            &MonitorTestRunner::with_stale_mapper_stats(),
+            &monitor_fs_btrfs(),
+            &monitor_mp(),
+            &paths,
+            t1,
+        );
+        assert_eq!(
+            causes_only(alert_state(&second)),
+            vec![AlertCause::SmartdAlert]
+        );
+
+        let saved = alert::load_alert_latch(&paths).unwrap().unwrap();
+        assert_eq!(
+            saved.causes[0].detected_at, expected_ts,
+            "re-detecting the same cause at t1 must keep the first-detection time on disk"
         );
     }
 
@@ -1395,7 +1474,7 @@ mod tests {
 
         let state = alert_state(&result);
         assert_eq!(
-            state.causes,
+            causes_only(state),
             vec![AlertCause::EnospcRisk {
                 margin: 100 * MIB as i64 - GIB as i64,
                 count_below: 1,
@@ -1442,7 +1521,7 @@ mod tests {
 
         let state = alert_state(&result);
         assert_eq!(
-            state.causes,
+            causes_only(state),
             vec![AlertCause::BtrfsDeviceErrors {
                 devid: Devid::new(1)
             }],
@@ -1677,7 +1756,7 @@ mod tests {
         };
         alert::save_alert_latch(
             &alert::AlertState {
-                causes: vec![latched.clone()],
+                causes: vec![latch_entry(latched.clone())],
             },
             &paths,
         )
@@ -1693,7 +1772,7 @@ mod tests {
         );
         let state = alert_state(&result);
         assert_eq!(
-            state.causes,
+            causes_only(state),
             vec![latched],
             "latched EnospcRisk must carry forward across re-arm (sticky-until-ack)"
         );

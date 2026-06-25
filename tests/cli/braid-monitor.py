@@ -156,8 +156,22 @@ with subtest("Degraded pool: monitor exit code is exactly 1"):
     rc = machine.succeed("set +e; braid monitor; echo $?").strip().splitlines()[-1]
     assert rc == "1", f"Expected exit 1, got {rc}"
 
+# RFC3339 UTC seconds, e.g. 2026-06-25T15:35:54Z -- the shape braid stamps
+# detected_at / renders as first_detected. Match format, never the value
+# (wall-clock); exact timestamp semantics are pinned in the Rust unit tests.
+RFC3339_UTC = r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z"
+
 with subtest("Degraded pool: latch file created"):
     machine.succeed("test -f /var/lib/braid/alert-latch.json")
+
+with subtest("Degraded pool: latch records detected_at per cause"):
+    latch = json.loads(machine.succeed("cat /var/lib/braid/alert-latch.json"))
+    assert latch["causes"], f"Expected at least one latched cause, got: {latch}"
+    for cause in latch["causes"]:
+        ts = cause.get("detected_at")
+        assert ts is not None and re.fullmatch(RFC3339_UTC, ts), (
+            f"Expected RFC3339 detected_at on each latched cause, got: {cause}"
+        )
 
 with subtest("Degraded pool: status shows CRITICAL alert banner"):
     output = machine.succeed("braid status")
@@ -167,6 +181,11 @@ with subtest("Degraded pool: status shows CRITICAL alert banner"):
     assert "braid ack" in output, f"Expected 'braid ack' hint in status, got: {output}"
     assert f"missing device: disk2 (devid {disk2_devid})" in output, (
         f"Expected 'missing device: disk2 (devid {disk2_devid})' cause in status, got: {output}"
+    )
+    # The latched cause line carries the first-detected suffix:
+    # `-- first detected <RFC3339> (<age> ago)`.
+    assert re.search(rf"first detected {RFC3339_UTC} \([^)]*ago\)", output), (
+        f"Expected 'first detected <ts> (<age> ago)' suffix in status, got: {output}"
     )
 
 with subtest("Degraded pool: status --json shows alert"):
@@ -181,6 +200,10 @@ with subtest("Degraded pool: status --json shows alert"):
     ]
     assert missing_causes, (
         f"Expected missing_device cause with devid={disk2_devid}, got: {report['alert_causes']}"
+    )
+    fd = missing_causes[0].get("first_detected")
+    assert fd is not None and re.fullmatch(RFC3339_UTC, fd), (
+        f"Expected RFC3339 first_detected on latched cause, got: {missing_causes[0]}"
     )
 
 with subtest("Ack clears alert"):
@@ -356,12 +379,14 @@ with subtest("Offline ack refused on mixed BtrfsDeviceErrors + MissingDevice lat
     machine.succeed("rm -f /var/lib/braid/acked-stats.json")
     # Hand-write a full AlertState fixture (load_alert_latch deserializes
     # AlertState, not a bare AlertCause -- a bare cause object would
-    # exercise the corrupt-latch path instead of the refusal path).
+    # exercise the corrupt-latch path instead of the refusal path). Each
+    # cause needs a `detected_at` (required field); a fixed literal is fine
+    # since this asserts the refusal path, not timestamp values.
     latch_fixture = json.dumps(
         {
             "causes": [
-                {"type": "btrfs_device_errors", "devid": 1},
-                {"type": "missing_device", "devid": 2},
+                {"detected_at": "2023-11-14T22:13:20Z", "type": "btrfs_device_errors", "devid": 1},
+                {"detected_at": "2023-11-14T22:13:20Z", "type": "missing_device", "devid": 2},
             ],
         }
     )

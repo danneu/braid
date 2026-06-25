@@ -6,7 +6,7 @@
 //! request-list assertion.
 
 use super::shared::{DeviceUsageSpec, device_usage_raw_body, mock_ok};
-use crate::alert::{AlertCause, AlertState, save_alert_latch};
+use crate::alert::{AlertCause, AlertState, LatchedCause, save_alert_latch};
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, MockRunner, RawCommandOutput};
 use crate::probe::Filesystem;
 use crate::state_paths::StatePaths;
@@ -202,9 +202,16 @@ pub(crate) fn ack_mp() -> MountPoint {
 /// Explicit no-op beeper hook for ack tests that only care about ack logic.
 pub(crate) fn ack_noop_beeper() {}
 
-/// Ack-specific alert latch writer for tests that compose alert causes.
+/// Ack-specific alert latch writer for tests that compose alert causes. Each
+/// cause is stamped with a fixed first-detection time; ack tests assert on cause
+/// kinds and lifecycle, not on the timestamp.
 pub(crate) fn ack_write_latch(paths: &StatePaths, causes: Vec<AlertCause>) {
-    let state = AlertState { causes };
+    let state = AlertState {
+        causes: causes
+            .into_iter()
+            .map(|cause| LatchedCause::new(cause, "2023-11-14T22:13:20Z".to_owned()))
+            .collect(),
+    };
     save_alert_latch(&state, paths).unwrap();
 }
 

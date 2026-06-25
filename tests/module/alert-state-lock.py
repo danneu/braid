@@ -92,9 +92,22 @@ def write_acked_stats(entries):
 
 
 def write_missing_latch(devid):
+    # detected_at is a required latch field; a fixed literal keeps the fixture
+    # parseable (so it reaches the lock/offline-ack paths, not the corrupt
+    # path). This test asserts behavior, not timestamp values.
     write_file(
         alert_latch_path,
-        json.dumps({"causes": [{"type": "missing_device", "devid": devid}]}),
+        json.dumps(
+            {
+                "causes": [
+                    {
+                        "detected_at": "2023-11-14T22:13:20Z",
+                        "type": "missing_device",
+                        "devid": devid,
+                    }
+                ]
+            }
+        ),
     )
 
 

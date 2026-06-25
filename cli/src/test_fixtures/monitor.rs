@@ -473,7 +473,7 @@ pub(crate) fn assert_monitor_single_computation_error(result: &MonitorResult) ->
                 "expected exactly one cause, got {:?}",
                 state.causes
             );
-            match &state.causes[0] {
+            match &state.causes[0].cause {
                 AlertCause::ComputationError { detail } => detail.as_str(),
                 other => panic!("expected ComputationError, got {other:?}"),
             }

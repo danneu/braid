@@ -54,8 +54,14 @@ pub(crate) fn cmd_ack_impl<R: CommandRunner, F: Filesystem + ?Sized>(
     // empty-latch gate or get swallowed by cleanup. An unreadable latch counts
     // as active for gating so the user can clear a corrupt file even with the
     // pool offline.
+    // Strip the latch's first-detection stamps here: ack decides which flag
+    // files to clear purely from the cause kinds, never the timestamps, so the
+    // rest of this path keeps operating on a plain `Vec<AlertCause>`.
     let (causes, latch_corrupt) = match alert::load_alert_latch(paths) {
-        Ok(Some(s)) => (s.causes, false),
+        Ok(Some(s)) => (
+            s.causes.into_iter().map(|c| c.cause).collect::<Vec<_>>(),
+            false,
+        ),
         Ok(None) => (Vec::new(), false),
         Err(e) => {
             eprintln!("warning: alert latch unreadable -- treating as active for ack gating: {e}");
@@ -449,6 +455,12 @@ mod tests {
     use std::process::{ExitStatus, Output};
     use std::time::UNIX_EPOCH;
 
+    /// The latched causes stripped of their `detected_at` stamp, for cause-set
+    /// assertions on a `MonitorResult::Alert` latch in ack integration tests.
+    fn latched_causes(state: &alert::AlertState) -> Vec<AlertCause> {
+        state.causes.iter().map(|c| c.cause.clone()).collect()
+    }
+
     // Intent: The ack beeper-stop spawn path gives systemctl only braid's
     // explicit child-environment allowlist.
     // Why it exists: stop_beeper bypasses RealRunner; without a boundary test
@@ -655,7 +667,7 @@ mod tests {
         let first = cmd_monitor(&runner, &fs, &mp, &paths);
         match first {
             MonitorResult::Alert(s) => assert_eq!(
-                s.causes,
+                latched_causes(&s),
                 vec![AlertCause::BtrfsDeviceErrors {
                     devid: Devid::new(1)
                 }],
@@ -710,7 +722,7 @@ mod tests {
         let third = cmd_monitor(&runner_higher, &fs, &mp, &paths);
         match third {
             MonitorResult::Alert(s) => assert!(
-                s.causes.contains(&AlertCause::BtrfsDeviceErrors {
+                latched_causes(&s).contains(&AlertCause::BtrfsDeviceErrors {
                     devid: Devid::new(1)
                 }),
                 "errors above the baseline must re-fire, got {:?}",

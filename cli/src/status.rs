@@ -1,8 +1,9 @@
 use std::collections::{HashMap, HashSet};
+use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 
-use crate::alert::{self, AlertCause, AlertSeverity, AlertState};
+use crate::alert::{self, AlertCause, AlertSeverity};
 use crate::capacity;
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, LsblkFieldKind};
 use crate::config::{Config, mapper_name};
@@ -75,7 +76,7 @@ pub struct StatusReport {
     #[serde(default)]
     pub alert_active: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub alert_causes: Vec<AlertCause>,
+    pub alert_causes: Vec<AlertCauseReport>,
     /// Every devid that contributes to `missing_count`. This is the union of
     /// btrfs's authoritative `MISSING` set and null-underlying devids (LUKS
     /// mapper open, backing block device gone), matching the set used for
@@ -84,6 +85,32 @@ pub struct StatusReport {
     /// and can reject a null-underlying devid reported here.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub missing_devids: Vec<Devid>,
+}
+
+/// The `status`-view DTO for one alert cause: the cause plus, when it came from
+/// the persisted latch, the first-detection timestamp. `first_detected` is
+/// `Option` because `resolve_alert_state` also synthesizes transient bridge
+/// causes (a smartd/scrub flag seen before the next monitor cycle latches it,
+/// the cleanup-pending sentinel, an unreadable-latch `ComputationError`) that
+/// have no persisted detection time and render with no timestamp. Serializes
+/// flat -- `{ "type": ..., ..., "first_detected": ... }` -- so JSON consumers
+/// that read `c["type"]` are unaffected and `first_detected` is purely additive.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AlertCauseReport {
+    #[serde(flatten)]
+    pub cause: AlertCause,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_detected: Option<String>,
+}
+
+impl AlertCauseReport {
+    /// A status-synthesized cause with no persisted first-detection time.
+    pub(crate) fn bridge(cause: AlertCause) -> Self {
+        AlertCauseReport {
+            cause,
+            first_detected: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -367,7 +394,7 @@ struct MountedExtras {
 }
 
 fn not_mounted_status(config: &Config, paths: &StatePaths, advisories: Vec<String>) -> BuiltStatus {
-    let alert_state = resolve_alert_state(paths);
+    let alert_causes = resolve_alert_state(paths);
     BuiltStatus {
         report: StatusReport {
             mount_point: config.mount_point().clone(),
@@ -383,8 +410,8 @@ fn not_mounted_status(config: &Config, paths: &StatePaths, advisories: Vec<Strin
             allocation: None,
             disks: vec![],
             advisories,
-            alert_active: alert_state.active(),
-            alert_causes: alert_state.causes,
+            alert_active: !alert_causes.is_empty(),
+            alert_causes,
             missing_devids: vec![],
         },
         mounted_extras: None,
@@ -588,7 +615,7 @@ fn build_status<R: CommandRunner, F: Filesystem>(
         &device_stats,
     );
 
-    let alert_state = resolve_alert_state(paths);
+    let alert_causes = resolve_alert_state(paths);
 
     let present_count = pool.total_devices.saturating_sub(pool.missing_count);
     let report = StatusReport {
@@ -605,8 +632,8 @@ fn build_status<R: CommandRunner, F: Filesystem>(
         allocation: df_summary.map(|summary| summary.allocation),
         disks: disk_views.disks,
         advisories,
-        alert_active: alert_state.active(),
-        alert_causes: alert_state.causes,
+        alert_active: !alert_causes.is_empty(),
+        alert_causes,
         missing_devids: pool.alert_missing_devids(),
     };
 
@@ -648,6 +675,7 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
                 extras.map(|e| e.compact_drives.as_slice()),
                 extras.map(|e| e.human_details.as_slice()),
                 extras.map(|e| &e.devid_names),
+                SystemTime::now(),
             )
         );
     }
@@ -666,7 +694,7 @@ pub fn cmd_status<R: CommandRunner, F: Filesystem>(
 /// smartd and scrub-failed flags are checked as a bridge for between-cycle
 /// fires. The cleanup-pending sentinel is also surfaced so interrupted ack
 /// cleanup remains visible to status and TUI.
-pub(crate) fn resolve_alert_state(paths: &StatePaths) -> AlertState {
+pub(crate) fn resolve_alert_state(paths: &StatePaths) -> Vec<AlertCauseReport> {
     let smartd_active = alert::smartd_alert_active(paths);
     let scrub_failed = alert::scrub_failed_active(paths);
     let cleanup_pending = alert::alert_cleanup_pending(paths);
@@ -676,48 +704,60 @@ pub(crate) fn resolve_alert_state(paths: &StatePaths) -> AlertState {
         Err(e) => {
             // Fail loud: don't pretend "no alert" when we can't read the
             // latch. Status is read-only -- never quarantine here; that is
-            // monitor's job.
-            let mut causes = vec![AlertCause::ComputationError {
+            // monitor's job. These are all bridge causes -- the latch we would
+            // have read the timestamp from is exactly what is unreadable.
+            let mut causes = vec![AlertCauseReport::bridge(AlertCause::ComputationError {
                 detail: format!("alert latch unreadable -- {e}"),
-            }];
+            })];
             if cleanup_pending {
-                causes.push(AlertCause::ComputationError {
+                causes.push(AlertCauseReport::bridge(AlertCause::ComputationError {
                     detail: "ack cleanup pending -- re-run `braid ack` to resume".to_owned(),
-                });
+                }));
             }
             if smartd_active {
-                causes.push(AlertCause::SmartdAlert);
+                causes.push(AlertCauseReport::bridge(AlertCause::SmartdAlert));
             }
             if scrub_failed {
-                causes.push(AlertCause::ScrubFailed);
+                causes.push(AlertCauseReport::bridge(AlertCause::ScrubFailed));
             }
-            return AlertState { causes };
+            return causes;
         }
     };
 
-    let mut state = latch.unwrap_or_default();
+    // Latch-derived causes carry their persisted first-detection time; the
+    // synthesized bridge causes below carry none.
+    let mut causes: Vec<AlertCauseReport> = latch
+        .map(|s| {
+            s.causes
+                .into_iter()
+                .map(|lc| AlertCauseReport {
+                    cause: lc.cause,
+                    first_detected: Some(lc.detected_at),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
     if smartd_active
-        && !state
-            .causes
+        && !causes
             .iter()
-            .any(|c| matches!(c, AlertCause::SmartdAlert))
+            .any(|c| matches!(c.cause, AlertCause::SmartdAlert))
     {
-        state.causes.push(AlertCause::SmartdAlert);
+        causes.push(AlertCauseReport::bridge(AlertCause::SmartdAlert));
     }
     if scrub_failed
-        && !state
-            .causes
+        && !causes
             .iter()
-            .any(|c| matches!(c, AlertCause::ScrubFailed))
+            .any(|c| matches!(c.cause, AlertCause::ScrubFailed))
     {
-        state.causes.push(AlertCause::ScrubFailed);
+        causes.push(AlertCauseReport::bridge(AlertCause::ScrubFailed));
     }
     if cleanup_pending {
-        state.causes.push(AlertCause::ComputationError {
+        causes.push(AlertCauseReport::bridge(AlertCause::ComputationError {
             detail: "ack cleanup pending -- re-run `braid ack` to resume".to_owned(),
-        });
+        }));
     }
-    state
+    causes
 }
 
 // ---------------------------------------------------------------------------
@@ -1398,6 +1438,7 @@ fn format_status_human(
     compact_drives: Option<&[CompactDrive]>,
     human_disks: Option<&[HumanDisk]>,
     devid_names: Option<&HashMap<Devid, String>>,
+    now: SystemTime,
 ) -> String {
     let mut out = String::new();
 
@@ -1406,7 +1447,12 @@ fn format_status_human(
     // the exact mis-signal the severity tier exists to prevent. `None` is
     // unreachable while `alert_active` is true but fails closed to Critical.
     if report.alert_active {
-        match report.alert_causes.iter().map(AlertCause::severity).max() {
+        match report
+            .alert_causes
+            .iter()
+            .map(|c| c.cause.severity())
+            .max()
+        {
             Some(AlertSeverity::Warning) => out.push_str(
                 "WARNING alert -- capacity risk detected. Run 'braid ack' to acknowledge.\n",
             ),
@@ -1414,33 +1460,44 @@ fn format_status_human(
                 "CRITICAL alert -- pool health issue detected. Run 'braid ack' to acknowledge and silence.\n",
             ),
         }
-        for cause in &report.alert_causes {
-            match cause {
+        for c in &report.alert_causes {
+            let mut line = match &c.cause {
                 AlertCause::BtrfsDeviceErrors { devid } => {
                     let name = devid_to_name(devid_names, *devid);
-                    out.push_str(&format!("  - btrfs device errors on {name}\n"));
+                    format!("  - btrfs device errors on {name}")
                 }
                 AlertCause::MissingDevice { devid } => {
                     let name = devid_to_name(devid_names, *devid);
-                    out.push_str(&format!("  - missing device: {name}\n"));
+                    format!("  - missing device: {name}")
                 }
-                AlertCause::SmartdAlert => {
-                    out.push_str("  - SMART health warning\n");
-                }
+                AlertCause::SmartdAlert => "  - SMART health warning".to_owned(),
                 AlertCause::ScrubFailed => {
-                    out.push_str(
-                        "  - scheduled scrub failed -- check journalctl -u braid-scrub.service\n",
-                    );
+                    "  - scheduled scrub failed -- check journalctl -u braid-scrub.service"
+                        .to_owned()
                 }
                 AlertCause::ComputationError { detail } => {
-                    out.push_str(&format!("  - alert computation error: {detail}\n"));
+                    format!("  - alert computation error: {detail}")
                 }
                 AlertCause::EnospcRisk { .. } => {
-                    out.push_str(
-                        "  - ENOSPC risk: pool is one disk-loss from being unable to restore RAID1 redundancy\n",
-                    );
+                    "  - ENOSPC risk: pool is one disk-loss from being unable to restore RAID1 redundancy"
+                        .to_owned()
+                }
+            };
+            // A latched cause carries an absolute first-detection timestamp;
+            // append a relative age only when it parses and is in the past, so a
+            // hand-edited or future stamp degrades to absolute-only rather than
+            // crashing `braid status` (fail-loud-don't-crash latch philosophy).
+            if let Some(ts) = &c.first_detected {
+                line.push_str(&format!(" -- first detected {ts}"));
+                if let Some(parsed) = crate::util::parse_rfc3339_utc(ts) {
+                    let now_odt: time::OffsetDateTime = now.into();
+                    if let Some(age) = crate::util::humanize_ago(now_odt - parsed) {
+                        line.push_str(&format!(" ({age})"));
+                    }
                 }
             }
+            line.push('\n');
+            out.push_str(&line);
         }
         out.push('\n');
     }
@@ -1772,6 +1829,14 @@ mod tests {
     };
 
     const TEST_FSID: &str = "12345678-1234-1234-1234-123456789012";
+
+    /// Fixed wall clock for `format_status_human` tests so the relative-age
+    /// suffix is deterministic. Most tests render no latched alert cause, so the
+    /// exact value is incidental; the first-detected rendering tests choose it
+    /// relative to their own latch stamp.
+    fn human_now() -> SystemTime {
+        SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000)
+    }
 
     fn membership_from(entries: Vec<(LuksUuid, DiskMember)>) -> PoolMembership {
         let mut membership = PoolMembership::empty();
@@ -2498,7 +2563,7 @@ mod tests {
             alert_causes: vec![],
             missing_devids: vec![],
         };
-        let human = format_status_human(&report, None, None, None);
+        let human = format_status_human(&report, None, None, None, human_now());
         assert!(human.contains("not mounted"), "got:\n{human}");
         assert!(!human.contains("FSID:"), "got:\n{human}");
         assert!(!human.contains("Capacity"), "got:\n{human}");
@@ -2556,7 +2621,7 @@ mod tests {
             devid: Some(Devid::new(1)),
             status: DiskStatus::Present,
         }];
-        let human = format_status_human(&report, Some(&compact), None, None);
+        let human = format_status_human(&report, Some(&compact), None, None, human_now());
         assert!(human.contains("intact"), "got:\n{human}");
         assert!(
             human.contains(&format!("FSID:     {TEST_FSID}")),
@@ -2652,7 +2717,7 @@ mod tests {
                 status: DiskStatus::Present,
             },
         ];
-        let human = format_status_human(&report, Some(&compact), None, None);
+        let human = format_status_human(&report, Some(&compact), None, None, human_now());
         assert!(human.contains("intact"), "got:\n{human}");
         assert!(
             human.contains(&format!("FSID:     {TEST_FSID}")),
@@ -2726,7 +2791,7 @@ mod tests {
             missing_devids: vec![],
         };
 
-        let human = format_status_human(&report, None, None, None);
+        let human = format_status_human(&report, None, None, None, human_now());
 
         assert!(
             human.contains("Data:      single, RAID1 (not fully redundant)"),
@@ -2797,7 +2862,7 @@ mod tests {
             missing_devids: vec![],
         };
 
-        let human = format_status_human(&report, None, None, None);
+        let human = format_status_human(&report, None, None, None, human_now());
 
         assert!(
             human.contains("Data:      RAID1, XENO, FOOBAR (not fully redundant)"),
@@ -2850,7 +2915,7 @@ mod tests {
             missing_devids: vec![],
         };
 
-        let human = format_status_human(&report, None, None, None);
+        let human = format_status_human(&report, None, None, None, human_now());
         let data_row = human
             .lines()
             .find(|line| line.contains("Data:"))
@@ -2894,7 +2959,7 @@ mod tests {
             missing_devids: vec![],
         };
 
-        let human = format_status_human(&report, None, None, None);
+        let human = format_status_human(&report, None, None, None, human_now());
 
         assert!(human.contains("Data:      RAID1"), "got:\n{human}");
         assert!(human.contains("Metadata:  unknown"), "got:\n{human}");
@@ -2946,7 +3011,7 @@ mod tests {
                 status: DiskStatus::Missing,
             },
         ];
-        let human = format_status_human(&report, Some(&compact), None, None);
+        let human = format_status_human(&report, Some(&compact), None, None, human_now());
         assert!(
             human.contains("DEGRADED (1 missing device)"),
             "got:\n{human}"
@@ -2980,7 +3045,7 @@ mod tests {
             alert_causes: vec![],
             missing_devids: vec![],
         };
-        let human = format_status_human(&report, None, None, None);
+        let human = format_status_human(&report, None, None, None, human_now());
         assert!(
             human.contains("DEGRADED (2 missing devices)"),
             "got:\n{human}"
@@ -3040,7 +3105,7 @@ mod tests {
             missing_devids: vec![],
         };
 
-        let human = format_status_human(&report, None, Some(&human_disks), None);
+        let human = format_status_human(&report, None, Some(&human_disks), None, human_now());
         assert!(human.contains("present"), "got:\n{human}");
         assert!(human.contains("devid 1"), "got:\n{human}");
         assert!(human.contains("LUKS:"), "got:\n{human}");
@@ -3104,7 +3169,7 @@ mod tests {
             missing_devids: vec![],
         };
 
-        let human = format_status_human(&report, None, Some(&human_disks), None);
+        let human = format_status_human(&report, None, Some(&human_disks), None, human_now());
         assert!(human.contains("Action:"), "got:\n{human}");
         assert!(human.contains("braid replace --old disk1"), "got:\n{human}");
     }
@@ -3148,7 +3213,7 @@ mod tests {
             missing_devids: vec![],
         };
 
-        let human = format_status_human(&report, None, Some(&human_disks), None);
+        let human = format_status_human(&report, None, Some(&human_disks), None, human_now());
         assert!(human.contains("MISSING"), "got:\n{human}");
         assert!(human.contains("not found"), "got:\n{human}");
         assert!(human.contains("device absent"), "got:\n{human}");
@@ -3203,7 +3268,7 @@ mod tests {
             missing_devids: vec![],
         };
 
-        let human = format_status_human(&report, None, Some(&human_disks), None);
+        let human = format_status_human(&report, None, Some(&human_disks), None, human_now());
         assert!(human.contains("LUKS HEADER UNREADABLE"), "got:\n{human}");
         assert!(
             human.contains("unknown (LUKS header unreadable)"),
@@ -3269,7 +3334,7 @@ mod tests {
             missing_devids: vec![],
         };
 
-        let human = format_status_human(&report, None, Some(&human_disks), None);
+        let human = format_status_human(&report, None, Some(&human_disks), None, human_now());
         assert!(human.contains("LUKS UUID MISMATCH"), "got:\n{human}");
         // The observed on-disk UUID is surfaced so the operator sees what the
         // disk now reports.
@@ -3335,7 +3400,7 @@ mod tests {
             missing_devids: vec![],
         };
 
-        let human = format_status_human(&report, None, Some(&human_disks), None);
+        let human = format_status_human(&report, None, Some(&human_disks), None, human_now());
         assert!(human.contains("(unknown)"), "got:\n{human}");
     }
 
@@ -3722,7 +3787,7 @@ mod tests {
             error_count: 0,
             journal_since: Some("2026-02-23 10:00:00".to_owned()),
         });
-        let human = format_status_human(&report, None, None, None);
+        let human = format_status_human(&report, None, None, None, human_now());
         assert!(
             human.contains("\nLast scrub: Mon Feb 23 10:00:00 2026 (no errors)\n"),
             "expected exact last-scrub line, got:\n{human}"
@@ -3744,7 +3809,7 @@ mod tests {
             error_count: 3,
             journal_since: Some("2026-02-23 10:00:00".to_owned()),
         });
-        let human = format_status_human(&report, None, None, None);
+        let human = format_status_human(&report, None, None, None, human_now());
         assert!(
             human.contains("\nLast scrub: Mon Feb 23 10:00:00 2026 (3 errors)\n"),
             "expected exact last-scrub line, got:\n{human}"
@@ -3772,7 +3837,7 @@ mod tests {
             error_count: 0,
             journal_since: Some("2026-02-23 10:00:00".to_owned()),
         });
-        let human = format_status_human(&report, None, None, None);
+        let human = format_status_human(&report, None, None, None, human_now());
         assert!(
             human.contains("\nLast scrub: Mon Feb 23 10:00:00 2026 cancelled (will resume)\n"),
             "expected exact cancelled last-scrub line, got:\n{human}"
@@ -3794,7 +3859,7 @@ mod tests {
             error_count: 2,
             journal_since: Some("2026-02-23 10:00:00".to_owned()),
         });
-        let human = format_status_human(&report, None, None, None);
+        let human = format_status_human(&report, None, None, None, human_now());
         assert!(
             human.contains(
                 "\nLast scrub: Mon Feb 23 10:00:00 2026 (2 errors) cancelled (will resume)\n"
@@ -3822,7 +3887,7 @@ mod tests {
             error_count: 2,
             journal_since: None,
         });
-        let human = format_status_human(&report, None, None, None);
+        let human = format_status_human(&report, None, None, None, human_now());
         assert!(
             human.contains("\nLast scrub: unknown start (2 errors) cancelled (will resume)\n"),
             "expected no-start cancelled line, got:\n{human}"
@@ -3844,7 +3909,7 @@ mod tests {
             error_count: 0,
             journal_since: Some("2026-02-23 10:00:00".to_owned()),
         });
-        let human = format_status_human(&report, None, None, None);
+        let human = format_status_human(&report, None, None, None, human_now());
         assert!(
             human.contains("\nLast scrub: Mon Feb 23 10:00:00 2026 interrupted\n"),
             "expected exact interrupted last-scrub line, got:\n{human}"
@@ -4009,7 +4074,7 @@ mod tests {
             alert_causes: vec![],
             missing_devids: vec![],
         };
-        let human = format_status_human(&report, None, None, None);
+        let human = format_status_human(&report, None, None, None, human_now());
         assert!(
             human.contains("Balance:  running, 108/160 chunks (68% complete)"),
             "got:\n{human}"
@@ -4041,7 +4106,7 @@ mod tests {
             alert_causes: vec![],
             missing_devids: vec![],
         };
-        let human = format_status_human(&report, None, None, None);
+        let human = format_status_human(&report, None, None, None, human_now());
         assert!(human.contains("Balance:  unknown"), "got:\n{human}");
     }
 
@@ -4070,7 +4135,7 @@ mod tests {
             alert_causes: vec![],
             missing_devids: vec![],
         };
-        let human = format_status_human(&report, None, None, None);
+        let human = format_status_human(&report, None, None, None, human_now());
         assert!(
             !human.contains("Balance:"),
             "Idle balance should not show Balance line, got:\n{human}"
@@ -4210,7 +4275,7 @@ mod tests {
                     .report
                     .alert_causes
                     .iter()
-                    .any(|c| matches!(c, AlertCause::SmartdAlert)),
+                    .any(|c| matches!(c.cause, AlertCause::SmartdAlert)),
                 "live per-disk SMART must not synthesize a SmartdAlert; causes: {:?}",
                 built.report.alert_causes
             );
@@ -4253,7 +4318,7 @@ mod tests {
         }];
 
         let report = status_report_with_scrub(ScrubReport::Never);
-        let human = format_status_human(&report, None, Some(&human_disks), None);
+        let human = format_status_human(&report, None, Some(&human_disks), None, human_now());
         assert!(
             human.contains("SMART:   failing (5 reallocated)"),
             "got:\n{human}"
@@ -4288,6 +4353,7 @@ mod tests {
             extras.map(|e| e.compact_drives.as_slice()),
             extras.map(|e| e.human_details.as_slice()),
             extras.map(|e| &e.devid_names),
+            human_now(),
         )
     }
 
@@ -5417,10 +5483,13 @@ mod tests {
         let (_tmp, paths) = isolated_paths();
         membership::save_membership(&membership, &paths).unwrap();
         alert::save_alert_latch(
-            &AlertState {
-                causes: vec![AlertCause::MissingDevice {
-                    devid: Devid::new(3),
-                }],
+            &alert::AlertState {
+                causes: vec![alert::LatchedCause::new(
+                    AlertCause::MissingDevice {
+                        devid: Devid::new(3),
+                    },
+                    "2023-11-14T22:13:20Z".to_owned(),
+                )],
             },
             &paths,
         )
@@ -5440,6 +5509,7 @@ mod tests {
             Some(&extras.compact_drives),
             Some(&extras.human_details),
             Some(&extras.devid_names),
+            human_now(),
         );
 
         assert!(
@@ -5736,7 +5806,7 @@ mod tests {
             alert_causes: vec![],
             missing_devids: vec![],
         };
-        let human = format_status_human(&report, None, Some(&ctx.human_details), None);
+        let human = format_status_human(&report, None, Some(&ctx.human_details), None, human_now());
 
         assert!(human.contains("disk1"), "got:\n{human}");
         assert!(
@@ -6235,7 +6305,7 @@ mod tests {
             alert_causes: vec![],
             missing_devids: vec![],
         };
-        let human = format_status_human(&report, None, Some(&ctx.human_details), None);
+        let human = format_status_human(&report, None, Some(&ctx.human_details), None, human_now());
 
         assert!(
             !human.contains("braid replace --old braid-"),
@@ -6311,7 +6381,7 @@ mod tests {
             alert_causes: vec![],
             missing_devids: vec![],
         };
-        let human = format_status_human(&report, None, Some(&ctx.human_details), None);
+        let human = format_status_human(&report, None, Some(&ctx.human_details), None, human_now());
 
         assert!(
             human.contains("braid replace --old disk1 --new <new-name>=/dev/disk/by-id/<...>"),
@@ -6760,7 +6830,7 @@ mod tests {
             missing_devids: vec![],
         };
 
-        let human = format_status_human(&report, None, Some(&human_disks), None);
+        let human = format_status_human(&report, None, Some(&human_disks), None, human_now());
         assert!(human.contains("UNKNOWN"), "got:\n{human}");
         assert!(human.contains("metadata unavailable"), "got:\n{human}");
         assert!(
@@ -6824,7 +6894,7 @@ mod tests {
             missing_devids: vec![],
         };
 
-        let human = format_status_human(&report, None, Some(&human_disks), None);
+        let human = format_status_human(&report, None, Some(&human_disks), None, human_now());
         assert!(human.contains("OFFLINE"), "got:\n{human}");
         assert!(
             human.contains("disk offline -- not in pool"),
@@ -6860,7 +6930,7 @@ mod tests {
             }],
         );
         let devid_names = std::collections::HashMap::from([(Devid::new(3), "toshiba3".to_owned())]);
-        let human = format_status_human(&report, None, None, Some(&devid_names));
+        let human = format_status_human(&report, None, None, Some(&devid_names), human_now());
         assert!(
             human.contains("missing device: toshiba3 (devid 3)"),
             "expected device name in alert, got:\n{human}"
@@ -6887,7 +6957,7 @@ mod tests {
             (Devid::new(1), "aaa".to_owned()),
             (Devid::new(2), "bbb".to_owned()),
         ]);
-        let human = format_status_human(&report, None, None, Some(&devid_names));
+        let human = format_status_human(&report, None, None, Some(&devid_names), human_now());
         assert!(
             human.contains("btrfs device errors on aaa (devid 1)"),
             "expected device name in alert, got:\n{human}"
@@ -6910,7 +6980,7 @@ mod tests {
             }],
         );
         let devid_names = std::collections::HashMap::new();
-        let human = format_status_human(&report, None, None, Some(&devid_names));
+        let human = format_status_human(&report, None, None, Some(&devid_names), human_now());
         assert!(
             human.contains("missing device: devid 99"),
             "unknown devid should fall back to raw id, got:\n{human}"
@@ -6947,7 +7017,7 @@ mod tests {
             }],
         );
 
-        let human = format_status_human(&report, None, None, Some(&devid_names));
+        let human = format_status_human(&report, None, None, Some(&devid_names), human_now());
 
         assert!(
             human.contains("btrfs device errors on foreign-live (devid 1)"),
@@ -6972,7 +7042,7 @@ mod tests {
             }],
         );
 
-        let human = format_status_human(&report, None, None, None);
+        let human = format_status_human(&report, None, None, None, human_now());
 
         assert!(
             human.contains(
@@ -7005,7 +7075,7 @@ mod tests {
             }],
         );
 
-        let human = format_status_human(&report, None, None, None);
+        let human = format_status_human(&report, None, None, None, human_now());
 
         assert!(
             human.contains("CRITICAL alert -- pool health issue detected"),
@@ -7028,7 +7098,7 @@ mod tests {
     fn status_human_scrub_failed_renders_critical_not_warning() {
         let report = status_report_with_alerts(vec![], vec![AlertCause::ScrubFailed]);
 
-        let human = format_status_human(&report, None, None, None);
+        let human = format_status_human(&report, None, None, None, human_now());
 
         assert!(
             human.contains("CRITICAL alert -- pool health issue detected"),
@@ -7065,7 +7135,7 @@ mod tests {
             ],
         );
 
-        let human = format_status_human(&report, None, None, None);
+        let human = format_status_human(&report, None, None, None, human_now());
 
         assert!(
             human.contains("CRITICAL alert -- pool health issue detected"),
@@ -7865,16 +7935,23 @@ mod tests {
         let (_tmp, paths) = isolated_paths();
         std::fs::write(paths.alert_latch_json(), b"not json").unwrap();
 
-        let state = resolve_alert_state(&paths);
+        let causes = resolve_alert_state(&paths);
 
-        assert!(state.active(), "corrupt latch must surface as active alert");
+        assert!(
+            !causes.is_empty(),
+            "corrupt latch must surface as active alert"
+        );
+        // A bridge ComputationError carries no first-detection time (the latch we
+        // would have read it from is exactly what is unreadable).
         assert!(
             matches!(
-                state.causes.as_slice(),
-                [AlertCause::ComputationError { .. }]
+                causes.as_slice(),
+                [AlertCauseReport {
+                    cause: AlertCause::ComputationError { .. },
+                    first_detected: None,
+                }]
             ),
-            "expected exactly one ComputationError cause, got {:?}",
-            state.causes
+            "expected exactly one bridge ComputationError cause, got {causes:?}"
         );
     }
 
@@ -7890,16 +7967,21 @@ mod tests {
         std::fs::write(paths.alert_latch_json(), b"not json").unwrap();
         std::fs::write(paths.smartd_alert(), b"").unwrap();
 
-        let state = resolve_alert_state(&paths);
+        let causes = resolve_alert_state(&paths);
 
         let [
-            AlertCause::ComputationError { detail },
-            AlertCause::SmartdAlert,
-        ] = state.causes.as_slice()
+            AlertCauseReport {
+                cause: AlertCause::ComputationError { detail },
+                first_detected: None,
+            },
+            AlertCauseReport {
+                cause: AlertCause::SmartdAlert,
+                first_detected: None,
+            },
+        ] = causes.as_slice()
         else {
             panic!(
-                "expected corrupt latch ComputationError followed by SmartdAlert, got {:?}",
-                state.causes
+                "expected corrupt latch ComputationError followed by bridged SmartdAlert, got {causes:?}"
             );
         };
         assert!(
@@ -7919,17 +8001,20 @@ mod tests {
         let (_tmp, paths) = isolated_paths();
         std::fs::write(paths.alert_cleanup_pending(), b"").unwrap();
 
-        let state = resolve_alert_state(&paths);
+        let causes = resolve_alert_state(&paths);
 
         assert!(
-            state.active(),
+            !causes.is_empty(),
             "cleanup-pending must surface as active alert"
         );
-        let [AlertCause::ComputationError { detail }] = state.causes.as_slice() else {
-            panic!(
-                "expected exactly one ComputationError cause, got {:?}",
-                state.causes
-            );
+        let [
+            AlertCauseReport {
+                cause: AlertCause::ComputationError { detail },
+                first_detected: None,
+            },
+        ] = causes.as_slice()
+        else {
+            panic!("expected exactly one bridge ComputationError cause, got {causes:?}");
         };
         assert!(
             detail.contains("ack cleanup pending"),
@@ -7952,18 +8037,34 @@ mod tests {
     fn resolve_alert_state_dedups_smartd_alert_against_latch() {
         let (_tmp, paths) = isolated_paths();
         alert::save_alert_latch(
-            &AlertState {
-                causes: vec![AlertCause::SmartdAlert],
+            &alert::AlertState {
+                causes: vec![alert::LatchedCause::new(
+                    AlertCause::SmartdAlert,
+                    "2023-11-14T22:13:20Z".to_owned(),
+                )],
             },
             &paths,
         )
         .unwrap();
         std::fs::write(paths.smartd_alert(), b"").unwrap();
 
-        let state = resolve_alert_state(&paths);
+        let causes = resolve_alert_state(&paths);
 
-        assert!(state.active(), "smartd flag must surface as active alert");
-        assert_eq!(state.causes, vec![AlertCause::SmartdAlert]);
+        assert!(
+            !causes.is_empty(),
+            "smartd flag must surface as active alert"
+        );
+        assert_eq!(
+            causes.len(),
+            1,
+            "live flag must not duplicate the latched cause"
+        );
+        assert_eq!(causes[0].cause, AlertCause::SmartdAlert);
+        assert_eq!(
+            causes[0].first_detected.as_deref(),
+            Some("2023-11-14T22:13:20Z"),
+            "the surviving cause is the latched one, so it keeps its first-detection time"
+        );
     }
 
     // Intent: resolve_alert_state bridges a live smartd flag into AlertState
@@ -7977,9 +8078,14 @@ mod tests {
         let (_tmp, paths) = isolated_paths();
         std::fs::write(paths.smartd_alert(), b"").unwrap();
 
-        let state = resolve_alert_state(&paths);
+        let causes = resolve_alert_state(&paths);
 
-        assert_eq!(state.causes, vec![AlertCause::SmartdAlert]);
+        assert_eq!(causes.len(), 1);
+        assert_eq!(causes[0].cause, AlertCause::SmartdAlert);
+        assert_eq!(
+            causes[0].first_detected, None,
+            "a bridged flag carries no first-detection time"
+        );
     }
 
     // Intent: resolve_alert_state bridges a live scrub-failed flag into
@@ -7994,8 +8100,150 @@ mod tests {
         let (_tmp, paths) = isolated_paths();
         std::fs::write(paths.scrub_failed(), b"").unwrap();
 
-        let state = resolve_alert_state(&paths);
+        let causes = resolve_alert_state(&paths);
 
-        assert_eq!(state.causes, vec![AlertCause::ScrubFailed]);
+        assert_eq!(causes.len(), 1);
+        assert_eq!(causes[0].cause, AlertCause::ScrubFailed);
+        assert_eq!(
+            causes[0].first_detected, None,
+            "a bridged flag carries no first-detection time"
+        );
+    }
+
+    /// Build a one-line status report carrying a single latched alert cause with
+    /// the given `first_detected`, for exercising the human/JSON alert render.
+    fn report_with_first_detected(first_detected: Option<String>) -> StatusReport {
+        StatusReport {
+            mount_point: status_mp(),
+            status: StatusCode::NotMounted,
+            total_devices: None,
+            present_count: None,
+            missing_count: None,
+            profile: None,
+            fsid: None,
+            capacity: None,
+            last_scrub: None,
+            balance: None,
+            allocation: None,
+            disks: vec![],
+            advisories: vec![],
+            alert_active: true,
+            alert_causes: vec![AlertCauseReport {
+                cause: AlertCause::MissingDevice {
+                    devid: Devid::new(2),
+                },
+                first_detected,
+            }],
+            missing_devids: vec![],
+        }
+    }
+
+    // Intent: a latched alert cause renders ` -- first detected <ts> (<age>)`,
+    //   with the absolute timestamp and the relative age computed against `now`.
+    // Why it exists: this is the user-visible point of the whole change -- the
+    //   status banner must label a latched alert with when it was first detected
+    //   so the operator can tell a fresh incident from a stale one.
+    // Scenario: a MissingDevice latched at TEST_TS is rendered two hours later.
+    #[test]
+    fn format_status_human_renders_first_detected_with_age() {
+        let report = report_with_first_detected(Some("2023-11-14T22:13:20Z".to_owned()));
+        let now = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000 + 7200);
+
+        let human = format_status_human(&report, None, None, None, now);
+
+        assert!(
+            human.contains(
+                "missing device: devid 2 -- first detected 2023-11-14T22:13:20Z (2 hours ago)"
+            ),
+            "expected absolute timestamp and relative age, got:\n{human}"
+        );
+    }
+
+    // Intent: a latched cause whose first_detected cannot be turned into a
+    //   relative age (a future timestamp, or a malformed non-RFC3339 string)
+    //   renders the absolute timestamp with NO `(... ago)` suffix.
+    // Why it exists: this pins the middle render branch between the happy path
+    //   (age present) and the bridge None path (no timestamp at all). A
+    //   regression into an unwrap would crash `braid status` on a weird latch,
+    //   and a lost absolute fallback would drop the timestamp entirely -- both
+    //   violate braid's fail-loud-don't-crash latch philosophy.
+    // Scenario: clock skew stamps a future detected_at; separately, a hand-edited
+    //   latch stores an opaque non-timestamp string.
+    #[test]
+    fn format_status_human_first_detected_degrades_to_absolute_only() {
+        let now = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+
+        let future = report_with_first_detected(Some("2099-01-01T00:00:00Z".to_owned()));
+        let human = format_status_human(&future, None, None, None, now);
+        assert!(
+            human.contains("missing device: devid 2 -- first detected 2099-01-01T00:00:00Z\n"),
+            "future timestamp must render absolute-only, got:\n{human}"
+        );
+        assert!(
+            !human.contains("ago)"),
+            "a future timestamp must not render a relative age, got:\n{human}"
+        );
+
+        let malformed = report_with_first_detected(Some("not a timestamp".to_owned()));
+        let human = format_status_human(&malformed, None, None, None, now);
+        assert!(
+            human.contains("missing device: devid 2 -- first detected not a timestamp\n"),
+            "malformed timestamp must render absolute-only, got:\n{human}"
+        );
+        assert!(
+            !human.contains("ago)"),
+            "a malformed timestamp must not render a relative age, got:\n{human}"
+        );
+    }
+
+    // Intent: a bridge cause (first_detected: None) renders with NO first-detected
+    //   suffix at all.
+    // Why it exists: status synthesizes bridge causes that have no persisted
+    //   detection time; they must render exactly as before this change, with no
+    //   trailing ` -- first detected ...`.
+    // Scenario: a smartd flag bridged into the alert list with no latch entry.
+    #[test]
+    fn format_status_human_bridge_cause_renders_without_first_detected() {
+        let report = report_with_first_detected(None);
+        let human = format_status_human(&report, None, None, None, human_now());
+
+        assert!(
+            human.contains("missing device: devid 2\n"),
+            "bridge cause must render the bare line, got:\n{human}"
+        );
+        assert!(
+            !human.contains("first detected"),
+            "a bridge cause must not render a first-detected suffix, got:\n{human}"
+        );
+    }
+
+    // Intent: a latched cause serializes first_detected in status --json; a
+    //   bridge cause omits the key; the report round-trips.
+    // Why it exists: first_detected is an additive JSON field gated by
+    //   skip_serializing_if, so the documented schema stays clean for bridge
+    //   causes while latched causes carry the timestamp. JSON consumers reading
+    //   c["type"] must be unaffected.
+    // Scenario: one report with a latched cause, one with a bridge cause.
+    #[test]
+    fn status_report_json_first_detected_present_then_omitted() {
+        let latched = report_with_first_detected(Some("2023-11-14T22:13:20Z".to_owned()));
+        let value: serde_json::Value = serde_json::to_value(&latched).unwrap();
+        let cause = &value["alert_causes"][0];
+        assert_eq!(
+            cause["type"], "missing_device",
+            "type stays a top-level key"
+        );
+        assert_eq!(cause["first_detected"], "2023-11-14T22:13:20Z");
+
+        let bridge = report_with_first_detected(None);
+        let value: serde_json::Value = serde_json::to_value(&bridge).unwrap();
+        assert!(
+            value["alert_causes"][0].get("first_detected").is_none(),
+            "a bridge cause must omit first_detected, got {value}"
+        );
+
+        let back: StatusReport =
+            serde_json::from_value(serde_json::to_value(&latched).unwrap()).unwrap();
+        assert_eq!(back, latched, "report must round-trip through JSON");
     }
 }

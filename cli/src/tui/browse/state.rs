@@ -1315,7 +1315,6 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
-    use crate::alert::AlertState;
     use crate::status::BalanceReport;
     use crate::tui::model::PoolState;
 
@@ -1330,7 +1329,7 @@ mod tests {
             disk_underlying: HashMap::new(),
             device_errors: HashMap::new(),
             unpooled_disks: HashMap::new(),
-            alert_state: AlertState::default(),
+            alert_causes: Vec::new(),
             scrub: crate::parse::types::ScrubState::Unknown,
             balance: BalanceReport::Idle,
             capacity_total_bytes: None,

@@ -539,7 +539,7 @@ pub(crate) fn write_corrupt_sidecar_at(
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("pool.json");
-    let ts = format_rfc3339_utc_seconds(now);
+    let ts = crate::util::format_rfc3339_utc_seconds(now);
     let base = format!("{file_name}.corrupt-{ts}");
 
     const MAX_COLLISIONS: u32 = 1000;
@@ -615,17 +615,6 @@ impl CorruptSidecarError {
     pub(crate) fn into_source(self) -> std::io::Error {
         self.source
     }
-}
-
-/// Format the sidecar timestamp suffix as seconds-only UTC so filenames
-/// match the documented `pool.json.corrupt-<RFC3339-UTC>` shape.
-fn format_rfc3339_utc_seconds(now: std::time::SystemTime) -> String {
-    let odt: time::OffsetDateTime = now.into();
-    let format = time::format_description::parse("[year]-[month]-[day]T[hour]:[minute]:[second]Z")
-        .expect("static format description must parse");
-    odt.to_offset(time::UtcOffset::UTC)
-        .format(&format)
-        .expect("formatting OffsetDateTime as RFC3339 seconds must not fail")
 }
 
 // ---------------------------------------------------------------------------
@@ -783,7 +772,7 @@ mod tests {
         std::fs::write(&pool_json, &seed_bytes).unwrap();
 
         let t = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
-        let ts = format_rfc3339_utc_seconds(t);
+        let ts = crate::util::format_rfc3339_utc_seconds(t);
         let primary = dir.path().join(format!("pool.json.corrupt-{ts}"));
         let first_retry = dir.path().join(format!("pool.json.corrupt-{ts}.1"));
         let second_retry = dir.path().join(format!("pool.json.corrupt-{ts}.2"));
@@ -822,7 +811,7 @@ mod tests {
         let t = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
         let sidecar = dir.path().join(format!(
             "pool.json.corrupt-{}",
-            format_rfc3339_utc_seconds(t)
+            crate::util::format_rfc3339_utc_seconds(t)
         ));
 
         let prior = umask(Mode::from_bits_truncate(0o777));
@@ -832,22 +821,6 @@ mod tests {
 
         let mode = std::fs::metadata(&sidecar).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "corrupt sidecar must be exactly 0600");
-    }
-
-    // Intent: sidecar timestamp formatting emits seconds-only UTC with a
-    //   literal Z suffix.
-    // Why it exists: the operator-facing filename convention must not
-    //   drift to the subsecond shape used by util::now_iso.
-    // Scenario: a future refactor tries to share timestamp helpers and
-    //   changes sidecar names documented in recovery runbooks.
-    #[test]
-    fn format_rfc3339_utc_seconds_emits_seconds_only_with_z_suffix() {
-        let first =
-            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
-        let second = std::time::SystemTime::UNIX_EPOCH;
-
-        assert_eq!(format_rfc3339_utc_seconds(first), "2023-11-14T22:13:20Z");
-        assert_eq!(format_rfc3339_utc_seconds(second), "1970-01-01T00:00:00Z");
     }
 
     // ----- LuksUuidMap shape regressions -----------------------------------

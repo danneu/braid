@@ -82,12 +82,20 @@ causes render the pool-health alert banner:
 
 ```
 CRITICAL alert -- pool health issue detected. Run 'braid ack' to acknowledge and silence.
-  - btrfs device errors on toshiba1 (devid 1)
-  - missing device: toshiba2 (devid 2)
-  - SMART health warning
+  - btrfs device errors on toshiba1 (devid 1) -- first detected 2026-06-25T15:35:54Z (2 hours ago)
+  - missing device: toshiba2 (devid 2) -- first detected 2026-06-25T15:35:54Z (2 hours ago)
+  - SMART health warning -- first detected 2026-06-25T15:35:54Z (2 hours ago)
   - scheduled scrub failed -- check journalctl -u braid-scrub.service
   - alert computation error: <detail>
 ```
+
+Each latched cause carries the time the monitor *first* latched it, shown inline
+as `-- first detected <RFC3339 UTC> (<relative age>)`. The age degrades to the
+absolute timestamp alone if it cannot be computed (a malformed or future stored
+value). Status-synthesized causes that were never persisted with a timestamp --
+a live SMART/scrub flag observed before the next monitor cycle latches it, the
+ack cleanup-pending sentinel, or an unreadable-latch computation error -- render
+with no `first detected` suffix.
 
 A Warning-only ENOSPC-risk state renders the capacity-risk alert instead:
 
@@ -532,7 +540,13 @@ is lost until `pool.json` is rebuilt.
   alert is active** (the key is absent, not `[]`) -- check the
   always-present `alert_active` boolean first, mirroring how `advisories`
   is "omitted when none". When present, each object is tagged by a `type`
-  discriminator:
+  discriminator, and a latched cause additionally carries
+  `"first_detected": "<RFC3339 UTC seconds>"` -- the time the monitor first
+  latched it, preserved across re-detections. The field is **omitted** for a
+  cause synthesized by `status` itself that was never persisted with a
+  timestamp (a live SMART/scrub flag not yet latched, the ack cleanup-pending
+  sentinel, or an unreadable-latch `computation_error`), so consumers must treat
+  it as optional. The discriminated payloads:
   - `{ "type": "btrfs_device_errors", "devid": <number> }` -- btrfs I/O
     errors on that device.
   - `{ "type": "missing_device", "devid": <number> }` -- a device counted

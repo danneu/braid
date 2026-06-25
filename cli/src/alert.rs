@@ -15,9 +15,15 @@ use crate::types::{Devid, Fsid};
 // Alert model
 // ---------------------------------------------------------------------------
 
+/// The persisted alert latch: the unacked causes from all sources, each stamped
+/// with when the monitor first latched it. The latch is the single source of
+/// truth for "what needs acknowledgment" and survives until `braid ack` (ADR
+/// 014's sticky-latch invariant). Distinct from the live `Vec<AlertCause>`
+/// `compute_alert_state` produces (untimestamped "what") and from the
+/// `status`-view `AlertCauseReport` DTO (cause + optional `first_detected`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct AlertState {
-    pub causes: Vec<AlertCause>,
+    pub causes: Vec<LatchedCause>,
 }
 
 impl AlertState {
@@ -31,7 +37,32 @@ impl AlertState {
     /// `None` is unreachable while a banner is shown (rendering is gated on an
     /// active alert) but exists because an empty `AlertState` has no maximum.
     pub fn severity(&self) -> Option<AlertSeverity> {
-        self.causes.iter().map(AlertCause::severity).max()
+        self.causes.iter().map(|c| c.cause.severity()).max()
+    }
+}
+
+/// A latched alert cause plus the first-detection timestamp. `detected_at` is a
+/// property of being *latched*, not of the cause itself, so it wraps `AlertCause`
+/// rather than living inside the enum: live causes from `compute_alert_state`
+/// carry no time. Serializes flat -- `{ "detected_at": ..., "type": ..., ... }`
+/// via `#[serde(flatten)]` over the internally-tagged `AlertCause` -- so the
+/// on-disk and `status --json` shapes keep their top-level `type` discriminator
+/// (the documented public contract; consumers read `c["type"]`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LatchedCause {
+    /// RFC3339 UTC seconds when the monitor FIRST latched this cause. Preserved
+    /// across refreshes (same `same_cause_key`); only a fresh append stamps it.
+    /// Display-only -- never compared or parsed back here; the merge path clones
+    /// it forward verbatim and only the `status` renderer parses it for an age.
+    pub detected_at: String,
+    #[serde(flatten)]
+    pub cause: AlertCause,
+}
+
+impl LatchedCause {
+    /// Terse constructor so fixtures and the merge append path read cleanly.
+    pub fn new(cause: AlertCause, detected_at: String) -> Self {
+        LatchedCause { cause, detected_at }
     }
 }
 
@@ -174,7 +205,7 @@ pub fn compute_alert_state(
     devids: &AlertDevids,
     smartd_alert_active: bool,
     scrub_failed: bool,
-) -> AlertState {
+) -> Vec<AlertCause> {
     let mut causes = Vec::new();
 
     for dev in &current_stats.devices {
@@ -210,7 +241,7 @@ pub fn compute_alert_state(
         causes.push(AlertCause::ScrubFailed);
     }
 
-    AlertState { causes }
+    causes
 }
 
 /// Alert when `current` exceeds the acked baseline, treating a baseline
@@ -674,27 +705,40 @@ pub fn remove_enospc_ack(paths: &StatePaths) -> Result<(), std::io::Error> {
 // Latch merging
 // ---------------------------------------------------------------------------
 
-/// Merge existing latched causes with newly detected live causes.
+/// Merge existing latched causes with newly detected live causes, stamping the
+/// first-detection time on each fresh append.
 ///
 /// Algorithm:
-/// 1. Start with all causes from the existing latch (carried forward).
-/// 2. For each live cause: if a latched cause matches by key, replace it;
-///    otherwise append.
+/// 1. Start with all `LatchedCause`s from the existing latch (carried forward,
+///    `detected_at` and all).
+/// 2. For each live cause: if a latched cause matches by key, replace its
+///    `cause` with the fresher evidence but **keep the original `detected_at`**
+///    (the first-detection guarantee); otherwise append a new `LatchedCause`
+///    stamped with `now`.
 /// 3. Result: `AlertState { causes }` (active derived from causes).
+///
+/// `now` is the single injected clock for the cycle (see `cmd_monitor_at`), so a
+/// fixed-clock test can pin both the stamp and the preserve-on-refresh behavior.
 pub fn merge_into_latch(
     existing_latch: Option<&AlertState>,
     live_causes: &[AlertCause],
+    now: SystemTime,
 ) -> AlertState {
-    let mut causes: Vec<AlertCause> = existing_latch.map(|s| s.causes.clone()).unwrap_or_default();
+    let mut causes: Vec<LatchedCause> =
+        existing_latch.map(|s| s.causes.clone()).unwrap_or_default();
 
     for new_cause in live_causes.iter() {
         if let Some(pos) = causes
             .iter()
-            .position(|existing| same_cause_key(existing, new_cause))
+            .position(|existing| same_cause_key(&existing.cause, new_cause))
         {
-            causes[pos] = new_cause.clone();
+            // Refresh: fresher evidence, but the first-detection time is sticky.
+            causes[pos].cause = new_cause.clone();
         } else {
-            causes.push(new_cause.clone());
+            causes.push(LatchedCause::new(
+                new_cause.clone(),
+                crate::util::format_rfc3339_utc_seconds(now),
+            ));
         }
     }
 
@@ -760,6 +804,19 @@ mod tests {
 
     fn fsid(raw: &str) -> Fsid {
         Fsid::parse(raw).unwrap()
+    }
+
+    /// Fixed monitor clock for latch tests; `format_rfc3339_utc_seconds` renders
+    /// it as `TEST_TS`.
+    fn test_now() -> SystemTime {
+        UNIX_EPOCH + Duration::from_secs(1_700_000_000)
+    }
+    const TEST_TS: &str = "2023-11-14T22:13:20Z";
+
+    /// Build a `LatchedCause` with the fixed test timestamp, keeping latch
+    /// fixtures terse where the exact `detected_at` value is incidental.
+    fn latched(cause: AlertCause) -> LatchedCause {
+        LatchedCause::new(cause, TEST_TS.to_owned())
     }
 
     #[test]
@@ -895,9 +952,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("good.json");
         let original = AlertState {
-            causes: vec![AlertCause::MissingDevice {
+            causes: vec![latched(AlertCause::MissingDevice {
                 devid: Devid::new(7),
-            }],
+            })],
         };
         std::fs::write(&path, serde_json::to_string(&original).unwrap()).unwrap();
         let result = load_alert_latch_at(&path).unwrap();
@@ -905,40 +962,37 @@ mod tests {
     }
 
     /*
-     * Intent: load_alert_latch_at parses a JSON latch that contains a legacy
-     * "active" key alongside causes, returning Ok(Some(state)) with the
-     * preserved causes; AlertState::active() is then derived from causes
-     * regardless of what the legacy "active" value was on disk.
+     * Intent: load_alert_latch_at ignores an unknown top-level "active" key
+     * (AlertState has no deny_unknown_fields) and derives active() from the
+     * timestamped causes vec, regardless of the on-disk "active" value.
      *
-     * Why it exists: pre-refactor latches written to
-     * /var/lib/braid/alert-latch.json by an older binary still need to load
-     * cleanly post-refactor. The refactor relies on serde ignoring the legacy
-     * key because AlertState has no deny_unknown_fields. Without this test, a
-     * later strictness change could regress every legacy on-disk latch into the
-     * corrupt-latch quarantine path on next monitor cycle.
+     * Why it exists: nothing reads a top-level "active" key -- active() is a
+     * function of causes -- so serde must keep tolerating its presence and an
+     * extra/stale field must never tip a parseable latch into the corrupt-latch
+     * quarantine path. This is NOT cross-version load tolerance: a genuine
+     * pre-timestamp, cause-only latch is now malformed and must fail to parse
+     * (see load_alert_latch_rejects_cause_missing_detected_at).
      *
-     * Scenario: a NAS upgrades the braid binary across this refactor with a
-     * latch from the prior version still on disk. Next monitor/status/ack
-     * invocation loads the legacy-shaped JSON; load_alert_latch_at must accept
-     * it, and the resulting AlertState must report active() based on its causes
-     * vec, not on whatever "active" value the legacy file carried.
+     * Scenario: a latch on disk carries a stray top-level "active":true beside
+     * its timestamped causes. load_alert_latch_at must accept it and report
+     * active() from the causes vec, not from the "active" field.
      */
     #[test]
     fn load_alert_latch_accepts_legacy_active_key() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("legacy-latch.json");
-        let legacy = br#"{"active":true,"causes":[{"type":"missing_device","devid":7}]}"#;
+        let legacy = br#"{"active":true,"causes":[{"detected_at":"2023-11-14T22:13:20Z","type":"missing_device","devid":7}]}"#;
         std::fs::write(&path, legacy).unwrap();
 
         let state = load_alert_latch_at(&path)
             .unwrap()
-            .expect("legacy latch must parse");
+            .expect("latch with a stray active key must parse");
         assert_eq!(
             state.causes,
-            vec![AlertCause::MissingDevice {
+            vec![latched(AlertCause::MissingDevice {
                 devid: Devid::new(7)
-            }],
-            "causes must round-trip from legacy JSON"
+            })],
+            "timestamped causes must round-trip; the active key is ignored"
         );
         assert!(
             state.active(),
@@ -950,12 +1004,91 @@ mod tests {
         std::fs::write(&path2, legacy_empty).unwrap();
         let state2 = load_alert_latch_at(&path2)
             .unwrap()
-            .expect("legacy empty latch must parse");
+            .expect("empty latch with a stray active key must parse");
         assert!(state2.causes.is_empty());
         assert!(
             !state2.active(),
-            "active() must follow causes, not the legacy active field on disk"
+            "active() must follow causes, not the stray active field on disk"
         );
+    }
+
+    /*
+     * Intent: a latch whose cause object is missing detected_at fails to parse
+     * (LatchLoadError::Parse), rather than silently loading a timeless cause.
+     *
+     * Why it exists: detected_at is a required field -- there are no
+     * pre-timestamp latches in the wild, and braid's fail-loud latch philosophy
+     * says a malformed entry must surface, not be papered over. This makes "old
+     * cause-only entries are malformed" executable rather than aspirational, and
+     * is the negative counterpart to load_alert_latch_accepts_legacy_active_key
+     * (which tolerates an *extra* unknown field, not a *missing* required one).
+     *
+     * Scenario: a hand-edited or pre-timestamp alert-latch.json carries a cause
+     * with no detected_at. The next monitor cycle must route it to the
+     * corrupt-latch quarantine path, not treat it as a valid latched cause.
+     */
+    #[test]
+    fn load_alert_latch_rejects_cause_missing_detected_at() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("timeless-latch.json");
+        let timeless = br#"{"causes":[{"type":"missing_device","devid":7}]}"#;
+        std::fs::write(&path, timeless).unwrap();
+
+        let result = load_alert_latch_at(&path);
+        assert!(
+            matches!(result, Err(LatchLoadError::Parse(_))),
+            "a cause missing detected_at must be a parse error; got {result:?}"
+        );
+    }
+
+    /*
+     * Intent: an AlertState with a latched cause save/load round-trips
+     * detected_at exactly, and the serialized LatchedCause carries top-level
+     * "detected_at" and "type" keys with no nested "cause" object.
+     *
+     * Why it exists: the flat public shape is the on-disk + status --json
+     * contract (consumers read c["type"]); this is the gate for the
+     * #[serde(flatten)]-over-internally-tagged-enum combination, which has
+     * historical edge cases. It pins the shape regardless of whether it is
+     * achieved by derive or a manual impl.
+     *
+     * Scenario: monitor latches a cause stamped with a first-detection time; a
+     * later status/ack reads it back and must see the same detected_at.
+     */
+    #[test]
+    fn latched_cause_roundtrips_detected_at_and_serializes_flat() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(dir.path().to_path_buf());
+        let state = AlertState {
+            causes: vec![LatchedCause::new(
+                AlertCause::MissingDevice {
+                    devid: Devid::new(7),
+                },
+                "2024-01-02T03:04:05Z".to_owned(),
+            )],
+        };
+
+        let value: serde_json::Value =
+            serde_json::to_value(&state.causes[0]).expect("serialize latched cause");
+        assert_eq!(
+            value["detected_at"], "2024-01-02T03:04:05Z",
+            "detected_at must be a top-level key"
+        );
+        assert_eq!(
+            value["type"], "missing_device",
+            "type must be a top-level key"
+        );
+        assert!(
+            value.get("cause").is_none(),
+            "the cause must be flattened, not nested under a \"cause\" key; got {value}"
+        );
+
+        save_alert_latch(&state, &paths).unwrap();
+        let reloaded = load_alert_latch(&paths)
+            .unwrap()
+            .expect("latch must reload");
+        assert_eq!(reloaded, state, "detected_at must round-trip exactly");
+        assert_eq!(reloaded.causes[0].detected_at, "2024-01-02T03:04:05Z");
     }
 
     /*
@@ -1307,8 +1440,7 @@ mod tests {
             false,
             false,
         );
-        assert!(!alert.active());
-        assert!(alert.causes.is_empty());
+        assert!(alert.is_empty());
     }
 
     #[test]
@@ -1328,10 +1460,10 @@ mod tests {
             false,
             false,
         );
-        assert!(alert.active());
-        assert_eq!(alert.causes.len(), 1);
+        assert!(!alert.is_empty());
+        assert_eq!(alert.len(), 1);
         assert_eq!(
-            alert.causes[0],
+            alert[0],
             AlertCause::BtrfsDeviceErrors {
                 devid: Devid::new(1)
             }
@@ -1352,10 +1484,10 @@ mod tests {
             false,
             false,
         );
-        assert!(alert.active());
-        assert_eq!(alert.causes.len(), 1);
+        assert!(!alert.is_empty());
+        assert_eq!(alert.len(), 1);
         assert_eq!(
-            alert.causes[0],
+            alert[0],
             AlertCause::MissingDevice {
                 devid: Devid::new(2)
             }
@@ -1376,9 +1508,9 @@ mod tests {
             true,
             false,
         );
-        assert!(alert.active());
-        assert_eq!(alert.causes.len(), 1);
-        assert_eq!(alert.causes[0], AlertCause::SmartdAlert);
+        assert!(!alert.is_empty());
+        assert_eq!(alert.len(), 1);
+        assert_eq!(alert[0], AlertCause::SmartdAlert);
     }
 
     #[test]
@@ -1409,7 +1541,7 @@ mod tests {
             false,
             false,
         );
-        assert!(!alert.active());
+        assert!(alert.is_empty());
     }
 
     // Intent: when the acked baseline is higher than the current counter,
@@ -1454,7 +1586,10 @@ mod tests {
             false,
             false,
         );
-        assert!(alert.active(), "stale-high baseline should trigger alert");
+        assert!(
+            !alert.is_empty(),
+            "stale-high baseline should trigger alert"
+        );
     }
 
     #[test]
@@ -1479,7 +1614,7 @@ mod tests {
             false,
             false,
         );
-        assert!(!alert.active(), "acked missing should not trigger alert");
+        assert!(alert.is_empty(), "acked missing should not trigger alert");
     }
 
     #[test]
@@ -1498,8 +1633,8 @@ mod tests {
             true,
             false,
         );
-        assert!(alert.active());
-        assert_eq!(alert.causes.len(), 3);
+        assert!(!alert.is_empty());
+        assert_eq!(alert.len(), 3);
     }
 
     #[test]
@@ -1587,7 +1722,7 @@ mod tests {
             false,
         );
         assert!(
-            alert.active(),
+            !alert.is_empty(),
             "new errors above acked baseline should trigger alert"
         );
     }
@@ -1617,8 +1752,7 @@ mod tests {
             false,
             false,
         );
-        assert!(!alert.active());
-        assert!(alert.causes.is_empty());
+        assert!(alert.is_empty());
     }
 
     // Intent: an unrecognized stats row cannot emit BtrfsDeviceErrors, even
@@ -1644,8 +1778,7 @@ mod tests {
             false,
             false,
         );
-        assert!(!alert.active());
-        assert!(alert.causes.is_empty());
+        assert!(alert.is_empty());
     }
 
     // Intent: a missing devid's stats row never produces BtrfsDeviceErrors,
@@ -1675,7 +1808,7 @@ mod tests {
         );
 
         assert_eq!(
-            alert.causes,
+            alert,
             vec![AlertCause::MissingDevice {
                 devid: Devid::new(2)
             }]
@@ -1702,10 +1835,10 @@ mod tests {
             false,
             false,
         );
-        assert!(alert.active());
-        assert_eq!(alert.causes.len(), 1);
+        assert!(!alert.is_empty());
+        assert_eq!(alert.len(), 1);
         assert_eq!(
-            alert.causes[0],
+            alert[0],
             AlertCause::MissingDevice {
                 devid: Devid::new(2)
             }
@@ -1744,7 +1877,7 @@ mod tests {
         let live = vec![AlertCause::BtrfsDeviceErrors {
             devid: Devid::new(1),
         }];
-        let merged = merge_into_latch(None, &live);
+        let merged = merge_into_latch(None, &live, test_now());
         assert!(merged.active());
         assert_eq!(merged.causes.len(), 1);
     }
@@ -1752,11 +1885,11 @@ mod tests {
     #[test]
     fn merge_no_new_causes_carries_forward_latched() {
         let existing = AlertState {
-            causes: vec![AlertCause::BtrfsDeviceErrors {
+            causes: vec![latched(AlertCause::BtrfsDeviceErrors {
                 devid: Devid::new(1),
-            }],
+            })],
         };
-        let merged = merge_into_latch(Some(&existing), &[]);
+        let merged = merge_into_latch(Some(&existing), &[], test_now());
         assert!(merged.active());
         assert_eq!(merged.causes.len(), 1);
     }
@@ -1764,14 +1897,14 @@ mod tests {
     #[test]
     fn merge_live_same_devid_replaces_latched() {
         let existing = AlertState {
-            causes: vec![AlertCause::BtrfsDeviceErrors {
+            causes: vec![latched(AlertCause::BtrfsDeviceErrors {
                 devid: Devid::new(1),
-            }],
+            })],
         };
         let live = vec![AlertCause::BtrfsDeviceErrors {
             devid: Devid::new(1),
         }];
-        let merged = merge_into_latch(Some(&existing), &live);
+        let merged = merge_into_latch(Some(&existing), &live, test_now());
         assert_eq!(merged.causes.len(), 1);
     }
 
@@ -1781,21 +1914,94 @@ mod tests {
         // even when live causes no longer include devid 1.
         let existing = AlertState {
             causes: vec![
-                AlertCause::BtrfsDeviceErrors {
+                latched(AlertCause::BtrfsDeviceErrors {
                     devid: Devid::new(1),
-                },
-                AlertCause::MissingDevice {
+                }),
+                latched(AlertCause::MissingDevice {
                     devid: Devid::new(2),
-                },
+                }),
             ],
         };
         // Live sources only detect devid 2 this cycle (devid 1 resolved)
         let live = vec![AlertCause::MissingDevice {
             devid: Devid::new(2),
         }];
-        let merged = merge_into_latch(Some(&existing), &live);
+        let merged = merge_into_latch(Some(&existing), &live, test_now());
         assert_eq!(merged.causes.len(), 2);
         assert!(merged.active());
+    }
+
+    // Intent: merge_into_latch stamps detected_at with the injected clock on a
+    //   fresh append.
+    // Why it exists: the first-detection time is what lets status distinguish a
+    //   latch that fired moments ago from a historical incident; a fresh append
+    //   must capture `now`.
+    // Scenario: an empty latch gains a newly detected cause at a fixed clock.
+    #[test]
+    fn merge_into_latch_stamps_detected_at_on_first_append() {
+        let live = vec![AlertCause::MissingDevice {
+            devid: Devid::new(2),
+        }];
+        let merged = merge_into_latch(None, &live, test_now());
+        assert_eq!(merged.causes.len(), 1);
+        assert_eq!(
+            merged.causes[0].detected_at, TEST_TS,
+            "a fresh append must stamp detected_at with the injected clock"
+        );
+    }
+
+    // Intent: merge_into_latch preserves the original detected_at when the same
+    //   cause key is re-detected on a later cycle, while taking the fresher
+    //   cause evidence.
+    // Why it exists: this is the core first-detection guarantee -- a re-detected
+    //   cause must keep its first-seen time across refreshes, not slide forward
+    //   every monitor cycle. A regression that re-stamped on refresh would make
+    //   every latched alert look brand new.
+    // Scenario: cycle 1 latches EnospcRisk at t0; cycle 2 re-detects it with a
+    //   deeper margin at t1 > t0.
+    #[test]
+    fn merge_into_latch_preserves_detected_at_on_refresh() {
+        let t0 = test_now();
+        let first = merge_into_latch(
+            None,
+            &[AlertCause::EnospcRisk {
+                margin: -10,
+                count_below: 1,
+                device_count: 2,
+            }],
+            t0,
+        );
+        assert_eq!(first.causes[0].detected_at, TEST_TS);
+
+        let t1 = t0 + Duration::from_secs(3600);
+        let refreshed = merge_into_latch(
+            Some(&first),
+            &[AlertCause::EnospcRisk {
+                margin: -50,
+                count_below: 2,
+                device_count: 3,
+            }],
+            t1,
+        );
+
+        assert_eq!(
+            refreshed.causes.len(),
+            1,
+            "singleton key must not duplicate"
+        );
+        assert_eq!(
+            refreshed.causes[0].detected_at, TEST_TS,
+            "detected_at must stay the first-detection time across a refresh"
+        );
+        assert_eq!(
+            refreshed.causes[0].cause,
+            AlertCause::EnospcRisk {
+                margin: -50,
+                count_below: 2,
+                device_count: 3,
+            },
+            "the cause must reflect the fresher evidence"
+        );
     }
 
     #[test]
@@ -2116,40 +2322,48 @@ mod tests {
         );
     }
 
-    // Intent: AlertState serializes AlertCause variants with bare-integer devid
-    //   values, and round-trips back to the original value.
-    // Why it exists: Devid is #[serde(transparent)], so its JSON representation
-    //   must be a bare number ("devid":7, not "devid":{"0":7} or similar).
+    // Intent: a latched AlertState serializes each cause flat -- the wrapper's
+    //   detected_at first, then the internally-tagged cause fields with a
+    //   bare-integer devid -- and round-trips back to the original value.
+    // Why it exists: Devid is #[serde(transparent)], so its JSON must be a bare
+    //   number ("devid":7, not "devid":{"0":7} or wrapped under a "cause" key).
     //   An exact-substring assertion pins this invariant so a future serde
     //   attribute change that switches to a wrapped form would fail here instead
-    //   of silently making alert-latch.json unreadable by older binaries or
-    //   braid-status parsing. The legacy-key test (load_alert_latch_accepts_
-    //   legacy_active_key) already asserts {"type":"missing_device","devid":7}
-    //   parses; this test asserts what the serializer emits.
+    //   of silently making alert-latch.json unreadable by braid-status parsing
+    //   or `c["type"]` JSON consumers. The generic round-trip test does not
+    //   re-pin the bare-integer devid, so this carries that contract forward.
     // Scenario: monitor writes a latch with two causes; the on-disk bytes must
-    //   contain the exact shape the format contract specifies.
+    //   contain the exact flat shape the format contract specifies.
     #[test]
     fn alert_state_json_shape_bare_integer_devid() {
         let state = AlertState {
             causes: vec![
-                AlertCause::MissingDevice {
+                latched(AlertCause::MissingDevice {
                     devid: Devid::new(7),
-                },
-                AlertCause::BtrfsDeviceErrors {
+                }),
+                latched(AlertCause::BtrfsDeviceErrors {
                     devid: Devid::new(2),
-                },
+                }),
             ],
         };
 
         let json = serde_json::to_string(&state).expect("serialization must succeed");
 
         assert!(
-            json.contains(r#"{"type":"missing_device","devid":7}"#),
-            "MissingDevice cause must serialize devid as a bare integer; got: {json}"
+            json.contains(
+                r#"{"detected_at":"2023-11-14T22:13:20Z","type":"missing_device","devid":7}"#
+            ),
+            "MissingDevice latched cause must serialize flat with a bare-integer devid; got: {json}"
         );
         assert!(
-            json.contains(r#"{"type":"btrfs_device_errors","devid":2}"#),
-            "BtrfsDeviceErrors cause must serialize devid as a bare integer; got: {json}"
+            json.contains(
+                r#"{"detected_at":"2023-11-14T22:13:20Z","type":"btrfs_device_errors","devid":2}"#
+            ),
+            "BtrfsDeviceErrors latched cause must serialize flat with a bare-integer devid; got: {json}"
+        );
+        assert!(
+            !json.contains(r#""cause""#),
+            "the flattened wrapper must not nest the cause under a \"cause\" key; got: {json}"
         );
 
         let back: AlertState =
@@ -2180,10 +2394,10 @@ mod tests {
             false,
             false,
         );
-        assert!(alert.active());
-        assert_eq!(alert.causes.len(), 1);
+        assert!(!alert.is_empty());
+        assert_eq!(alert.len(), 1);
         assert_eq!(
-            alert.causes[0],
+            alert[0],
             AlertCause::MissingDevice {
                 devid: Devid::new(2)
             }
@@ -2223,13 +2437,13 @@ mod tests {
     #[test]
     fn merge_carries_forward_latched_enospc_risk() {
         let existing = AlertState {
-            causes: vec![AlertCause::EnospcRisk {
+            causes: vec![latched(AlertCause::EnospcRisk {
                 margin: -42,
                 count_below: 1,
                 device_count: 2,
-            }],
+            })],
         };
-        let merged = merge_into_latch(Some(&existing), &[]);
+        let merged = merge_into_latch(Some(&existing), &[], test_now());
         assert_eq!(merged.causes, existing.causes, "EnospcRisk must persist");
     }
 
@@ -2244,24 +2458,24 @@ mod tests {
         assert!(AlertSeverity::Critical > AlertSeverity::Warning);
 
         let warning_only = AlertState {
-            causes: vec![AlertCause::EnospcRisk {
+            causes: vec![latched(AlertCause::EnospcRisk {
                 margin: -1,
                 count_below: 1,
                 device_count: 2,
-            }],
+            })],
         };
         assert_eq!(warning_only.severity(), Some(AlertSeverity::Warning));
 
         let mixed = AlertState {
             causes: vec![
-                AlertCause::EnospcRisk {
+                latched(AlertCause::EnospcRisk {
                     margin: -1,
                     count_below: 1,
                     device_count: 2,
-                },
-                AlertCause::MissingDevice {
+                }),
+                latched(AlertCause::MissingDevice {
                     devid: Devid::new(2),
-                },
+                }),
             ],
         };
         assert_eq!(
@@ -2285,19 +2499,19 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let paths = StatePaths::custom(dir.path().to_path_buf());
         let state = AlertState {
-            causes: vec![AlertCause::EnospcRisk {
+            causes: vec![latched(AlertCause::EnospcRisk {
                 margin: -1_063_256_064,
                 count_below: 1,
                 device_count: 2,
-            }],
+            })],
         };
 
         let json = serde_json::to_string(&state).unwrap();
         assert!(
             json.contains(
-                r#"{"type":"enospc_risk","margin":-1063256064,"count_below":1,"device_count":2}"#
+                r#"{"detected_at":"2023-11-14T22:13:20Z","type":"enospc_risk","margin":-1063256064,"count_below":1,"device_count":2}"#
             ),
-            "EnospcRisk must serialize internally-tagged snake_case; got {json}"
+            "EnospcRisk must serialize flat: detected_at then internally-tagged snake_case; got {json}"
         );
 
         save_alert_latch(&state, &paths).unwrap();
@@ -2501,8 +2715,8 @@ mod tests {
             false,
             true,
         );
-        assert!(alert.active());
-        assert_eq!(alert.causes, vec![AlertCause::ScrubFailed]);
+        assert!(!alert.is_empty());
+        assert_eq!(alert, vec![AlertCause::ScrubFailed]);
     }
 
     // Intent: same_cause_key treats any two ScrubFailed causes as the same latch
@@ -2528,9 +2742,9 @@ mod tests {
     #[test]
     fn merge_carries_forward_latched_scrub_failed() {
         let existing = AlertState {
-            causes: vec![AlertCause::ScrubFailed],
+            causes: vec![latched(AlertCause::ScrubFailed)],
         };
-        let merged = merge_into_latch(Some(&existing), &[]);
+        let merged = merge_into_latch(Some(&existing), &[], test_now());
         assert_eq!(merged.causes, existing.causes, "ScrubFailed must persist");
     }
 
@@ -2551,7 +2765,7 @@ mod tests {
             "a failed scrub must beep, exactly like the smartd source it mirrors"
         );
         let state = AlertState {
-            causes: vec![AlertCause::ScrubFailed],
+            causes: vec![latched(AlertCause::ScrubFailed)],
         };
         assert_eq!(state.severity(), Some(AlertSeverity::Critical));
     }
@@ -2567,13 +2781,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let paths = StatePaths::custom(dir.path().to_path_buf());
         let state = AlertState {
-            causes: vec![AlertCause::ScrubFailed],
+            causes: vec![latched(AlertCause::ScrubFailed)],
         };
 
         let json = serde_json::to_string(&state).unwrap();
         assert!(
-            json.contains(r#"{"type":"scrub_failed"}"#),
-            "ScrubFailed must serialize as the bare internally-tagged value; got {json}"
+            json.contains(r#"{"detected_at":"2023-11-14T22:13:20Z","type":"scrub_failed"}"#),
+            "ScrubFailed must serialize flat: detected_at then the bare internally-tagged value; got {json}"
         );
 
         save_alert_latch(&state, &paths).unwrap();

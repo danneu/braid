@@ -16,9 +16,21 @@ Synology NAS boxes beep when a disk develops bad sectors — you hear it, SSH in
 
 braid has first-class Alerts. An Alert represents "something happened that needs human acknowledgment." Beeping is one notification mechanism for an active alert. `braid status` is the primary surface for understanding alert details. `braid ack` acknowledges current alerts and silences notifications.
 
-### Shared alert computation
+### Shared alert computation, three layers
 
-A single shared computation produces an `AlertState` consumed by all surfaces — `braid monitor` (exit code), `braid status` (banner + causes), TUI (banner + indicators). No surface re-encodes alert logic.
+Alert logic is computed once and flows through three types, mirroring braid's split between internal state and the public DTO. No surface re-encodes alert logic.
+
+- **Live detection** — `compute_alert_state` returns `Vec<AlertCause>`: the untimestamped "what" observed this cycle. A live cause carries no time; the timestamp is a property of being *latched*, not of the cause.
+- **Persisted latch** — `AlertState { causes: Vec<LatchedCause> }`, written by `braid monitor` and read by `status`/`ack`. Each `LatchedCause` wraps an `AlertCause` with a required `detected_at` (RFC3339 UTC seconds) recording when the monitor *first* latched that cause. See [First-detected timestamp](#first-detected-timestamp).
+- **Status view** — `braid status` (banner + causes, JSON) and the TUI consume `AlertCauseReport { cause, first_detected: Option<String> }`. Latch-derived causes carry `Some(detected_at)`; status-synthesized bridge causes (see [Corrupt latch recovery](#corrupt-latch-recovery)) carry `None`.
+
+`AlertState::severity()` (the monitor exit code and the status/TUI banner) is the max over `c.cause.severity()`.
+
+### First-detected timestamp
+
+Each `LatchedCause` records `detected_at`: an RFC3339-UTC-seconds string stamped when the monitor *first* appended that cause to the latch, and **preserved across refreshes** — a re-detected cause (same `same_cause_key`) keeps its original `detected_at` while taking the fresher cause evidence; only a brand-new append stamps `now`. `braid status` renders it per cause as an absolute timestamp plus a relative age (`-- first detected 2026-06-25T15:35:54Z (2 hours ago)`), making explicit that a latched alert is an *incident* ("this happened, ack it"), not necessarily a live fact.
+
+The timestamp **enriches** the latch; it does not change when alerts appear or clear. The sticky-latch invariant is unchanged. `detected_at` is display-only: the merge path only clones it forward, and only the `status` renderer ever parses it back (to compute the age, degrading to absolute-only on a malformed or future value). RFC3339-UTC-seconds is stored verbatim — no `u64` conversion layer — because nothing integer-compares it (unlike `EnospcAck::snoozed_until`, which is a `u64` precisely because the monitor compares it); it still sorts chronologically as a plain string. `detected_at` is **required** on disk: there are no pre-timestamp latches in the wild, so a cause object without one is malformed and fails to parse, matching the fail-loud latch philosophy. Status-synthesized bridge causes legitimately carry no timestamp and render with none.
 
 ### Alert causes
 
@@ -148,11 +160,11 @@ audible side effects.
 
 ### Latch as append/refresh log
 
-The alert latch is an append/refresh log of all unacked causes from all sources. Each monitor cycle loads the existing latch, computes new causes, and merges. Previously-latched causes that aren't re-detected are carried forward. Newly-detected causes replace their latched counterpart (same key = fresher evidence). This ensures all cause types persist until `braid ack`, even if the triggering condition resolves — fixing the invariant for all sources, not just journal.
+The alert latch is an append/refresh log of `LatchedCause` entries (each an `AlertCause` plus its `detected_at`) covering all unacked causes from all sources. Each monitor cycle loads the existing latch, computes new live causes (`Vec<AlertCause>`), and merges. Previously-latched entries that aren't re-detected are carried forward verbatim. A newly-detected cause that matches a latched entry by key refreshes that entry's cause (fresher evidence) while **keeping its original `detected_at`** (see [First-detected timestamp](#first-detected-timestamp)); a cause with no latched counterpart is appended as a fresh entry stamped with the current time. This ensures all cause types persist until `braid ack`, even if the triggering condition resolves — fixing the invariant for all sources, not just journal.
 
 ### Corrupt latch recovery
 
-`load_alert_latch` returns `Result<Option<AlertState>, LatchLoadError>` so callers can distinguish three outcomes: file absent (`Ok(None)`, normal -- no active alerts), I/O failure (`Err(Read)`), and unparseable on-disk content (`Err(Parse)`). Each caller picks its own fail-closed policy:
+`load_alert_latch` returns `Result<Option<AlertState>, LatchLoadError>` so callers can distinguish three outcomes: file absent (`Ok(None)`, normal -- no active alerts), I/O failure (`Err(Read)`), and unparseable on-disk content (`Err(Parse)`). A latch whose cause object is missing the required `detected_at` is unparseable and falls into `Err(Parse)` like any other malformed content -- there are no pre-timestamp latches to accept (see [First-detected timestamp](#first-detected-timestamp)). Each caller picks its own fail-closed policy:
 
 - `cmd_monitor` is the only path that mutates the latch. On read/parse failure it quarantines the bad bytes by linking `alert-latch.json` to `alert-latch.json.corrupt` and then removing the live path, then writes a fresh latch containing a loud `ComputationError` cause whose `detail` names the failure. Quarantine uses `hard_link` + `remove_file` (not `rename`) so an already-existing sidecar is detected atomically by `link(2)`'s `EEXIST`; when that happens, the first sidecar is preserved as the highest-value forensic snapshot and the new corruption is surfaced only in the `ComputationError` detail. Any I/O failure during quarantine is folded into the same detail rather than silently dropped. The corruption signal is folded into a single `ComputationError` (not appended as a second cause), because `merge_into_latch` collapses every `ComputationError` into one slot via `same_cause_key` -- appending two would silently drop one.
 - `cmd_status` is the read-only surface: `resolve_alert_state` surfaces a corrupt latch as a `ComputationError` cause but never moves the file (status must not mutate state).

@@ -20,7 +20,9 @@ use crate::config::{Config, mapper_name};
 use crate::membership::PoolMembership;
 use crate::probe::Filesystem;
 use crate::profile_summary::ProfileJson;
-use crate::status::{DiskReport, DiskStatus, ScrubReport, StatusCode, StatusReport};
+use crate::status::{
+    AlertCauseReport, DiskReport, DiskStatus, ScrubReport, StatusCode, StatusReport,
+};
 use crate::types::*;
 
 // ---------------------------------------------------------------------------
@@ -715,7 +717,10 @@ pub(crate) fn status_report_with_alerts(
         disks,
         advisories: vec![],
         alert_active: true,
-        alert_causes: causes,
+        // Render these as bridge causes (no first-detected stamp) so the alert
+        // banner text these fixtures exercise stays byte-identical; the
+        // first-detected suffix is covered by dedicated status tests.
+        alert_causes: causes.into_iter().map(AlertCauseReport::bridge).collect(),
         missing_devids: vec![],
     }
 }

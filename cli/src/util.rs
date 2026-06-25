@@ -1,4 +1,5 @@
 use std::io::{self, IsTerminal};
+use std::time::SystemTime;
 
 use crate::probe::Filesystem;
 use crate::types::MountPoint;
@@ -20,6 +21,59 @@ pub fn now_iso() -> String {
     time::OffsetDateTime::now_utc()
         .format(&Iso8601::DEFAULT)
         .expect("formatting UTC as ISO8601 should never fail")
+}
+
+/// Format an instant as seconds-only UTC RFC3339 (`2023-11-14T22:13:20Z`).
+///
+/// Shared by the membership corrupt-state sidecar filename and the alert latch
+/// `detected_at` stamp, so both surfaces agree on the seconds-only shape that
+/// recovery runbooks and the `status` render depend on. Distinct from
+/// `now_iso`, which emits the subsecond ISO-8601 form.
+pub(crate) fn format_rfc3339_utc_seconds(now: SystemTime) -> String {
+    let odt: time::OffsetDateTime = now.into();
+    let format = time::format_description::parse("[year]-[month]-[day]T[hour]:[minute]:[second]Z")
+        .expect("static format description must parse");
+    odt.to_offset(time::UtcOffset::UTC)
+        .format(&format)
+        .expect("formatting OffsetDateTime as RFC3339 seconds must not fail")
+}
+
+/// Parse a stored RFC3339 timestamp back into an `OffsetDateTime` for relative-age
+/// computation. `None` on any malformed value so the alert renderer degrades to
+/// absolute-only instead of crashing on a hand-edited or future-format latch --
+/// the latch stores `detected_at` as an opaque string, so only this render-time
+/// parse ever interprets it. Our seconds-only output is valid RFC3339, so the
+/// well-known `Rfc3339` description round-trips it.
+pub(crate) fn parse_rfc3339_utc(s: &str) -> Option<time::OffsetDateTime> {
+    time::OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339).ok()
+}
+
+/// Single relative-age humanizer reused by `braid status` (UTC basis) and the
+/// TUI scrub/alert rows (naive-local basis), both of which pass a `time::Duration`
+/// so the helper is agnostic to the clock basis. `None` for a negative/future
+/// diff (clock skew) so callers drop the relative suffix rather than render a
+/// bogus age. The hours bucket exists so a 5-hour age reads `5 hours ago`, not
+/// `300 min ago`.
+pub(crate) fn humanize_ago(diff: time::Duration) -> Option<String> {
+    if diff.is_negative() {
+        return None;
+    }
+    let days = diff.whole_days();
+    let hours = diff.whole_hours();
+    let minutes = diff.whole_minutes();
+    Some(if days > 1 {
+        format!("{days} days ago")
+    } else if days == 1 {
+        "1 day ago".to_owned()
+    } else if hours > 1 {
+        format!("{hours} hours ago")
+    } else if hours == 1 {
+        "1 hour ago".to_owned()
+    } else if minutes < 1 {
+        "<1 min ago".to_owned()
+    } else {
+        format!("{minutes} min ago")
+    })
 }
 
 /// Renders seconds with unit suffixes so callers never produce the
@@ -68,7 +122,11 @@ pub(crate) fn ensure_mount_point_dir<F: Filesystem + ?Sized>(
 
 #[cfg(test)]
 mod tests {
-    use super::{detail_suffix, format_duration_secs, require_tty_inner};
+    use super::{
+        detail_suffix, format_duration_secs, format_rfc3339_utc_seconds, humanize_ago,
+        parse_rfc3339_utc, require_tty_inner,
+    };
+    use std::time::{Duration, SystemTime};
 
     // Intent: require_tty_inner returns Ok only when both stdin and stdout
     // are terminals.
@@ -110,5 +168,86 @@ mod tests {
         assert_eq!(detail_suffix(""), "");
         assert_eq!(detail_suffix("x"), ": x");
         assert_eq!(detail_suffix("  "), ":   ");
+    }
+
+    // Intent: shared timestamp formatting emits seconds-only UTC with a literal
+    //   Z suffix (moved here with the helper from membership.rs).
+    // Why it exists: the corrupt-state sidecar filename and the alert latch
+    //   detected_at stamp both depend on this exact shape; a drift to the
+    //   subsecond shape used by now_iso would break recovery runbooks and the
+    //   status render.
+    // Scenario: a future refactor tries to share timestamp helpers and changes
+    //   the seconds-only output.
+    #[test]
+    fn format_rfc3339_utc_seconds_emits_seconds_only_with_z_suffix() {
+        let first = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let second = SystemTime::UNIX_EPOCH;
+
+        assert_eq!(format_rfc3339_utc_seconds(first), "2023-11-14T22:13:20Z");
+        assert_eq!(format_rfc3339_utc_seconds(second), "1970-01-01T00:00:00Z");
+    }
+
+    // Intent: parse_rfc3339_utc round-trips the seconds-only output of
+    //   format_rfc3339_utc_seconds and returns None on a non-RFC3339 string.
+    // Why it exists: the status alert renderer parses the stored detected_at
+    //   back to compute a relative age, and must degrade to absolute-only
+    //   (None) on a hand-edited or malformed latch rather than panic.
+    // Scenario: a well-formed latch timestamp parses; an opaque garbage value
+    //   does not.
+    #[test]
+    fn parse_rfc3339_utc_round_trips_and_rejects_garbage() {
+        let stamp =
+            format_rfc3339_utc_seconds(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000));
+        assert!(
+            parse_rfc3339_utc(&stamp).is_some(),
+            "valid stamp must parse"
+        );
+        assert!(
+            parse_rfc3339_utc("not a timestamp").is_none(),
+            "garbage must parse to None, not panic"
+        );
+    }
+
+    // Intent: humanize_ago buckets a non-negative Duration into <1 min / N min /
+    //   1 hour / N hours / 1 day / N days, and returns None for a future diff.
+    // Why it exists: this is the single relative-age humanizer shared by the
+    //   status alert line and the TUI scrub/alert rows. The hours bucket is the
+    //   regression that distinguishes it from the old TUI-local timeago, which
+    //   rendered a 5-hour age as "300 min ago"; the negative-diff None branch is
+    //   what keeps a clock-skewed timestamp from printing a bogus age.
+    // Scenario: fixed Durations exercise every bucket boundary plus a future diff.
+    #[test]
+    fn humanize_ago_bucket_boundaries() {
+        use time::Duration as TDuration;
+
+        assert_eq!(
+            humanize_ago(TDuration::seconds(59)).as_deref(),
+            Some("<1 min ago")
+        );
+        assert_eq!(
+            humanize_ago(TDuration::seconds(60)).as_deref(),
+            Some("1 min ago")
+        );
+        assert_eq!(
+            humanize_ago(TDuration::minutes(59)).as_deref(),
+            Some("59 min ago")
+        );
+        assert_eq!(
+            humanize_ago(TDuration::minutes(60)).as_deref(),
+            Some("1 hour ago")
+        );
+        assert_eq!(
+            humanize_ago(TDuration::hours(23)).as_deref(),
+            Some("23 hours ago")
+        );
+        assert_eq!(
+            humanize_ago(TDuration::hours(24)).as_deref(),
+            Some("1 day ago")
+        );
+        assert_eq!(
+            humanize_ago(TDuration::hours(48)).as_deref(),
+            Some("2 days ago")
+        );
+        assert_eq!(humanize_ago(TDuration::seconds(-1)), None);
     }
 }

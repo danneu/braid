@@ -1,10 +1,9 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use crate::alert::AlertState;
 use crate::parse::types::{BtrfsDfEntry, DeviceAllocation, ScrubState, SmartProbe, UpsStatusFlag};
 use crate::state_paths::StatePaths;
-use crate::status::{BalanceReport, DiskErrors};
+use crate::status::{AlertCauseReport, BalanceReport, DiskErrors};
 use crate::tui::browse::BrowseState;
 use crate::tui::effect::Effect;
 use crate::types::{Devid, LuksUuid, MountPoint};
@@ -315,7 +314,10 @@ pub struct PoolState {
     /// so the disk table can render Unreadable / UnknownLuks /
     /// Missing distinctly. Disks present in `disk_usage` are omitted.
     pub unpooled_disks: HashMap<String, UnpooledDiskRender>,
-    pub alert_state: AlertState,
+    /// Latched + bridged alert causes for this pool snapshot, as resolved by
+    /// `status::resolve_alert_state`. The TUI banner branches on the max severity
+    /// across these; each carries an optional first-detection timestamp.
+    pub alert_causes: Vec<AlertCauseReport>,
     pub scrub: ScrubState,
     pub balance: BalanceReport,
     pub capacity_total_bytes: Option<u64>,
