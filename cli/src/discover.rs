@@ -918,6 +918,96 @@ mod tests {
     }
 
     #[test]
+    fn discover_skips_decrypted_mapper_aliases_of_unlocked_member() {
+        /*
+         * Intent: when a pool is already unlocked, /dev/disk/by-id/ carries
+         *   dm-name-braid-<name> and dm-uuid-CRYPT-LUKS2-<uuid>-braid-<name>
+         *   symlinks pointing at the plaintext mapper (/dev/dm-N). Discover must
+         *   record the member exactly once, via its whole-disk wwn-/ata- handle,
+         *   and must neither admit nor warn about the decrypted-mapper aliases.
+         * Why it exists: discover is a repair tool that may run against an
+         *   attached, unlocked array. The decrypted mapper has no LUKS header, so
+         *   `cryptsetup isLuks` returns nonzero and the alias is skipped silently
+         *   at the isLuks gate -- but nothing pinned this. The dm-* aliases are
+         *   NOT partition-filtered (is_partition_entry only matches -partN), so the
+         *   isLuks gate is the sole thing keeping a plaintext alias out of
+         *   membership. A future change to that gate or the entry filter could let
+         *   a decrypted-mapper alias collide with the real member's name
+         *   (LabelCollision) or pollute the warning stream, and no other discover
+         *   test exercises an unlocked pool's by-id directory -- the unit fixtures
+         *   never include dm-* aliases and the VM test runs discover before unlock.
+         * Scenario: an operator whose pool.json was lost unlocks the array, then
+         *   runs `braid discover` to inspect membership before rebuilding. udev has
+         *   created dm-name-/dm-uuid- aliases for the open mapper alongside the
+         *   stable wwn- whole-disk handle; discover must reconstruct one member
+         *   from the whole-disk handle and ignore the plaintext aliases.
+         */
+        let dir = tempfile::tempdir().unwrap();
+
+        // The physical disk (locked LUKS header lives here) and the plaintext
+        // mapper exposed by the open dm-crypt target are distinct canonical
+        // devices, mirroring /dev/sda vs /dev/dm-0.
+        let disk_target = discover_create_target(dir.path(), "fake-sda");
+        let mapper_target = discover_create_target(dir.path(), "fake-dm-0");
+
+        // Whole-disk handle: the real LUKS member, in the label map.
+        let wwn_path =
+            discover_create_by_id_symlink(dir.path(), "wwn-0x5000c500deadbeef", &disk_target);
+
+        // Decrypted-mapper aliases udev creates while the pool is unlocked. Both
+        // point at the plaintext mapper and are absent from the label map, so the
+        // mock's isLuks returns exit 1 for them -- exactly as cryptsetup does on a
+        // headerless plaintext device. Neither is a -partN entry, so neither is
+        // partition-filtered; the isLuks gate is what must skip them.
+        let dm_name_path =
+            discover_create_by_id_symlink(dir.path(), "dm-name-braid-disk1", &mapper_target);
+        let dm_uuid_path = discover_create_by_id_symlink(
+            dir.path(),
+            // Real udev form: CRYPT-LUKS2-<uuid-without-dashes>-<mapper-name>.
+            // The exact suffix is irrelevant to the gate; what matters is that
+            // it is neither a -partN entry nor present in the label map.
+            "dm-uuid-CRYPT-LUKS2-0123456789abcdef0123456789abcdef-braid-disk1",
+            &mapper_target,
+        );
+
+        // Only the whole-disk handle is a real LUKS device.
+        let runner = DiscoverLabelMap::new(&[(&wwn_path, "braid-disk1")]);
+        let scan = discover_from_dir(&runner, dir.path());
+        let members = scan.result.unwrap();
+
+        // Exactly one member, recorded via the whole-disk handle -- not a dm alias.
+        assert_eq!(members.len(), 1, "expected one member: {members:?}");
+        let by_id = by_id_for(&members, "disk1");
+        assert!(
+            by_id.ends_with("wwn-0x5000c500deadbeef"),
+            "member must be recorded via the whole-disk wwn- handle, got: {by_id}",
+        );
+
+        // The plaintext aliases are filtered silently at the isLuks gate (a
+        // nonzero exit is the common non-member case and must not warn).
+        assert!(
+            scan.warnings.is_empty(),
+            "decrypted-mapper aliases must not warn: {:?}",
+            scan.warnings,
+        );
+
+        // Belt-and-suspenders: the isLuks gate must stop the plaintext aliases
+        // before luksDump -- discover must never probe a decrypted mapper's
+        // header. (Mirrors non_luks_device_never_reaches_luks_dump.)
+        let dm_dump_calls: Vec<_> = runner
+            .calls()
+            .into_iter()
+            .filter(|(cmd, dev)| {
+                cmd == "luksDump" && (dev == &dm_name_path || dev == &dm_uuid_path)
+            })
+            .collect();
+        assert!(
+            dm_dump_calls.is_empty(),
+            "luksDump must not be called on a decrypted-mapper alias: {dm_dump_calls:?}",
+        );
+    }
+
+    #[test]
     fn discover_warns_when_labeled_disk_fails_luksdump() {
         /*
          * Intent: a braid-labeled disk whose luksDump command reports a
