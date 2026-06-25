@@ -560,11 +560,13 @@ pub fn plan_remove<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             let mut msg = format!("disk '{}' not found in pool.", params.name);
             if pool.missing_count > 0 {
                 let repair_command = repair_hint::missing_replace_command(None);
+                let status_hint =
+                    repair_hint::see_missing_names_and_devids_in_status(pool.missing_count);
                 msg.push_str(&format!(
                     " ({} missing device{} detected. \
                      To repair onto a new disk, use `{repair_command}`. \
                      To forget the entry, use `braid remove-missing`. \
-                     Use `braid status` to see the missing disk's name and device IDs.)",
+                     {status_hint})",
                     pool.missing_count,
                     if pool.missing_count == 1 { "" } else { "s" }
                 ));

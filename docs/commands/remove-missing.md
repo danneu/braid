@@ -95,6 +95,6 @@ If a btrfs exclusive operation (a running balance, device add/remove/replace, re
 
 ## Related commands
 
-- [braid status](status.md) -- find missing device IDs
+- [braid status](status.md) -- find missing devids
 - [braid replace](replace.md) -- replace a missing disk with a new one (rebuilds data)
 - [braid remove](remove.md) -- remove a live disk

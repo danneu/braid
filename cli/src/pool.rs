@@ -328,13 +328,13 @@ fn device_remove_error(
             ),
             RemoveContext::Missing => {
                 let repair_command = repair_hint::missing_replace_command(None);
+                let status_hint = repair_hint::see_missing_names_in_status(1);
                 format!(
                     "a non-RAID1 chunk requires more devices than will remain. \
                      While a device is missing, do not lower redundancy -- \
                      repair the missing device instead. Run `braid recover` to \
                      clear the pending operation, then `{repair_command}` \
-                     to rebuild data onto a replacement disk. Use `braid status` to see the \
-                     missing disk's name."
+                     to rebuild data onto a replacement disk. {status_hint}"
                 )
             }
         };

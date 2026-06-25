@@ -959,10 +959,11 @@ pub struct AddParams<'a> {
 /// -- one contract for both modes.
 fn format_add_missing_devices_warning(missing_count: u64) -> String {
     let repair_command = repair_hint::missing_replace_command(None);
+    let status_hint = repair_hint::see_missing_names_in_status(missing_count);
     format!(
         "pool has {} missing device{}. \
          Consider repairing with `{repair_command}` first. \
-         Use `braid status` to see the missing disk's name.",
+         {status_hint}",
         missing_count,
         if missing_count == 1 { "" } else { "s" }
     )

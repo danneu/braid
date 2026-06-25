@@ -1849,10 +1849,11 @@ fn resolve_replace_source(
         }
         if pool.missing_count > 0 {
             let repair_command = repair_hint::missing_replace_command(None);
+            let status_hint = repair_hint::see_missing_names_in_status(pool.missing_count);
             return Err(ReplaceError::Validation(format!(
                 "pool has {} missing device{}. \
                  Repair the missing device{} first with `{repair_command}`, \
-                 then retry this live replace. Use `braid status` to see the missing disk's name.",
+                 then retry this live replace. {status_hint}",
                 pool.missing_count,
                 if pool.missing_count == 1 { "" } else { "s" },
                 if pool.missing_count == 1 { "" } else { "s" },
@@ -1906,7 +1907,8 @@ fn resolve_replace_source(
             }
             return Err(ReplaceError::Validation(format!(
                 "devid {supplied} is not a missing device in this pool. \
-                 Use 'braid status' to see device IDs."
+                 {}",
+                repair_hint::see_devids_in_status()
             )));
         }
         supplied

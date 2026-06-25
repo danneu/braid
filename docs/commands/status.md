@@ -11,7 +11,7 @@ Show pool health, per-disk detail, capacity, and operation progress.
 
 - After unlocking, to verify everything is healthy
 - To check on a running scrub, balance, or replace
-- To find device IDs needed by other commands (`--missing-id`)
+- To find devids needed by other commands (`--missing-id`)
 - To investigate alerts or degraded state
 
 ## Basic example

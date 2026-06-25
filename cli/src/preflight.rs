@@ -318,12 +318,13 @@ fn check_not_read_only<F: Filesystem + ?Sized>(
 pub fn check_no_missing_devices(missing_count: u64, action: &str) -> Result<(), String> {
     if missing_count > 0 {
         let repair_command = repair_hint::missing_replace_command(None);
+        let status_hint = repair_hint::see_missing_names_and_devids_in_status(missing_count);
         Err(format!(
             "pool has {missing_count} missing device{}. \
              Resolve the missing device{} first -- repair with \
              `{repair_command}`, or forget the entry with \
              `braid remove-missing` -- then {action}. \
-             Use `braid status` to see the missing disk's name and device IDs.",
+             {status_hint}",
             if missing_count == 1 { "" } else { "s" },
             if missing_count == 1 { "" } else { "s" },
         ))

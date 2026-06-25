@@ -36,6 +36,33 @@ pub(crate) fn optional_missing_id_cross_check_phrase() -> String {
     format!("Optionally add `{placeholder_arg}` as a cross-check.")
 }
 
+/// Name-only member of the status trailer family; centralizing plurality here
+/// retires doctor drift while `devid` stays reserved for status-rendered btrfs
+/// targets in repair diagnostics.
+pub(crate) fn see_missing_names_in_status(missing_count: u64) -> String {
+    if missing_count == 1 {
+        "Use `braid status` to see the missing disk's name.".into()
+    } else {
+        "Use `braid status` to see the missing disks' names.".into()
+    }
+}
+
+/// Shared status lookup hint for repair paths that need names plus the literal
+/// `devid` targets rendered by status, with plurality kept out of callers.
+pub(crate) fn see_missing_names_and_devids_in_status(missing_count: u64) -> String {
+    if missing_count == 1 {
+        "Use `braid status` to see the missing disk's name and devid.".into()
+    } else {
+        "Use `braid status` to see the missing disks' names and devids.".into()
+    }
+}
+
+/// Shared bad-`--missing-id` trailer that points operators at the literal
+/// `devid` tokens rendered by status without another caller-owned plural.
+pub(crate) fn see_devids_in_status() -> String {
+    "Use `braid status` to see which devids are missing.".into()
+}
+
 /// Operator remediation for a member btrfs has not yet promoted to MISSING.
 ///
 /// `actor` names the command that only acts on btrfs-authoritative MISSING
@@ -119,6 +146,56 @@ mod tests {
         assert_eq!(
             optional_missing_id_cross_check_phrase(),
             "Optionally add `--missing-id <devid>` as a cross-check."
+        );
+    }
+
+    // Intent: status lookup guidance for missing names renders the singular
+    // and plural possessives from one canonical helper.
+    // Why it exists: doctor and command refusals should not drift on missing
+    // disk name wording or lose the trailing period.
+    // Scenario: a degraded pool has either one missing member or multiple
+    // missing members whose names the operator can inspect in status.
+    #[test]
+    fn see_missing_names_in_status_pluralizes_disk_names() {
+        assert_eq!(
+            see_missing_names_in_status(1),
+            "Use `braid status` to see the missing disk's name."
+        );
+        assert_eq!(
+            see_missing_names_in_status(2),
+            "Use `braid status` to see the missing disks' names."
+        );
+    }
+
+    // Intent: status lookup guidance for missing-name plus devid repair paths
+    // uses the literal `devid` token status renders.
+    // Why it exists: generic ID wording is ambiguous with by-id hardware paths on
+    // the same status row and has drifted across command refusals.
+    // Scenario: an operator needs both the missing member name and the btrfs
+    // devid accepted by `--missing-id`.
+    #[test]
+    fn see_missing_names_and_devids_in_status_pluralizes_devid_hint() {
+        assert_eq!(
+            see_missing_names_and_devids_in_status(1),
+            "Use `braid status` to see the missing disk's name and devid."
+        );
+        assert_eq!(
+            see_missing_names_and_devids_in_status(2),
+            "Use `braid status` to see the missing disks' names and devids."
+        );
+    }
+
+    // Intent: bad `--missing-id` guidance points at the status-rendered devid
+    // set without reintroducing the ambiguous generic ID noun.
+    // Why it exists: replace and remove-missing should share the same target
+    // lookup sentence when rejecting an invalid missing devid.
+    // Scenario: an operator supplies a devid that is neither live nor missing
+    // in the current pool.
+    #[test]
+    fn see_devids_in_status_names_missing_devid_targets() {
+        assert_eq!(
+            see_devids_in_status(),
+            "Use `braid status` to see which devids are missing."
         );
     }
 

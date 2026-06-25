@@ -889,8 +889,9 @@ fn check_pool_missing_devices<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) 
             CheckResult::warn(
                 "pool_missing_devices",
                 format!(
-                    "{lead}; {} Use `braid status` to see the missing disk's name",
-                    parts.join("; ")
+                    "{lead}; {} {}",
+                    parts.join("; "),
+                    repair_hint::see_missing_names_in_status(n)
                 ),
             )
         }
@@ -5888,6 +5889,13 @@ mod tests {
             "expected single-missing cross-check target: {}",
             check.message
         );
+        assert!(
+            check
+                .message
+                .contains("Use `braid status` to see the missing disk's name."),
+            "expected singular status lookup trailer with period: {}",
+            check.message
+        );
     }
 
     // Intent: pool_missing_devices plural output lists missing devids once and
@@ -5943,6 +5951,13 @@ mod tests {
         assert!(
             !check.message.contains("braid replace --missing-id"),
             "must not render bare replace --missing-id guidance: {}",
+            check.message
+        );
+        assert!(
+            check
+                .message
+                .contains("Use `braid status` to see the missing disks' names."),
+            "expected plural status lookup trailer with period: {}",
             check.message
         );
     }

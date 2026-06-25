@@ -1999,7 +1999,7 @@ mod tests {
      * Intent: drop_ghost_acked_for_devids returns Ok(false) and leaves the
      * file byte-identical when none of the requested devids are present.
      *
-     * Why it exists: command cleanup must be narrowly scoped to the device IDs
+     * Why it exists: command cleanup must be narrowly scoped to the devids
      * whose ownership changed. A no-match cleanup should not rewrite the file,
      * reorder keys, reformat JSON, or otherwise disturb unrelated acks.
      *

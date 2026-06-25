@@ -312,7 +312,8 @@ fn validate_missing_id_target(pool: &PoolState, missing_id: Devid) -> Result<(),
     }
     Err(format!(
         "devid {missing_id} is not a device in this pool. \
-         Use 'braid status' to see device IDs."
+         {}",
+        repair_hint::see_devids_in_status()
     ))
 }
 
@@ -417,6 +418,7 @@ pub fn plan_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     // rests on this label.
     if pool.total_devices == 2 && pool.devices.len() == 1 && pool.missing_count == 1 {
         let repair_command = repair_hint::missing_replace_command(None);
+        let status_hint = repair_hint::see_missing_names_and_devids_in_status(pool.missing_count);
         return Err(PlanFailure::with_notes(
             notes,
             RemoveMissingError::Validation(format!(
@@ -425,8 +427,7 @@ pub fn plan_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
                  to drop a RAID1 pool below two devices. Repair the dead \
                  disk with `{repair_command}`, or run \
                  `braid add <new-name>=/dev/disk/by-id/<...>` \
-                 first and then re-run `braid remove-missing`. \
-                 Use `braid status` to see device names and IDs.",
+                 first and then re-run `braid remove-missing`. {status_hint}",
                 devid = params.missing_id,
             )),
         ));
@@ -1825,7 +1826,7 @@ mod tests {
         match &failure.error {
             RemoveMissingError::Validation(msg) => assert_eq!(
                 msg,
-                "devid 99 is not a device in this pool. Use 'braid status' to see device IDs.",
+                "devid 99 is not a device in this pool. Use `braid status` to see which devids are missing.",
             ),
             other => panic!("expected Validation, got: {other:?}"),
         }
