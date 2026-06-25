@@ -2480,6 +2480,7 @@ mod tests {
     use super::*;
     use crate::luks::{RealTty, ScriptedPassphraseReader};
     use crate::secret::Passphrase;
+    use crate::test_fixtures::{assert_lines_in_order, line_index};
     use std::collections::HashMap;
 
     fn disk(name: &str) -> DiskName {
@@ -7808,36 +7809,47 @@ mod tests {
         .unwrap()
         .render_steps();
         let output = Step::render_dry_run(&steps);
-        let lines: Vec<&str> = output.lines().collect();
+        assert_eq!(
+            steps.len(),
+            5,
+            "fresh single-disk bootstrap must emit format + backup + open + mkfs + mount; got {:?}",
+            steps
+        );
+        assert_lines_in_order(
+            &output,
+            &[
+                "[destructive]",
+                "$ cryptsetup luksFormat",
+                "LUKS header backup",
+                "$ cryptsetup luksHeaderBackup",
+                "LUKS open",
+                "$ cryptsetup open --type luks",
+                "mkfs.btrfs",
+                "$ mkfs.btrfs",
+                "mount",
+                "$ mount",
+            ],
+        );
 
-        // Steps: LUKS format, header backup, LUKS open, mkfs, mount = 5 steps x 2 lines = 10
-        assert_eq!(lines.len(), 10, "expected 10 lines, got:\n{output}");
+        let format_line = output
+            .lines()
+            .nth(line_index(&output, "$ cryptsetup luksFormat"))
+            .expect("format line present");
+        assert!(format_line.contains("--pbkdf pbkdf2 --iter-time 1"));
+        assert!(format_line.contains("--label braid-disk1"));
 
-        // LUKS format
-        assert!(lines[0].contains("[destructive]"));
-        assert!(lines[0].contains("LUKS format"));
-        assert!(lines[1].contains("$ cryptsetup luksFormat"));
-        assert!(lines[1].contains("--pbkdf pbkdf2 --iter-time 1"));
-        assert!(lines[1].contains("--label braid-disk1"));
+        let mkfs_line = output
+            .lines()
+            .nth(line_index(&output, "$ mkfs.btrfs"))
+            .expect("mkfs line present");
+        assert!(mkfs_line.contains("-d single -m dup"));
+        assert!(!mkfs_line.contains("raid1"));
 
-        // Header backup
-        assert!(lines[2].contains("LUKS header backup"));
-        assert!(lines[3].contains("$ cryptsetup luksHeaderBackup"));
-
-        // LUKS open
-        assert!(lines[4].contains("LUKS open"));
-        assert!(lines[5].contains("$ cryptsetup open --type luks"));
-
-        // mkfs
-        assert!(lines[6].contains("mkfs.btrfs"));
-        assert!(lines[7].contains("$ mkfs.btrfs"));
-        assert!(lines[7].contains("-d single -m dup"));
-        assert!(!lines[7].contains("raid1"));
-
-        // mount
-        assert!(lines[8].contains("mount"));
-        assert!(lines[9].contains("$ mount"));
-        assert!(lines[9].contains("/mnt/storage"));
+        let mount_line = output
+            .lines()
+            .nth(line_index(&output, "$ mount"))
+            .expect("mount line present");
+        assert!(mount_line.contains("/mnt/storage"));
     }
 
     // Intent: under mapper drift (a live member open as braid-WRONG), the add
@@ -8023,24 +8035,18 @@ mod tests {
         .unwrap()
         .render_steps();
         let output = Step::render_dry_run(&steps);
-        let lines: Vec<&str> = output.lines().collect();
-
-        let find = |needle: &str| -> usize {
-            lines
-                .iter()
-                .position(|line| line.contains(needle))
-                .unwrap_or_else(|| panic!("missing line containing {needle:?}; got:\n{output}"))
-        };
-        let format = find("$ cryptsetup luksFormat");
-        let addkey = find("$ cryptsetup luksAddKey");
-        let backup = find("$ cryptsetup luksHeaderBackup");
-        let open = find("$ cryptsetup open --type luks");
-
-        assert!(
-            format < addkey && addkey < backup && backup < open,
-            "expected luksFormat({format}) < luksAddKey({addkey}) < \
-             luksHeaderBackup({backup}) < luksOpen({open}); got:\n{output}"
+        assert_lines_in_order(
+            &output,
+            &[
+                "$ cryptsetup luksFormat",
+                "$ cryptsetup luksAddKey",
+                "$ cryptsetup luksHeaderBackup",
+                "$ cryptsetup open --type luks",
+            ],
         );
+        let addkey = line_index(&output, "$ cryptsetup luksAddKey");
+        let backup = line_index(&output, "$ cryptsetup luksHeaderBackup");
+        let lines: Vec<&str> = output.lines().collect();
         // Pin BOTH stringly fields with distinct keyfile and header paths
         // so a transposition at the terminal render (keyfile string into
         // HeaderBackup.backup_path, or the reverse) fails here even though
@@ -8132,22 +8138,18 @@ mod tests {
         .unwrap()
         .render_steps();
         let output = Step::render_dry_run(&steps);
-        let lines: Vec<&str> = output.lines().collect();
-        let find = |needle: &str| -> usize {
-            lines
-                .iter()
-                .position(|line| line.contains(needle))
-                .unwrap_or_else(|| panic!("missing {needle:?} in:\n{output}"))
-        };
-        let open = find("$ cryptsetup open --type luks");
-        let addkey = find("$ cryptsetup luksAddKey");
-        let backup = find("$ cryptsetup luksHeaderBackup");
-        let add = find("$ btrfs device add");
-        assert!(
-            open < addkey && addkey < backup && backup < add,
-            "expected luksOpen({open}) < luksAddKey({addkey}) < \
-             luksHeaderBackup({backup}) < btrfs device add({add}); got:\n{output}"
+        assert_lines_in_order(
+            &output,
+            &[
+                "$ cryptsetup open --type luks",
+                "$ cryptsetup luksAddKey",
+                "$ cryptsetup luksHeaderBackup",
+                "$ btrfs device add",
+            ],
         );
+        let addkey = line_index(&output, "$ cryptsetup luksAddKey");
+        let backup = line_index(&output, "$ cryptsetup luksHeaderBackup");
+        let lines: Vec<&str> = output.lines().collect();
         // Pin both stringly fields with distinct paths so a keyfile/header
         // transposition at the returned-disk render boundary fails here.
         assert!(

@@ -206,10 +206,10 @@ pub(crate) use scrub::{
 #[allow(unused_imports)]
 pub(crate) use shared::{
     DeviceUsageSpec, MockBackingPathResolver, MockFs, PoolFixture, RecordingSleeper,
-    TEST_PASSPHRASE_BYTES, btrfs_remove_devid_error, btrfs_remove_path_error, canonical_luks_uuid,
-    device_usage_raw_body, disk_member, disk_member_with, mock_ok,
-    mock_virtio_backing_path_resolver, mock_virtio_offset_backing_path_resolver, test_uuid,
-    with_lsblk_hw_info,
+    TEST_PASSPHRASE_BYTES, assert_exact_lines_in_order, assert_lines_in_order,
+    btrfs_remove_devid_error, btrfs_remove_path_error, canonical_luks_uuid, device_usage_raw_body,
+    disk_member, disk_member_with, line_index, mock_ok, mock_virtio_backing_path_resolver,
+    mock_virtio_offset_backing_path_resolver, test_uuid, with_lsblk_hw_info,
 };
 #[allow(unused_imports)]
 pub(crate) use status::{

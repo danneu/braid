@@ -129,6 +129,57 @@ pub(crate) fn btrfs_remove_path_error(path: &str, msg: &str) -> String {
     format!("ERROR: error removing device '{path}': {msg}")
 }
 
+/// Locate rendered preview lines by content so command tests assert on the
+/// operator-visible contract without depending on absolute layout.
+pub(crate) fn line_index(rendered: &str, needle: &str) -> usize {
+    rendered
+        .lines()
+        .position(|line| line.contains(needle))
+        .unwrap_or_else(|| panic!("missing line containing {needle:?}; got:\n{rendered}"))
+}
+
+/// Assert rendered preview lines contain each needle in strictly increasing
+/// line order, preserving ordering contracts while tolerating layout reflow.
+pub(crate) fn assert_lines_in_order(rendered: &str, needles: &[&str]) {
+    let lines: Vec<&str> = rendered.lines().collect();
+    let mut start = 0;
+    for needle in needles {
+        match lines
+            .iter()
+            .enumerate()
+            .skip(start)
+            .find(|(_, line)| line.contains(needle))
+        {
+            Some((idx, _)) => start = idx + 1,
+            None => panic!(
+                "missing line containing {needle:?} after line {}; got:\n{rendered}",
+                start.saturating_sub(1)
+            ),
+        }
+    }
+}
+
+/// Assert rendered preview lines exactly match each expected row in strictly
+/// increasing order so shell argv pins remain full-line checks.
+pub(crate) fn assert_exact_lines_in_order(rendered: &str, expected: &[&str]) {
+    let lines: Vec<&str> = rendered.lines().collect();
+    let mut start = 0;
+    for &exact in expected {
+        match lines
+            .iter()
+            .enumerate()
+            .skip(start)
+            .find(|(_, line)| **line == exact)
+        {
+            Some((idx, _)) => start = idx + 1,
+            None => panic!(
+                "missing exact line {exact:?} after line {}; got:\n{rendered}",
+                start.saturating_sub(1)
+            ),
+        }
+    }
+}
+
 /// Register `lsblk` Model/Serial/Size outputs for `device` so a confirm
 /// prompt's hw line resolves only when the probe is routed to THIS path.
 /// Lets routing tests pin that a present-disk prompt queries the live
@@ -693,6 +744,60 @@ mod tests {
                  test_fixtures::shared instead of hardcoding the stderr shape"
             );
         }
+    }
+
+    // Intent: exact preview-line assertions reject suffix drift instead of
+    //   accepting substring matches.
+    // Why it exists: migrated argv pins rely on full-line equality to catch
+    //   trailing shell text or quoting regressions.
+    // Scenario: a rendered close command carries extra junk after the expected
+    //   argv; the exact helper must fail.
+    #[test]
+    #[should_panic(expected = "missing exact line")]
+    fn assert_exact_lines_in_order_rejects_trailing_junk() {
+        assert_exact_lines_in_order(
+            "$ cryptsetup close braid-disk2 # x\n",
+            &["$ cryptsetup close braid-disk2"],
+        );
+    }
+
+    // Intent: substring preview-line assertions require strictly increasing
+    //   lines, not just all needles somewhere in the output.
+    // Why it exists: ordering tests should fail when two expected phases
+    //   collapse onto one rendered line.
+    // Scenario: a malformed preview writes both phase markers on one row.
+    #[test]
+    #[should_panic(expected = "missing line containing")]
+    fn assert_lines_in_order_rejects_same_line_matches() {
+        assert_lines_in_order("[long] first and second\n", &["first", "second"]);
+    }
+
+    // Intent: exact preview-line assertions require strictly increasing
+    //   positions.
+    // Why it exists: repeated exact argv pins should prove multiple rows, not
+    //   reuse one matching line twice.
+    // Scenario: the caller expects two identical close rows but the render has
+    //   only one.
+    #[test]
+    #[should_panic(expected = "missing exact line")]
+    fn assert_exact_lines_in_order_rejects_reusing_one_line() {
+        assert_exact_lines_in_order(
+            "$ cryptsetup close braid-disk2\n",
+            &[
+                "$ cryptsetup close braid-disk2",
+                "$ cryptsetup close braid-disk2",
+            ],
+        );
+    }
+
+    // Intent: missing-line panics include the full rendered preview.
+    // Why it exists: failures from shared preview assertions should preserve
+    //   enough context to diagnose the command render.
+    // Scenario: a requested needle is absent from a two-line preview.
+    #[test]
+    #[should_panic(expected = "alpha\nbeta")]
+    fn line_index_missing_needle_reports_full_render() {
+        let _ = line_index("alpha\nbeta", "gamma");
     }
 
     // Intent: canonical_luks_uuid(n) yields the exact repeated-digit literal for

@@ -872,11 +872,11 @@ mod tests {
     use crate::membership::PoolMembership;
     use crate::state_paths::StatePaths;
     use crate::test_fixtures::{
-        DeviceUsageSpec, MockFs, PoolFixture, RemovalPool, btrfs_remove_path_error,
-        canonical_luks_uuid, device_usage_raw_body, mock_ok, overcommitted_survivor_df_json,
-        overcommitted_survivor_usage_stdout, target_device, valid_three_disk_df_json,
-        valid_three_disk_usage_stdout, valid_two_disk_df_json, valid_two_disk_usage_stdout,
-        with_lsblk_hw_info,
+        DeviceUsageSpec, MockFs, PoolFixture, RemovalPool, assert_exact_lines_in_order,
+        btrfs_remove_path_error, canonical_luks_uuid, device_usage_raw_body, mock_ok,
+        overcommitted_survivor_df_json, overcommitted_survivor_usage_stdout, target_device,
+        valid_three_disk_df_json, valid_three_disk_usage_stdout, valid_two_disk_df_json,
+        valid_two_disk_usage_stdout, with_lsblk_hw_info,
     };
     use std::collections::BTreeMap;
 
@@ -1670,21 +1670,20 @@ mod tests {
         // quoting) plus the device-remove and close argv are pinned
         // end-to-end. Subsumes the deleted
         // `dry_run_render_2disk_removal_includes_balance`.
-        let lines: Vec<&str> = rendered.lines().collect();
         assert_eq!(
-            lines.len(),
-            6,
-            "2->1 preview must render balance + device-remove + close (6 lines), got:\n{rendered}",
+            preview.steps.len(),
+            3,
+            "2->1 preview must render balance + device-remove + close; got {:?}",
+            preview.steps
         );
-        assert_eq!(
-            lines[1],
-            "$ btrfs balance start --enqueue '-dconvert=single' '-mconvert=dup' -f /mnt/storage",
+        assert_exact_lines_in_order(
+            &rendered,
+            &[
+                "$ btrfs balance start --enqueue '-dconvert=single' '-mconvert=dup' -f /mnt/storage",
+                "$ btrfs device remove --enqueue /dev/mapper/braid-disk2 /mnt/storage",
+                "$ cryptsetup close braid-disk2",
+            ],
         );
-        assert_eq!(
-            lines[3],
-            "$ btrfs device remove --enqueue /dev/mapper/braid-disk2 /mnt/storage",
-        );
-        assert_eq!(lines[5], "$ cryptsetup close braid-disk2");
     }
 
     #[test]
@@ -1723,16 +1722,17 @@ mod tests {
             preview.steps,
         );
         let rendered = preview.render();
-        let lines: Vec<&str> = rendered.lines().collect();
         assert!(
             !rendered.contains("RAID1 -> single"),
             "3->2 preview must NOT render the balance-to-single step, got:\n{rendered}",
         );
-        assert_eq!(
-            lines[1],
-            "$ btrfs device remove --enqueue /dev/mapper/braid-disk2 /mnt/storage",
+        assert_exact_lines_in_order(
+            &rendered,
+            &[
+                "$ btrfs device remove --enqueue /dev/mapper/braid-disk2 /mnt/storage",
+                "$ cryptsetup close braid-disk2",
+            ],
         );
-        assert_eq!(lines[3], "$ cryptsetup close braid-disk2");
     }
 
     #[test]

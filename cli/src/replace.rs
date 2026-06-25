@@ -2158,7 +2158,9 @@ mod tests {
     use super::*;
     use crate::cmd::{CmdRequest, MockRunner, RawCommandOutput};
     use crate::state_paths::StatePaths;
-    use crate::test_fixtures::MockBackingPathResolver;
+    use crate::test_fixtures::{
+        MockBackingPathResolver, assert_exact_lines_in_order, assert_lines_in_order, line_index,
+    };
 
     fn test_paths() -> (tempfile::TempDir, StatePaths) {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -4678,55 +4680,65 @@ mod tests {
         })
         .render_steps();
         let output = Step::render_dry_run(&steps);
-        let lines: Vec<&str> = output.lines().collect();
 
-        // Steps: LUKS format, keyfile enroll, header backup, LUKS open,
-        //        replace start, close old, resize = 7 steps x 2 lines each = 14
         // Header backup runs after the final keyslot mutation so the backup
         // captures slot 1; ordering invariant is format < addKey < backup < open.
-        assert_eq!(lines.len(), 14, "expected 14 lines, got:\n{output}");
+        assert_eq!(
+            steps.len(),
+            7,
+            "fresh live replace must emit format + enroll + backup + open + replace + close + resize; got {:?}",
+            steps
+        );
+        assert_lines_in_order(
+            &output,
+            &[
+                "[destructive]",
+                "$ cryptsetup luksFormat",
+                "enroll keyfile",
+                "$ cryptsetup luksAddKey",
+                "LUKS header backup",
+                "$ cryptsetup luksHeaderBackup",
+                "LUKS open",
+                "$ cryptsetup open --type luks",
+                "[long]",
+                "$ btrfs replace start",
+                "cryptsetup close",
+                "$ cryptsetup close braid-disk2",
+                "btrfs filesystem resize",
+            ],
+        );
 
-        // LUKS format
-        assert!(lines[0].contains("[destructive]"));
-        assert!(lines[1].contains("$ cryptsetup luksFormat"));
-        assert!(lines[1].contains("--pbkdf pbkdf2 --iter-time 1"));
-        assert!(lines[1].contains("--label braid-disk3"));
+        let format_line = output
+            .lines()
+            .nth(line_index(&output, "$ cryptsetup luksFormat"))
+            .expect("format line present");
+        assert!(format_line.contains("--pbkdf pbkdf2 --iter-time 1"));
+        assert!(format_line.contains("--label braid-disk3"));
 
         // Keyfile enrollment (runs before backup so slot 1 lands in the backup).
         // Pin BOTH stringly fields with distinct keyfile and header paths so a
         // transposition at the render boundary fails here.
-        assert!(lines[2].contains("enroll keyfile"));
-        assert!(lines[3].contains("$ cryptsetup luksAddKey"));
+        let lines: Vec<&str> = output.lines().collect();
+        let addkey = line_index(&output, "$ cryptsetup luksAddKey");
+        let backup = line_index(&output, "$ cryptsetup luksHeaderBackup");
         assert!(
-            lines[3].contains("/mnt/usb/braid.key") && !lines[3].contains("braid-disk3.luksheader"),
+            lines[addkey].contains("/mnt/usb/braid.key")
+                && !lines[addkey].contains("braid-disk3.luksheader"),
             "luksAddKey must carry the keyfile, not the header path; got: {}",
-            lines[3]
+            lines[addkey]
         );
 
         // Header backup
-        assert!(lines[4].contains("LUKS header backup"));
-        assert!(lines[5].contains("$ cryptsetup luksHeaderBackup"));
         assert!(
-            lines[5].contains("braid-disk3.luksheader") && !lines[5].contains("/mnt/usb/braid.key"),
+            lines[backup].contains("braid-disk3.luksheader")
+                && !lines[backup].contains("/mnt/usb/braid.key"),
             "luksHeaderBackup must carry the header path, not the keyfile; got: {}",
-            lines[5]
+            lines[backup]
         );
-
-        // LUKS open
-        assert!(lines[6].contains("LUKS open"));
-        assert!(lines[7].contains("$ cryptsetup open --type luks"));
-
-        // Replace start
-        assert!(lines[8].contains("[long]"));
-        assert!(lines[9].contains("$ btrfs replace start"));
 
         // Close old mapper (before resize: a resize failure must not strand
         // the old dm slot)
-        assert!(lines[10].contains("cryptsetup close"));
-        assert_eq!(lines[11], "$ cryptsetup close braid-disk2");
-
-        // Resize
-        assert!(lines[12].contains("btrfs filesystem resize"));
+        assert_exact_lines_in_order(&output, &["$ cryptsetup close braid-disk2"]);
     }
 
     #[test]
@@ -4853,27 +4865,17 @@ mod tests {
 
         let steps = work_plan.render_steps();
         let output = Step::render_dry_run(&steps);
+        assert_lines_in_order(
+            &output,
+            &[
+                "$ cryptsetup luksAddKey",
+                "$ cryptsetup luksHeaderBackup",
+                "$ cryptsetup open --type luks",
+            ],
+        );
+        let p_addkey = line_index(&output, "$ cryptsetup luksAddKey");
+        let p_backup = line_index(&output, "$ cryptsetup luksHeaderBackup");
         let lines: Vec<&str> = output.lines().collect();
-
-        let pos_of = |needle: &str| {
-            lines
-                .iter()
-                .position(|line| line.contains(needle))
-                .unwrap_or_else(|| panic!("missing {needle:?} in render:\n{output}"))
-        };
-
-        let p_addkey = pos_of("$ cryptsetup luksAddKey");
-        let p_backup = pos_of("$ cryptsetup luksHeaderBackup");
-        let p_open = pos_of("$ cryptsetup open --type luks");
-
-        assert!(
-            p_addkey < p_backup,
-            "luksAddKey must precede luksHeaderBackup so slot 1 is captured in the backup; got addKey@{p_addkey} backup@{p_backup}"
-        );
-        assert!(
-            p_backup < p_open,
-            "luksHeaderBackup must precede luksOpen; got backup@{p_backup} open@{p_open}"
-        );
         // Pin BOTH stringly fields with distinct keyfile and header paths so a
         // transposition at the ExistingLuks render boundary fails here.
         assert!(
@@ -4927,35 +4929,19 @@ mod tests {
         })
         .render_steps();
         let output = Step::render_dry_run(&steps);
-        let lines: Vec<&str> = output.lines().collect();
 
         // Substring order: LUKS format -> header backup -> LUKS open ->
         // btrfs replace start -> btrfs filesystem resize -> soft balance.
-        // Pin the order by resolving each substring to an index and
-        // asserting strict monotonic increase.
-        let find = |needle: &str| -> usize {
-            lines
-                .iter()
-                .position(|l| l.contains(needle))
-                .unwrap_or_else(|| panic!("expected '{needle}' in dry-run output:\n{output}"))
-        };
-        let luks_format = find("$ cryptsetup luksFormat");
-        let header_backup = find("$ cryptsetup luksHeaderBackup");
-        let luks_open = find("$ cryptsetup open --type luks");
-        let replace_start = find("$ btrfs replace start");
-        let resize = find("btrfs filesystem resize");
-        let soft_balance = find("-dconvert=raid1,soft");
-
-        assert!(
-            luks_format < header_backup
-                && header_backup < luks_open
-                && luks_open < replace_start
-                && replace_start < resize
-                && resize < soft_balance,
-            "missing-path dry-run step ordering violated \
-             (format={luks_format}, header_backup={header_backup}, \
-             luks_open={luks_open}, replace_start={replace_start}, \
-             resize={resize}, soft_balance={soft_balance}):\n{output}"
+        assert_lines_in_order(
+            &output,
+            &[
+                "$ cryptsetup luksFormat",
+                "$ cryptsetup luksHeaderBackup",
+                "$ cryptsetup open --type luks",
+                "$ btrfs replace start",
+                "btrfs filesystem resize",
+                "-dconvert=raid1,soft",
+            ],
         );
 
         // Missing path has no old mapper, so no cryptsetup close anywhere.

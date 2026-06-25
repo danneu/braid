@@ -744,8 +744,8 @@ mod tests {
     use crate::config::mapper_name;
     use crate::membership::PoolMembership;
     use crate::test_fixtures::{
-        DeviceUsageSpec, MockFs, PoolFixture, RemoveMissingPool, btrfs_remove_devid_error,
-        device_usage_raw_body, mock_ok,
+        DeviceUsageSpec, MockFs, PoolFixture, RemoveMissingPool, assert_exact_lines_in_order,
+        assert_lines_in_order, btrfs_remove_devid_error, device_usage_raw_body, mock_ok,
     };
     use crate::types::{Fsid, NullUnderlyingDevice, PoolDevice};
 
@@ -2618,16 +2618,23 @@ mod tests {
         let steps =
             remove_missing_work_plan_for_test(Devid::new(2), 1, 2, &mount_point).render_steps();
         let output = Step::render_dry_run(&steps);
-        let lines: Vec<&str> = output.lines().collect();
 
-        // 2 steps: device remove + balance, each with 1 command = 4 lines
-        assert_eq!(lines.len(), 4, "expected 4 lines, got:\n{output}");
-        assert!(lines[0].contains("target specific missing device"));
-        assert_eq!(lines[1], "$ btrfs device remove --enqueue 2 /mnt/storage");
-        assert!(lines[2].contains("restore redundancy"));
         assert_eq!(
-            lines[3],
-            "$ btrfs balance start --enqueue '-dconvert=raid1,soft' '-mconvert=raid1,soft' /mnt/storage"
+            steps.len(),
+            2,
+            "targeted missing-device removal must emit device-remove + balance; got {:?}",
+            steps
+        );
+        assert_lines_in_order(
+            &output,
+            &["target specific missing device", "restore redundancy"],
+        );
+        assert_exact_lines_in_order(
+            &output,
+            &[
+                "$ btrfs device remove --enqueue 2 /mnt/storage",
+                "$ btrfs balance start --enqueue '-dconvert=raid1,soft' '-mconvert=raid1,soft' /mnt/storage",
+            ],
         );
     }
 
@@ -2847,15 +2854,12 @@ mod tests {
             "[warn] read-only pre-flight failed: mountinfo probe failed; proceeding anyway",
             "warn note must render first; got full output:\n{rendered}"
         );
-        assert!(
-            lines[1].starts_with("[long"),
-            "step block must follow the warn line; got lines[1]={:?}",
-            lines[1]
-        );
-        assert!(
-            lines[1].contains("target specific missing device"),
-            "first step must be the device-remove step; got lines[1]={:?}",
-            lines[1]
+        assert_lines_in_order(
+            &rendered,
+            &[
+                "[warn] read-only pre-flight failed: mountinfo probe failed; proceeding anyway",
+                "target specific missing device",
+            ],
         );
     }
 

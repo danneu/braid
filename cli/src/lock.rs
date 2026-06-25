@@ -1312,9 +1312,10 @@ mod tests {
     use crate::online_state::{BRAID_ONLINE_UNIT, RecordingOnlineStateOps, StagedOnlineFailure};
     use crate::pool_lock::RealStopCoordinator;
     use crate::test_fixtures::{
-        LockNoopSleeper, LockRecordingRunner, disk_member, lock_count_forget_steps, lock_err_raw,
-        lock_forget_step_devices, lock_fs, lock_mounted_runner, lock_ok_raw, lock_test_config,
-        lock_test_membership, lock_umount_failed_runner, lock_with_fsid_probe_mocks, test_uuid,
+        LockNoopSleeper, LockRecordingRunner, assert_lines_in_order, disk_member, line_index,
+        lock_count_forget_steps, lock_err_raw, lock_forget_step_devices, lock_fs,
+        lock_mounted_runner, lock_ok_raw, lock_test_config, lock_test_membership,
+        lock_umount_failed_runner, lock_with_fsid_probe_mocks, test_uuid,
     };
     use std::sync::Mutex;
     use std::time::Duration;
@@ -4255,20 +4256,32 @@ mod tests {
         );
         let steps = compile_lock_steps(true, false, &close_set, &mount_point);
         let output = Step::render_dry_run(&steps);
-        let lines: Vec<&str> = output.lines().collect();
-
-        // 4 steps (umount + scan forget + 2x close), each with 1 command = 8 lines
-        assert_eq!(lines.len(), 8, "expected 8 lines, got:\n{output}");
-        assert!(lines[0].contains("unmount"));
-        assert!(lines[1].contains("$ umount"));
-        assert!(lines[2].contains("btrfs device scan --forget"));
-        assert!(
-            lines[3].contains("--forget /dev/mapper/braid-disk1 /dev/mapper/braid-disk2"),
-            "rendered forget command must list pool mapper paths, got: {}",
-            lines[3]
+        assert_eq!(
+            steps.len(),
+            4,
+            "mounted 2-disk lock must emit umount + scan forget + 2 closes; got {:?}",
+            steps
         );
-        assert!(lines[4].contains("close LUKS mapper braid-disk1"));
-        assert!(lines[6].contains("close LUKS mapper braid-disk2"));
+        assert_lines_in_order(
+            &output,
+            &[
+                "unmount",
+                "$ umount",
+                "btrfs device scan --forget",
+                "$ btrfs device scan --forget",
+                "close LUKS mapper braid-disk1",
+                "close LUKS mapper braid-disk2",
+            ],
+        );
+        let forget_line = output
+            .lines()
+            .nth(line_index(&output, "$ btrfs device scan --forget"))
+            .expect("forget command line present");
+        assert!(
+            forget_line.contains("--forget /dev/mapper/braid-disk1 /dev/mapper/braid-disk2"),
+            "rendered forget command must list pool mapper paths, got: {}",
+            forget_line
+        );
     }
 
     // Intent: dry-run when not mounted skips umount/scan, shows only close.
@@ -4281,11 +4294,8 @@ mod tests {
         let close_set = test_close_set(vec![member_close("braid-disk1", "disk1")], vec![]);
         let steps = compile_lock_steps(false, false, &close_set, &mount_point);
         let output = Step::render_dry_run(&steps);
-        let lines: Vec<&str> = output.lines().collect();
-
-        // 1 step (close), 2 lines
-        assert_eq!(lines.len(), 2, "expected 2 lines, got:\n{output}");
-        assert!(lines[0].contains("close LUKS mapper"));
+        assert_eq!(steps.len(), 1, "not-mounted lock must emit one close step");
+        assert_lines_in_order(&output, &["close LUKS mapper", "$ cryptsetup close"]);
         assert!(!output.contains("unmount"));
     }
 

@@ -855,7 +855,7 @@ mod tests {
         enroll_make_existing_keyfile, enroll_make_membership, enroll_mountpoint_fail,
         enroll_mountpoint_ok, enroll_passphrase, enroll_test_keyfile_fail, enroll_test_keyfile_ok,
         enroll_test_passphrase_fail, enroll_test_passphrase_ok, enroll_with_mountpoint_fail,
-        enroll_with_mountpoint_ok, isolated_paths, mock_ok, test_uuid,
+        enroll_with_mountpoint_ok, isolated_paths, line_index, mock_ok, test_uuid,
     };
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU8, Ordering};
@@ -4578,12 +4578,12 @@ mod tests {
         );
         let output = Step::render_dry_run(&steps);
 
-        // 1 generate + 3× (enroll + backup) = 7 steps
-        // generate has no command (1 line), others have 1 command each (2 lines each) = 1 + 6×2 = 13 lines
+        // 1 generate + 3x (enroll + backup) = 7 steps.
         assert_eq!(
-            output.lines().count(),
-            13,
-            "expected 13 lines, got:\n{output}"
+            steps.len(),
+            7,
+            "expected generate + 3 enroll/backup pairs, got {:?}",
+            steps
         );
         assert!(output.contains("generate keyfile"));
         assert!(output.contains("enroll keyfile"));
@@ -4595,14 +4595,8 @@ mod tests {
         // transposition at the standalone-enroll render boundary (keyfile into
         // HeaderBackup.backup_path, or the reverse) fails here.
         let lines: Vec<&str> = output.lines().collect();
-        let addkey = lines
-            .iter()
-            .find(|l| l.contains("$ cryptsetup luksAddKey"))
-            .expect("addKey line present");
-        let backup = lines
-            .iter()
-            .find(|l| l.contains("$ cryptsetup luksHeaderBackup"))
-            .expect("headerBackup line present");
+        let addkey = lines[line_index(&output, "$ cryptsetup luksAddKey")];
+        let backup = lines[line_index(&output, "$ cryptsetup luksHeaderBackup")];
         assert!(
             addkey.contains("/mnt/usb/braid.key") && !addkey.contains("braid-aaa.luksheader"),
             "luksAddKey must carry the keyfile, not the header path; got: {addkey}"
@@ -4631,11 +4625,12 @@ mod tests {
         );
         let output = Step::render_dry_run(&steps);
 
-        // No generate step. 2× (enroll + backup) = 4 steps, each 2 lines = 8
+        // No generate step. 2x (enroll + backup) = 4 steps.
         assert_eq!(
-            output.lines().count(),
-            8,
-            "expected 8 lines, got:\n{output}"
+            steps.len(),
+            4,
+            "expected 2 enroll/backup pairs, got {:?}",
+            steps
         );
         assert!(!output.contains("generate keyfile"));
         assert!(output.contains("enroll keyfile"));
