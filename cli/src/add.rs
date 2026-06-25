@@ -20,6 +20,7 @@ use crate::parse::btrfs_filesystem_show::{DeviceBtrfsProbe, classify_btrfs_probe
 use crate::parse::{parse_btrfs_filesystem_show, parse_cryptsetup_luks_uuid};
 use crate::pool::{
     pool_add_device, pool_balance_raid1, pool_bootstrap_mount, pool_bootstrap_mount_raid1,
+    pool_can_host_raid1,
 };
 use crate::preflight;
 use crate::preview::{self, PerDiskStyle, PlanFailure, Preview, PreviewCompleteness, PreviewNote};
@@ -589,10 +590,9 @@ struct AddWorkPlan {
     mount_point: MountPoint,
     pool_was_mounted: bool,
     existing_pool_device_count: usize,
-    /// Pre-add count of missing pool members. The preview path renders
-    /// from this plan and cannot see `PoolState`, so the degraded-add
-    /// balance skip (Edit 3/4) keys on this threaded copy to stay in
-    /// lockstep with the execute gate's `self.pool.missing_count`.
+    /// Plan-time count of missing pool members. Dry-run preview uses this as
+    /// a best-effort predictor; execute re-checks the authoritative post-add
+    /// probe before deciding whether the hard RAID1 balance can run.
     pre_add_missing_count: u64,
 }
 
@@ -805,11 +805,9 @@ impl AddWorkPlan {
             let total_after = self.existing_pool_device_count + self.target_count();
             // Defensive lower-bound guard for live-pool adds: normal plans
             // have existing present devices plus at least one committed target.
-            // Skipped on a degraded pool (missing member): the hard convert
-            // would rewrite all chunks with no redundancy, so braid defers
-            // redundancy restoration to `remove-missing`/`replace`. The
-            // dry-run preview must omit the step that the execute gate
-            // (`missing_count == 0`) will also omit. See
+            // The preview uses the plan-time missing count as a predictor;
+            // execute owns the authoritative post-add probe check and may
+            // still skip if the pool degrades after planning. See
             // docs/internals/btrfs/balance-soft.md.
             if total_after >= 2 && self.pre_add_missing_count == 0 {
                 steps.push(Step {
@@ -1547,17 +1545,13 @@ impl AddPlan {
             journal::write_journal(params.paths, &balance_journal)
                 .map_err(|e| AddError::Validation(e.to_string()))?;
 
-            let total_after = self.pool.devices.len() + mapper_paths.len();
-            // Defensive lower-bound guard for live-pool adds: normal plans
-            // have existing present devices plus at least one committed target.
-            // Skipped on a degraded pool (missing_count > 0): the hard convert
-            // would rewrite all chunks while the pool has no redundancy, so
-            // braid defers restoration to `remove-missing`/`replace`. No eprint
-            // in the skip path -- the PreviewNote::Skip from plan_add already
-            // emitted to stderr via emit_notes_to_stderr before any mutation;
-            // a second message here would double the body. See
-            // docs/internals/btrfs/balance-soft.md.
-            if total_after >= 2 && self.pool.missing_count == 0 {
+            // Authoritative live gate for the hard post-add convert. The
+            // preview step is only a plan-time predictor; this final probe
+            // closes the confirmation/passphrase/format/add window where an
+            // existing member can go missing. If the plan was healthy but the
+            // fresh probe is degraded, emit the same skip note now so real-run
+            // stderr explains why the previewed balance did not run.
+            if pool_can_host_raid1(&pool_after) {
                 eprint!(
                     "{}",
                     status_line(
@@ -1570,6 +1564,11 @@ impl AddPlan {
                 eprint!(
                     "{}",
                     status_line(StatusTag::Ok, color_enabled, "pool: RAID1 balance complete",)
+                );
+            } else if self.pool.missing_count == 0 && pool_after.missing_count > 0 {
+                preview::emit_notes_to_stderr(
+                    &[PreviewNote::Skip(format_add_degraded_balance_skip())],
+                    PerDiskStyle::Bracketed,
                 );
             }
 
@@ -1882,12 +1881,12 @@ pub fn plan_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             }
         }
     }
-    // Degraded-add balance skip: surfaced exactly once as a PreviewNote::Skip
-    // so the body renders identically on dry-run stdout and real-run stderr
-    // (replayed before mutation via emit_notes_to_stderr). Gated on the exact
-    // condition the balance step/execute gate use, plus the `!is_noop` /
-    // `pool_was_mounted` guards so a no-op re-add or a bootstrap does not emit
-    // it. The execute gate (Edit 4) must NOT also print this, or it double-emits.
+    // Degraded-add balance skip predicted from the plan-time pool probe:
+    // surfaced exactly once as a PreviewNote::Skip so the body renders
+    // identically on dry-run stdout and real-run stderr (replayed before
+    // mutation via emit_notes_to_stderr). The execute gate may emit the same
+    // note only when the plan was healthy and the fresh post-add probe is
+    // newly degraded, so the two branches stay mutually exclusive.
     if !work_plan.is_noop()
         && work_plan.pool_was_mounted
         && (work_plan.existing_pool_device_count + work_plan.target_count()) >= 2
@@ -4346,6 +4345,10 @@ mod tests {
         /// and the degraded-add skip test models reality instead of leaning
         /// only on the planned `PoolState.missing_count`.
         degraded: bool,
+        /// When set, `pool_show` reports disk1 as MISSING only after disk2 was
+        /// added. This models a plan-healthy pool that degrades in the window
+        /// before the authoritative post-add balance gate.
+        degrade_after_add: bool,
         /// When set, answer `LsblkField` for the disk2 by-id target with the
         /// canonical `HW_*` model/serial/size so the confirm-prompt routing
         /// test can pin that hw is probed via the by-id handle (decision 024).
@@ -4367,6 +4370,7 @@ mod tests {
                 disk2_added: std::sync::atomic::AtomicBool::new(false),
                 disk2_opened: std::sync::atomic::AtomicBool::new(false),
                 degraded: false,
+                degrade_after_add: false,
                 report_hw: false,
             }
         }
@@ -4374,6 +4378,13 @@ mod tests {
         fn degraded() -> Self {
             Self {
                 degraded: true,
+                ..Self::new()
+            }
+        }
+
+        fn degrades_after_add() -> Self {
+            Self {
+                degrade_after_add: true,
                 ..Self::new()
             }
         }
@@ -4389,11 +4400,20 @@ mod tests {
         }
 
         fn pool_show(&self) -> String {
-            let disk2_line = if self.disk2_added.load(std::sync::atomic::Ordering::SeqCst) {
+            let disk2_added = self.disk2_added.load(std::sync::atomic::Ordering::SeqCst);
+            let disk2_line = if disk2_added {
                 "\tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk2\n"
             } else {
                 ""
             };
+            if self.degrade_after_add && disk2_added {
+                return format!(
+                    "Label: none  uuid: {POOL_FSID}\n\
+                     \tTotal devices 2 FS bytes used 16.17MiB\n\
+                     \tdevid    1 size 0 used 0 path MISSING\n\
+                     {disk2_line}"
+                );
+            }
             let present = if disk2_line.is_empty() { 1 } else { 2 };
             // Missing placeholder sits at the devid after the present devices,
             // mirroring AddPlanTestRunner's synthesis; total counts it so
@@ -4891,6 +4911,93 @@ mod tests {
         assert_eq!(
             device_add_count, 1,
             "degraded add must still issue the btrfs device add: {requests:?}"
+        );
+    }
+
+    // Intent: if a healthy planned add becomes degraded before the post-add
+    //   balance gate, execute skips the hard RAID1 convert and tells the
+    //   operator why.
+    // Why it exists: the gate must use the fresh post-add probe, not the
+    //   stale plan-time missing count, or add can rewrite a newly degraded
+    //   pool with no redundancy.
+    // Scenario: disk1 is healthy at planning and execute-start; after disk2 is
+    //   added, the final probe reports disk2 present and disk1 as MISSING.
+    #[test]
+    fn execute_newly_degraded_add_skips_raid1_balance_and_emits_note() {
+        let (_state_tmp, paths, _tmp, pass_path) = execute_fixture();
+        let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
+        let runner = RequestRecordingRunner::new(RecoverableAddRunner::degrades_after_add());
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let confirm = crate::confirm::RecordingConfirm::new();
+        let target = fresh_target(
+            "disk2",
+            "/dev/disk/by-id/virtio-disk2",
+            "22222222-2222-2222-2222-222222222222",
+        );
+        let target_uuid = target.luks_uuid.clone();
+        let pool = PoolState {
+            mounted: true,
+            devices: vec![PoolDevice {
+                mapper: MapperName::from_basename("braid-disk1".into()),
+                luks_uuid: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
+                devid: Devid::new(1),
+                underlying: "/dev/vdb".into(),
+            }],
+            missing_count: 0,
+            missing_devids: vec![],
+            total_devices: 1,
+            fsid: Some(Fsid::parse(POOL_FSID).unwrap()),
+            null_underlying: vec![],
+        };
+        let plan = plan_for_execute_target(
+            AddTargetWork::Fresh(target.clone()),
+            journal_targets_with(target_uuid, fresh_journal_target(&target)),
+            pool,
+        );
+        let config = test_config();
+
+        let mut result = None;
+        let captured = crate::status_tag::testing::capture_with_color(false, || {
+            result = Some(plan.execute(
+                &runner,
+                &fs,
+                &AddParams {
+                    config: &config,
+                    disk_specs: &[],
+                    dry_run: false,
+                    yes: true,
+                    passphrase_stdin: false,
+                    passphrase_file: Some(pass_path.as_path()),
+                    enroll_key_file: None,
+                    luks_format_extra_opts: &[],
+                    progress: ProgressOutput::Off,
+                    paths: &paths,
+                    sleep_inhibitor: &inhibitor,
+                    confirm: &confirm,
+                    passphrase_reader: &RealTty,
+                    backing_path_resolver:
+                        crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
+                },
+            ));
+        });
+
+        result
+            .expect("execute should run")
+            .expect("newly degraded add should still succeed");
+        let requests = runner.requests();
+        let balance_count = requests
+            .iter()
+            .filter(|request| matches!(request, CmdRequest::BtrfsBalanceRaid1 { .. }))
+            .count();
+        assert_eq!(
+            balance_count, 0,
+            "newly degraded add must issue NO RAID1 balance: {requests:?}"
+        );
+        let skip_body = "[skip] pool: RAID1 balance skipped";
+        assert_eq!(
+            captured.matches(skip_body).count(),
+            1,
+            "newly degraded add must emit one balance-skip note; got: {captured:?}"
         );
     }
 
@@ -5408,6 +5515,7 @@ mod tests {
         fail_post_add_probe: bool,
         fail_luks_format: bool,
         omit_new_mapper_from_probe: bool,
+        degraded: bool,
         vanished_after_later_add: Option<String>,
         added_mapper_drift: Option<String>,
         disk2_devid: u64,
@@ -5426,6 +5534,7 @@ mod tests {
                 fail_post_add_probe: false,
                 fail_luks_format: false,
                 omit_new_mapper_from_probe: false,
+                degraded: false,
                 vanished_after_later_add: None,
                 added_mapper_drift: None,
                 disk2_devid: 2,
@@ -5466,6 +5575,11 @@ mod tests {
 
         fn with_new_mapper_omitted_from_probe(mut self) -> Self {
             self.omit_new_mapper_from_probe = true;
+            self
+        }
+
+        fn degraded(mut self) -> Self {
+            self.degraded = true;
             self
         }
 
@@ -5586,16 +5700,24 @@ mod tests {
             {
                 mappers.retain(|mapper| mapper != vanished);
             }
+            let missing_count = if self.degraded { 1 } else { 0 };
             let mut out = format!(
                 "Label: none  uuid: {POOL_FSID}\n\
                  \tTotal devices {} FS bytes used 16.17MiB\n",
-                mappers.len()
+                mappers.len() + missing_count
             );
+            let present_count = mappers.len();
             for mapper in mappers {
                 let probe_mapper = self.probe_mapper_name(&mapper);
                 let devid = self.mapper_devid(&probe_mapper);
                 out.push_str(&format!(
                     "\tdevid    {devid} size 496.00MiB used 121.56MiB path /dev/mapper/{probe_mapper}\n"
+                ));
+            }
+            if self.degraded {
+                let missing_devid = present_count + 1;
+                out.push_str(&format!(
+                    "\tdevid    {missing_devid} size 0 used 0 path MISSING\n"
                 ));
             }
             out
@@ -5846,6 +5968,68 @@ mod tests {
         assert!(
             !reloaded.0.contains_key("7"),
             "newly assigned devid must not inherit a ghost ack"
+        );
+    }
+
+    // Intent: a plan-degraded real `cmd_add` emits the degraded balance-skip
+    //   note once, from the plan notes, and never again from execute.
+    // Why it exists: the execute-time newly-degraded branch must stay mutually
+    //   exclusive with the plan-degraded branch or operators see duplicate
+    //   `[skip]` explanations.
+    // Scenario: the mounted pool has disk1 present and one missing member at
+    //   planning time; disk2 is added successfully, the pool remains degraded,
+    //   and the hard RAID1 balance is skipped.
+    #[test]
+    fn cmd_add_plan_degraded_emits_balance_skip_once() {
+        let (_state_tmp, paths, _tmp, config_path, pass_path) = add_test_setup();
+        let base_runner = AddFullPathRunner::live().degraded();
+        let fs = base_runner.fs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
+        let runner = RequestRecordingRunner::new(base_runner);
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let confirm = crate::confirm::RecordingConfirm::new();
+
+        let mut result = None;
+        let captured = crate::status_tag::testing::capture_with_color(false, || {
+            result = Some(cmd_add(
+                &runner,
+                &fs,
+                &AddParams {
+                    config: &read_test_config(&config_path),
+                    disk_specs: &["disk2=/dev/disk/by-id/virtio-disk2".into()],
+                    dry_run: false,
+                    yes: true,
+                    passphrase_stdin: false,
+                    passphrase_file: Some(pass_path.as_path()),
+                    enroll_key_file: None,
+                    luks_format_extra_opts: &[],
+                    progress: ProgressOutput::Off,
+                    paths: &paths,
+                    sleep_inhibitor: &inhibitor,
+                    confirm: &confirm,
+                    passphrase_reader: &RealTty,
+                    backing_path_resolver:
+                        crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
+                },
+            ));
+        });
+
+        result
+            .expect("cmd_add should run")
+            .expect("plan-degraded add should still succeed");
+        let requests = runner.requests();
+        let balance_count = requests
+            .iter()
+            .filter(|request| matches!(request, CmdRequest::BtrfsBalanceRaid1 { .. }))
+            .count();
+        assert_eq!(
+            balance_count, 0,
+            "plan-degraded add must issue NO RAID1 balance: {requests:?}"
+        );
+        let skip_body = "[skip] pool: RAID1 balance skipped";
+        assert_eq!(
+            captured.matches(skip_body).count(),
+            1,
+            "plan-degraded add must emit one balance-skip note; got: {captured:?}"
         );
     }
 

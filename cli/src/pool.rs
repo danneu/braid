@@ -6,7 +6,7 @@ use crate::progress::{
 };
 use crate::repair_hint;
 use crate::status_tag::{StatusTag, color_enabled_for_stderr, emit_status, status_line};
-use crate::types::{Devid, LuksUuid, MapperName, MountPoint};
+use crate::types::{Devid, LuksUuid, MapperName, MountPoint, PoolState};
 use std::collections::BTreeMap;
 
 #[derive(Debug, thiserror::Error)]
@@ -437,6 +437,13 @@ pub(crate) fn should_restore_raid1(clears_last_missing: bool, present_after: usi
     clears_last_missing && present_after >= 2
 }
 
+/// Authoritative live-pool predicate for execute-time RAID1 balance gates.
+/// Shared so add's hard grow-balance gate and restore's soft balance gate
+/// cannot drift on the topology required to host RAID1 right now.
+pub(crate) fn pool_can_host_raid1(pool: &PoolState) -> bool {
+    pool.missing_count == 0 && pool.devices.len() >= 2
+}
+
 /// Run a soft RAID1 rebalance if the operation just transitioned the pool from
 /// degraded to non-degraded with >=2 present devices. This restores redundancy
 /// for single-profile chunks created during degraded operation (known btrfs bug).
@@ -454,12 +461,12 @@ pub fn maybe_restore_raid1<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     progress: ProgressOutput,
 ) -> Result<(), PoolError> {
     if pre_op_missing_count == 0 {
-        return Ok(()); // Pool wasn't degraded — nothing to restore
+        return Ok(()); // Pool wasn't degraded -- nothing to restore
     }
     let pool_after = probe_pool(runner, fs, mount_point)
         .map_err(|e| PoolError::Failed(format!("post-operation pool probe failed: {e}")))?;
     let color_enabled = color_enabled_for_stderr();
-    if pool_after.missing_count == 0 && pool_after.devices.len() >= 2 {
+    if pool_can_host_raid1(&pool_after) {
         emit_status(&status_line(
             StatusTag::Wait,
             color_enabled,
