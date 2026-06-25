@@ -981,9 +981,10 @@ fn format_add_done(names: &[DiskName]) -> String {
 /// Dry-run preview source of truth for `braid add` plus the execute
 /// inputs pre-computed during planning. `preview()` renders accumulated
 /// notes plus steps from the semantic work plan; `execute()` renders
-/// the accumulated notes to stderr through
-/// `preview::render_notes_for_stderr` before any mutation. Warn notes
-/// use canonical `[warn] <body>` wording and Info notes render bare.
+/// the accumulated Warn/Info notes to stderr before any mutation. The
+/// degraded-balance `PreviewNote::Skip` is a dry-run prediction only:
+/// execute filters it from the replay and lets the live balance gate
+/// re-emit it when the post-add probe is still degraded.
 pub struct AddPlan {
     pub notes: Vec<PreviewNote>,
     work_plan: AddWorkPlan,
@@ -1018,8 +1019,16 @@ impl AddPlan {
         // note (when steps are empty) emits as the bare noop line.
         // `cmd_add`'s preserved-context Err branch pipes `PlanFailure::notes`
         // through the same helper, so success, failure, and dry-run
-        // stdout share one render contract for these notes.
-        preview::emit_notes_to_stderr(&self.notes, PerDiskStyle::Bracketed);
+        // stdout share one render contract for these notes. The
+        // degraded-balance Skip note is a dry-run prediction; execute's
+        // live balance gate below is the sole real-run emitter for it.
+        let replay_notes: Vec<_> = self
+            .notes
+            .iter()
+            .filter(|note| !matches!(note, PreviewNote::Skip(_)))
+            .cloned()
+            .collect();
+        preview::emit_notes_to_stderr(&replay_notes, PerDiskStyle::Bracketed);
 
         // No-op early-return: if the plan has zero steps, the Info
         // note emitted above is the whole user-visible output for
@@ -1548,9 +1557,7 @@ impl AddPlan {
             // Authoritative live gate for the hard post-add convert. The
             // preview step is only a plan-time predictor; this final probe
             // closes the confirmation/passphrase/format/add window where an
-            // existing member can go missing. If the plan was healthy but the
-            // fresh probe is degraded, emit the same skip note now so real-run
-            // stderr explains why the previewed balance did not run.
+            // existing member can go missing or return before the balance.
             if pool_can_host_raid1(&pool_after) {
                 eprint!(
                     "{}",
@@ -1565,7 +1572,10 @@ impl AddPlan {
                     "{}",
                     status_line(StatusTag::Ok, color_enabled, "pool: RAID1 balance complete",)
                 );
-            } else if self.pool.missing_count == 0 && pool_after.missing_count > 0 {
+            } else if pool_after.missing_count > 0 {
+                // Live pool is degraded: skip the hard convert and announce it.
+                // The plan-time Skip note was filtered from the replay above,
+                // so this is the one real-run source for the balance-skip line.
                 preview::emit_notes_to_stderr(
                     &[PreviewNote::Skip(format_add_degraded_balance_skip())],
                     PerDiskStyle::Bracketed,
@@ -1881,12 +1891,9 @@ pub fn plan_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             }
         }
     }
-    // Degraded-add balance skip predicted from the plan-time pool probe:
-    // surfaced exactly once as a PreviewNote::Skip so the body renders
-    // identically on dry-run stdout and real-run stderr (replayed before
-    // mutation via emit_notes_to_stderr). The execute gate may emit the same
-    // note only when the plan was healthy and the fresh post-add probe is
-    // newly degraded, so the two branches stay mutually exclusive.
+    // Degraded-add balance skip predicted from the plan-time pool probe. The
+    // note is dry-run-only on success; real execute filters it from replay and
+    // lets the post-add live gate emit the same body for all degraded outcomes.
     if !work_plan.is_noop()
         && work_plan.pool_was_mounted
         && (work_plan.existing_pool_device_count + work_plan.target_count()) >= 2
@@ -4993,11 +5000,114 @@ mod tests {
             balance_count, 0,
             "newly degraded add must issue NO RAID1 balance: {requests:?}"
         );
-        let skip_body = "[skip] pool: RAID1 balance skipped";
+        let skip_body = format_add_degraded_balance_skip();
         assert_eq!(
-            captured.matches(skip_body).count(),
+            captured.matches(skip_body.as_str()).count(),
             1,
             "newly degraded add must emit one balance-skip note; got: {captured:?}"
+        );
+    }
+
+    // Intent: if a degraded planned add becomes healthy before the post-add
+    //   balance gate, execute runs the hard RAID1 convert and suppresses the
+    //   stale plan-time balance-skip prediction.
+    // Why it exists: real-run output must not say the RAID1 balance was
+    //   skipped immediately before execute balances the now-healthy pool.
+    // Scenario: disk2 was missing at planning time, then returns before the
+    //   final post-add probe; the warning note replays, the skip note does
+    //   not, and the live gate balances.
+    #[test]
+    fn execute_member_returned_add_balances_without_stale_skip_note() {
+        let (_state_tmp, paths, _tmp, pass_path) = execute_fixture();
+        let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
+        let runner = RequestRecordingRunner::new(RecoverableAddRunner::new());
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let confirm = crate::confirm::RecordingConfirm::new();
+        let target = fresh_target(
+            "disk2",
+            "/dev/disk/by-id/virtio-disk2",
+            "22222222-2222-2222-2222-222222222222",
+        );
+        let target_uuid = target.luks_uuid.clone();
+        let pool = PoolState {
+            mounted: true,
+            devices: vec![PoolDevice {
+                mapper: MapperName::from_basename("braid-disk1".into()),
+                luks_uuid: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
+                devid: Devid::new(1),
+                underlying: "/dev/vdb".into(),
+            }],
+            missing_count: 1,
+            missing_devids: vec![Devid::new(2)],
+            total_devices: 2,
+            fsid: Some(Fsid::parse(POOL_FSID).unwrap()),
+            null_underlying: vec![],
+        };
+        let mut plan = plan_for_execute_target(
+            AddTargetWork::Fresh(target.clone()),
+            journal_targets_with(target_uuid, fresh_journal_target(&target)),
+            pool,
+        );
+        plan.notes
+            .push(PreviewNote::Warn(format_add_missing_devices_warning(1)));
+        plan.notes
+            .push(PreviewNote::Skip(format_add_degraded_balance_skip()));
+        let config = test_config();
+
+        let mut result = None;
+        let captured = crate::status_tag::testing::capture_with_color(false, || {
+            result = Some(plan.execute(
+                &runner,
+                &fs,
+                &AddParams {
+                    config: &config,
+                    disk_specs: &[],
+                    dry_run: false,
+                    yes: true,
+                    passphrase_stdin: false,
+                    passphrase_file: Some(pass_path.as_path()),
+                    enroll_key_file: None,
+                    luks_format_extra_opts: &[],
+                    progress: ProgressOutput::Off,
+                    paths: &paths,
+                    sleep_inhibitor: &inhibitor,
+                    confirm: &confirm,
+                    passphrase_reader: &RealTty,
+                    backing_path_resolver:
+                        crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
+                },
+            ));
+        });
+
+        result
+            .expect("execute should run")
+            .expect("member-returned add should still succeed");
+        let requests = runner.requests();
+        let balance_count = requests
+            .iter()
+            .filter(|request| matches!(request, CmdRequest::BtrfsBalanceRaid1 { .. }))
+            .count();
+        assert_eq!(
+            balance_count, 1,
+            "member-returned add should issue exactly one RAID1 balance: {requests:?}"
+        );
+        let device_add_count = requests
+            .iter()
+            .filter(|request| matches!(request, CmdRequest::BtrfsDeviceAdd { .. }))
+            .count();
+        assert_eq!(
+            device_add_count, 1,
+            "member-returned add must still issue the btrfs device add: {requests:?}"
+        );
+        let skip_body = format_add_degraded_balance_skip();
+        assert!(
+            !captured.contains(skip_body.as_str()),
+            "member-returned add must suppress stale balance-skip note; got: {captured:?}"
+        );
+        let warn_body = format_add_missing_devices_warning(1);
+        assert!(
+            captured.contains(warn_body.as_str()),
+            "member-returned add must still replay non-Skip notes; got: {captured:?}"
         );
     }
 
@@ -6025,9 +6135,9 @@ mod tests {
             balance_count, 0,
             "plan-degraded add must issue NO RAID1 balance: {requests:?}"
         );
-        let skip_body = "[skip] pool: RAID1 balance skipped";
+        let skip_body = format_add_degraded_balance_skip();
         assert_eq!(
-            captured.matches(skip_body).count(),
+            captured.matches(skip_body.as_str()).count(),
             1,
             "plan-degraded add must emit one balance-skip note; got: {captured:?}"
         );
@@ -10284,9 +10394,9 @@ mod tests {
             !rendered.contains("btrfs balance to RAID1"),
             "degraded preview must omit the RAID1 balance step; got:\n{rendered}"
         );
-        let skip_body = "[skip] pool: RAID1 balance skipped";
+        let skip_body = format_add_degraded_balance_skip();
         assert_eq!(
-            rendered.matches(skip_body).count(),
+            rendered.matches(skip_body.as_str()).count(),
             1,
             "degraded preview must surface the balance-skip note exactly once; got:\n{rendered}"
         );

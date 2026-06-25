@@ -88,11 +88,13 @@ applied asymmetrically in `cli/src/add.rs`: `plan_add` and
 `AddWorkPlan::render_steps` key on the plan-time `pre_add_missing_count` as a
 best-effort preview predictor, while `AddPlan::execute` makes the authoritative
 go/no-go decision from the fresh post-add `pool_after` probe. Those can diverge
-when a pool member drops after planning; in that case the real run skips the
-convert and surfaces the same `[skip]` note on stderr so the operator is told
-why the previewed balance did not run. This is the same advisory-plan /
-authoritative-execute split as `should_restore_raid1` plus
-`maybe_restore_raid1`, and fits ADR-022's execution-time validation carve-out.
+when pool health changes after planning: if a member drops, the real run skips
+the convert and surfaces the `[skip]` note from the execute gate; if a missing
+member returns, the real run balances and suppresses the previewed skip. This
+keeps the real-run balance-skip line tied to live state instead of replaying a
+stale plan-time prediction. This is the same advisory-plan /
+authoritative-execute split as `should_restore_raid1` plus `maybe_restore_raid1`,
+and fits ADR-022's execution-time validation carve-out.
 
 This is a deliberate **deferral**, not a hazard fix. The hard convert does
 succeed on a degraded pool today -- `btrfs device add` works on a degraded
