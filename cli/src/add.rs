@@ -577,6 +577,53 @@ impl AddTargetWork {
     }
 }
 
+/// Plan-time preview prediction of the add pool phase. This is preview-only:
+/// `AddPlan::execute` makes the authoritative balance call independently from
+/// the fresh post-add `pool_after` probe (`pool_can_host_raid1`) and may
+/// diverge from this prediction when a member drops or returns after planning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AddPreviewPhase {
+    /// Pool not mounted: preview renders mkfs and mount. Single-vs-RAID1
+    /// topology follows the target count, so it stays local to the work plan.
+    Bootstrap,
+    /// Pool live: preview renders add-target work followed by a predicted
+    /// balance decision.
+    LiveAdd(PreviewedBalance),
+}
+
+/// Plan-time prediction of the post-device-add RAID1 hard convert. Consumed
+/// only by the preview step builder and the dry-run skip note.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreviewedBalance {
+    /// The plan-time pool is whole and total_after >= 2, so preview predicts
+    /// the hard RAID1 convert will run.
+    Run,
+    /// The plan-time pool is still degraded and total_after >= 2, so preview
+    /// predicts the convert is skipped and emits one skip note.
+    SkipDegraded,
+    /// total_after < 2; no balance and no note.
+    NotApplicable,
+}
+
+/// Decide the add preview phase once from the planning pool snapshot and target
+/// count so the dry-run steps and skip note share one source.
+fn add_preview_phase(pool: &PoolState, target_count: usize) -> AddPreviewPhase {
+    if !pool.mounted {
+        return AddPreviewPhase::Bootstrap;
+    }
+
+    let total_after = pool.devices.len() + target_count;
+    let balance = if total_after < 2 {
+        PreviewedBalance::NotApplicable
+    } else if pool.missing_count == 0 {
+        PreviewedBalance::Run
+    } else {
+        PreviewedBalance::SkipDegraded
+    };
+
+    AddPreviewPhase::LiveAdd(balance)
+}
+
 /// Semantic add work plan. `initial_journal_targets` is keyed by
 /// `LuksUuid` so the journaled identity is the authoritative key from
 /// t=0; operator-visible iteration sorts by `DiskName` separately. The
@@ -588,12 +635,7 @@ struct AddWorkPlan {
     targets: Vec<AddTargetWork>,
     initial_journal_targets: LuksUuidMap<journal::AddJournalTarget>,
     mount_point: MountPoint,
-    pool_was_mounted: bool,
-    existing_pool_device_count: usize,
-    /// Plan-time count of missing pool members. Dry-run preview uses this as
-    /// a best-effort predictor; execute re-checks the authoritative post-add
-    /// probe before deciding whether the hard RAID1 balance can run.
-    pre_add_missing_count: u64,
+    preview_phase: AddPreviewPhase,
 }
 
 /// Single definition of the `DiskName`-sorted add-target order used by
@@ -609,10 +651,6 @@ fn sort_targets_by_name(targets: &[AddTargetWork]) -> Vec<&AddTargetWork> {
 impl AddWorkPlan {
     fn is_noop(&self) -> bool {
         self.targets.is_empty()
-    }
-
-    fn target_count(&self) -> usize {
-        self.targets.len()
     }
 
     fn mapper_paths(&self) -> Vec<String> {
@@ -744,85 +782,81 @@ impl AddWorkPlan {
             return steps;
         }
 
-        if !self.pool_was_mounted {
-            let mapper_paths = self.mapper_paths();
-            if mapper_paths.len() >= 2 {
-                steps.push(Step {
-                    risk: "safe",
-                    description: format!("mkfs.btrfs RAID1 {}", mapper_paths.join(" ")),
-                    commands: vec![CmdRequest::MkfsBtrfsRaid1 {
-                        devices: mapper_paths.clone(),
-                    }],
-                });
-                steps.push(Step {
-                    risk: "safe",
-                    description: format!("mount -> {}", self.mount_point),
-                    commands: vec![CmdRequest::Mount {
-                        device: mapper_paths[0].clone(),
-                        mount_point: self.mount_point.clone(),
-                    }],
-                });
-            } else {
-                let mapper_path = mapper_paths
-                    .first()
-                    .expect("non-noop bootstrap plan must have a mapper path")
-                    .clone();
-                steps.push(Step {
-                    risk: "safe",
-                    description: format!("mkfs.btrfs {mapper_path}"),
-                    commands: vec![CmdRequest::MkfsBtrfs {
-                        device: mapper_path.clone(),
-                    }],
-                });
-                steps.push(Step {
-                    risk: "safe",
-                    description: format!("mount -> {}", self.mount_point),
-                    commands: vec![CmdRequest::Mount {
-                        device: mapper_path,
-                        mount_point: self.mount_point.clone(),
-                    }],
-                });
-            }
-        } else {
-            // Operator-visible iteration: sort by DiskName for the device-add
-            // step ordering shown in dry-run preview.
-            for target in &sorted_targets {
-                if let AddTargetWork::Fresh(target) = target {
+        match self.preview_phase {
+            AddPreviewPhase::Bootstrap => {
+                let mapper_paths = self.mapper_paths();
+                if mapper_paths.len() >= 2 {
                     steps.push(Step {
                         risk: "safe",
-                        description: format!(
-                            "btrfs device add {} {}",
-                            target.mapper_path, self.mount_point
-                        ),
-                        commands: vec![CmdRequest::BtrfsDeviceAdd {
-                            device: target.mapper_path.clone(),
+                        description: format!("mkfs.btrfs RAID1 {}", mapper_paths.join(" ")),
+                        commands: vec![CmdRequest::MkfsBtrfsRaid1 {
+                            devices: mapper_paths.clone(),
+                        }],
+                    });
+                    steps.push(Step {
+                        risk: "safe",
+                        description: format!("mount -> {}", self.mount_point),
+                        commands: vec![CmdRequest::Mount {
+                            device: mapper_paths[0].clone(),
                             mount_point: self.mount_point.clone(),
-                            force: false,
+                        }],
+                    });
+                } else {
+                    let mapper_path = mapper_paths
+                        .first()
+                        .expect("non-noop bootstrap plan must have a mapper path")
+                        .clone();
+                    steps.push(Step {
+                        risk: "safe",
+                        description: format!("mkfs.btrfs {mapper_path}"),
+                        commands: vec![CmdRequest::MkfsBtrfs {
+                            device: mapper_path.clone(),
+                        }],
+                    });
+                    steps.push(Step {
+                        risk: "safe",
+                        description: format!("mount -> {}", self.mount_point),
+                        commands: vec![CmdRequest::Mount {
+                            device: mapper_path,
+                            mount_point: self.mount_point.clone(),
                         }],
                     });
                 }
             }
-            let total_after = self.existing_pool_device_count + self.target_count();
-            // Defensive lower-bound guard for live-pool adds: normal plans
-            // have existing present devices plus at least one committed target.
-            // The preview uses the plan-time missing count as a predictor;
-            // execute owns the authoritative post-add probe check and may
-            // still skip if the pool degrades after planning. See
-            // docs/internals/btrfs/balance-soft.md.
-            if total_after >= 2 && self.pre_add_missing_count == 0 {
-                steps.push(Step {
-                    risk: "long",
-                    description: "btrfs balance to RAID1".into(),
-                    // HARD convert, not ,soft. When growing an already-RAID1
-                    // pool (3rd+ device), every chunk is already RAID1, so only
-                    // a hard rewrite redistributes copies onto the new device;
-                    // ,soft would skip them all and leave it empty. A 1->2 add
-                    // converts existing single chunks either way. See
-                    // docs/internals/btrfs/balance-soft.md.
-                    commands: vec![CmdRequest::BtrfsBalanceRaid1 {
-                        mount_point: self.mount_point.clone(),
-                    }],
-                });
+            AddPreviewPhase::LiveAdd(balance) => {
+                // Operator-visible iteration: sort by DiskName for the device-add
+                // step ordering shown in dry-run preview.
+                for target in &sorted_targets {
+                    if let AddTargetWork::Fresh(target) = target {
+                        steps.push(Step {
+                            risk: "safe",
+                            description: format!(
+                                "btrfs device add {} {}",
+                                target.mapper_path, self.mount_point
+                            ),
+                            commands: vec![CmdRequest::BtrfsDeviceAdd {
+                                device: target.mapper_path.clone(),
+                                mount_point: self.mount_point.clone(),
+                                force: false,
+                            }],
+                        });
+                    }
+                }
+                if balance == PreviewedBalance::Run {
+                    steps.push(Step {
+                        risk: "long",
+                        description: "btrfs balance to RAID1".into(),
+                        // HARD convert, not ,soft. When growing an already-RAID1
+                        // pool (3rd+ device), every chunk is already RAID1, so only
+                        // a hard rewrite redistributes copies onto the new device;
+                        // ,soft would skip them all and leave it empty. A 1->2 add
+                        // converts existing single chunks either way. See
+                        // docs/internals/btrfs/balance-soft.md.
+                        commands: vec![CmdRequest::BtrfsBalanceRaid1 {
+                            mount_point: self.mount_point.clone(),
+                        }],
+                    });
+                }
             }
         }
 
@@ -1895,9 +1929,7 @@ pub fn plan_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     // note is dry-run-only on success; real execute filters it from replay and
     // lets the post-add live gate emit the same body for all degraded outcomes.
     if !work_plan.is_noop()
-        && work_plan.pool_was_mounted
-        && (work_plan.existing_pool_device_count + work_plan.target_count()) >= 2
-        && work_plan.pre_add_missing_count > 0
+        && work_plan.preview_phase == AddPreviewPhase::LiveAdd(PreviewedBalance::SkipDegraded)
     {
         notes.push(PreviewNote::Skip(format_add_degraded_balance_skip()));
     }
@@ -2266,14 +2298,13 @@ fn build_add_work_plan<R: CommandRunner>(
         }
     }
 
+    let preview_phase = add_preview_phase(input.pool, targets.len());
     Ok(AddWorkPlan {
         prelude: build_add_credential_prelude(input, &targets),
         targets,
         initial_journal_targets,
         mount_point: input.mount_point.clone(),
-        pool_was_mounted: input.pool.mounted,
-        existing_pool_device_count: input.pool.devices.len(),
-        pre_add_missing_count: input.pool.missing_count,
+        preview_phase,
     })
 }
 
@@ -3022,6 +3053,8 @@ mod tests {
             by_id_path: by_id.clone(),
             state: probed_state,
         }];
+        let targets = vec![target];
+        let preview_phase = add_preview_phase(&pool, targets.len());
         AddPlan {
             notes: vec![],
             work_plan: AddWorkPlan {
@@ -3031,12 +3064,10 @@ mod tests {
                     verify_targets: vec![],
                     pool_target_count: 0,
                 },
-                targets: vec![target],
+                targets,
                 initial_journal_targets,
                 mount_point: MountPoint::new("/mnt/storage".into()),
-                pool_was_mounted: pool.mounted,
-                existing_pool_device_count: pool.devices.len(),
-                pre_add_missing_count: pool.missing_count,
+                preview_phase,
             },
             config: Config::new(MountPoint::new("/mnt/storage".into())).unwrap(),
             parsed: vec![(name.clone(), by_id.clone())],
@@ -10364,6 +10395,40 @@ mod tests {
         );
     }
 
+    /* Intent: add_preview_phase encodes the full preview-side balance
+     * decision table used by dry-run steps and the degraded-add skip note.
+     * Why it exists: the two preview readers must keep sharing one
+     * typed prediction instead of reintroducing separate mounted/count/
+     * missing-count math.
+     * Scenario: exercise bootstrap, live whole, live degraded, and the
+     * defensive live lower-bound branch.
+     */
+    #[test]
+    fn add_preview_phase_decision_table() {
+        let whole = pool_mounted_with_fsid("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+        assert_eq!(
+            add_preview_phase(&pool_unmounted(), 1),
+            AddPreviewPhase::Bootstrap
+        );
+        assert_eq!(
+            add_preview_phase(&whole, 1),
+            AddPreviewPhase::LiveAdd(PreviewedBalance::Run)
+        );
+
+        let mut degraded = whole.clone();
+        degraded.missing_count = 1;
+        degraded.missing_devids = vec![Devid::new(2)];
+        degraded.total_devices = 2;
+        assert_eq!(
+            add_preview_phase(&degraded, 1),
+            AddPreviewPhase::LiveAdd(PreviewedBalance::SkipDegraded)
+        );
+        assert_eq!(
+            add_preview_phase(&whole, 0),
+            AddPreviewPhase::LiveAdd(PreviewedBalance::NotApplicable)
+        );
+    }
+
     /* Intent: on a degraded pool (a member missing), the dry-run preview
      * adds the disk but OMITS the `btrfs balance to RAID1` step and
      * surfaces exactly one `[skip]` note explaining redundancy is deferred.
@@ -11222,7 +11287,7 @@ mod tests {
         .expect("fresh target should keep mixed add from being a no-op");
 
         assert!(!work_plan.is_noop(), "expected mixed add to do work");
-        assert_eq!(work_plan.target_count(), 1);
+        assert_eq!(work_plan.targets.len(), 1);
         let confirm_disks = &work_plan.prelude.confirm_disks;
         assert_eq!(
             confirm_disks.len(),
