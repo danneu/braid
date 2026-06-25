@@ -3107,6 +3107,83 @@ mod tests {
         assert!(!plan.cleanup_uncertain);
     }
 
+    // Intent: an unmounted user lock does not consult the exclusive-op preflight;
+    //   a stale `balance` reading must not make the plan refuse.
+    // Why it exists: "skip the preflight when not mounted" is an invariant
+    //   (ADR-024 item 7; lock.md step 2). The Snapshot::Unmounted arm bypasses
+    //   lock_preflight_pause_decision entirely. A refactor routing it through the
+    //   user preflight (e.g. by re-probing an FSID) would make an unmounted lock
+    //   spuriously fail during a balance -- and every existing test would stay
+    //   green because all unmounted tests leave exclusive_operation at "none".
+    //   In user mode that regression surfaces as the `.expect()` below panicking
+    //   (the preflight returns Err, so plan_lock fails), not as the pause
+    //   assertion failing; the pause assertion is the direct discriminator in the
+    //   systemd-stop sibling test, where the preflight returns Ok(true).
+    // Scenario: pool is not mounted but sysfs still reports a stale `balance`
+    //   exclusive op (a state only constructible in a unit test); operator runs
+    //   `braid lock`.
+    #[test]
+    fn unmounted_user_lock_ignores_active_exclusive_op() {
+        // FSID-probe mocks armed so a re-probe regression reaches the preflight
+        // (and bites on the seeded op) instead of dying on a missing BtrfsFilesystemShow.
+        let runner = lock_with_fsid_probe_mocks(MockRunner::default().with_output(
+            CmdRequest::MountpointCheck {
+                path: MountPoint::new("/mnt/storage".to_owned()).into(),
+            },
+            lock_err_raw("mountpoint -q /mnt/storage", 1, ""),
+        ));
+        let fs = lock_fs(&[]).with_excl_op("balance");
+        let config = lock_test_config();
+        let membership = lock_test_membership();
+
+        let plan = plan_lock(&runner, &fs, &config, &membership, LockMode::User)
+            .expect("unmounted lock must plan without consulting the exclusive-op preflight");
+
+        assert!(
+            !plan.pool_was_mounted,
+            "test must exercise the Unmounted arm"
+        );
+        assert!(
+            !plan.pause_balance_before_unmount,
+            "unmounted lock must not pause for a balance: the preflight is skipped when not mounted"
+        );
+    }
+
+    // Intent: same invariant under the systemd-stop preflight contract -- an
+    //   unmounted ExecStop lock does not pause for a stale running balance.
+    // Why it exists: SystemdStop's preflight returns Ok(true) for a running
+    //   balance, so routing the Unmounted arm through it would set
+    //   pause_balance_before_unmount = true and make ExecStop try to pause a
+    //   balance on a pool that is not mounted -- silently, with all tests green.
+    // Scenario: shutdown ExecStop runs lock on an already-unmounted pool while
+    //   sysfs still reports a stale `balance` op.
+    #[test]
+    fn unmounted_systemd_stop_lock_ignores_active_exclusive_op() {
+        // FSID-probe mocks armed so a re-probe regression reaches the preflight
+        // (and bites on the seeded op) instead of dying on a missing BtrfsFilesystemShow.
+        let runner = lock_with_fsid_probe_mocks(MockRunner::default().with_output(
+            CmdRequest::MountpointCheck {
+                path: MountPoint::new("/mnt/storage".to_owned()).into(),
+            },
+            lock_err_raw("mountpoint -q /mnt/storage", 1, ""),
+        ));
+        let fs = lock_fs(&[]).with_excl_op("balance");
+        let config = lock_test_config();
+        let membership = lock_test_membership();
+
+        let plan = plan_lock(&runner, &fs, &config, &membership, LockMode::SystemdStop)
+            .expect("unmounted systemd-stop lock must plan without consulting the preflight");
+
+        assert!(
+            !plan.pool_was_mounted,
+            "test must exercise the Unmounted arm"
+        );
+        assert!(
+            !plan.pause_balance_before_unmount,
+            "unmounted systemd-stop lock must not pause for a balance: preflight is skipped when not mounted"
+        );
+    }
+
     // Intent: a mapper named like a member but backed by a different
     // readable UUID is not classified as that member.
     // Why it exists: `braid-<DiskName>` is a cleanup namespace, not
