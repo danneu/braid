@@ -2817,6 +2817,66 @@ mod tests {
         assert!(!r.message.contains("/dev/vdb"), "{}", r.message);
     }
 
+    // Intent: an offline member is SMART-probed through its persisted by-id
+    //   handle while an assembled sibling in the same mounted pool is probed
+    //   through its live backing path.
+    // Why it exists: existing live-path tests covered only the assembled arm,
+    //   and multi-drive tests used no live pool, so nothing pinned the offline
+    //   arm inside a mounted pool where a refactor could route it to a sibling's
+    //   live node.
+    // Scenario: disk2 is assembled at /dev/vdc, but disk1 is
+    //   present-but-unassembled; doctor must read disk1's stable by-id handle,
+    //   not disk2's live node.
+    #[test]
+    fn check_smart_selftest_offline_member_queries_by_id_not_live() {
+        let (dir, paths) = isolated_paths();
+        save_doctor_membership(
+            &paths,
+            &[
+                (1, "disk1", "/dev/disk/by-id/disk1", Some(Devid::new(1))),
+                (2, "disk2", "/dev/disk/by-id/disk2", Some(Devid::new(2))),
+            ],
+        );
+        let (disk1_req, disk1_out) = smartctl_selftest_json(
+            "/dev/disk/by-id/disk1",
+            "smartctl-selftest-ata-recent-pass.json",
+            0,
+        );
+        let (disk2_req, disk2_out) =
+            smartctl_selftest_json("/dev/vdc", "smartctl-selftest-ata-stale.json", 0);
+        let runner = pool_state_runner(vec![("braid-disk2", 2, "/dev/vdc", test_uuid(2))], &[])
+            .with_output(disk1_req, disk1_out)
+            .with_output(disk2_req, disk2_out);
+        let fs = DoctorMockFs::mounted_btrfs_only();
+        let mut ctx =
+            DoctorContext::for_test_parsed_with_fs(&runner, &fs, &paths, valid_config_json());
+
+        let results = check_smart_selftests(&mut ctx);
+        drop(dir);
+
+        let smart_devices: Vec<String> = runner
+            .requests()
+            .into_iter()
+            .filter_map(|r| match r {
+                CmdRequest::SmartctlSelftestLogJson { device } => Some(device),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            smart_devices,
+            vec!["/dev/disk/by-id/disk1".to_owned(), "/dev/vdc".to_owned(),],
+        );
+
+        let disk1 = by_subject(&results, "disk1");
+        assert_eq!(disk1.status, CheckStatus::Ok);
+        assert!(
+            disk1.message.contains("passed ~2 days ago"),
+            "{}",
+            disk1.message
+        );
+        assert_eq!(by_subject(&results, "disk2").status, CheckStatus::Warn);
+    }
+
     // Intent: declared_disks issues its LUKS-identity probe against the persisted
     //   by-id handle, not the live backing path, even when the member is
     //   assembled in a mounted pool.
