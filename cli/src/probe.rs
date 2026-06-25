@@ -274,21 +274,20 @@ fn probe_mapper_open<R: CommandRunner>(
 // probe_pool
 // ---------------------------------------------------------------------------
 
-/// Devid-only pool view for the alert pipeline. Ack and monitor need mount
-/// state, live devids, btrfs-MISSING devids, and null-underlying devices,
-/// but not per-device LUKS identity, FSID, or device counts.
+/// Alert-pipeline pool view. Ack and monitor need mount state, live devids,
+/// btrfs-MISSING devids, null-underlying devices, and the optional pool FSID,
+/// but not per-device LUKS identity or device counts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlertPoolState {
     pub mounted: bool,
     pub present_devids: Vec<Devid>,
     pub missing_devids: Vec<Devid>,
     pub null_underlying: Vec<NullUnderlyingDevice>,
-    /// btrfs filesystem UUID, the strongest field of the ENOSPC baseline's
+    /// Canonical btrfs filesystem UUID, the strongest field of the ENOSPC baseline's
     /// `PoolKey`. `None` only when the probe could not extract it; the monitor
     /// and ack then build no usable `PoolKey` rather than weaken the identity
-    /// guard. Carried as a plain `String` because the alert pipeline only
-    /// compares it, never re-parses it.
-    pub fs_uuid: Option<String>,
+    /// guard.
+    pub fsid: Option<Fsid>,
 }
 
 /// Named carrier for the two devid sets `compute_alert_state` and
@@ -335,8 +334,9 @@ impl AlertPoolState {
 
 /// Narrowed alert-pipeline probe for `cmd_ack` and `cmd_monitor`. Preserves
 /// `probe_pool`'s mount-state, btrfs-MISSING, and null-underlying detection
-/// while omitting per-device LUKS UUID lookup and FSID extraction because the
-/// alert pipeline is devid-keyed and does not consume either identity.
+/// while omitting per-device LUKS UUID lookup. Unlike `probe_pool`, it tolerates
+/// a missing FSID so device-alert paths can still run while ENOSPC keying falls
+/// back to "no usable `PoolKey`".
 pub fn probe_pool_alerts<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
@@ -349,7 +349,7 @@ pub fn probe_pool_alerts<R: CommandRunner, F: Filesystem + ?Sized>(
                 present_devids: vec![],
                 missing_devids: vec![],
                 null_underlying: vec![],
-                fs_uuid: None,
+                fsid: None,
             });
         }
         Some(fstype) if fstype != "btrfs" => {
@@ -365,7 +365,7 @@ pub fn probe_pool_alerts<R: CommandRunner, F: Filesystem + ?Sized>(
         mount_point: mount_point.clone(),
     })?;
     let show = parse_btrfs_filesystem_show(&show_raw)?;
-    let fs_uuid = show.uuid.as_ref().map(|u| u.as_str().to_owned());
+    let fsid = show.uuid;
 
     let mut present_devids = Vec::new();
     let mut null_underlying = Vec::new();
@@ -413,7 +413,7 @@ pub fn probe_pool_alerts<R: CommandRunner, F: Filesystem + ?Sized>(
         present_devids,
         missing_devids: show.missing_devids,
         null_underlying,
-        fs_uuid,
+        fsid,
     })
 }
 
@@ -1962,7 +1962,7 @@ mod tests {
         assert!(result.missing_devids.is_empty());
         assert!(result.null_underlying.is_empty());
         assert_eq!(
-            result.fs_uuid.as_deref(),
+            result.fsid.as_ref().map(Fsid::as_str),
             Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"),
             "alert probe must carry the FS UUID for the ENOSPC baseline key"
         );
@@ -2098,7 +2098,7 @@ mod tests {
         assert!(result.missing_devids.is_empty());
         assert!(result.null_underlying.is_empty());
         assert_eq!(
-            result.fs_uuid, None,
+            result.fsid, None,
             "an absent uuid line yields no usable PoolKey identity"
         );
     }
@@ -2234,7 +2234,7 @@ mod tests {
                     devid: Devid::new(3),
                 },
             ],
-            fs_uuid: None,
+            fsid: None,
         };
 
         assert_eq!(
@@ -2266,7 +2266,7 @@ mod tests {
                     devid: Devid::new(3),
                 },
             ],
-            fs_uuid: None,
+            fsid: None,
         };
 
         assert_eq!(
@@ -2304,7 +2304,7 @@ mod tests {
                 mapper: MapperName::from_basename("braid-three".into()),
                 devid: Devid::new(3),
             }],
-            fs_uuid: None,
+            fsid: None,
         };
 
         let devids = state.alert_devids();

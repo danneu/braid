@@ -129,7 +129,7 @@ mod ups;
 
 #[allow(unused_imports)]
 pub(crate) use ack::{
-    ACK_DEVICE_SIZE, ACK_FS_UUID, AckPanicFilesystem, AckPanicRunner, ack_fs_btrfs, ack_fs_ext4,
+    ACK_DEVICE_SIZE, ACK_FSID, AckPanicFilesystem, AckPanicRunner, ack_fs_btrfs, ack_fs_ext4,
     ack_fs_not_mounted, ack_mounted_fs_that_touches_smartd, ack_mounted_probe_runner,
     ack_mounted_probe_runner_no_uuid_with_enospc_usage, ack_mounted_probe_runner_with_device_stats,
     ack_mounted_probe_runner_with_enospc_usage, ack_mounted_probe_runner_with_healthy_enospc_usage,
@@ -173,7 +173,7 @@ pub(crate) use lock::{
 };
 #[allow(unused_imports)]
 pub(crate) use monitor::{
-    BTRFS_SHOW_2DISK_1MISSING, BTRFS_SHOW_2DISK_NO_UUID, MONITOR_FS_UUID, MonitorOverride,
+    BTRFS_SHOW_2DISK_1MISSING, BTRFS_SHOW_2DISK_NO_UUID, MONITOR_FSID, MonitorOverride,
     MonitorReconcileRunner, MonitorTestRunner, USAGE_DEVICE_SIZE,
     assert_monitor_single_computation_error, monitor_fs_btrfs, monitor_fs_ext4,
     monitor_fs_mountinfo_error, monitor_fs_not_mounted, monitor_mp, usage_2disk,

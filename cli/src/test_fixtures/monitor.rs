@@ -16,9 +16,9 @@ const MOUNTINFO_BTRFS: &str =
     "36 35 0:32 / /mnt/storage rw,noatime shared:1 - btrfs /dev/mapper/braid-vdb rw\n";
 const MOUNTINFO_EXT4: &str = "36 35 0:32 / /mnt/storage rw,noatime shared:1 - ext4 /dev/sda1 rw\n";
 
-/// Canonical FS UUID for the monitor 2-disk show, also the `pool_key.fs_uuid`
+/// Canonical FSID for the monitor 2-disk show, also the `pool_key.fsid`
 /// the keying-baseline tests seed and compare against.
-pub(crate) const MONITOR_FS_UUID: &str = "de2b8517-f972-45fc-b121-3e160c8ea432";
+pub(crate) const MONITOR_FSID: &str = "de2b8517-f972-45fc-b121-3e160c8ea432";
 
 /// Device size (bytes) for the monitor usage fixtures' large-pool model, chosen
 /// so the ENOSPC threshold caps at 1 GiB and the at-risk margin has room to vary
@@ -31,7 +31,7 @@ const BTRFS_SHOW_2DISK: &str = "Label: none  uuid: de2b8517-f972-45fc-b121-3e160
     \tdevid    2 size 1008.00MiB used 209.50MiB path /dev/mapper/braid-vdc\n";
 
 /// Same two-disk pool as `BTRFS_SHOW_2DISK` but with no `uuid:` line, so
-/// `probe_pool_alerts` yields `fs_uuid: None` and `live_pool_key` returns `None`.
+/// `probe_pool_alerts` yields `fsid: None` and `live_pool_key` returns `None`.
 /// Drives the identity-gap monitor test (live key cannot be built, but the pool
 /// is at risk).
 pub(crate) const BTRFS_SHOW_2DISK_NO_UUID: &str = "Label: none\n\
@@ -149,7 +149,7 @@ pub(crate) fn usage_2disk_healthy() -> String {
 /// Four-disk, one-low *predicate-healthy* usage: three roomy devices plus one at
 /// 50 MiB. The pool survives any single loss (large positive margin) even though
 /// one device is far below the raw threshold -- the F2 re-arm guard. The monitor
-/// 2-disk show only supplies fs_uuid + missing_count(0) here; the helper consumes
+/// 2-disk show only supplies FSID + missing_count(0) here; the helper consumes
 /// the four usage devices.
 pub(crate) fn usage_4disk_one_low() -> String {
     device_usage_raw_body(&[
@@ -258,7 +258,7 @@ impl MonitorTestRunner {
     }
 
     /// Build a runner with a custom usage payload *and* a one-shot override
-    /// (typically a `BtrfsShowPayload` to control fs_uuid/membership), so the
+    /// (typically a `BtrfsShowPayload` to control FSID/membership), so the
     /// identity-gap test can run an at-risk pool whose show carries no FS UUID.
     pub(crate) fn with_usage_and_override(
         usage: impl Into<String>,

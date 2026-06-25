@@ -9,7 +9,7 @@ use crate::parse::types::{BtrfsDeviceStatsOutput, BtrfsDeviceUsageEntry, DeviceE
 use crate::probe::AlertDevids;
 use crate::state_io::atomic_write;
 use crate::state_paths::StatePaths;
-use crate::types::Devid;
+use crate::types::{Devid, Fsid};
 
 // ---------------------------------------------------------------------------
 // Alert model
@@ -546,18 +546,21 @@ pub fn clear_alert_cleanup_pending(paths: &StatePaths) -> Result<(), std::io::Er
 // ENOSPC-risk suppression baseline (enospc-ack.json)
 // ---------------------------------------------------------------------------
 
-/// Pool identity + geometry the ENOSPC baseline is bound to: the btrfs FS UUID
-/// plus the sorted per-device `(devid, device_size)` pairs.
+/// Pool identity + geometry the ENOSPC baseline is bound to: the btrfs FSID plus
+/// the sorted per-device `(devid, device_size)` pairs.
 ///
 /// Including `device_size` (not bare devid) is what invalidates a baseline
-/// across a same-devid `braid replace`/resize, where `fs_uuid + devids` alone
+/// across a same-devid `braid replace`/resize, where `fsid + devids` alone
 /// would still match: `btrfs replace` keeps the source devid but the chunk-pair
 /// capacity geometry the predicate depends on changes. `device_size` is stable
 /// across ordinary fill (only `used`/`unallocated` move), so the key changes
 /// only on a real topology/geometry event, never while a pool is merely filling.
+/// This is the btrfs filesystem UUID (pool identity), deliberately not ADR 024's
+/// LUKS UUID per-disk identity; per-device alert state stays devid-keyed per
+/// ADR 014.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PoolKey {
-    pub fs_uuid: String,
+    pub fsid: Fsid,
     pub devices: Vec<(Devid, u64)>,
 }
 
@@ -613,20 +616,20 @@ impl EnospcAck {
 }
 
 /// Build the live `PoolKey` for the current probe, or `None` when the pool's
-/// `fs_uuid` is absent.
+/// FSID is absent.
 ///
 /// There is deliberately no membership-only fallback: a `None` key means "no
 /// usable identity", and both the monitor and ack treat it as no-usable-baseline
 /// rather than invent a weaker key that could spuriously match a stored one. The
 /// strongest identity field (FS UUID) being absent must not silently weaken the
 /// guard.
-pub fn live_pool_key(fs_uuid: Option<&str>, devices: &[BtrfsDeviceUsageEntry]) -> Option<PoolKey> {
-    let fs_uuid = fs_uuid?;
+pub fn live_pool_key(fsid: Option<&Fsid>, devices: &[BtrfsDeviceUsageEntry]) -> Option<PoolKey> {
+    let fsid = fsid?;
     let mut pairs: Vec<(Devid, u64)> = devices.iter().map(|d| (d.devid, d.device_size)).collect();
     // Sort so a membership reordering in btrfs output cannot churn the key.
     pairs.sort_unstable();
     Some(PoolKey {
-        fs_uuid: fs_uuid.to_owned(),
+        fsid: fsid.clone(),
         devices: pairs,
     })
 }
@@ -753,6 +756,10 @@ mod tests {
             allocations: Vec::new(),
             unallocated: 0,
         }
+    }
+
+    fn fsid(raw: &str) -> Fsid {
+        Fsid::parse(raw).unwrap()
     }
 
     #[test]
@@ -2317,7 +2324,7 @@ mod tests {
 
         let ack = EnospcAck {
             pool_key: PoolKey {
-                fs_uuid: "de2b8517-f972-45fc-b121-3e160c8ea432".to_owned(),
+                fsid: fsid("de2b8517-f972-45fc-b121-3e160c8ea432"),
                 devices: vec![(Devid::new(1), 1056964608), (Devid::new(2), 1056964608)],
             },
             snoozed_until: 1_700_000_000,
@@ -2333,7 +2340,7 @@ mod tests {
             "snoozed_until is a flat top-level integer"
         );
         assert!(
-            on_disk["pool_key"]["fs_uuid"].is_string(),
+            on_disk["pool_key"]["fsid"].is_string(),
             "pool_key stays a nested object"
         );
 
@@ -2355,7 +2362,7 @@ mod tests {
     #[test]
     fn enospc_ack_snooze_sets_deadline_one_interval_out() {
         let pool_key = PoolKey {
-            fs_uuid: "fs".to_owned(),
+            fsid: fsid("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"),
             devices: vec![(Devid::new(1), 1), (Devid::new(2), 1)],
         };
         let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
@@ -2384,7 +2391,7 @@ mod tests {
         let interval = ENOSPC_REMINDER_INTERVAL.as_secs();
         let ack = |snoozed_until| EnospcAck {
             pool_key: PoolKey {
-                fs_uuid: "fs".to_owned(),
+                fsid: fsid("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"),
                 devices: vec![(Devid::new(1), 1), (Devid::new(2), 1)],
             },
             snoozed_until,
@@ -2421,19 +2428,21 @@ mod tests {
         );
     }
 
-    // Intent: live_pool_key returns None when fs_uuid is absent and a
+    // Intent: live_pool_key returns None when FSID is absent and a
     //   devid-sorted key when present.
     // Why it exists: the monitor and ack both treat a None key as no-usable
     //   identity (fire armed / write no baseline); a membership-only fallback
     //   would silently weaken the guard. Sorting pins that btrfs row order cannot
     //   churn the key.
-    // Scenario: a usage probe yields entries with and without an fs_uuid.
+    // Scenario: a usage probe yields entries with and without an FSID.
     #[test]
-    fn live_pool_key_requires_fs_uuid_and_sorts() {
+    fn live_pool_key_requires_fsid_and_sorts() {
         let entries = vec![usage_entry(2, 1056964608), usage_entry(1, 1056964608)];
-        assert_eq!(live_pool_key(None, &entries), None, "no fs_uuid -> None");
+        assert_eq!(live_pool_key(None, &entries), None, "no FSID -> None");
 
-        let key = live_pool_key(Some("fs-uuid"), &entries).expect("present fs_uuid -> Some");
+        let fsid = fsid("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+        let key = live_pool_key(Some(&fsid), &entries).expect("present FSID -> Some");
+        assert_eq!(key.fsid, fsid, "key must carry the supplied FSID");
         assert_eq!(
             key.devices,
             vec![(Devid::new(1), 1056964608), (Devid::new(2), 1056964608)],

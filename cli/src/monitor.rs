@@ -13,7 +13,7 @@ use crate::parse::types::BtrfsDeviceUsageEntry;
 use crate::parse::{parse_btrfs_device_stats, parse_btrfs_device_usage};
 use crate::probe::{Filesystem, ProbeError, probe_pool_alerts};
 use crate::state_paths::StatePaths;
-use crate::types::MountPoint;
+use crate::types::{Fsid, MountPoint};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum MonitorResult {
@@ -135,7 +135,7 @@ pub fn cmd_monitor<R: CommandRunner, F: Filesystem + ?Sized>(
             runner,
             mount_point,
             missing_count,
-            pool.fs_uuid.as_deref(),
+            pool.fsid.as_ref(),
             paths,
             now,
         ) {
@@ -219,7 +219,7 @@ fn evaluate_enospc_for_monitor<R: CommandRunner>(
     runner: &R,
     mount_point: &MountPoint,
     missing_count: u64,
-    fs_uuid: Option<&str>,
+    fsid: Option<&Fsid>,
     paths: &StatePaths,
     now: SystemTime,
 ) -> Option<AlertCause> {
@@ -264,7 +264,7 @@ fn evaluate_enospc_for_monitor<R: CommandRunner>(
         device_count: assessment.device_count as u32,
     };
 
-    let live_key = live_pool_key(fs_uuid, &entries);
+    let live_key = live_pool_key(fsid, &entries);
     let baseline = match load_enospc_ack(paths) {
         Ok(opt) => opt,
         Err(e) => {
@@ -328,7 +328,7 @@ mod tests {
     };
     use crate::cmd::{CmdError, RawCommandOutput};
     use crate::test_fixtures::{
-        BTRFS_SHOW_2DISK_1MISSING, BTRFS_SHOW_2DISK_NO_UUID, MONITOR_FS_UUID, MonitorOverride,
+        BTRFS_SHOW_2DISK_1MISSING, BTRFS_SHOW_2DISK_NO_UUID, MONITOR_FSID, MonitorOverride,
         MonitorReconcileRunner, MonitorTestRunner, USAGE_DEVICE_SIZE, ack_noop_beeper,
         assert_monitor_single_computation_error, isolated_paths, monitor_fs_btrfs, monitor_fs_ext4,
         monitor_fs_mountinfo_error, monitor_fs_not_mounted, monitor_mp, usage_2disk,
@@ -361,11 +361,15 @@ mod tests {
         usage_2disk(USAGE_DEVICE_SIZE, 100 * MIB, 50 * GIB)
     }
 
+    fn fsid(raw: &str) -> Fsid {
+        Fsid::parse(raw).unwrap()
+    }
+
     /// The `PoolKey` the default monitor probe builds for an at-risk 2-disk pool:
     /// the canonical FS UUID plus both devids at `USAGE_DEVICE_SIZE`.
     fn matching_pool_key() -> PoolKey {
         PoolKey {
-            fs_uuid: MONITOR_FS_UUID.to_owned(),
+            fsid: fsid(MONITOR_FSID),
             devices: vec![
                 (Devid::new(1), USAGE_DEVICE_SIZE),
                 (Devid::new(2), USAGE_DEVICE_SIZE),
@@ -1659,7 +1663,7 @@ mod tests {
     //   changed devid set, changed FS UUID, and same-devid changed device_size.
     // Why it exists (F1): a stale baseline from a bootstrap/membership/geometry
     //   change must never silence a fresh risk. The device_size axis is the one
-    //   this round closes -- `fs_uuid + devids` alone would still match a
+    //   this round closes -- `fsid + devids` alone would still match a
     //   same-devid `braid replace`/resize.
     // Scenario: an at-risk pool carries a baseline acked on an old topology.
     #[test]
@@ -1668,7 +1672,7 @@ mod tests {
             (
                 "changed-devid-set",
                 PoolKey {
-                    fs_uuid: MONITOR_FS_UUID.to_owned(),
+                    fsid: fsid(MONITOR_FSID),
                     devices: vec![
                         (Devid::new(1), USAGE_DEVICE_SIZE),
                         (Devid::new(2), USAGE_DEVICE_SIZE),
@@ -1679,7 +1683,7 @@ mod tests {
             (
                 "changed-fs-uuid",
                 PoolKey {
-                    fs_uuid: "ffffffff-ffff-ffff-ffff-ffffffffffff".to_owned(),
+                    fsid: fsid("ffffffff-ffff-ffff-ffff-ffffffffffff"),
                     devices: vec![
                         (Devid::new(1), USAGE_DEVICE_SIZE),
                         (Devid::new(2), USAGE_DEVICE_SIZE),
@@ -1689,7 +1693,7 @@ mod tests {
             (
                 "changed-device-size",
                 PoolKey {
-                    fs_uuid: MONITOR_FS_UUID.to_owned(),
+                    fsid: fsid(MONITOR_FSID),
                     devices: vec![(Devid::new(1), 50 * GIB), (Devid::new(2), 50 * GIB)],
                 },
             ),
@@ -1738,6 +1742,94 @@ mod tests {
         assert!(
             paths.enospc_ack_json().exists(),
             "an uncomparable baseline must be left in place, not removed"
+        );
+    }
+
+    // Intent: a legacy pre-rename marker using `pool_key.fs_uuid` is treated as
+    //   corrupt even when its value is otherwise a valid UUID, so the at-risk
+    //   cycle fires armed and removes the marker.
+    // Why it exists: pins the no-migration upgrade path. Accepting the old key
+    //   through an alias/default would deserialize the marker and, with no live
+    //   FSID, route into the identity-gap arm that leaves the file in place.
+    // Scenario: a NAS upgrades with an old snooze marker on disk while the next
+    //   mounted probe is at risk but lacks a uuid line.
+    #[test]
+    fn cmd_monitor_legacy_fs_uuid_marker_fires_armed_and_clears_without_computation_error() {
+        let (_dir, paths) = isolated_paths();
+        let legacy = serde_json::json!({
+            "pool_key": {
+                "fs_uuid": MONITOR_FSID,
+                "devices": [[1, USAGE_DEVICE_SIZE], [2, USAGE_DEVICE_SIZE]],
+            },
+            "snoozed_until": open_snooze_deadline(),
+        });
+        std::fs::write(
+            paths.enospc_ack_json(),
+            serde_json::to_vec(&legacy).unwrap(),
+        )
+        .unwrap();
+        let runner = MonitorTestRunner::with_usage_and_override(
+            usage_atrisk(),
+            MonitorOverride::BtrfsShowPayload(BTRFS_SHOW_2DISK_NO_UUID.to_owned()),
+        );
+
+        let result = cmd_monitor(&runner, &monitor_fs_btrfs(), &monitor_mp(), &paths);
+
+        assert!(
+            has_enospc_cause(&result),
+            "legacy-key baseline must fire armed, got {result:?}"
+        );
+        assert!(
+            !paths.enospc_ack_json().exists(),
+            "legacy-key baseline is corrupt after the fsid rename -> removed"
+        );
+        assert!(
+            !has_computation_error(&result),
+            "a legacy-key baseline must not fold a ComputationError"
+        );
+    }
+
+    // Intent: a structurally-current marker with a malformed `pool_key.fsid`
+    //   fails closed through the corrupt-marker path, so the at-risk cycle fires
+    //   armed and removes the marker.
+    // Why it exists: `Fsid` deserialization must keep validating the on-disk
+    //   marker. A weakened deserializer would accept the garbage and, with no
+    //   live FSID, route into the identity-gap arm that leaves the file in place.
+    // Scenario: enospc-ack.json is hand-edited to a non-UUID fsid while the next
+    //   mounted probe is at risk but lacks a uuid line.
+    #[test]
+    fn cmd_monitor_malformed_fsid_marker_fires_armed_and_clears_without_computation_error() {
+        let (_dir, paths) = isolated_paths();
+        let malformed = serde_json::json!({
+            "pool_key": {
+                "fsid": "not-a-uuid",
+                "devices": [[1, USAGE_DEVICE_SIZE], [2, USAGE_DEVICE_SIZE]],
+            },
+            "snoozed_until": open_snooze_deadline(),
+        });
+        std::fs::write(
+            paths.enospc_ack_json(),
+            serde_json::to_vec(&malformed).unwrap(),
+        )
+        .unwrap();
+        let runner = MonitorTestRunner::with_usage_and_override(
+            usage_atrisk(),
+            MonitorOverride::BtrfsShowPayload(BTRFS_SHOW_2DISK_NO_UUID.to_owned()),
+        );
+
+        let result = cmd_monitor(&runner, &monitor_fs_btrfs(), &monitor_mp(), &paths);
+
+        assert!(
+            has_enospc_cause(&result),
+            "malformed-fsid baseline must fire armed, got {result:?}"
+        );
+        assert!(
+            !paths.enospc_ack_json().exists(),
+            "malformed-fsid baseline is corrupt -> removed"
+        );
+        assert!(
+            !has_computation_error(&result),
+            "a malformed-fsid baseline must not fold a ComputationError"
         );
     }
 

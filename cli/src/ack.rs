@@ -125,7 +125,7 @@ pub(crate) fn cmd_ack_impl<R: CommandRunner, F: Filesystem + ?Sized>(
     //    reminder from one fresh usage probe -- when the pool is still at risk,
     //    write the live pool key + a reminder deadline one interval out. Ack
     //    snoozes the reminder, it does not resolve the risk. Best-effort: a
-    //    probe/parse failure, an absent fs_uuid, or a pool that recovered by ack
+    //    probe/parse failure, an absent FSID, or a pool that recovered by ack
     //    time clears the latch but writes no marker (a later recurrence fires armed).
     if causes
         .iter()
@@ -287,7 +287,7 @@ fn cleanup_alert_files_and_beeper(
 /// marker). No marker -> a later recurrence fires armed.
 ///
 /// Best-effort by contract. A usage-probe failure, a parse failure, or an absent
-/// `fs_uuid` (no usable `PoolKey`) logs and writes no marker -- the same end-state
+/// FSID (no usable `PoolKey`) logs and writes no marker -- the same end-state
 /// as an offline ack (one quiet re-fire next cycle at the non-beeping Warning
 /// level, then a mounted ack snoozes it). It never fails the ack: the latch is
 /// already cleared by the time this runs.
@@ -319,7 +319,7 @@ fn write_enospc_baseline<R: CommandRunner>(
             return;
         }
     };
-    let Some(pool_key) = live_pool_key(pool.fs_uuid.as_deref(), &entries) else {
+    let Some(pool_key) = live_pool_key(pool.fsid.as_ref(), &entries) else {
         eprintln!(
             "warning: no FS UUID to key the ENOSPC baseline; ack cleared the alert but wrote no baseline"
         );
@@ -432,7 +432,7 @@ mod tests {
     };
     use crate::monitor::{MonitorResult, cmd_monitor};
     use crate::test_fixtures::{
-        ACK_DEVICE_SIZE, ACK_FS_UUID, AckPanicFilesystem, AckPanicRunner, MonitorTestRunner,
+        ACK_DEVICE_SIZE, ACK_FSID, AckPanicFilesystem, AckPanicRunner, MonitorTestRunner,
         ack_fs_btrfs, ack_fs_ext4, ack_fs_not_mounted, ack_mounted_fs_that_touches_smartd,
         ack_mounted_probe_runner, ack_mounted_probe_runner_no_uuid_with_enospc_usage,
         ack_mounted_probe_runner_with_device_stats, ack_mounted_probe_runner_with_enospc_usage,
@@ -2512,7 +2512,8 @@ mod tests {
             .unwrap()
             .expect("mounted ack of a still-at-risk pool must write a snooze marker");
         assert_eq!(
-            ack.pool_key.fs_uuid, ACK_FS_UUID,
+            ack.pool_key.fsid.as_str(),
+            ACK_FSID,
             "keyed on the live FS UUID"
         );
         assert_eq!(
@@ -2618,7 +2619,7 @@ mod tests {
     //   the absent strongest-identity field must not produce a weak baseline.
     // Scenario: a transient mounted ack reads a btrfs show with no uuid line.
     #[test]
-    fn cmd_ack_mounted_enospc_risk_no_fs_uuid_writes_no_baseline() {
+    fn cmd_ack_mounted_enospc_risk_no_fsid_writes_no_baseline() {
         let (_dir, paths) = isolated_paths();
         ack_write_latch(
             &paths,

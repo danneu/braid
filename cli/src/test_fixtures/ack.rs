@@ -12,9 +12,9 @@ use crate::probe::Filesystem;
 use crate::state_paths::StatePaths;
 use crate::types::{MapperName, MountPoint};
 
-/// FS UUID the ack 2-disk show reports; the `pool_key.fs_uuid` that a mounted ack
+/// FSID the ack 2-disk show reports; the `pool_key.fsid` that a mounted ack
 /// of an EnospcRisk latch writes into `enospc-ack.json`.
-pub(crate) const ACK_FS_UUID: &str = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+pub(crate) const ACK_FSID: &str = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
 
 /// Device size (100 GiB) for the ack ENOSPC usage fixtures, so the threshold caps
 /// at 1 GiB. Also the `device_size` in the baseline `PoolKey`.
@@ -424,7 +424,7 @@ fn ack_btrfs_device_usage_healthy() -> RawCommandOutput {
 }
 
 /// 2-disk btrfs show with no `uuid:` line, so `probe_pool_alerts` yields
-/// `fs_uuid: None` -- the "ack cannot key a baseline" path.
+/// `fsid: None` -- the "ack cannot key a baseline" path.
 fn btrfs_show_2disk_no_uuid() -> RawCommandOutput {
     mock_ok(
         "btrfs filesystem show /mnt/storage",
