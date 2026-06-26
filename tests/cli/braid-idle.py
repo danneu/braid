@@ -12,6 +12,15 @@
 #   unreadable or unparseable config, exit 1 before config/probes when run
 #   without root, exit 0 when pool idle, exit 1 on a forced probe failure, and
 #   exit 1 during a live scrub held running with dm-delay read throttling.
+#
+# Coverage boundary: the exit-1 cases here are the root gate, a forced probe
+#   failure, and a live scrub. The sysfs exclusive-operation branch of cmd_idle
+#   (step 2 -> Busy(Exclop) -> exit 1) is proven end-to-end against a live
+#   kernel by tests/cli/replace-inhibits-suspend.py, where an in-flight `btrfs
+#   replace` (a kernel exclop) makes `braid idle` exit 1. That branch is
+#   op-agnostic, so a balance-specific subtest would be redundant; the per-op
+#   parse/Display/mapping deltas are pinned by cli/src/idle.rs unit tests
+#   (busy_exclop_short_circuits_scrub_probe, busy_reason_display_pins_cli_strings).
 
 import base64
 import re

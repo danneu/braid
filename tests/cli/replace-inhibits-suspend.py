@@ -138,6 +138,10 @@ with subtest("Start replace and wait for in-flight progress"):
 # btrfs_replace_status_includes_minus_one. This subtest is the
 # end-to-end pair for the new sysfs path: cmd helper (probe_fsid) +
 # Filesystem read + idle wiring against live tool output.
+# This subtest is also the canonical live proof of the `braid idle` exit-1
+# exclusive-operation branch (cmd_idle step 2); tests/cli/braid-idle.py points
+# here for that path. Do not weaken the exit-1 / "device replace" assertions
+# below without relocating that coverage.
 #
 # Scenario: replace is mid-flight (verified above). Operator's autosuspend
 # daemon polls `braid idle`. The call must return within seconds and

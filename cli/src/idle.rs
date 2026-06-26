@@ -343,6 +343,8 @@ mod tests {
     // Scenario: Operator runs `btrfs device remove` directly on the pool;
     //   `braid idle` must report busy without spending a subprocess on
     //   `btrfs scrub status`.
+    // Live end-to-end counterpart: tests/cli/replace-inhibits-suspend.py drives
+    // this branch through a real `btrfs replace` exclop -> `braid idle` exit 1.
     #[test]
     fn busy_exclop_short_circuits_scrub_probe() {
         let cases = [
