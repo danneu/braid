@@ -50,39 +50,57 @@ fn fallback_disk_luks_lock<R: CommandRunner>(
         Err(_) => return (DiskLockState::Unknown, None),
     };
 
-    let expected_path = match backing_path_resolver.canonicalize(by_id_path) {
-        Ok(path) => path,
-        Err(_) => return (DiskLockState::Unknown, Some(underlying.as_str().to_owned())),
+    // Once a backing device is observed the carried path is invariant; only the
+    // verdict varies. Pair it with Some(underlying) exactly once here.
+    let lock = classify_open_mapper_lock(
+        runner,
+        by_id_path,
+        underlying.as_str(),
+        expected_uuid,
+        backing_path_resolver,
+    );
+    (lock, Some(underlying.as_str().to_owned()))
+}
+
+/// Verdict for an already-open braid mapper whose backing device is known.
+/// Returns `Unlocked` only when both the backing path and the LUKS UUID match
+/// the configured disk; any probe/parse failure or mismatch collapses to
+/// `Unknown`. Never returns `Locked` -- inactivity is resolved by the caller
+/// before a backing device exists. Silent by design (it does spawn
+/// `cryptsetup luksUUID`, so not pure): unlike the close-time
+/// `probe_observed_mapper_uuid`, it emits no operator `Warning:` lines (no
+/// `emit_status`), so the TUI render path stays uncorrupted.
+fn classify_open_mapper_lock<R: CommandRunner>(
+    runner: &R,
+    by_id_path: &str,
+    observed: &str,
+    expected_uuid: Option<&LuksUuid>,
+    backing_path_resolver: &dyn BackingPathResolver,
+) -> DiskLockState {
+    let Ok(expected_path) = backing_path_resolver.canonicalize(by_id_path) else {
+        return DiskLockState::Unknown;
     };
-    let found_path = match backing_path_resolver.canonicalize(underlying.as_str()) {
-        Ok(path) => path,
-        Err(_) => return (DiskLockState::Unknown, Some(underlying.as_str().to_owned())),
+    let Ok(found_path) = backing_path_resolver.canonicalize(observed) else {
+        return DiskLockState::Unknown;
     };
     if expected_path != found_path {
-        return (DiskLockState::Unknown, Some(underlying.as_str().to_owned()));
+        return DiskLockState::Unknown;
     }
-
     let Some(expected_uuid) = expected_uuid else {
-        return (DiskLockState::Unknown, Some(underlying.as_str().to_owned()));
+        return DiskLockState::Unknown;
     };
-    let uuid_raw = match runner.run(&CmdRequest::CryptsetupLuksUuid {
-        device: underlying.as_str().to_owned(),
-    }) {
-        Ok(raw) => raw,
-        Err(_) => return (DiskLockState::Unknown, Some(underlying.as_str().to_owned())),
+    let Ok(uuid_raw) = runner.run(&CmdRequest::CryptsetupLuksUuid {
+        device: observed.to_owned(),
+    }) else {
+        return DiskLockState::Unknown;
     };
-    let found_uuid = match parse_cryptsetup_luks_uuid(&uuid_raw) {
-        Ok(out) => out.uuid,
-        Err(_) => return (DiskLockState::Unknown, Some(underlying.as_str().to_owned())),
+    let Ok(found) = parse_cryptsetup_luks_uuid(&uuid_raw) else {
+        return DiskLockState::Unknown;
     };
-
-    if &found_uuid == expected_uuid {
-        (
-            DiskLockState::Unlocked,
-            Some(underlying.as_str().to_owned()),
-        )
+    if &found.uuid == expected_uuid {
+        DiskLockState::Unlocked
     } else {
-        (DiskLockState::Unknown, Some(underlying.as_str().to_owned()))
+        DiskLockState::Unknown
     }
 }
 
