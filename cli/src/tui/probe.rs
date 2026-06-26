@@ -1621,20 +1621,16 @@ mod tests {
         );
     }
 
-    /*
-     * Intent: TUI device_errors can attach a btrfs stats row for a fully
-     * missing device to the UUID-keyed member through the persisted prior
-     * devid.
-     *
-     * Why it exists: after the LUKS UUID identity migration, persisted devid
-     * is still the authorized fallback when btrfs reports a stats row by
-     * devid but no live LUKS UUID is observable. The TUI must not require a
-     * mapper name for missing-device stats rows.
-     *
-     * Scenario: btrfs reports disk1 live and devid 2 as MISSING. Device stats
-     * reports `devid:2` for devid 2 with a read error. The TUI surfaces
-     * that counter on the member whose persisted prior devid is 2.
-     */
+    // Intent: TUI device_errors can attach a btrfs stats row for a fully
+    //   missing device to the UUID-keyed member through the persisted prior
+    //   devid.
+    // Why it exists: after the LUKS UUID identity migration, persisted devid
+    //   is still the authorized fallback when btrfs reports a stats row by
+    //   devid but no live LUKS UUID is observable. The TUI must not require a
+    //   mapper name for missing-device stats rows.
+    // Scenario: btrfs reports disk1 live and devid 2 as MISSING. Device stats
+    //   reports `devid:2` for devid 2 with a read error. The TUI surfaces
+    //   that counter on the member whose persisted prior devid is 2.
     #[test]
     fn device_errors_for_missing_devid_use_persisted_prior_binding() {
         let mp = MountPoint::new("/mnt/storage".to_owned());
