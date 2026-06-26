@@ -3430,6 +3430,13 @@ mod tests {
             )),
             "never-enriched refusal must issue zero mutating requests; calls: {calls:?}"
         );
+        assert!(
+            !calls
+                .iter()
+                .any(|c| matches!(c, CmdRequest::BtrfsDeviceUsageRaw { .. })),
+            "never-enriched refusal must precede the relocation-space probe \
+             (resolve_removal_target before check_relocation_space); calls: {calls:?}"
+        );
     }
 
     // Intent: when membership has no member with the requested devid,
@@ -3511,6 +3518,13 @@ mod tests {
                     | CmdRequest::BtrfsDeviceScanForget { .. }
             )),
             "dry-run never-enriched refusal must issue zero mutating requests; calls: {calls:?}"
+        );
+        assert!(
+            !calls
+                .iter()
+                .any(|c| matches!(c, CmdRequest::BtrfsDeviceUsageRaw { .. })),
+            "dry-run never-enriched refusal must precede the relocation-space probe \
+             (resolve_removal_target before check_relocation_space); calls: {calls:?}"
         );
     }
 
@@ -3602,6 +3616,14 @@ mod tests {
                 .iter()
                 .any(|c| matches!(c, CmdRequest::BtrfsDeviceRemove { .. })),
             "duplicate-devid refusal must not call btrfs device remove"
+        );
+        assert!(
+            !runner
+                .requests()
+                .iter()
+                .any(|c| matches!(c, CmdRequest::BtrfsDeviceUsageRaw { .. })),
+            "duplicate-devid refusal must precede the relocation-space probe \
+             (load_membership before check_relocation_space)"
         );
         let post_bytes = std::fs::read(f.paths.pool_json()).unwrap();
         assert_eq!(
