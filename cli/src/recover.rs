@@ -1549,10 +1549,12 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             restore_raid1_after_commit: *restore_raid1_after_commit,
         },
         journal::OpKind::Add { .. } => RecoverCompletion::GenericLivePool {
-            // For Add the new disk is already in the pool (so `braid add` would
-            // refuse on rerun), so recover-side replay avoids stranding the
-            // operator with single-profile chunks they have to fix manually
-            // with `btrfs balance start`.
+            // Reached only by bootstrap add -- live PoolMutation routes to
+            // AddPoolMutation and PostAddBalanceRaid1 to AddPostBalance, so the
+            // leftover-single-chunk conversion those paths own never applies here.
+            // A 2+-disk bootstrap already ran `mkfs.btrfs -d raid1 -m raid1`, so this
+            // soft replay is an idempotent near-no-op kept as cheap defense-in-depth;
+            // do not assume mkfs leaves zero convertible chunks, and do not drop it.
             replay_raid1_maintenance: true,
         },
         journal::OpKind::Remove { .. } => RecoverCompletion::GenericLivePool {
@@ -17458,8 +17460,10 @@ mod tests {
     // `RecoverCompletion::GenericLivePool.replay_raid1_maintenance`, set at
     // plan-construction time. If that value silently flips to false for Add,
     // or the executor stops consuming it, recovery would clear the journal
-    // without replaying the soft RAID1 balance and leave the operator with
-    // single-profile chunks. The pre-existing direct-call test
+    // without replaying the defensive soft RAID1 balance; that pass is normally
+    // a near-no-op after a RAID1 bootstrap, but it must keep firing so a future
+    // mkfs/profile change cannot silently skip a real convertible chunk. The
+    // pre-existing direct-call test
     // `bootstrap_recovery_clears_acked_stats` only asserts acked-stats
     // cleanup, so it would stay green through such a regression. This test
     // fails the moment either end of the construction-time/runtime contract

@@ -138,11 +138,14 @@ On any pool with two or more devices, the idle/no-paused path runs the soft
 balance above to catch `single` chunks an interrupted balance left behind. The
 idempotent `,soft` filter makes this safe even when nothing needs converting.
 
-This replay fires for an interrupted `add` when the balance state is idle -- the
-new disk is already in the pool, so re-running `braid add` would refuse, and
-recover finishes the job so the operator is not left with `single` chunks -- and
+This replay fires for an interrupted `add` when the balance state is idle, and
 for the idle/no-paused owed post-maintenance step of `remove-missing` and
-`replace`.
+`replace`. The `add` case covers two shapes: an interrupted post-add balance --
+a live add whose convert left `single` chunks behind, where the new disk is
+already in the pool so re-running `braid add` would refuse and recover finishes
+the job -- and a bootstrap add, where `mkfs.btrfs -d raid1 -m raid1` already
+created the pool as full RAID1, so the soft pass normally has nothing to convert
+(an expected near-no-op) but is still run as defense-in-depth.
 
 `braid remove` is deliberately not part of this replay. It is the only mutation
 whose pre-mutation phase can issue a balance -- the RAID1 -> single conversion
