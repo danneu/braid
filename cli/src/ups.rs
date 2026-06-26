@@ -434,10 +434,12 @@ mod tests {
 
     // Intent: format_status returns the literal sentinel
     // `(unknown -- ups.status missing)` for an empty flag set.
-    // Why it exists: preflight fails closed on an empty set; the rendered
-    // sentinel must read verbatim so the doctor/preflight referral
-    // (`Check 'braid ups status'`) stays actionable. A substring check
-    // would let `(unknown)` or `unknown status` ride through.
+    // Why it exists: an empty flag set is the parser's empty-status case
+    // (see parse/upsc.rs); this is its operator-facing rendering, paired
+    // with the machine-facing `ups_status_empty` JSON warning. The
+    // exact-match pin guards that rendering against silent degradation --
+    // a refactor returning `(unknown)`, `unknown status`, or a blank line
+    // would satisfy a substring check yet drop the cause an operator needs.
     // Scenario: dummy-ups fixture with no ups.status line yet.
     #[test]
     fn format_status_empty_is_unknown() {
@@ -718,11 +720,12 @@ mod tests {
 
     // Intent: format_human emits exactly the line
     // `Status: (unknown -- ups.status missing)` when status_flags is empty.
-    // Why it exists: preflight and doctor both point operators at
-    // `braid ups status` when ups.status is empty. A refactor that drops
-    // the parenthetical, adds a prefix/suffix, or changes the sentinel
-    // would leave that referral unactionable; snapshots only cover
-    // non-empty flag sets.
+    // Why it exists: this is the line an operator lands on after preflight
+    // refuses an empty-ups.status mutation and refers them to `braid ups
+    // status` (preflight.rs). The referral itself is a fixed string and
+    // does not depend on this wording; what the exact-match pin protects is
+    // the landing spot staying self-explaining instead of degrading to a
+    // bare `(unknown)`. Snapshots otherwise cover only non-empty flag sets.
     // Scenario: dummy-ups driver published telemetry before populating ups.status.
     #[test]
     fn format_human_empty_status_renders_sentinel() {
