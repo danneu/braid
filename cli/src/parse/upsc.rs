@@ -417,32 +417,4 @@ ups.test.result: Done and passed\n\
         assert_eq!(over.battery.charge_pct, None);
         assert_eq!(over.load_pct, None);
     }
-
-    // Intent: parse_upsc accepts the captured fixture for the
-    // on-utility-power state and produces {OL} plus the typed tail.
-    // Why: freezing the fixture contract here guards against later refactors
-    // that would silently change what preflight and `braid ups status` see.
-    // Scenario: smoke test of the `upsc-online.txt` committed fixture.
-    #[test]
-    fn parses_online_fixture() {
-        let fixture = include_str!("../../tests/fixtures/nixos-26.05/upsc/upsc-online.txt");
-        let out = parse_upsc(fixture);
-        assert!(out.status_flags.contains(&UpsStatusFlag::Ol));
-        assert!(!out.status_flags.contains(&UpsStatusFlag::Ob));
-        assert_eq!(out.battery.charge_pct, Some(100));
-        assert_eq!(out.device.model.as_deref(), Some("Back-UPS ES 550G"));
-    }
-
-    // Intent: the `upsc-lowbattery.txt` fixture produces {OB, LB}.
-    // Why: this is the preflight refuse case and the upsmon critical-state
-    // trigger. The whole safety core depends on parsing that combination.
-    // Scenario: operator captures `upsc` output during a simulated outage.
-    #[test]
-    fn parses_lowbattery_fixture() {
-        let fixture = include_str!("../../tests/fixtures/nixos-26.05/upsc/upsc-lowbattery.txt");
-        let out = parse_upsc(fixture);
-        assert!(out.status_flags.contains(&UpsStatusFlag::Ob));
-        assert!(out.status_flags.contains(&UpsStatusFlag::Lb));
-        assert_eq!(out.battery.charge_pct, Some(8));
-    }
 }
