@@ -251,8 +251,11 @@ warns rather than claiming every declared member is assembled.
 - `cli/src/status.rs` unit tests pin compact status names by resolving live
   pool UUIDs back to `DiskName`, including a drifted mapper case.
 - `cli/src/status.rs` and `cli/src/tui/probe.rs` unit tests pin that a present,
-  LUKS-identity-verified member absent from the live pool renders `offline`, not
-  `missing` or `unknown`.
+  LUKS-identity-verified member absent from the live pool is classified offline
+  (`UnpooledDiskRender::Offline` in the TUI), not `missing` or `unknown`.
+  `cli/src/tui/view/mod.rs#unpooled_disk_status_cell_renders_each_variant` pins
+  that the TUI renders that classification as the literal yellow `offline` cell
+  rather than collapsing to the `missing` fallback.
 - `cli/src/doctor.rs` unit tests pin that `declared_disks` renders verified
   members absent from the live pool as cause-neutral `Warn`, keeps UUID
   mismatches as `Fail`, preserves offline-pool identity-only behavior, and warns
