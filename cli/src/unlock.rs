@@ -134,21 +134,23 @@ impl UnlockPlan {
 
         let mount_point = params.config.mount_point();
 
-        // Enrich pool.json with live metadata (devid, added_at) -- best-effort.
-        // The in-memory membership clone is authoritative here because the
-        // Rust dispatch holds the pool flock for the lifetime of unlock.
-        // Three outcomes are tolerated and leave membership data unenriched:
-        //   * `Ok(PoolState { mounted: false, devices: vec![], ... })` -- a
-        //     mountinfo race after a successful mount; enrich_from_pool_state
-        //     walks an empty devices vec so no fields change.
-        //   * `Err(_)` from probe_pool itself (e.g. a parser drift in
-        //     `btrfs filesystem show`) -- a Warning line is emitted,
-        //     and pool.json is not rewritten.
-        //   * save failure -- a Warning line is emitted and unlock
-        //     still succeeds because the mount has already completed.
-        // Correctness never depends on this enrichment (see contract above).
-        // Pinned by unlock_tolerates_post_mount_probe_mounted_false and
-        // unlock_warns_when_post_mount_probe_errors.
+        // Enrich pool.json with live metadata (devid, added_at) from a
+        // fresh pool probe, best-effort: correctness never depends on it
+        // (see the contract above). The in-memory membership clone is
+        // authoritative here because the Rust dispatch holds the pool
+        // flock for unlock's lifetime. Neither arm converts the
+        // already-completed mount into a failure:
+        //   * Ok  -- enrich the UUID-matched members and save. A raced
+        //            probe (mounted: false, no pool devices) makes
+        //            enrich_from_pool_state a no-op; a save failure only
+        //            warns (add/replace `?`-fail here, but unlock's pool
+        //            is already online).
+        //   * Err -- warn and leave pool.json unrewritten (e.g. a parser
+        //            drift in `btrfs filesystem show`).
+        // Pinned by unlock_tolerates_post_mount_probe_mounted_false,
+        // unlock_tolerates_post_mount_save_membership_failure,
+        // unlock_warns_when_post_mount_probe_errors, and
+        // unlock_tolerates_post_mount_probe_err.
         match probe::probe_pool(runner, fs, mount_point) {
             Ok(pool_after) => {
                 let mut enriched = params.membership.clone();
