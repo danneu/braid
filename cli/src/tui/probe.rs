@@ -476,6 +476,10 @@ pub fn probe_pool_for_tui<R: CommandRunner, F: Filesystem + ?Sized>(
             smart,
             disk_temperature_readings,
             disk_underlying: present_underlying,
+            devid_names: devid_to_name
+                .iter()
+                .map(|(devid, name)| (*devid, (*name).to_owned()))
+                .collect(),
             device_errors,
             unpooled_disks: unpooled_by_name,
             alert_causes,
@@ -1706,6 +1710,11 @@ mod tests {
             .get("ironwolf")
             .expect("missing devid 2 must resolve to ironwolf by persisted binding");
         assert_eq!(errors.read, 9);
+        assert_eq!(
+            pool.devid_names.get(&Devid::new(2)).map(String::as_str),
+            Some("ironwolf"),
+            "missing devid must also be available for TUI alert labels"
+        );
     }
 
     /// Intent: capacity_used_bytes and capacity_total_bytes must be

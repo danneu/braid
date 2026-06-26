@@ -308,6 +308,10 @@ pub struct PoolState {
     /// caller falls back to by-id. The TUI-layer, name-keyed analog of the
     /// domain's `PoolState::underlying_for_uuid`.
     pub disk_underlying: HashMap<String, String>,
+    /// Btrfs devid-to-member name map for alert cause labels. Stored on the
+    /// pool snapshot so the TUI uses the same display join as `braid status`
+    /// without re-probing while rendering.
+    pub devid_names: HashMap<Devid, String>,
     pub device_errors: HashMap<String, DiskErrors>,
     /// Per-declared-disk render classification for disks NOT in
     /// `disk_usage`. Populated by `tui::probe` via `probe_config_disk`

@@ -108,9 +108,10 @@ fn run_loop(
         // dropped the old "fail when multithreaded" rule and calls localtime_r directly,
         // so unwrap_or(UTC) guards only a genuine localtime failure, not thread count.
         let offset = time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC);
-        let now = frame_local_now(time::OffsetDateTime::now_utc(), offset);
+        let now_utc = time::OffsetDateTime::now_utc();
+        let now = frame_local_now(now_utc, offset);
         let animating = model.is_animating();
-        terminal.draw(|f| view(model, f, now))?;
+        terminal.draw(|f| view(model, f, now, now_utc))?;
 
         let timeout = if animating {
             FRAME_BUDGET

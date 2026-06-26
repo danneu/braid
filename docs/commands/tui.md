@@ -55,7 +55,9 @@ Demo mode shows three fake disks with sample data, useful for exploring the inte
 ## What it shows
 
 **Main view** -- pool status, mount point, capacity bar, balance state, and
-active alerts and advisories.
+active alerts and advisories. When an alert is active, the banner lists each
+cause beneath it; latched causes use the same first-detected timestamp and
+relative-age format as [`braid status`](status.md#alert-banner).
 
 **Refreshing** -- while the pool is mounted, pool, disk, scrub, and alert data
 refresh automatically about every 10 seconds and immediately when you press

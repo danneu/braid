@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -82,8 +82,8 @@ pub enum AlertCause {
     /// scrub-*found* corruption, which still alerts via `BtrfsDeviceErrors`
     /// (ADR 014). Flag-driven like `SmartdAlert`: `braid-scrub-failed.service`
     /// (the scrub unit's `onFailure`) touches `scrub-failed`, the monitor
-    /// latches this cause, and `braid ack` clears it. No `Display`/JSON code:
-    /// the human text lives in `status.rs#format_status_human` and the
+    /// latches this cause, and `braid ack` clears it. No `Display` impl: the
+    /// human text lives in `AlertCause::describe`, and the
     /// internally-tagged enum auto-serializes as `{"type":"scrub_failed"}`.
     ScrubFailed,
     ComputationError {
@@ -115,6 +115,32 @@ pub enum AlertSeverity {
 }
 
 impl AlertCause {
+    /// Shared human label for one alert cause, excluding list bullets and
+    /// first-detection suffixes, so `braid status` and the TUI cannot drift.
+    pub(crate) fn describe(&self, devid_names: Option<&HashMap<Devid, String>>) -> String {
+        match self {
+            AlertCause::BtrfsDeviceErrors { devid } => {
+                let name = devid_to_name(devid_names, *devid);
+                format!("btrfs device errors on {name}")
+            }
+            AlertCause::MissingDevice { devid } => {
+                let name = devid_to_name(devid_names, *devid);
+                format!("missing device: {name}")
+            }
+            AlertCause::SmartdAlert => "SMART health warning".to_owned(),
+            AlertCause::ScrubFailed => {
+                "scheduled scrub failed -- check journalctl -u braid-scrub.service".to_owned()
+            }
+            AlertCause::ComputationError { detail } => {
+                format!("alert computation error: {detail}")
+            }
+            AlertCause::EnospcRisk { .. } => {
+                "ENOSPC risk: pool is one disk-loss from being unable to restore RAID1 redundancy"
+                    .to_owned()
+            }
+        }
+    }
+
     /// Notification tier for this cause. ENOSPC risk is a non-beeping `Warning`;
     /// the data-loss / redundancy / SMART / failed-scrub causes are `Critical`,
     /// and `ComputationError` is fail-closed/indeterminate so it must also beep.
@@ -128,6 +154,13 @@ impl AlertCause {
             | AlertCause::ComputationError { .. } => AlertSeverity::Critical,
         }
     }
+}
+
+fn devid_to_name(devid_names: Option<&HashMap<Devid, String>>, devid: Devid) -> String {
+    devid_names
+        .and_then(|names| names.get(&devid))
+        .map(|name| format!("{name} (devid {devid})"))
+        .unwrap_or_else(|| format!("devid {devid}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -775,6 +808,7 @@ fn same_cause_key(a: &AlertCause, b: &AlertCause) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     fn make_stats(devices: Vec<DeviceErrorStats>) -> BtrfsDeviceStatsOutput {
         BtrfsDeviceStatsOutput { devices }
@@ -859,6 +893,69 @@ mod tests {
         std::fs::write(&path, "not json").unwrap();
         let stats = load_acked_stats_at(&path);
         assert!(stats.0.is_empty());
+    }
+
+    // Intent: AlertCause::describe owns the human cause labels shared by
+    //   `braid status` and the TUI, including devid-to-name rendering.
+    // Why it exists: copying these match arms into each surface lets labels
+    //   drift, so each variant is pinned at the single source.
+    // Scenario: status and TUI both render the same active alert cause list.
+    #[test]
+    fn alert_cause_describe_renders_each_label() {
+        let names = HashMap::from([(Devid::new(2), "disk2".to_owned())]);
+
+        assert_eq!(
+            AlertCause::BtrfsDeviceErrors {
+                devid: Devid::new(2)
+            }
+            .describe(Some(&names)),
+            "btrfs device errors on disk2 (devid 2)"
+        );
+        assert_eq!(
+            AlertCause::BtrfsDeviceErrors {
+                devid: Devid::new(3)
+            }
+            .describe(Some(&names)),
+            "btrfs device errors on devid 3"
+        );
+        assert_eq!(
+            AlertCause::MissingDevice {
+                devid: Devid::new(2)
+            }
+            .describe(Some(&names)),
+            "missing device: disk2 (devid 2)"
+        );
+        assert_eq!(
+            AlertCause::MissingDevice {
+                devid: Devid::new(3)
+            }
+            .describe(Some(&names)),
+            "missing device: devid 3"
+        );
+        assert_eq!(
+            AlertCause::SmartdAlert.describe(Some(&names)),
+            "SMART health warning"
+        );
+        assert_eq!(
+            AlertCause::ScrubFailed.describe(Some(&names)),
+            "scheduled scrub failed -- check journalctl -u braid-scrub.service"
+        );
+        assert_eq!(
+            AlertCause::ComputationError {
+                detail: "bad latch".to_owned()
+            }
+            .describe(Some(&names)),
+            "alert computation error: bad latch"
+        );
+        assert_eq!(
+            AlertCause::EnospcRisk {
+                margin: -1,
+                count_below: 1,
+                device_count: 2,
+            }
+            .describe(Some(&names)),
+            "ENOSPC risk: pool is one disk-loss from being unable to restore RAID1 redundancy"
+        );
     }
 
     /*

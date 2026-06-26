@@ -111,6 +111,26 @@ impl AlertCauseReport {
             first_detected: None,
         }
     }
+
+    /// Shared first-detection suffix for human alert lines, so status and TUI
+    /// keep the same fail-loud display for latched timestamps.
+    pub(crate) fn first_detected_suffix(&self, now: time::OffsetDateTime) -> String {
+        let Some(ts) = &self.first_detected else {
+            return String::new();
+        };
+
+        let mut suffix = format!(" -- first detected {ts}");
+        // A latched cause carries an absolute first-detection timestamp; append
+        // a relative age only when it parses and is in the past, so a
+        // hand-edited or future stamp degrades to absolute-only rather than
+        // crashing `braid status` (fail-loud-don't-crash latch philosophy).
+        if let Some(parsed) = crate::util::parse_rfc3339_utc(ts)
+            && let Some(age) = crate::util::humanize_ago(now - parsed)
+        {
+            suffix.push_str(&format!(" ({age})"));
+        }
+        suffix
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1369,13 +1389,6 @@ fn build_disk_views<R: CommandRunner>(
 // Human output formatting
 // ---------------------------------------------------------------------------
 
-fn devid_to_name(devid_names: Option<&HashMap<Devid, String>>, devid: Devid) -> String {
-    devid_names
-        .and_then(|names| names.get(&devid))
-        .map(|name| format!("{name} (devid {devid})"))
-        .unwrap_or_else(|| format!("devid {devid}"))
-}
-
 fn format_type_profile_human(names: &[String]) -> String {
     if names.is_empty() {
         return "unknown".to_owned();
@@ -1447,55 +1460,19 @@ fn format_status_human(
     // the exact mis-signal the severity tier exists to prevent. `None` is
     // unreachable while `alert_active` is true but fails closed to Critical.
     if report.alert_active {
-        match report
-            .alert_causes
-            .iter()
-            .map(|c| c.cause.severity())
-            .max()
-        {
-            Some(AlertSeverity::Warning) => out.push_str(
-                "WARNING alert -- capacity risk detected. Run 'braid ack' to acknowledge.\n",
-            ),
-            _ => out.push_str(
-                "CRITICAL alert -- pool health issue detected. Run 'braid ack' to acknowledge and silence.\n",
-            ),
-        }
-        for c in &report.alert_causes {
-            let mut line = match &c.cause {
-                AlertCause::BtrfsDeviceErrors { devid } => {
-                    let name = devid_to_name(devid_names, *devid);
-                    format!("  - btrfs device errors on {name}")
-                }
-                AlertCause::MissingDevice { devid } => {
-                    let name = devid_to_name(devid_names, *devid);
-                    format!("  - missing device: {name}")
-                }
-                AlertCause::SmartdAlert => "  - SMART health warning".to_owned(),
-                AlertCause::ScrubFailed => {
-                    "  - scheduled scrub failed -- check journalctl -u braid-scrub.service"
-                        .to_owned()
-                }
-                AlertCause::ComputationError { detail } => {
-                    format!("  - alert computation error: {detail}")
-                }
-                AlertCause::EnospcRisk { .. } => {
-                    "  - ENOSPC risk: pool is one disk-loss from being unable to restore RAID1 redundancy"
-                        .to_owned()
-                }
-            };
-            // A latched cause carries an absolute first-detection timestamp;
-            // append a relative age only when it parses and is in the past, so a
-            // hand-edited or future stamp degrades to absolute-only rather than
-            // crashing `braid status` (fail-loud-don't-crash latch philosophy).
-            if let Some(ts) = &c.first_detected {
-                line.push_str(&format!(" -- first detected {ts}"));
-                if let Some(parsed) = crate::util::parse_rfc3339_utc(ts) {
-                    let now_odt: time::OffsetDateTime = now.into();
-                    if let Some(age) = crate::util::humanize_ago(now_odt - parsed) {
-                        line.push_str(&format!(" ({age})"));
-                    }
-                }
+        let banner = match report.alert_causes.iter().map(|c| c.cause.severity()).max() {
+            Some(AlertSeverity::Warning) => {
+                "WARNING alert -- capacity risk detected. Run 'braid ack' to acknowledge.\n"
             }
+            _ => {
+                "CRITICAL alert -- pool health issue detected. Run 'braid ack' to acknowledge and silence.\n"
+            }
+        };
+        out.push_str(banner);
+        let now_odt: time::OffsetDateTime = now.into();
+        for c in &report.alert_causes {
+            let mut line = format!("  - {}", c.cause.describe(devid_names));
+            line.push_str(&c.first_detected_suffix(now_odt));
             line.push('\n');
             out.push_str(&line);
         }

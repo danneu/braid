@@ -8,8 +8,8 @@ use ratatui::Frame;
 use ratatui::widgets::{
     Block, Borders, Cell, Clear, Padding, Paragraph, Row, Table, TableState, Wrap,
 };
-use time::PrimitiveDateTime;
 use time::macros::format_description;
+use time::{OffsetDateTime, PrimitiveDateTime};
 
 use crate::alert::AlertSeverity;
 use crate::config::FanControl;
@@ -998,6 +998,44 @@ fn tab_bar(active: Tab) -> Line<'static> {
     Line::from(spans)
 }
 
+fn alert_lines(
+    pool: &PoolState,
+    severity: AlertSeverity,
+    now_utc: OffsetDateTime,
+) -> Vec<Line<'static>> {
+    let (banner, banner_style, detail_color) = match severity {
+        AlertSeverity::Warning => (
+            " WARNING alert -- capacity risk detected. Run 'braid ack' to acknowledge. ",
+            Style::default()
+                .bg(Color::Yellow)
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD),
+            Color::Yellow,
+        ),
+        AlertSeverity::Critical => (
+            " CRITICAL alert -- pool health issue detected. Run 'braid ack' to acknowledge and silence. ",
+            Style::default()
+                .bg(Color::Red)
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+            Color::Red,
+        ),
+    };
+
+    let mut lines = vec![Line::from(Span::styled(banner, banner_style))];
+    for cause in &pool.alert_causes {
+        lines.push(Line::from(Span::styled(
+            format!(
+                "  - {}{}",
+                cause.cause.describe(Some(&pool.devid_names)),
+                cause.first_detected_suffix(now_utc)
+            ),
+            Style::default().fg(detail_color),
+        )));
+    }
+    lines
+}
+
 fn view_data(model: &Model, frame: &mut Frame, area: Rect, _now: PrimitiveDateTime) {
     let page_unit = page_unit(model);
 
@@ -1419,18 +1457,21 @@ fn view_disk_detail(model: &Model, frame: &mut Frame, area: Rect) {
     frame.render_widget(footer, regions[1 + 2 * n_sections]);
 }
 
-pub fn view(model: &Model, frame: &mut Frame, now: PrimitiveDateTime) {
+/// Render one TUI frame. `now` and `now_utc` must describe the same instant:
+/// scrub ages use local naive timestamps, while alert latch timestamps are UTC.
+pub fn view(model: &Model, frame: &mut Frame, now: PrimitiveDateTime, now_utc: OffsetDateTime) {
     let area = frame.area();
     let advisory_height = model.advisories.len() as u16;
     // Severity drives both whether the banner shows and which banner: a
     // Warning-only state (ENOSPC risk) renders a non-beeping amber WARNING alert,
     // never the red CRITICAL alert. `severity().is_some()` is exactly `active()`.
-    let alert_severity = model
-        .pool
-        .current()
-        .and_then(|p| p.alert_causes.iter().map(|c| c.cause.severity()).max());
-    let alert_active = alert_severity.is_some();
-    let alert_height: u16 = if alert_active { 1 } else { 0 };
+    let alert_pool = model.pool.current().filter(|p| !p.alert_causes.is_empty());
+    let alert_severity =
+        alert_pool.and_then(|p| p.alert_causes.iter().map(|c| c.cause.severity()).max());
+    let alert_height: u16 = alert_pool
+        .zip(alert_severity)
+        .map(|(pool, _)| 1 + pool.alert_causes.len() as u16)
+        .unwrap_or(0);
     let stale_msg = model.pool.stale_error();
     let stale_height: u16 = if stale_msg.is_some() { 1 } else { 0 };
 
@@ -1452,27 +1493,9 @@ pub fn view(model: &Model, frame: &mut Frame, now: PrimitiveDateTime) {
     let outer = Layout::vertical(constraints).split(area);
     let mut off: usize = 0;
 
-    if alert_active {
-        // Warning-only renders an amber WARNING alert; any Critical cause -- or
-        // the unreachable None, fail-closed -- renders the red CRITICAL alert.
-        let (text, style) = match alert_severity {
-            Some(AlertSeverity::Warning) => (
-                " WARNING alert -- capacity risk detected. Run 'braid ack' to acknowledge. ",
-                Style::default()
-                    .bg(Color::Yellow)
-                    .fg(Color::Black)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            _ => (
-                " CRITICAL alert -- pool health issue detected. Run 'braid ack' to acknowledge and silence. ",
-                Style::default()
-                    .bg(Color::Red)
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        };
+    if let (Some(pool), Some(severity)) = (alert_pool, alert_severity) {
         frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(text, style))),
+            Paragraph::new(alert_lines(pool, severity, now_utc)),
             outer[off],
         );
         off += 1;
@@ -1556,12 +1579,115 @@ pub(crate) mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
-    fn render(model: &Model, width: u16, height: u16) -> Terminal<TestBackend> {
-        let now = time::macros::datetime!(2026-02-24 02:12:00);
+    fn render_with_times(
+        model: &Model,
+        width: u16,
+        height: u16,
+        now: time::PrimitiveDateTime,
+        now_utc: time::OffsetDateTime,
+    ) -> Terminal<TestBackend> {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|frame| view(model, frame, now)).unwrap();
         terminal
+            .draw(|frame| view(model, frame, now, now_utc))
+            .unwrap();
+        terminal
+    }
+
+    fn render(model: &Model, width: u16, height: u16) -> Terminal<TestBackend> {
+        let now = time::macros::datetime!(2026-02-24 02:12:00);
+        let now_utc = time::macros::datetime!(2026-02-24 08:12:00 UTC);
+        render_with_times(model, width, height, now, now_utc)
+    }
+
+    fn alert_render_now_utc() -> time::OffsetDateTime {
+        time::macros::datetime!(2026-02-24 08:12:00 UTC)
+    }
+
+    fn timestamped_missing_device() -> (AlertCause, Option<String>) {
+        (
+            AlertCause::MissingDevice {
+                devid: Devid::new(2),
+            },
+            Some("2026-02-24T06:12:00Z".to_owned()),
+        )
+    }
+
+    fn pool_with_timestamped_alert(causes: Vec<(AlertCause, Option<String>)>) -> PoolState {
+        let mut pool = sample_pool();
+        pool.devid_names = HashMap::from([(Devid::new(2), "ironwolf".to_owned())]);
+        pool.alert_causes = causes
+            .into_iter()
+            .map(|(cause, first_detected)| AlertCauseReport {
+                cause,
+                first_detected,
+            })
+            .collect();
+        pool
+    }
+
+    fn render_timestamped_alert(pool: PoolState) -> String {
+        let model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(pool));
+        buffer_to_string(&render(&model, 130, 28))
+    }
+
+    fn render_with_local_and_utc_now(pool: PoolState) -> String {
+        let model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(pool));
+        buffer_to_string(&render_with_times(
+            &model,
+            130,
+            28,
+            time::macros::datetime!(2026-02-24 02:12:00),
+            alert_render_now_utc(),
+        ))
+    }
+
+    fn render_snapshot_alert(pool: PoolState) -> Terminal<TestBackend> {
+        let model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(pool));
+        render(&model, 120, 28)
+    }
+
+    fn footer_present(output: &str) -> bool {
+        output.contains("Reload: r")
+    }
+
+    fn data_body_present(output: &str) -> bool {
+        output.contains("Pool") && output.contains("Disks")
+    }
+
+    fn missing_device_detail_line() -> &'static str {
+        "  - missing device: ironwolf (devid 2) -- first detected 2026-02-24T06:12:00Z (2 hours ago)"
+    }
+
+    fn bridge_enospc_label() -> &'static str {
+        "  - ENOSPC risk: pool is one disk-loss from being unable to restore RAID1 redundancy"
+    }
+
+    fn banner_text() -> &'static str {
+        "CRITICAL alert -- pool health issue detected"
+    }
+
+    fn warning_banner_text() -> &'static str {
+        "WARNING alert -- capacity risk detected"
+    }
+
+    fn assert_has_alert_detail(output: &str) {
+        assert!(
+            output.contains(banner_text()),
+            "alert banner missing from rendered output:\n{output}"
+        );
+        assert!(
+            output.contains(missing_device_detail_line()),
+            "timestamped cause line missing from rendered output:\n{output}"
+        );
+        assert!(
+            output.contains("first detected"),
+            "first-detected suffix missing from rendered output:\n{output}"
+        );
+        assert!(
+            output.contains("2 hours ago"),
+            "relative age missing from rendered output:\n{output}"
+        );
     }
 
     fn df_entry(bg_type: BtrfsBgType, bg_profile: BtrfsProfile) -> BtrfsDfEntry {
@@ -1583,6 +1709,109 @@ pub(crate) mod tests {
         let mut pool = sample_pool();
         pool.alert_causes = causes.into_iter().map(AlertCauseReport::bridge).collect();
         pool
+    }
+
+    // Intent: a timestamped critical TUI alert renders the banner plus one
+    //   per-cause detail line with the shared status label and age suffix.
+    // Why it exists: the TUI previously showed only a generic banner, leaving
+    //   operators without the "what is wrong and since when" details.
+    // Scenario: a missing-device latch was first detected two UTC hours before
+    //   the rendered frame.
+    #[test]
+    fn tui_alert_renders_timestamped_cause_detail() {
+        let pool = pool_with_timestamped_alert(vec![timestamped_missing_device()]);
+        let out = render_timestamped_alert(pool);
+
+        assert_has_alert_detail(&out);
+    }
+
+    // Intent: alert ages are computed against the frame's UTC clock, not the
+    //   naive local scrub clock.
+    // Why it exists: first_detected is RFC3339 UTC; subtracting it from local
+    //   wall clock drops or skews the relative age on non-UTC hosts.
+    // Scenario: local wall-clock is six hours behind the UTC frame instant, and
+    //   the alert was detected two UTC hours ago.
+    #[test]
+    fn tui_alert_age_uses_utc_clock() {
+        let pool = pool_with_timestamped_alert(vec![timestamped_missing_device()]);
+        let out = render_with_local_and_utc_now(pool);
+
+        assert!(
+            out.contains("2 hours ago"),
+            "age must be based on now_utc, got:\n{out}"
+        );
+    }
+
+    // Intent: a bridge alert cause with no persisted timestamp renders the
+    //   shared label without inventing a first-detected suffix.
+    // Why it exists: bridge causes come from live status signals before the
+    //   monitor latches them, so the TUI must not imply a detection time.
+    // Scenario: ENOSPC risk is surfaced directly in the current status report.
+    #[test]
+    fn tui_alert_bridge_cause_omits_first_detected_suffix() {
+        let pool = pool_with_timestamped_alert(vec![(
+            AlertCause::EnospcRisk {
+                margin: -1,
+                count_below: 1,
+                device_count: 2,
+            },
+            None,
+        )]);
+        let out = render_timestamped_alert(pool);
+
+        assert!(
+            out.contains(warning_banner_text()),
+            "warning banner missing from rendered output:\n{out}"
+        );
+        assert!(
+            out.contains(bridge_enospc_label()),
+            "ENOSPC detail line missing from rendered output:\n{out}"
+        );
+        assert!(
+            !out.contains("first detected"),
+            "bridge cause must not render first-detected suffix:\n{out}"
+        );
+    }
+
+    // Intent: the alert region snapshot captures the multi-line banner plus
+    //   detail block.
+    // Why it exists: cause detail is a top-of-screen layout element; a snapshot
+    //   makes accidental line loss obvious while text assertions pin semantics.
+    // Scenario: one timestamped missing-device alert on the Data tab.
+    #[test]
+    fn snapshot_alert_detail_region() {
+        let pool = pool_with_timestamped_alert(vec![timestamped_missing_device()]);
+        let terminal = render_snapshot_alert(pool);
+
+        snap!(buffer_to_string(&terminal));
+    }
+
+    // Intent: multiple alert causes increase the alert block height without
+    //   consuming the body or footer layout.
+    // Why it exists: the alert region changed from a single row to a
+    //   variable-height paragraph, so downstream section indexing must stay
+    //   aligned.
+    // Scenario: a warning and critical detail line both render above the Data
+    //   tab body on a normal-height terminal.
+    #[test]
+    fn tui_alert_multiple_causes_leave_body_and_footer_visible() {
+        let pool = pool_with_timestamped_alert(vec![
+            (
+                AlertCause::EnospcRisk {
+                    margin: -1,
+                    count_below: 1,
+                    device_count: 2,
+                },
+                None,
+            ),
+            timestamped_missing_device(),
+        ]);
+        let out = render_timestamped_alert(pool);
+
+        assert!(out.contains(bridge_enospc_label()), "got:\n{out}");
+        assert!(out.contains(missing_device_detail_line()), "got:\n{out}");
+        assert!(data_body_present(&out), "body missing from layout:\n{out}");
+        assert!(footer_present(&out), "footer missing from layout:\n{out}");
     }
 
     // Intent: verify relative-time text buckets and the future-timestamp None branch.

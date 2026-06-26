@@ -1327,6 +1327,7 @@ mod tests {
             smart: HashMap::new(),
             disk_temperature_readings: HashMap::new(),
             disk_underlying: HashMap::new(),
+            devid_names: HashMap::new(),
             device_errors: HashMap::new(),
             unpooled_disks: HashMap::new(),
             alert_causes: Vec::new(),

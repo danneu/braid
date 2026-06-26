@@ -232,6 +232,7 @@ pub(crate) fn sample_pool() -> PoolState {
         smart,
         disk_temperature_readings: HashMap::new(),
         disk_underlying: HashMap::new(),
+        devid_names: HashMap::new(),
         device_errors: HashMap::from([
             (
                 "toshiba".to_owned(),
