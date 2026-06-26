@@ -31,8 +31,8 @@ sudo braid monitor; echo $?
 | --- | --- |
 | **0** | Healthy, pool is offline, or another braid command holds the pool lock (cycle skipped, re-evaluated on the next timer tick) |
 | **1** | Critical alert active -- a disk-health problem; the beeper fires |
-| **3** | Warning-only alert active -- a proactive capacity (ENOSPC) risk; notifies via `alertCommand`, no beep |
 | **2** | Pre-monitor setup error (e.g. pool-lock I/O, config load failure) |
+| **3** | Warning-only alert active -- a proactive capacity (ENOSPC) risk; notifies via `alertCommand`, no beep |
 
 ## What triggers an alert
 
