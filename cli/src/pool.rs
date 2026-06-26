@@ -488,7 +488,10 @@ pub fn maybe_restore_raid1<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     Ok(())
 }
 
-/// Gracefully remove a specific device from the pool with progress.
+/// Present-disk remove entry point for `braid remove`; it removes by mapper
+/// path and maps failures through the live-device recovery context. Missing
+/// cleanup uses `pool_remove_missing_device` so context and identifier type
+/// cannot drift.
 pub fn pool_remove_device<R: CommandRunner + Sync>(
     runner: &R,
     device: &str,
@@ -506,9 +509,13 @@ pub fn pool_remove_device<R: CommandRunner + Sync>(
     device_remove_result(RemoveContext::Live, mount_point, &result)
 }
 
-pub(crate) fn pool_remove_device_using<R, S, W>(
+/// Missing-device cleanup entry point for `braid remove-missing`; it removes by
+/// btrfs devid and maps failures through the missing-device recovery context.
+/// This is a distinct operation from `pool_remove_device`; the sleeper/sink
+/// parameters are only the heartbeat test seam.
+pub(crate) fn pool_remove_missing_device<R, S, W>(
     runner: &R,
-    device: &str,
+    missing_devid: Devid,
     mount_point: &MountPoint,
     progress: ProgressOutput,
     sleeper: &S,
@@ -522,7 +529,7 @@ where
     let result = progress::run_device_remove_with_progress_using(
         runner,
         &CmdRequest::BtrfsDeviceRemove {
-            device: device.to_owned(),
+            device: missing_devid.to_string(),
             mount_point: mount_point.clone(),
         },
         progress,
@@ -1037,7 +1044,7 @@ mod tests {
     }
 
     /*
-     * Intent: pool_remove_device_using routes device removal through the
+     * Intent: pool_remove_missing_device routes device removal through the
      * heartbeat progress helper.
      * Why it exists: the pool layer owns the btrfs device-remove call; a
      * direct runner.run here would make slow removals silent again.
@@ -1045,14 +1052,14 @@ mod tests {
      * written, then completes successfully.
      */
     #[test]
-    fn pool_remove_device_using_emits_heartbeat() {
+    fn pool_remove_missing_device_emits_heartbeat() {
         let runner = BlockingRemoveRunner::new();
         let sleeper = FakeSleeper::default();
         let sink = RecordingSink::with_gate(runner.gate());
 
-        let result = pool_remove_device_using(
+        let result = pool_remove_missing_device(
             &runner,
-            "/dev/mapper/braid-disk2",
+            Devid::new(2),
             &mp(),
             ProgressOutput::Human,
             &sleeper,
@@ -1588,14 +1595,14 @@ mod tests {
     }
 
     #[test]
-    // Intent: pool_remove_device_using wires missing-device cleanup to the
+    // Intent: pool_remove_missing_device wires missing-device cleanup to the
     // missing recovery hint context.
     // Why it exists: the compiler enforces that a context is passed, but only
     // this wrapper-level test catches a swapped Live/Missing value at the
     // remove-missing boundary.
     // Scenario: `braid remove-missing` fails on a stray RAID1C3 chunk and
     // should point at recover, then replace the missing device.
-    fn pool_remove_device_using_failure_emits_missing_replace_hint() {
+    fn pool_remove_missing_device_failure_emits_missing_replace_hint() {
         let runner = MockRunner::default().with_output(
             CmdRequest::BtrfsDeviceRemove {
                 device: "2".to_owned(),
@@ -1614,10 +1621,16 @@ mod tests {
         let sleeper = FakeSleeper::default();
         let sink = RecordingSink::default();
 
-        let err =
-            pool_remove_device_using(&runner, "2", &mp(), ProgressOutput::Off, &sleeper, &sink)
-                .expect_err("min-devices rejection should return an error")
-                .to_string();
+        let err = pool_remove_missing_device(
+            &runner,
+            Devid::new(2),
+            &mp(),
+            ProgressOutput::Off,
+            &sleeper,
+            &sink,
+        )
+        .expect_err("min-devices rejection should return an error")
+        .to_string();
         assert!(
             err.contains(
                 "braid replace --old <missing-name> --new <new-name>=/dev/disk/by-id/<...>"

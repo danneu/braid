@@ -8,10 +8,13 @@ use std::time::Duration;
 
 pub(crate) const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 
+/// Injectable wait contract so progress-loop tests can advance heartbeats
+/// without paying real wall-clock sleeps.
 pub trait Sleeper: Sync {
     fn sleep(&self, duration: Duration);
 }
 
+/// Production sleeper for progress loops that should wait while a command runs.
 pub struct RealSleeper;
 
 impl Sleeper for RealSleeper {
@@ -28,12 +31,16 @@ impl Sleeper for NoopSleeper {
     fn sleep(&self, _duration: Duration) {}
 }
 
+/// Progress-output boundary so long-running helpers can be tested without
+/// writing to stderr.
 pub(crate) trait ProgressSink: Sync {
     fn write_line(&self, msg: &str);
     fn write_json(&self, msg: &str);
     fn clear(&self);
 }
 
+/// Production progress sink that owns stderr rendering for human and JSON
+/// progress.
 pub(crate) struct StderrSink;
 
 impl ProgressSink for StderrSink {
@@ -300,6 +307,9 @@ pub fn run_with_progress<R: CommandRunner + Sync>(
     })
 }
 
+/// Device-remove progress wrapper for production waits and stderr output.
+/// Kept separate because btrfs device remove does not report through balance
+/// status.
 pub(crate) fn run_device_remove_with_progress<R: CommandRunner + Sync>(
     runner: &R,
     request: &CmdRequest,
@@ -308,6 +318,8 @@ pub(crate) fn run_device_remove_with_progress<R: CommandRunner + Sync>(
     run_device_remove_with_progress_using(runner, request, output, &RealSleeper, &StderrSink)
 }
 
+/// Injectable device-remove progress loop so tests can drive heartbeat timing
+/// and output without real sleeps or stderr writes.
 pub(crate) fn run_device_remove_with_progress_using<R, S, W>(
     runner: &R,
     request: &CmdRequest,

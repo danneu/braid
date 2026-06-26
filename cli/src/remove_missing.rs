@@ -7,7 +7,7 @@ use crate::journal;
 use crate::membership;
 use crate::parse::types::BtrfsDeviceUsageEntry;
 use crate::parse::{ParseError, parse_btrfs_device_usage};
-use crate::pool::pool_remove_device_using;
+use crate::pool::pool_remove_missing_device;
 use crate::preflight;
 use crate::preview::{self, PerDiskStyle, PlanFailure, Preview, PreviewCompleteness, PreviewNote};
 use crate::probe::{Filesystem, ProbeError, probe_pool};
@@ -226,9 +226,9 @@ impl RemoveMissingPlan {
                 &format!("pool: removing missing devid {}...", work_plan.missing_id),
             )
         );
-        pool_remove_device_using(
+        pool_remove_missing_device(
             runner,
-            &work_plan.missing_id.to_string(),
+            work_plan.missing_id,
             &work_plan.mount_point,
             params.progress,
             params.sleeper,
@@ -2109,7 +2109,7 @@ mod tests {
      *
      * Why it exists: remove-missing must not persist the target pool.json
      * until `btrfs device remove <devid>` succeeds. If save_membership ran
-     * before pool_remove_device_using, this device-remove failure would
+     * before pool_remove_missing_device, this device-remove failure would
      * leave pool.json reconciled without the btrfs operation having
      * committed.
      *
@@ -2208,7 +2208,7 @@ mod tests {
     //   replace hint when btrfs rejects with "unable to go below" min-devices,
     //   alongside journal preservation.
     // Why it exists: the planner intentionally leaves multi-missing topologies
-    //   to the kernel + device_remove_error. pool_remove_device_using's own
+    //   to the kernel + device_remove_error. pool_remove_missing_device's own
     //   test pins the wrapper, but only this command-level test catches a
     //   regression in the wiring -- e.g. swapping RemoveContext::Missing for
     //   ::Live, swallowing the PoolError, or replacing the hint with a generic
