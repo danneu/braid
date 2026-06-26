@@ -138,6 +138,14 @@ struct RemoveWorkPlan {
     /// dm slot. See plan section "remove.rs" for the parallel with
     /// lock.rs's "close observed, not reconstructed" doctrine.
     target_mapper: MapperName,
+    /// Live backing path of the target captured at planning time -- the
+    /// cryptsetup-reported `PoolDevice.underlying`, not the mapper path or
+    /// a by-id handle (decision 024: present-device probes use live paths).
+    /// Display-only: its sole consumer is the best-effort confirm-prompt
+    /// hardware line (`confirm::query_disk_hw_info`) behind the interactive
+    /// `!params.yes` gate; no mutation, journal, or validation reads it.
+    /// Snapshotted rather than re-resolved because `execute()` holds no
+    /// `PoolState` to call `underlying_for_uuid` on (contrast replace.rs).
     target_underlying: String,
     remaining: usize,
     total: usize,
