@@ -358,7 +358,7 @@ struct ReplaceArgs {
     /// Disk name of the new replacement disk
     #[arg(long, add = ArgValueCandidates::new(disk_name_candidates))]
     new: String,
-    /// Optional cross-check for a dead disk: assert the missing btrfs devid; must match the devid recorded for --old
+    /// Optional cross-check for a dead disk: assert the missing btrfs devid. braid refuses if it disagrees with the devid pool.json records for --old. Never required.
     #[arg(long)]
     missing_id: Option<u64>,
     /// Directory containing braid.key to enroll in the new disk (LUKS slot 1)
