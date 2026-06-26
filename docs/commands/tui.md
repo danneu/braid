@@ -70,6 +70,39 @@ polls do not update it. The view redraws periodically while idle so relative
 
 **Disk table** -- one row per disk: number, name, bus (sata/usb/nvme), SMART health, temperature, btrfs device-error count, and allocated (shown as percent used and allocated/size).
 
+**Disk status cell** -- when a declared disk is not assembled into the live pool,
+its row drops the allocation columns and shows a status cell instead. Cell color
+reflects severity: red marks identity, header, or mapper faults that need
+attention now; yellow marks the remaining diagnostic states, which can still need
+follow-up -- `missing` in particular means a member is absent and the pool may be
+running degraded. The five states `braid status` also reports per-disk
+(`missing`, `offline`, `unknown`, `uuid mismatch`, `LUKS header unreadable`)
+carry fuller descriptions under
+[`braid status` per-disk detail](status.md#per-disk-detail), with an `Action:`
+hint where applicable (`missing`, `uuid mismatch`, `LUKS header unreadable`;
+`offline` and `unknown` get none); the two TUI-only probe faults
+(`mapper conflict`, `LUKS<v> (unsupported)`) appear there only as
+[config-disk probe-fault advisories](status.md#advisories). Run `braid doctor`
+to diagnose the states it covers -- `uuid mismatch`, `LUKS header unreadable`,
+`offline`, and `missing`.
+
+  - `missing` (yellow) -- the device is absent at its by-id path.
+  - `offline` (yellow) -- present and LUKS-identity-verified, but not assembled
+    into the live pool. Cause-neutral (a locked member of a degraded mount, an
+    interrupted post-commit step, etc.); see
+    [decision 024](../design/decisions/024-luks-uuid-identity.md#offline-disk-state).
+  - `unknown` (yellow) -- braid could not classify the disk's state.
+  - `uuid mismatch` (red) -- the on-disk LUKS UUID differs from the recorded
+    member: the disk was swapped, cloned, or reformatted. Run `braid doctor` for
+    the expected vs observed UUID.
+  - `mapper conflict` (red) -- the `braid-<name>` device-mapper node is open for
+    the wrong backing device or LUKS UUID. Close it and unlock again.
+  - `LUKS header unreadable` (red) -- the device is present but its LUKS header
+    could not be read or validated.
+  - `LUKS<v> (unsupported)` (red) -- the device holds a LUKS header of the wrong
+    version (e.g. `LUKS1`; braid requires LUKS2). Back up its data and re-add the
+    disk.
+
 **Fans** (when fan control is enabled) -- Data-tab row with a `daemon:`
 header annotation for `hddfancontrol-braid.service`: `active` is green,
 `activating` and `inactive` are yellow, `failed` is red, and `unknown` is
