@@ -53,6 +53,20 @@ scope, refactor, or backwards-compatibility cost.
   Unicode (arrows, box-drawing, degree sign, spinners) is fine. Enforced by
   `scripts/docs/check-output-ascii.py` over `cli/src/**/*.rs` and `modules/**/*.nix` echo lines
   (comments and tests exempt).
+- **Command error prefixes.** In command-level error enums (e.g.
+  `cli/src/add.rs#AddError`), variants are tagged by *role*, not by syntax. A
+  subsystem-wrapper variant -- whose inner error wouldn't reveal which braid layer
+  produced it -- gets a `<subsystem> error:` tag (`probe error:`, `pool error:`,
+  `luks error:`, `command error:`, `parse error:`, `membership error:`) so the operator
+  can see which layer failed; `print_cli_error` (`cli/src/main.rs#print_cli_error`) then
+  prepends the single `error: ` marker, so output reads `error: <subsystem> error: ...`
+  (the doubling is intentional). A variant whose message already stands alone gets no
+  tag -- both terminal refusals with full hand-authored wording (e.g.
+  `cli/src/remove_missing.rs#RemoveMissingError::NoMemberForDevid`, which is not
+  `#[error("{0}")]`) and deliberate transparent passthroughs of an already-user-facing
+  sub-error (e.g. `cli/src/add.rs#AddError::ManagedFormatFlag`,
+  `cli/src/recover.rs#RecoverError::Mount`, both `#[from]` + `#[error("{0}")]`). Tagging
+  is per-role and codebase-wide; don't flip one variant to change the doubling.
 - **Commits:** Conventional Commits; first line lowercase (`fix the foo bug`, not `Fix ...`).
 - **File citations:** cite `path#symbol` (code, as a code span) or `path#heading-slug`
   (markdown link) -- never line numbers. Details: [doc-citations.md](docs/dev/doc-citations.md);
