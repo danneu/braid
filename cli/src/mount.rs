@@ -2188,15 +2188,15 @@ pool already mounted at /mnt/storage
         );
     }
 
-    /// Intent: When a disk's probed LUKS UUID doesn't match pool.json's stored
-    /// UUID, unlock must fatally error before attempting to open the device.
-    ///
-    /// Why: A UUID mismatch means the physical drive has been swapped,
-    /// reformatted, or corrupted. Proceeding would mount the wrong data.
-    ///
-    /// Scenario: 2-disk RAID1. disk1 has a stored luks_uuid from a prior
-    /// unlock, but the device now reports a different UUID (drive was swapped).
-    /// Both LUKS devices are closed.
+    // Intent: When a disk's probed LUKS UUID doesn't match pool.json's stored
+    // UUID, unlock must fatally error before attempting to open the device.
+    //
+    // Why: A UUID mismatch means the physical drive has been swapped,
+    // reformatted, or corrupted. Proceeding would mount the wrong data.
+    //
+    // Scenario: 2-disk RAID1. disk1 is keyed under one LUKS UUID in pool.json,
+    // but the device now reports a different UUID (drive was swapped). Both LUKS
+    // devices are closed.
     #[test]
     fn mount_luks_uuid_mismatch_closed() {
         let config = test_config();
@@ -2207,8 +2207,8 @@ pool already mounted at /mnt/storage
             "/dev/disk/by-id/virtio-disk2",
         ]);
 
-        // Override base's disk1 UUID seed with a value that mismatches the
-        // stored luks_uuid (HashMap insert semantics on `with_output`).
+        // Override base's disk1 probe-UUID seed with a value that mismatches its
+        // pool.json membership key (HashMap insert semantics on `with_output`).
         let (uuid1_req, uuid1_out) = luks_uuid_ok(
             "/dev/disk/by-id/virtio-disk1",
             "ffffffff-ffff-ffff-ffff-ffffffffffff",
@@ -2242,14 +2242,14 @@ pool already mounted at /mnt/storage
         );
     }
 
-    /// Intent: UUID mismatch must be caught even when the LUKS mapper is
-    /// already open (e.g. from a previous partial unlock or manual intervention).
-    ///
-    /// Why: The check must fire in both PresentLuks branches — mapper_open
-    /// status doesn't make a swapped drive safe.
-    ///
-    /// Scenario: Same as mount_luks_uuid_mismatch_closed, but disk1's mapper
-    /// is already open.
+    // Intent: UUID mismatch must be caught even when the LUKS mapper is
+    // already open (e.g. from a previous partial unlock or manual intervention).
+    //
+    // Why: The check must fire in both PresentLuks branches -- mapper_open
+    // status doesn't make a swapped drive safe.
+    //
+    // Scenario: Same as mount_luks_uuid_mismatch_closed, but disk1's mapper
+    // is already open.
     #[test]
     fn mount_luks_uuid_mismatch_already_open() {
         let config = test_config();
@@ -2263,7 +2263,7 @@ pool already mounted at /mnt/storage
 
         let (uuid1_req, uuid1_out) = luks_uuid_ok(
             "/dev/disk/by-id/virtio-disk1",
-            "ffffffff-ffff-ffff-ffff-ffffffffffff", // different from stored
+            "ffffffff-ffff-ffff-ffff-ffffffffffff", // differs from membership key
         );
         let (uuid2_req, uuid2_out) = luks_uuid_ok(
             "/dev/disk/by-id/virtio-disk2",
@@ -2307,22 +2307,22 @@ pool already mounted at /mnt/storage
         );
     }
 
-    /// Intent: A LUKS UUID mismatch on a *present* disk is refused even when
-    /// `--allow-degraded` is set. The mismatch returns inside the probe loop,
-    /// before the degraded gate, so the flag cannot reach it: the result is the
-    /// hard `MountError::Failed("...LUKS UUID mismatch...")`, never
-    /// `DegradedRefused` and never `Ok`.
-    ///
-    /// Why: docs/commands/unlock.md and docs/guides/recovery-scenarios.md tell
-    /// operators that `--allow-degraded` does not bypass a UUID mismatch (that
-    /// flag only covers *missing* disks). Both existing mismatch tests pass
-    /// `allow_degraded=false`; this locks that load-bearing doc claim so a
-    /// future gate reorder that broke it fails here instead of shipping silently.
-    ///
-    /// Scenario: 2-disk RAID1. disk1's device reports a UUID that differs from
-    /// the stored luks_uuid (swapped/cloned/reformatted drive), but the operator
-    /// reaches for `--allow-degraded` -- the wrong guess after seeing a present
-    /// disk refused.
+    // Intent: A LUKS UUID mismatch on a *present* disk is refused even when
+    // `--allow-degraded` is set. The mismatch returns inside the probe loop,
+    // before the degraded gate, so the flag cannot reach it: the result is the
+    // hard `MountError::Failed("...LUKS UUID mismatch...")`, never
+    // `DegradedRefused` and never `Ok`.
+    //
+    // Why: docs/commands/unlock.md and docs/guides/recovery-scenarios.md tell
+    // operators that `--allow-degraded` does not bypass a UUID mismatch (that
+    // flag only covers *missing* disks). Both existing mismatch tests pass
+    // `allow_degraded=false`; this locks that load-bearing doc claim so a
+    // future gate reorder that broke it fails here instead of shipping silently.
+    //
+    // Scenario: 2-disk RAID1. disk1's device reports a UUID that differs from
+    // its pool.json membership key (swapped/cloned/reformatted drive), but the
+    // operator reaches for `--allow-degraded` -- the wrong guess after seeing a
+    // present disk refused.
     #[test]
     fn mount_luks_uuid_mismatch_refused_even_with_allow_degraded() {
         let config = test_config();
@@ -2333,8 +2333,8 @@ pool already mounted at /mnt/storage
             "/dev/disk/by-id/virtio-disk2",
         ]);
 
-        // Override base's disk1 UUID seed with a value that mismatches the
-        // stored luks_uuid (HashMap insert semantics on `with_output`).
+        // Override base's disk1 probe-UUID seed with a value that mismatches its
+        // pool.json membership key (HashMap insert semantics on `with_output`).
         let (uuid1_req, uuid1_out) = luks_uuid_ok(
             "/dev/disk/by-id/virtio-disk1",
             "ffffffff-ffff-ffff-ffff-ffffffffffff",
