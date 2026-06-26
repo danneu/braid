@@ -84,9 +84,11 @@ If a btrfs exclusive operation (a running balance, device add/remove/replace, re
   `btrfs device usage` probe failed to spawn, returned a nonzero exit,
   produced unparseable output, did not list the targeted missing devid, or
   reported an untrusted missing-device allocation shape: the targeted devid is
-  listed more than once, carries an allocation profile braid does not model, or
-  reports no positive Data/Metadata/System RAID1 row), when more than 1
-  surviving device exists
+  listed more than once, is listed but **not as a missing device** (a real
+  device path, or a nonzero device size -- a disagreement between `btrfs
+  filesystem show` and `btrfs device usage`), carries an allocation profile
+  braid does not model, or reports no positive Data/Metadata/System RAID1 row),
+  when more than 1 surviving device exists
 - Refuses on a 2-disk RAID1 pool with one disk missing -- the kernel refuses to drop a RAID1 pool below two devices. Use `braid replace --old <missing-name> --new <new-name>=/dev/disk/by-id/<...>` to repair the dead disk, or `braid add` first and then re-run.
 - Refuses if a pending operation journal (`pending-op.json`) exists -- run `braid recover` to reconcile.
 - Refuses if another braid operation is in progress (pool lock `/run/braid-pool.lock` is held) -- retry once it finishes.

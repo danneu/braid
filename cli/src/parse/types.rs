@@ -597,10 +597,14 @@ pub struct BtrfsDeviceUsageEntry {
 }
 
 impl BtrfsDeviceUsageEntry {
-    /// Identifies btrfs's `<missing disk>` usage row so alert and removal code
-    /// share the same missing-device sentinel predicate.
-    pub fn is_missing(&self) -> bool {
-        self.device_size == 0
+    /// True when btrfs rendered this stanza with a "missing device" path marker rather than a
+    /// real block-device path. Trusting a relocation target keys on this, never on
+    /// `device_size == 0` alone: btrfs-progs also reports `Device size: 0` for a PRESENT device
+    /// whose `device_get_partition_size` probe failed, so size alone cannot tell a missing
+    /// member from a live device with a transient probe failure.
+    pub fn has_missing_marker(&self) -> bool {
+        self.path == super::btrfs_device_usage::MISSING_DEVICE_PATH_MARKER
+            || self.path == super::btrfs_device_usage::MISSING_DEVICE_PATH_FALLBACK
     }
 
     pub fn used_bytes(&self) -> u64 {

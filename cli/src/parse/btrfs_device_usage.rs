@@ -10,6 +10,12 @@ use crate::types::Devid;
 use super::ParseError;
 use super::types::{BtrfsDeviceUsageEntry, BtrfsDeviceUsageOutput, DeviceAllocation};
 
+/// Kernel `btrfs_dev_name()` marker for a BTRFS_DEV_STATE_MISSING device, copied through
+/// BTRFS_IOC_DEV_INFO by btrfs device usage (reference/btrfs-progs/cmds/filesystem-usage.c).
+pub const MISSING_DEVICE_PATH_MARKER: &str = "<missing disk>";
+/// btrfs-progs fallback when the dev-info ioctl returns an empty path.
+pub const MISSING_DEVICE_PATH_FALLBACK: &str = "missing";
+
 // ---------------------------------------------------------------------------
 // nom parsers
 // ---------------------------------------------------------------------------
@@ -260,7 +266,7 @@ mod tests {
         let out = parse_btrfs_device_usage(&raw).unwrap();
         assert_eq!(out.devices.len(), 2);
         let missing = &out.devices[1];
-        assert_eq!(missing.path, "<missing disk>");
+        assert_eq!(missing.path, MISSING_DEVICE_PATH_MARKER);
         assert_eq!(missing.devid, Devid::new(3));
         assert_eq!(missing.device_size, 0);
         assert_eq!(missing.device_slack, 0);

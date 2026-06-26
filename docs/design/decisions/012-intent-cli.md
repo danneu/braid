@@ -82,10 +82,16 @@ uncertainty, because a miss there can crash the filesystem read-only with
 `pending-op.json` already written.
 
 `remove-missing` also refuses an untrusted missing-device allocation shape
-before `btrfs device remove`. Its trust check validates shape, not per-type
-completeness: the targeted missing devid must have exactly one usage stanza,
+before `btrfs device remove`. Its trust check validates target identity and
+shape, not per-type completeness: the targeted missing devid must have exactly
+one usage stanza, that stanza must carry the kernel missing-device path marker
+(`<missing disk>`, or the `missing` fallback) together with `device_size == 0`,
 every positive target allocation row must be one of Data/Metadata/System RAID1,
-and at least one positive supported row must be present. Missing supported row
+and at least one positive supported row must be present. A stanza with a real
+device path -- even at `device_size == 0`, which btrfs-progs emits when a present
+device's size probe fails -- is a probe disagreement between `btrfs filesystem
+show` and `btrfs device usage`, and is refused rather than trusted as the
+relocation target; size alone never proves missing-ness. Missing supported row
 types are treated as zero demand because a sparse 3+ device RAID1 member may
 legitimately hold only a subset of Data, Metadata, and System chunks.
 

@@ -543,10 +543,12 @@ pub fn cmd_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
 /// cleanly, while `remove-missing` always starts from the degraded context
 /// that reproduced the read-only crash. Do not unify the policies.
 ///
-/// Missing devices are identified by `device_size == 0` in `btrfs device usage
-/// --raw` output. This is reliable: present devices always have device_size > 0,
-/// and missing devices always report 0. Their allocation lines (Data, Metadata,
-/// System) are preserved and accurate.
+/// Missing devices are identified by the kernel missing-marker path
+/// (`<missing disk>`, or the `missing` fallback) together with `device_size == 0`;
+/// size alone is not trusted because btrfs-progs reports `Device size: 0` for a
+/// present device whose partition-size probe fails, so a real-path stanza is
+/// treated as a probe disagreement and refused. Their allocation lines (Data,
+/// Metadata, System) are preserved and accurate.
 fn check_relocation_space<R: CommandRunner>(
     runner: &R,
     mount_point: &MountPoint,
@@ -585,37 +587,89 @@ fn check_relocation_space<R: CommandRunner>(
         }
     };
 
-    // Partition: btrfs missing-marker rows vs surviving devices.
-    let target: Vec<_> = usage
-        .devices
-        .iter()
-        .filter(|d| d.is_missing() && d.devid == missing_id)
-        .collect();
-    let remaining: Vec<_> = usage.devices.iter().filter(|d| !d.is_missing()).collect();
+    let target = match classify_usage_target(&usage.devices, missing_id) {
+        UsageTargetState::Absent => {
+            return Err(RemoveMissingError::Validation(format!(
+                "ENOSPC pre-flight: missing devid {missing_id} is not listed in \
+                 `btrfs device usage --raw {mount_point}`, so its allocations cannot be \
+                 measured. Refusing to remove the missing device without a validated \
+                 relocation-space check. Inspect the command output manually, then re-run."
+            )));
+        }
+        UsageTargetState::Duplicate(n) => {
+            return Err(RemoveMissingError::Validation(format!(
+                "ENOSPC pre-flight: missing devid {missing_id} is listed {n} times in \
+                 `btrfs device usage --raw {mount_point}`. Refusing to remove the missing \
+                 device without a validated relocation-space check. Inspect `btrfs device \
+                 usage --raw {mount_point}` manually, then re-run."
+            )));
+        }
+        UsageTargetState::PresentNotMissing(entry) => {
+            return Err(RemoveMissingError::Validation(format!(
+                "ENOSPC pre-flight: devid {missing_id} is listed in `btrfs device usage --raw \
+                 {mount_point}` as `{path}` with device size {size}, not as a missing device \
+                 (a missing member appears as `{marker}` with device size 0). The pool probe \
+                 (`btrfs filesystem show`) and `btrfs device usage` disagree about devid \
+                 {missing_id} -- the device may have come back online, or its size probe \
+                 failed. Refusing to remove the missing device without a validated \
+                 relocation-space check. Re-run `braid status` to re-probe the pool, then \
+                 re-run remove-missing only if the device is still missing.",
+                path = entry.path,
+                size = entry.device_size,
+                marker = crate::parse::btrfs_device_usage::MISSING_DEVICE_PATH_MARKER,
+            )));
+        }
+        UsageTargetState::TrustedMissing(entry) => entry,
+    };
 
-    if target.is_empty() {
-        return Err(RemoveMissingError::Validation(format!(
-            "ENOSPC pre-flight: missing devid {missing_id} is not listed in \
-             `btrfs device usage --raw {mount_point}`, so its allocations cannot \
-             be measured. Refusing to remove the missing device without a \
-             validated relocation-space check. Inspect the command output \
-             manually, then re-run."
-        )));
-    }
+    validate_missing_target_usage_shape(target, mount_point, missing_id)?;
 
-    validate_missing_target_usage_shape(target.as_slice(), mount_point, missing_id)?;
-
-    preflight::check_raid1_relocation_space(&target, &remaining).map_err(|e| {
+    let remaining: Vec<_> = usage.devices.iter().filter(|d| d.device_size > 0).collect();
+    preflight::check_raid1_relocation_space(&[target], &remaining).map_err(|e| {
         RemoveMissingError::Validation(format!(
             "{e}\n\nFree up space by deleting files, or add a new device first with `braid add`."
         ))
     })
 }
 
+/// How the targeted devid appears in `btrfs device usage --raw`. The relocation preflight
+/// trusts a stanza as the missing target only when btrfs renders it with the kernel missing
+/// marker AND zero device size -- see BtrfsDeviceUsageEntry::has_missing_marker for why size
+/// alone is unsafe.
+enum UsageTargetState<'a> {
+    /// devid does not appear in usage output at all.
+    Absent,
+    /// Exactly one stanza, missing marker path, device_size == 0.
+    TrustedMissing(&'a BtrfsDeviceUsageEntry),
+    /// Exactly one stanza, but a real path and/or nonzero size: `btrfs filesystem show`
+    /// (upstream missing-set probe) and `btrfs device usage` disagree about missing-ness.
+    PresentNotMissing(&'a BtrfsDeviceUsageEntry),
+    /// More than one stanza for the devid: ambiguous/corrupt output.
+    Duplicate(usize),
+}
+
+/// Classify the targeted devid's usage stanza for relocation-target trust. Owns target
+/// *identity*; `validate_missing_target_usage_shape` keeps allocation-row *shape* validation.
+fn classify_usage_target(
+    devices: &[BtrfsDeviceUsageEntry],
+    missing_id: Devid,
+) -> UsageTargetState<'_> {
+    let matches: Vec<&BtrfsDeviceUsageEntry> =
+        devices.iter().filter(|d| d.devid == missing_id).collect();
+    match matches.as_slice() {
+        [] => UsageTargetState::Absent,
+        [entry] if entry.has_missing_marker() && entry.device_size == 0 => {
+            UsageTargetState::TrustedMissing(entry)
+        }
+        [entry] => UsageTargetState::PresentNotMissing(entry),
+        many => UsageTargetState::Duplicate(many.len()),
+    }
+}
+
 /// Fail-closed shape contract for the missing-device stanza before the generic
 /// RAID1 relocation math treats absent allocation types as zero demand.
 fn validate_missing_target_usage_shape(
-    target: &[&BtrfsDeviceUsageEntry],
+    target: &BtrfsDeviceUsageEntry,
     mount_point: &MountPoint,
     missing_id: Devid,
 ) -> Result<(), RemoveMissingError> {
@@ -627,14 +681,6 @@ fn validate_missing_target_usage_shape(
          manually, then re-run."
     );
 
-    if target.len() > 1 {
-        return Err(RemoveMissingError::Validation(format!(
-            "ENOSPC pre-flight: missing devid {missing_id} is listed more than \
-             once in `btrfs device usage --raw {mount_point}`. {fail_closed_suffix}"
-        )));
-    }
-
-    let target = target[0];
     let mut saw_positive_supported_raid1 = false;
     for allocation in &target.allocations {
         if allocation.bytes == 0 {
@@ -1627,12 +1673,167 @@ mod tests {
             .expect_err("duplicate target stanzas must fail closed");
         let msg = err.to_string();
         assert!(
-            msg.contains("missing devid 3 is listed more than once"),
+            msg.contains("missing devid 3 is listed 2 times"),
             "expected duplicate-target error, got: {msg}"
         );
         assert!(
             !msg.contains("not enough space to relocate"),
             "duplicate validation must fire before relocation math, got: {msg}"
+        );
+    }
+
+    // Intent: check_relocation_space fails closed when the targeted devid is
+    //   listed with a real device path and a nonzero device size -- the probe
+    //   thinks it is present, not missing.
+    //
+    // Why it exists: `btrfs filesystem show` (the missing-set probe) can report
+    //   devid N missing while `btrfs device usage` lists it as a live device --
+    //   e.g. the device came back online between probes. The old size-only
+    //   filter classified it on device_size and emitted the misleading "is not
+    //   listed" message; the marker-based classifier must instead name the
+    //   probe disagreement and refuse.
+    //
+    // Scenario: missing devid 3 is reported by show, but device usage lists it
+    //   as `/dev/mapper/braid-disk3` with a nonzero device size.
+    #[test]
+    fn check_relocation_space_fails_closed_on_present_nonzero_size_target() {
+        let fixture = device_usage_raw_body(&[
+            relocation_usage_live_device(
+                "/dev/mapper/braid-disk1",
+                1,
+                &[("Data", "RAID1", 67_108_864)],
+                452_984_832,
+            ),
+            relocation_usage_live_device(
+                "/dev/mapper/braid-disk2",
+                2,
+                &[("Data", "RAID1", 67_108_864)],
+                452_984_832,
+            ),
+            relocation_usage_live_device(
+                "/dev/mapper/braid-disk3",
+                3,
+                &[("Data", "RAID1", 67_108_864)],
+                452_984_832,
+            ),
+        ]);
+
+        let runner = EnospcRunner {
+            device_usage_stdout: fixture,
+        };
+
+        let err = check_relocation_space(&runner, &mp(), Devid::new(3))
+            .expect_err("present nonzero-size target must fail closed");
+        let msg = err.to_string();
+        assert!(msg.contains("device size"), "got: {msg}");
+        assert!(msg.contains("disagree"), "got: {msg}");
+        assert!(
+            msg.contains("/dev/mapper/braid-disk3"),
+            "error must name the observed real path, got: {msg}"
+        );
+        assert!(
+            !msg.contains("is not listed"),
+            "a present-but-disagreeing target must not be reported as absent, got: {msg}"
+        );
+    }
+
+    // Intent: check_relocation_space fails closed when the targeted devid is
+    //   listed with a real device path but device size 0 -- the btrfs-progs
+    //   size-probe failure that the old size-only premise misclassified.
+    //
+    // Why it exists: btrfs-progs reports `Device size: 0` for a PRESENT device
+    //   whose `device_get_partition_size` probe fails, rendering it with its
+    //   real path. The retired `device_size == 0` filter would have adopted
+    //   that live device as the relocation target and proceeded toward
+    //   `btrfs device remove` on a present device -- the read-only-crash class
+    //   the preflight exists to prevent. The marker-based classifier must refuse
+    //   it as a probe disagreement, never reaching relocation/shape math.
+    //
+    // Scenario: device usage lists devid 3 as `/dev/mapper/braid-disk3` with
+    //   device size 0 and a positive Data RAID1 row.
+    #[test]
+    fn check_relocation_space_fails_closed_on_present_zero_size_real_path_target() {
+        let fixture = device_usage_raw_body(&[
+            relocation_usage_live_device(
+                "/dev/mapper/braid-disk1",
+                1,
+                &[("Data", "RAID1", 67_108_864)],
+                452_984_832,
+            ),
+            relocation_usage_live_device(
+                "/dev/mapper/braid-disk2",
+                2,
+                &[("Data", "RAID1", 67_108_864)],
+                452_984_832,
+            ),
+            DeviceUsageSpec::live(
+                "/dev/mapper/braid-disk3",
+                3,
+                0,
+                &[("Data", "RAID1", 67_108_864)],
+                0,
+            ),
+        ]);
+
+        let runner = EnospcRunner {
+            device_usage_stdout: fixture,
+        };
+
+        let err = check_relocation_space(&runner, &mp(), Devid::new(3))
+            .expect_err("present zero-size real-path target must fail closed");
+        let msg = err.to_string();
+        assert!(msg.contains("disagree"), "got: {msg}");
+        assert!(
+            msg.contains("/dev/mapper/braid-disk3"),
+            "error must name the observed real path, got: {msg}"
+        );
+        assert!(
+            !msg.contains("not enough space to relocate"),
+            "a live device with a failed size probe must not reach relocation math, got: {msg}"
+        );
+        assert!(
+            !msg.contains("no positive Data/Metadata/System RAID1 allocation row"),
+            "a real-path target must not reach allocation-shape validation, got: {msg}"
+        );
+    }
+
+    // Intent: check_relocation_space accepts a trusted missing target rendered
+    //   with the `missing` fallback marker (not just `<missing disk>`).
+    //
+    // Why it exists: btrfs-progs falls back to the literal `missing` path when
+    //   the dev-info ioctl hands back an empty path, so `has_missing_marker`
+    //   must trust that form too. An implementation that dropped the
+    //   `MISSING_DEVICE_PATH_FALLBACK` arm would misclassify this stanza as
+    //   a probe disagreement and refuse a legitimate removal.
+    //
+    // Scenario: missing devid 3 is rendered as `missing, ID: 3` with device
+    //   size 0 and a positive Data RAID1 row; survivors have plenty of space.
+    #[test]
+    fn check_relocation_space_accepts_fallback_missing_marker_target() {
+        let fixture = device_usage_raw_body(&[
+            relocation_usage_live_device(
+                "/dev/mapper/braid-disk1",
+                1,
+                &[("Data", "RAID1", 67_108_864)],
+                452_984_832,
+            ),
+            relocation_usage_live_device(
+                "/dev/mapper/braid-disk2",
+                2,
+                &[("Data", "RAID1", 67_108_864)],
+                452_984_832,
+            ),
+            DeviceUsageSpec::live("missing", 3, 0, &[("Data", "RAID1", 67_108_864)], 0),
+        ]);
+
+        let runner = EnospcRunner {
+            device_usage_stdout: fixture,
+        };
+
+        let result = check_relocation_space(&runner, &mp(), Devid::new(3));
+        assert!(
+            result.is_ok(),
+            "fallback `missing` marker must classify as trusted-missing: {result:?}"
         );
     }
 

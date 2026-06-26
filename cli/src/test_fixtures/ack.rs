@@ -422,6 +422,32 @@ fn ack_btrfs_device_usage_atrisk_one_missing() -> RawCommandOutput {
     )
 }
 
+/// At-risk usage whose second entry carries a **real** device path but `device_size == 0` --
+/// the btrfs-progs size-probe failure on a present device, not the `<missing disk>` marker.
+/// ADR 014's ENOSPC baseline guard keys on size, not on the marker, so ack must still write no
+/// baseline here.
+fn ack_btrfs_device_usage_atrisk_one_zero_size_real_path() -> RawCommandOutput {
+    mock_ok(
+        "btrfs device usage",
+        &device_usage_raw_body(&[
+            DeviceUsageSpec::live(
+                "/dev/mapper/braid-disk1",
+                1,
+                ACK_DEVICE_SIZE,
+                &[("Data", "RAID1", ACK_DEVICE_SIZE - 100 * (1 << 20))],
+                100 * (1 << 20),
+            ),
+            DeviceUsageSpec::live(
+                "/dev/mapper/braid-disk3",
+                3,
+                0,
+                &[("Data", "RAID1", ACK_DEVICE_SIZE / 2)],
+                0,
+            ),
+        ]),
+    )
+}
+
 /// Healthy (dead-band) `btrfs device usage --raw` for the ack pool: device 1 has
 /// 1.5 GiB unallocated against the 1 GiB threshold (predicate margin 0.5 GiB, in
 /// `[0, REARM)`), so the fresh ack-time probe is not at risk and a mounted ack
@@ -479,6 +505,18 @@ pub(crate) fn ack_mounted_probe_runner_with_missing_enospc_usage() -> MockRunner
             mount_point: ack_mp(),
         },
         ack_btrfs_device_usage_atrisk_one_missing(),
+    )
+}
+
+/// Mounted probe runner plus an at-risk usage snapshot whose second device has a real path but
+/// `device_size == 0` (a present device whose size probe failed), so ack must clear the latch
+/// without writing a baseline -- the ADR 014 guard keys on size, not on the missing marker.
+pub(crate) fn ack_mounted_probe_runner_with_zero_size_real_path_enospc_usage() -> MockRunner {
+    ack_mounted_probe_runner_with_device_stats().with_output(
+        CmdRequest::BtrfsDeviceUsageRaw {
+            mount_point: ack_mp(),
+        },
+        ack_btrfs_device_usage_atrisk_one_zero_size_real_path(),
     )
 }
 

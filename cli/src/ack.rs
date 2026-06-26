@@ -325,9 +325,11 @@ fn write_enospc_baseline<R: CommandRunner>(
             return;
         }
     };
-    // ADR 014's ENOSPC baseline section: a usage snapshot carrying btrfs's
-    // missing marker must never be persisted as an ENOSPC baseline.
-    if entries.iter().any(|entry| entry.is_missing()) {
+    // ADR 014: never baseline a snapshot that carries a zero-sized device. btrfs renders a
+    // missing member as `<missing disk>` with device size 0, and a present device whose size
+    // probe failed also reports 0; either makes the baseline untrustworthy, so the bail-out keys
+    // on size, not on the missing marker.
+    if entries.iter().any(|entry| entry.device_size == 0) {
         eprintln!(
             "warning: usage reports a missing device; ack cleared the alert but wrote no ENOSPC baseline"
         );
@@ -452,7 +454,8 @@ mod tests {
         ack_mounted_probe_runner_with_device_stats, ack_mounted_probe_runner_with_enospc_usage,
         ack_mounted_probe_runner_with_healthy_enospc_usage,
         ack_mounted_probe_runner_with_missing_enospc_usage,
-        ack_mounted_probe_runner_with_stale_devid_stats, ack_mp, ack_noop_beeper,
+        ack_mounted_probe_runner_with_stale_devid_stats,
+        ack_mounted_probe_runner_with_zero_size_real_path_enospc_usage, ack_mp, ack_noop_beeper,
         ack_offline_fs_that_touches_scrub_failed, ack_offline_fs_that_touches_smartd,
         ack_write_latch, isolated_paths, monitor_fs_btrfs, monitor_mp,
     };
@@ -2633,6 +2636,45 @@ mod tests {
         assert!(
             load_enospc_ack(&paths).unwrap().is_none(),
             "a usage-missing snapshot writes no snooze marker"
+        );
+    }
+
+    // Intent: a mounted ack whose fresh usage snapshot carries a zero-sized device with a
+    //   real path -- not the `<missing disk>` marker -- clears the latch but writes no snooze
+    //   marker.
+    // Why it exists: ADR 014's invariant is "a zero-sized device never appears in a baseline
+    //   that suppresses an alert." btrfs-progs reports `Device size: 0` for a present device
+    //   whose `device_get_partition_size` probe failed, rendering it with its real path; the
+    //   guard keys on size, not on the missing marker, so a future narrowing to
+    //   `has_missing_marker()` would let this real-path zero-sized row be baselined. Pins that.
+    // Scenario: monitor latched EnospcRisk; the ack-time usage probe reports devid 3 with its
+    //   real `/dev/mapper/braid-disk3` path but device size 0 (a transient size-probe failure).
+    #[test]
+    fn cmd_ack_mounted_enospc_zero_size_real_path_usage_writes_no_snooze() {
+        let (_dir, paths) = isolated_paths();
+        ack_write_latch(
+            &paths,
+            vec![AlertCause::EnospcRisk {
+                margin: -5,
+                count_below: 1,
+                device_count: 2,
+            }],
+        );
+        let runner = ack_mounted_probe_runner_with_zero_size_real_path_enospc_usage();
+
+        let result = cmd_ack_impl(
+            &runner,
+            &ack_fs_btrfs(),
+            &ack_mp(),
+            &paths,
+            &ack_noop_beeper,
+        );
+
+        assert!(result.is_ok(), "ack must succeed, got {result:?}");
+        assert!(!paths.alert_latch_json().exists(), "ack clears the latch");
+        assert!(
+            load_enospc_ack(&paths).unwrap().is_none(),
+            "a zero-sized real-path snapshot writes no snooze marker"
         );
     }
 
