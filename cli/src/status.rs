@@ -402,11 +402,23 @@ struct HumanDisk {
 // Status assembly
 // ---------------------------------------------------------------------------
 
+/// One `build_status` pass split into the two surfaces `cmd_status` renders:
+/// the always-built `report` (JSON, and the spine of human output) and the
+/// human-only `mounted_extras`, `None` exactly when the pool is not mounted
+/// (the human-only render data needs a live pool; see `not_mounted_status`).
 struct BuiltStatus {
     report: StatusReport,
     mounted_extras: Option<MountedExtras>,
 }
 
+/// Human-only render data assembled during one `build_status` pass and dropped
+/// on the JSON path (`cmd_status` serializes only `report`): `compact_drives`
+/// and `human_details` are the disk-view projections from `build_disk_views`,
+/// kept status-consistent with the JSON `disks` by that single classifier
+/// (decision 024); `devid_names` is the alert-cause devid->name map built here
+/// from the same live pool + membership, feeding the human alert banner. All
+/// three are built even for `--json`, by design -- not a cache to gate on
+/// `!json`.
 struct MountedExtras {
     compact_drives: Vec<CompactDrive>,
     human_details: Vec<HumanDisk>,
