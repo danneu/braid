@@ -1011,6 +1011,10 @@ mod tests {
                     LuksUuid::parse("22222222-2222-2222-2222-222222222222").unwrap(),
                 ),
             ]),
+            // Persisted prior devid->name binding. Consumed only by the
+            // null_underlying/missing_devids fallback in probe_pool_for_tui
+            // (live members resolve by LUKS UUID, not this map); pinned by
+            // device_errors_for_{missing_devid,null_underlying}_use_persisted_prior_binding.
             devid: HashMap::from([
                 ("toshiba".to_owned(), Devid::new(1)),
                 ("ironwolf".to_owned(), Devid::new(2)),
@@ -1733,6 +1737,182 @@ mod tests {
             Some("ironwolf"),
             "missing devid must also be available for TUI alert labels"
         );
+    }
+
+    // Intent: a null_underlying member (mapper open, backing hot-unplugged) has
+    //   its btrfs stats row attached to the member by persisted devid, is
+    //   exposed in devid_names, and is classified Unlocked with no live backing
+    //   path.
+    // Why it exists: the null_underlying TUI fallback is the sibling of the
+    //   missing-devid fallback but had zero TUI-level coverage; only the domain
+    //   probe_pool was tested. Both consumer sites -- the devid name join and
+    //   the mounted_classification entry -- must stay pinned.
+    // Scenario: btrfs reports disk1 live and braid-ironwolf open, but
+    //   `cryptsetup status braid-ironwolf` returns device: (null) (backing
+    //   yanked); device stats reports devid 2 with a read error.
+    #[test]
+    fn device_errors_for_null_underlying_use_persisted_prior_binding() {
+        let mp = MountPoint::new("/mnt/storage".to_owned());
+
+        let disk_by_id = HashMap::from([
+            (
+                "toshiba".to_owned(),
+                "/dev/disk/by-id/braid-toshiba".to_owned(),
+            ),
+            (
+                "ironwolf".to_owned(),
+                "/dev/disk/by-id/braid-ironwolf".to_owned(),
+            ),
+        ]);
+
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::BtrfsFilesystemShow {
+                    mount_point: mp.clone(),
+                },
+                ok_raw(
+                    "btrfs filesystem show",
+                    "Label: none  uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
+                     \tTotal devices 2 FS bytes used 1.00GiB\n\
+                     \tdevid    1 size 10.00GiB used 2.00GiB path /dev/mapper/braid-toshiba\n\
+                     \tdevid    2 size 10.00GiB used 2.00GiB path /dev/mapper/braid-ironwolf\n",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName::from_basename("braid-toshiba".into()),
+                },
+                ok_raw(
+                    "cryptsetup status",
+                    "/dev/mapper/braid-toshiba is active.\n\tdevice:  /dev/vda\n",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vda".into(),
+                },
+                ok_raw(
+                    "cryptsetup luksUUID",
+                    "11111111-1111-1111-1111-111111111111\n",
+                ),
+            )
+            // The trigger: braid-ironwolf is open but its backing drive was
+            // hot-unplugged, so cryptsetup reports device: (null). This routes
+            // devid 2 into null_underlying; the null branch continues before any
+            // luksUUID query, so none is mocked for ironwolf.
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName::from_basename("braid-ironwolf".into()),
+                },
+                ok_raw(
+                    "cryptsetup status",
+                    "/dev/mapper/braid-ironwolf is active.\n\tdevice:  (null)\n",
+                ),
+            )
+            .with_output(
+                CmdRequest::BtrfsFilesystemDfJson {
+                    mount_point: mp.clone(),
+                },
+                ok_raw(
+                    "btrfs filesystem df",
+                    r#"{"filesystem-df": [
+                        {"bg-type": "Data", "bg-profile": "single", "total": 67108864, "used": 16777216}
+                    ]}"#,
+                ),
+            )
+            // Two device rows: devid 2's dm node still exists (only the LUKS
+            // backing is gone), so listing ID 2 is the internally consistent
+            // mock. It also keeps ironwolf in disk_usage, so the unpooled-disk
+            // loop skips it instead of misclassifying a pool member as Absent.
+            .with_output(
+                CmdRequest::BtrfsDeviceUsageRaw {
+                    mount_point: mp.clone(),
+                },
+                ok_raw(
+                    "btrfs device usage",
+                    "/dev/dm-0, ID: 1\n\
+                     \x20  Device size:          1073741824\n\
+                     \x20  Device slack:              0\n\
+                     \x20  Data,single:          67108864\n\
+                     \x20  Unallocated:          1006632960\n\
+                     \n\
+                     /dev/dm-1, ID: 2\n\
+                     \x20  Device size:          1073741824\n\
+                     \x20  Device slack:              0\n\
+                     \x20  Data,single:          67108864\n\
+                     \x20  Unallocated:          1006632960\n",
+                ),
+            )
+            .with_output(
+                CmdRequest::BtrfsBalanceStatus {
+                    mount_point: mp.clone(),
+                },
+                ok_raw(
+                    "btrfs balance status",
+                    "No balance found on '/mnt/storage'\n",
+                ),
+            )
+            // devid 2 stats row carries a /dev/dm-1 path (not the mapper) so the
+            // join is forced through devid, not path.
+            .with_output(
+                CmdRequest::BtrfsDeviceStatsJson {
+                    mount_point: mp.clone(),
+                },
+                ok_raw(
+                    "btrfs device stats",
+                    r#"{"device-stats": [
+                        {"device": "/dev/dm-1", "devid": 2, "write_io_errs": 0, "read_io_errs": 9, "flush_io_errs": 0, "corruption_errs": 0, "generation_errs": 0}
+                    ]}"#,
+                ),
+            );
+
+        let (states, pool_state) = probe_pool_for_tui(
+            &runner,
+            &StubFs::empty(),
+            &MountPoint::new("/mnt/storage".into()),
+            &tui_disks_with_by_id(disk_by_id),
+            &test_paths().1,
+            crate::test_fixtures::mock_virtio_backing_path_resolver(),
+        )
+        .unwrap();
+        let pool = pool_state.expect("pool should be Some");
+
+        // A. Classification site -- the branch-pinning assertion. Deleting the
+        //    null_underlying clause that inserts (Unlocked, None) into
+        //    mounted_classification drops ironwolf, so build_disk_luks_states
+        //    falls back to cryptsetup status, sees device: (null), and returns
+        //    (Unknown, None) -- flipping this Unlocked to Unknown.
+        assert_eq!(states["ironwolf"].lock, DiskLockState::Unlocked);
+        // Characterizes the state but does not discriminate the mutation
+        // (None either way), so the .lock assertion above is the one that bites.
+        assert_eq!(states["ironwolf"].underlying_present, None);
+        // The live member keeps its backing path and Unlocked verdict.
+        assert_eq!(states["toshiba"].lock, DiskLockState::Unlocked);
+        assert_eq!(
+            states["toshiba"].underlying_present,
+            Some("/dev/vda".to_owned())
+        );
+
+        // B. Name-join site (the original gap). Deleting the null_underlying
+        //    clause in devid_to_name drops devid 2, so both of these fail.
+        let errors = pool
+            .device_errors
+            .get("ironwolf")
+            .expect("null-underlying devid 2 must resolve to ironwolf by persisted binding");
+        assert_eq!(errors.read, 9);
+        assert_eq!(
+            pool.devid_names.get(&Devid::new(2)).map(String::as_str),
+            Some("ironwolf")
+        );
+
+        // C. Secondary disk_underlying surface, explicitly non-pinning: deleting
+        //    the null_underlying classification branch leaves ironwolf absent
+        //    here either way, so these document the surface but do not pin it.
+        assert_eq!(
+            pool.disk_underlying.get("toshiba").map(String::as_str),
+            Some("/dev/vda")
+        );
+        assert!(!pool.disk_underlying.contains_key("ironwolf"));
     }
 
     /// Intent: capacity_used_bytes and capacity_total_bytes must be
