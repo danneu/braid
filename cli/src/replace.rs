@@ -8,7 +8,7 @@ use crate::credential_verify::{
 use crate::inhibit::AcquireSleepInhibitor;
 use crate::journal;
 use crate::luks::{
-    BackingPathResolver, HeaderBackupPath, KeySlotState, LUKS_SLOT_KEYFILE, OwnershipError,
+    BackingPathResolver, KeySlotState, LUKS_SLOT_KEYFILE, OwnershipError,
     backup_luks_header_post_mutation, check_key_slot, classify_mapper_ownership, ensure_luks_open,
     format_keyfile_asymmetry_warning, format_keyfile_enrollment_probe_failure,
     format_target_keyfile_probe_failure, luks_format, luks_header_backup_path,
@@ -30,7 +30,7 @@ use crate::state_paths::StatePaths;
 use crate::status_tag::{StatusTag, color_enabled_for_stderr, status_line};
 use crate::types::*;
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Which uniqueness axis `assert_new_uuid_unique` collided on. Rendered as
 /// `"membership"` and `"live_pool"` so the operator-facing message names
@@ -206,7 +206,6 @@ enum ReplaceTargetPrep {
         /// identity. No raw `--label braid-<name>` injection.
         extra_opts: LuksFormatExtraOpts,
         enroll_key_file: Option<KeyFilePath>,
-        header_backup_path: HeaderBackupPath,
     },
     ExistingLuks {
         mapper_open: bool,
@@ -218,11 +217,6 @@ enum ReplaceTargetPrep {
         /// conflicts are rejected at planning time before any journal
         /// write.
         enroll_key_file: Option<KeyFilePath>,
-        /// Where the post-enrollment LUKS header backup should land.
-        /// Always populated so render_steps can reference it without
-        /// re-deriving from `paths` (mirrors the FreshLuks variant).
-        /// Unused when `enroll_key_file` is `None`.
-        header_backup_path: HeaderBackupPath,
     },
 }
 
@@ -242,6 +236,9 @@ struct ReplaceWorkPlan {
     new_by_id: ByIdPath,
     pool: PoolState,
     replace_source: ReplaceSource,
+    /// Lets `render_steps` derive header-backup paths without carrying
+    /// `StatePaths` across the preview boundary.
+    luks_headers_dir: PathBuf,
     target_prep: ReplaceTargetPrep,
     journal_target: journal::ReplaceJournalTarget,
     journal_source: journal::ReplaceJournalSource,
@@ -264,9 +261,10 @@ impl ReplaceWorkPlan {
             ReplaceTargetPrep::FreshLuks {
                 extra_opts,
                 enroll_key_file,
-                header_backup_path,
             } => {
                 let label = luks_label_for(&self.new_name);
+                let header_backup_path =
+                    luks_header_backup_path(&self.luks_headers_dir, &self.new_mapper);
                 steps.push(Step {
                     risk: "destructive",
                     description: format!("LUKS format {}", self.new_by_id),
@@ -310,9 +308,10 @@ impl ReplaceWorkPlan {
             ReplaceTargetPrep::ExistingLuks {
                 mapper_open,
                 enroll_key_file,
-                header_backup_path,
             } => {
                 if let Some(kf) = enroll_key_file {
+                    let header_backup_path =
+                        luks_header_backup_path(&self.luks_headers_dir, &self.new_mapper);
                     steps.push(Step {
                         risk: "safe",
                         description: format!("enroll keyfile -> LUKS slot 1 on {}", self.new_by_id),
@@ -433,6 +432,7 @@ impl ReplacePlan {
             new_by_id,
             pool,
             replace_source,
+            luks_headers_dir: _,
             target_prep,
             journal_target: new_target,
             journal_source,
@@ -1750,19 +1750,11 @@ fn build_replace_work_plan(input: ReplaceWorkPlanInput<'_>) -> ReplaceWorkPlan {
         PresentConfigDiskState::PresentNotLuks => ReplaceTargetPrep::FreshLuks {
             extra_opts: input.luks_format_extra_opts.clone(),
             enroll_key_file: input.enroll_key_file.clone(),
-            header_backup_path: luks_header_backup_path(
-                &input.paths.luks_headers_dir(),
-                &new_mapper,
-            ),
         },
         PresentConfigDiskState::PresentLuks { mapper_open, .. } => {
             ReplaceTargetPrep::ExistingLuks {
                 mapper_open,
                 enroll_key_file: input.enroll_key_file.clone(),
-                header_backup_path: luks_header_backup_path(
-                    &input.paths.luks_headers_dir(),
-                    &new_mapper,
-                ),
             }
         }
     };
@@ -1776,6 +1768,7 @@ fn build_replace_work_plan(input: ReplaceWorkPlanInput<'_>) -> ReplaceWorkPlan {
         new_by_id: input.new_by_id,
         pool: input.pool,
         replace_source: input.replace_source,
+        luks_headers_dir: input.paths.luks_headers_dir(),
         target_prep,
         journal_target,
         journal_source,
@@ -8006,10 +7999,6 @@ mod tests {
         let target_prep = ReplaceTargetPrep::FreshLuks {
             extra_opts: LuksFormatExtraOpts::default(),
             enroll_key_file: None,
-            header_backup_path: luks_header_backup_path(
-                Path::new("/var/lib/braid/headers"),
-                &MapperName::from_basename("braid-disk3".into()),
-            ),
         };
         let resolver = MockBackingPathResolver::default();
         let result = verify_existing_luks_new_target_preflight(

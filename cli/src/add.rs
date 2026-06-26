@@ -31,7 +31,7 @@ use crate::repair_hint;
 use crate::state_paths::StatePaths;
 use crate::status_tag::{StatusTag, color_enabled_for_stderr, emit_status, status_line};
 use crate::types::*;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Errors raised by `braid add` planning and execution. Two refusals cover
 /// duplicate LUKS UUIDs, both raised from planning BEFORE any
@@ -498,7 +498,6 @@ struct FreshLuksTarget {
     luks_uuid: LuksUuid,
     luks_format_extra_opts: LuksFormatExtraOpts,
     enroll_key_file: Option<KeyFilePath>,
-    header_backup_path: HeaderBackupPath,
 }
 
 #[derive(Debug, Clone)]
@@ -514,11 +513,6 @@ struct RecoverableBraidTarget {
     /// flag, or the disk's slot 1 already authenticates with the
     /// supplied keyfile (idempotent skip).
     enroll_key_file: Option<KeyFilePath>,
-    /// Where the post-enrollment LUKS header backup lands, computed at
-    /// plan time so render_steps does not need access to `paths`.
-    /// Mirrors `FreshLuksTarget::header_backup_path`. Unused when
-    /// `enroll_key_file` is `None`.
-    header_backup_path: HeaderBackupPath,
 }
 
 #[derive(Debug, Clone)]
@@ -534,8 +528,6 @@ struct ClosedPresentLuksCandidate {
     /// promoted into the runtime `RecoverableBraidTarget` and
     /// journaled, so crash-recovery can replay enrollment.
     enroll_key_file: Option<KeyFilePath>,
-    /// See `RecoverableBraidTarget::header_backup_path`.
-    header_backup_path: HeaderBackupPath,
 }
 
 #[derive(Debug, Clone)]
@@ -636,6 +628,9 @@ struct AddWorkPlan {
     initial_journal_targets: LuksUuidMap<journal::AddJournalTarget>,
     mount_point: MountPoint,
     preview_phase: AddPreviewPhase,
+    /// Lets `render_steps` derive header-backup paths without carrying
+    /// `StatePaths` across the preview boundary.
+    luks_headers_dir: PathBuf,
 }
 
 /// Single definition of the `DiskName`-sorted add-target order used by
@@ -691,6 +686,8 @@ impl AddWorkPlan {
             match target {
                 AddTargetWork::Fresh(target) => {
                     let label = luks_label_for(&target.name);
+                    let header_backup_path =
+                        luks_header_backup_path(&self.luks_headers_dir, &target.mapper_name);
                     steps.push(Step {
                         risk: "destructive",
                         description: format!("LUKS format {}", target.by_id),
@@ -718,11 +715,11 @@ impl AddWorkPlan {
                         risk: "safe",
                         description: format!(
                             "LUKS header backup -> {}",
-                            target.header_backup_path.as_path().display()
+                            header_backup_path.as_path().display()
                         ),
                         commands: vec![CmdRequest::CryptsetupLuksHeaderBackup {
                             device: target.by_id.as_str().to_owned(),
-                            backup_path: target.header_backup_path.as_path().display().to_string(),
+                            backup_path: header_backup_path.as_path().display().to_string(),
                         }],
                     });
                     steps.push(Step {
@@ -736,11 +733,14 @@ impl AddWorkPlan {
                 }
                 AddTargetWork::OpenRecoverable(target) => {
                     if let Some(kf) = &target.enroll_key_file {
+                        let target_mapper = mapper_name(&target.name);
+                        let header_backup_path =
+                            luks_header_backup_path(&self.luks_headers_dir, &target_mapper);
                         push_returned_disk_enrollment_steps(
                             &mut steps,
                             &target.by_id,
                             kf,
-                            &target.header_backup_path,
+                            &header_backup_path,
                         );
                     }
                     steps.push(forced_returned_device_add_step(
@@ -762,11 +762,13 @@ impl AddWorkPlan {
                         }],
                     });
                     if let Some(kf) = &target.enroll_key_file {
+                        let header_backup_path =
+                            luks_header_backup_path(&self.luks_headers_dir, &target.mapper_name);
                         push_returned_disk_enrollment_steps(
                             &mut steps,
                             &target.by_id,
                             kf,
-                            &target.header_backup_path,
+                            &header_backup_path,
                         );
                     }
                     steps.push(forced_returned_device_add_step(
@@ -1230,7 +1232,6 @@ impl AddPlan {
                         luks_uuid: target.luks_uuid.clone(),
                         verified_pool_fsid,
                         enroll_key_file: target.enroll_key_file.clone(),
-                        header_backup_path: target.header_backup_path.clone(),
                     };
                     journal_targets
                         .insert(
@@ -2122,6 +2123,7 @@ fn build_add_work_plan<R: CommandRunner>(
 ) -> Result<AddWorkPlan, AddError> {
     let mut targets = Vec::new();
     let mut initial_journal_targets: LuksUuidMap<journal::AddJournalTarget> = LuksUuidMap::new();
+    let luks_headers_dir = input.paths.luks_headers_dir();
 
     // Internal iteration: build the work plan in input spec order so
     // each probe gets visited deterministically. Operator-visible
@@ -2140,8 +2142,6 @@ fn build_add_work_plan<R: CommandRunner>(
                 // A mid-format crash and replay reformats under the
                 // same identity.
                 let luks_uuid = LuksUuid::new_v4();
-                let header_backup_path =
-                    luks_header_backup_path(&input.paths.luks_headers_dir(), &mn);
                 let target = FreshLuksTarget {
                     name: name.clone(),
                     by_id: (*by_id).clone(),
@@ -2152,7 +2152,6 @@ fn build_add_work_plan<R: CommandRunner>(
                     enroll_key_file: input
                         .enroll_key_file
                         .map(|p| KeyFilePath::new(p.to_path_buf())),
-                    header_backup_path,
                 };
                 // Identity scopes first (in-flight + membership), then the
                 // live-pool guard -- the same order the old single assert
@@ -2224,10 +2223,6 @@ fn build_add_work_plan<R: CommandRunner>(
                                 luks_uuid: uuid.clone(),
                                 verified_pool_fsid,
                                 enroll_key_file: resolved_enroll_key_file,
-                                header_backup_path: luks_header_backup_path(
-                                    &input.paths.luks_headers_dir(),
-                                    &mn,
-                                ),
                             };
                             assert_target_uuid_unique(
                                 &target.luks_uuid,
@@ -2288,10 +2283,6 @@ fn build_add_work_plan<R: CommandRunner>(
                             mapper_path,
                             luks_uuid: uuid.clone(),
                             enroll_key_file: resolved_enroll_key_file,
-                            header_backup_path: luks_header_backup_path(
-                                &input.paths.luks_headers_dir(),
-                                &mn,
-                            ),
                         },
                     ));
                 }
@@ -2306,6 +2297,7 @@ fn build_add_work_plan<R: CommandRunner>(
         initial_journal_targets,
         mount_point: input.mount_point.clone(),
         preview_phase,
+        luks_headers_dir,
     })
 }
 
@@ -2988,7 +2980,6 @@ mod tests {
         let name = DiskName::parse(name).unwrap();
         RecoverableBraidTarget {
             mapper_path: mapper_name(&name).dev_path(),
-            header_backup_path: luks_header_backup_path(Path::new("/tmp"), &mapper_name(&name)),
             by_id: ByIdPath::parse(by_id).unwrap(),
             luks_uuid: LuksUuid::parse(uuid).unwrap(),
             verified_pool_fsid: Fsid::parse(POOL_FSID).unwrap(),
@@ -3002,7 +2993,6 @@ mod tests {
         FreshLuksTarget {
             mapper_name: mapper_name(&name),
             mapper_path: mapper_name(&name).dev_path(),
-            header_backup_path: luks_header_backup_path(Path::new("/tmp"), &mapper_name(&name)),
             by_id: ByIdPath::parse(by_id).unwrap(),
             luks_uuid: LuksUuid::parse(uuid).unwrap(),
             luks_format_extra_opts: LuksFormatExtraOpts::default(),
@@ -3070,6 +3060,7 @@ mod tests {
                 initial_journal_targets,
                 mount_point: MountPoint::new("/mnt/storage".into()),
                 preview_phase,
+                luks_headers_dir: Path::new("/tmp").to_path_buf(),
             },
             config: Config::new(MountPoint::new("/mnt/storage".into())).unwrap(),
             parsed: vec![(name.clone(), by_id.clone())],
