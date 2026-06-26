@@ -404,6 +404,24 @@ fn ack_btrfs_device_usage_atrisk() -> RawCommandOutput {
     )
 }
 
+/// At-risk usage whose second entry is btrfs's missing-device marker, while the
+/// paired show fixture still reports both devices present.
+fn ack_btrfs_device_usage_atrisk_one_missing() -> RawCommandOutput {
+    mock_ok(
+        "btrfs device usage",
+        &device_usage_raw_body(&[
+            DeviceUsageSpec::live(
+                "/dev/mapper/braid-disk1",
+                1,
+                ACK_DEVICE_SIZE,
+                &[("Data", "RAID1", ACK_DEVICE_SIZE - 100 * (1 << 20))],
+                100 * (1 << 20),
+            ),
+            DeviceUsageSpec::missing(3, &[("Data", "RAID1", ACK_DEVICE_SIZE / 2)], 0),
+        ]),
+    )
+}
+
 /// Healthy (dead-band) `btrfs device usage --raw` for the ack pool: device 1 has
 /// 1.5 GiB unallocated against the 1 GiB threshold (predicate margin 0.5 GiB, in
 /// `[0, REARM)`), so the fresh ack-time probe is not at risk and a mounted ack
@@ -450,6 +468,17 @@ pub(crate) fn ack_mounted_probe_runner_with_enospc_usage() -> MockRunner {
             mount_point: ack_mp(),
         },
         ack_btrfs_device_usage_atrisk(),
+    )
+}
+
+/// Mounted probe runner plus an at-risk usage snapshot that already carries a
+/// missing-device marker, so ack must clear the latch without writing a baseline.
+pub(crate) fn ack_mounted_probe_runner_with_missing_enospc_usage() -> MockRunner {
+    ack_mounted_probe_runner_with_device_stats().with_output(
+        CmdRequest::BtrfsDeviceUsageRaw {
+            mount_point: ack_mp(),
+        },
+        ack_btrfs_device_usage_atrisk_one_missing(),
     )
 }
 

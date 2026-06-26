@@ -5,11 +5,11 @@
 //! mountinfo-only filesystem helpers without adding a broad topology handler.
 
 use super::shared::{DeviceUsageSpec, device_usage_raw_body, mock_ok};
-use crate::alert::AlertCause;
+use crate::alert::{AlertCause, PoolKey};
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, RawCommandOutput};
 use crate::monitor::MonitorResult;
 use crate::probe::Filesystem;
-use crate::types::MountPoint;
+use crate::types::{Devid, Fsid, MountPoint};
 use std::sync::Mutex;
 
 const MOUNTINFO_BTRFS: &str =
@@ -144,6 +144,30 @@ pub(crate) fn usage_2disk(device_size: u64, unalloc1: u64, unalloc2: u64) -> Str
 /// usage for every monitor fixture -- existing tests stay healthy.
 pub(crate) fn usage_2disk_healthy() -> String {
     usage_2disk(USAGE_DEVICE_SIZE, 50 * (1 << 30), 50 * (1 << 30))
+}
+
+/// Two-disk usage where the live probe has already seen devid 2 disappear while
+/// the default show fixture still reports both devices present.
+pub(crate) fn usage_2disk_one_missing() -> String {
+    device_usage_raw_body(&[
+        DeviceUsageSpec::live(
+            "/dev/mapper/braid-vdb",
+            1,
+            USAGE_DEVICE_SIZE,
+            &[("Data", "RAID1", USAGE_DEVICE_SIZE - 100 * (1 << 20))],
+            100 * (1 << 20),
+        ),
+        DeviceUsageSpec::missing(2, &[("Data", "RAID1", USAGE_DEVICE_SIZE / 2)], 0),
+    ])
+}
+
+/// Legacy poisoned ENOSPC key shape that pre-fix code could persist from a
+/// show-vs-usage skew: same FSID and devids, but the missing device has size 0.
+pub(crate) fn missing_pool_key() -> PoolKey {
+    PoolKey {
+        fsid: Fsid::parse(MONITOR_FSID).unwrap(),
+        devices: vec![(Devid::new(1), USAGE_DEVICE_SIZE), (Devid::new(2), 0)],
+    }
 }
 
 /// Four-disk, one-low *predicate-healthy* usage: three roomy devices plus one at

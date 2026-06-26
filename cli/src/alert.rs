@@ -628,6 +628,15 @@ pub struct PoolKey {
     pub devices: Vec<(Devid, u64)>,
 }
 
+impl PoolKey {
+    /// Rejects stored ENOSPC baselines that carry btrfs's missing-device marker;
+    /// a zero-sized entry is never a legitimate snooze key per ADR 014's
+    /// ENOSPC baseline section.
+    pub fn contains_missing_device(&self) -> bool {
+        self.devices.iter().any(|(_, size)| *size == 0)
+    }
+}
+
 /// How long a `braid ack` snoozes ENOSPC reminders. Lives here next to
 /// `EnospcAck` because it is marker/ack policy, not capacity-byte math: the
 /// monitor suppresses the reminder for one interval, then re-fires every cycle
@@ -690,6 +699,9 @@ impl EnospcAck {
 pub fn live_pool_key(fsid: Option<&Fsid>, devices: &[BtrfsDeviceUsageEntry]) -> Option<PoolKey> {
     let fsid = fsid?;
     let mut pairs: Vec<(Devid, u64)> = devices.iter().map(|d| (d.devid, d.device_size)).collect();
+    // A missing device appears here as `(devid, 0)`; the accepted show-vs-usage
+    // skew and baseline guards live in
+    // docs/design/decisions/014-alerts.md#severity-tiers-and-the-enospc-baseline.
     // Sort so a membership reordering in btrfs output cannot churn the key.
     pairs.sort_unstable();
     Some(PoolKey {

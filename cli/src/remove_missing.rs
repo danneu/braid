@@ -585,13 +585,13 @@ fn check_relocation_space<R: CommandRunner>(
         }
     };
 
-    // Partition: missing (device_size == 0) vs surviving (device_size > 0)
+    // Partition: btrfs missing-marker rows vs surviving devices.
     let target: Vec<_> = usage
         .devices
         .iter()
-        .filter(|d| d.device_size == 0 && d.devid == missing_id)
+        .filter(|d| d.is_missing() && d.devid == missing_id)
         .collect();
-    let remaining: Vec<_> = usage.devices.iter().filter(|d| d.device_size > 0).collect();
+    let remaining: Vec<_> = usage.devices.iter().filter(|d| !d.is_missing()).collect();
 
     if target.is_empty() {
         return Err(RemoveMissingError::Validation(format!(

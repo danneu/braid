@@ -325,6 +325,14 @@ fn write_enospc_baseline<R: CommandRunner>(
             return;
         }
     };
+    // ADR 014's ENOSPC baseline section: a usage snapshot carrying btrfs's
+    // missing marker must never be persisted as an ENOSPC baseline.
+    if entries.iter().any(|entry| entry.is_missing()) {
+        eprintln!(
+            "warning: usage reports a missing device; ack cleared the alert but wrote no ENOSPC baseline"
+        );
+        return;
+    }
     let Some(pool_key) = live_pool_key(pool.fsid.as_ref(), &entries) else {
         eprintln!(
             "warning: no FS UUID to key the ENOSPC baseline; ack cleared the alert but wrote no baseline"
@@ -443,6 +451,7 @@ mod tests {
         ack_mounted_probe_runner, ack_mounted_probe_runner_no_uuid_with_enospc_usage,
         ack_mounted_probe_runner_with_device_stats, ack_mounted_probe_runner_with_enospc_usage,
         ack_mounted_probe_runner_with_healthy_enospc_usage,
+        ack_mounted_probe_runner_with_missing_enospc_usage,
         ack_mounted_probe_runner_with_stale_devid_stats, ack_mp, ack_noop_beeper,
         ack_offline_fs_that_touches_scrub_failed, ack_offline_fs_that_touches_smartd,
         ack_write_latch, isolated_paths, monitor_fs_btrfs, monitor_mp,
@@ -2587,6 +2596,43 @@ mod tests {
         assert!(
             !paths.enospc_ack_json().exists(),
             "a not-at-risk ack-time probe writes no snooze marker"
+        );
+    }
+
+    // Intent: a mounted ack whose fresh usage snapshot contains btrfs's missing
+    //   marker clears the latch but writes no snooze marker.
+    // Why it exists: a show-vs-usage skew can make `missing_count == 0` while the
+    //   usage-derived key already contains `(devid, 0)`. Persisting that key would
+    //   let a later skewed monitor cycle suppress a real ENOSPC risk.
+    // Scenario: monitor latched EnospcRisk, `btrfs filesystem show` still reports
+    //   both devices present, but the ack-time usage probe reports one missing
+    //   device.
+    #[test]
+    fn cmd_ack_mounted_enospc_missing_usage_writes_no_snooze() {
+        let (_dir, paths) = isolated_paths();
+        ack_write_latch(
+            &paths,
+            vec![AlertCause::EnospcRisk {
+                margin: -5,
+                count_below: 1,
+                device_count: 2,
+            }],
+        );
+        let runner = ack_mounted_probe_runner_with_missing_enospc_usage();
+
+        let result = cmd_ack_impl(
+            &runner,
+            &ack_fs_btrfs(),
+            &ack_mp(),
+            &paths,
+            &ack_noop_beeper,
+        );
+
+        assert!(result.is_ok(), "ack must succeed, got {result:?}");
+        assert!(!paths.alert_latch_json().exists(), "ack clears the latch");
+        assert!(
+            load_enospc_ack(&paths).unwrap().is_none(),
+            "a usage-missing snapshot writes no snooze marker"
         );
     }
 

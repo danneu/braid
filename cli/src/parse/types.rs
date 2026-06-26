@@ -597,6 +597,12 @@ pub struct BtrfsDeviceUsageEntry {
 }
 
 impl BtrfsDeviceUsageEntry {
+    /// Identifies btrfs's `<missing disk>` usage row so alert and removal code
+    /// share the same missing-device sentinel predicate.
+    pub fn is_missing(&self) -> bool {
+        self.device_size == 0
+    }
+
     pub fn used_bytes(&self) -> u64 {
         self.allocations.iter().map(|a| a.bytes).sum()
     }

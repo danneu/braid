@@ -236,9 +236,13 @@ fn evaluate_enospc_for_monitor<R: CommandRunner>(
     paths: &StatePaths,
     now: SystemTime,
 ) -> Option<AlertCause> {
-    // Degraded pools alert louder through MissingDevice. Skip entirely and leave
-    // any baseline untouched -- a transient device absence must not drop a
-    // still-at-risk pool's suppression memory (reconnect keeps the same key).
+    // Degraded pools alert louder through MissingDevice. `missing_count` is
+    // show-probed while the key below is usage-probed; ADR 014's ENOSPC baseline
+    // section documents why the accepted skew fires/re-arms against a clean
+    // baseline and never suppresses.
+    // Skip entirely and leave any baseline untouched -- a transient device
+    // absence must not drop a still-at-risk pool's suppression memory (reconnect
+    // keeps the same key).
     if missing_count > 0 {
         return None;
     }
@@ -298,6 +302,16 @@ fn evaluate_enospc_for_monitor<R: CommandRunner>(
         Some(b) => b,
     };
 
+    // ADR 014's ENOSPC baseline section: a stored key carrying btrfs's missing
+    // marker is never honored as a legitimate ENOSPC snooze.
+    if baseline.pool_key.contains_missing_device() {
+        eprintln!(
+            "braid monitor: ENOSPC baseline holds a missing (zero-sized) device -- re-arming and firing"
+        );
+        let _ = remove_enospc_ack(paths);
+        return Some(cause);
+    }
+
     match &live_key {
         // Acked with a matching key: suppress while the snooze window is open,
         // otherwise remind. Once the deadline elapses (or a clock anomaly pushes
@@ -343,9 +357,9 @@ mod tests {
     use crate::test_fixtures::{
         BTRFS_SHOW_2DISK_1MISSING, BTRFS_SHOW_2DISK_NO_UUID, MONITOR_FSID, MonitorOverride,
         MonitorReconcileRunner, MonitorTestRunner, USAGE_DEVICE_SIZE, ack_noop_beeper,
-        assert_monitor_single_computation_error, isolated_paths, monitor_fs_btrfs, monitor_fs_ext4,
-        monitor_fs_mountinfo_error, monitor_fs_not_mounted, monitor_mp, usage_2disk,
-        usage_4disk_one_low,
+        assert_monitor_single_computation_error, isolated_paths, missing_pool_key,
+        monitor_fs_btrfs, monitor_fs_ext4, monitor_fs_mountinfo_error, monitor_fs_not_mounted,
+        monitor_mp, usage_2disk, usage_2disk_one_missing, usage_4disk_one_low,
     };
     use crate::types::Devid;
     use std::time::UNIX_EPOCH;
@@ -1579,6 +1593,57 @@ mod tests {
         assert!(
             paths.enospc_ack_json().exists(),
             "suppression leaves the marker in place"
+        );
+    }
+
+    // Intent: a clean snoozed baseline does not suppress when only the later
+    //   usage probe has seen a missing device.
+    // Why it exists: the accepted show-vs-usage skew must take the safe
+    //   confirmed-mismatch direction -- fire armed and clear the baseline -- even
+    //   inside an open snooze window.
+    // Scenario: show still reports both devices present, usage reports devid 2 as
+    //   `<missing disk>` with device_size 0, and the stored baseline was taken on
+    //   the clean both-present key.
+    #[test]
+    fn cmd_monitor_clean_enospc_baseline_fires_and_clears_under_usage_skew() {
+        let (_dir, paths) = isolated_paths();
+        seed_enospc_baseline(&paths, matching_pool_key(), open_snooze_deadline());
+        let runner = MonitorTestRunner::with_usage_payload(usage_2disk_one_missing());
+
+        let result = cmd_monitor(&runner, &monitor_fs_btrfs(), &monitor_mp(), &paths);
+
+        assert!(
+            has_enospc_cause(&result),
+            "usage-skewed live key must fire instead of suppressing, got {result:?}"
+        );
+        assert!(
+            load_enospc_ack(&paths).unwrap().is_none(),
+            "the confirmed key mismatch must clear the baseline"
+        );
+    }
+
+    // Intent: a snoozed baseline whose stored key contains btrfs's missing marker
+    //   is rejected before the matching-key suppression branch can honor it.
+    // Why it exists: pre-fix ack could persist `(devid, 0)` during the same
+    //   show-vs-usage skew. A later skewed monitor cycle would otherwise match
+    //   that poisoned key and suppress a real ENOSPC risk inside the snooze.
+    // Scenario: a legacy poisoned marker is on disk, show still reports both
+    //   devices present, and usage re-derives the same zero-sized key.
+    #[test]
+    fn cmd_monitor_zero_sized_enospc_baseline_fires_and_clears() {
+        let (_dir, paths) = isolated_paths();
+        seed_enospc_baseline(&paths, missing_pool_key(), open_snooze_deadline());
+        let runner = MonitorTestRunner::with_usage_payload(usage_2disk_one_missing());
+
+        let result = cmd_monitor(&runner, &monitor_fs_btrfs(), &monitor_mp(), &paths);
+
+        assert!(
+            has_enospc_cause(&result),
+            "zero-sized baseline must fire instead of suppressing, got {result:?}"
+        );
+        assert!(
+            load_enospc_ack(&paths).unwrap().is_none(),
+            "the poisoned baseline must be removed"
         );
     }
 
