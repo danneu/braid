@@ -65,12 +65,13 @@ sudo braid enroll /mnt/usb --generate --dry-run
 2. **With `--generate`:** Validates that the target directory exists, is a directory, is already a mount point, and does not already contain `braid.key` (if a prior `--generate` run was interrupted, drop `--generate` and re-run to finish enrolling the existing keyfile; otherwise remove it manually first).
 3. **Without `--generate`:** Validates that `DIR/braid.key` already exists and is a regular file.
 4. Scans pool membership for present LUKS disks. Absent or non-LUKS disks are skipped with a message. If a present disk's live LUKS UUID does not match the UUID recorded in `pool.json` -- the disk was swapped, cloned, or reformatted -- enrollment aborts before any passphrase prompt or slot change; detach the foreign disk and reattach the original, or run `braid replace` if the swap was intentional.
-5. Verifies the passphrase against every present pool disk before any keyfile probe.
-6. **Without `--generate`:** Probes the keyfile against each disk. If it authenticates, reports "already enrolled" and skips that disk for the rest of enrollment. A rejected probe means the disk still needs enrollment; any other probe failure (e.g. device busy) aborts immediately rather than treating the disk as un-enrolled.
-7. For each disk still needing enrollment, checks LUKS slot 1: proceeds if free; refuses with an error if occupied by an unknown key (you must remove it first with `cryptsetup luksKillSlot`).
-8. **With `--generate`:** Only after all preflight checks pass, generates the random keyfile.
-9. Enrolls the keyfile into LUKS slot 1 on each disk.
-10. Creates a LUKS header backup for each modified disk.
+5. Reads the pool passphrase, then -- before verifying it and before any slot change -- re-probes each present member's live LUKS UUID against `pool.json`, repeating the discovery-time check (step 4) at the mutation boundary. The passphrase prompt is an operator-controlled window in which a disk could be swapped or reformatted; a mismatch, or a probe that cannot confirm the UUID, aborts before slot 1 is touched. Re-probing before the verify means a mid-prompt swap surfaces as a clear LUKS UUID mismatch rather than a misleading wrong-passphrase error.
+6. Verifies the passphrase against every present pool disk before any keyfile probe.
+7. **Without `--generate`:** Probes the keyfile against each disk. If it authenticates, reports "already enrolled" and skips that disk for the rest of enrollment. A rejected probe means the disk still needs enrollment; any other probe failure (e.g. device busy) aborts immediately rather than treating the disk as un-enrolled.
+8. For each disk still needing enrollment, checks LUKS slot 1: proceeds if free; refuses with an error if occupied by an unknown key (you must remove it first with `cryptsetup luksKillSlot`).
+9. **With `--generate`:** Only after all preflight checks pass, generates the random keyfile.
+10. Enrolls the keyfile into LUKS slot 1 on each disk.
+11. Creates a LUKS header backup for each modified disk.
 
 See [Pending LUKS header backups](status.md#pending-luks-header-backups) -- copy each `.luksheader` off-system and delete the local copy.
 
