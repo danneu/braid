@@ -98,10 +98,8 @@ enum KeyfileTargetPhase {
 }
 
 /// A present LUKS pool member that discovery validated as enrollable.
-/// Carries the `uuid` discovery already proved equals the live header so
-/// the execute-time re-probe (`reprobe_member_luks_uuid`) can compare
-/// against the exact value discovery validated, rather than re-deriving
-/// it from membership at the mutation boundary.
+/// Carries the membership-expected `uuid` that discovery proved equal to
+/// the live header, keeping the execute-time re-probe's inputs together.
 #[derive(Debug, Clone)]
 pub struct EnrollmentCandidate {
     pub name: DiskName,
