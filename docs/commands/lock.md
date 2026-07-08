@@ -49,10 +49,10 @@ If the pool is already unmounted and all mappers are already closed, lock report
 When braid is installed via the NixOS module, `braid lock` also:
 
 - Stops `braid-scrub.timer`, `braid-scrub-resume-trigger.service`, and `braid-scrub.service` before unmount.
-- Stops any consumer wired into the pool lifecycle via `BindsTo=braid-online.service` (lock walks its reverse, `BoundBy`; e.g. an SMB or NFS unit you set up that way -- see [Sharing and permissions](../guides/sharing-and-permissions.md)) before unmount.
+- Stops any consumer wired into the pool lifecycle via `braid.poolBoundServices` or a direct `BindsTo=braid-online.service` edge (lock walks its reverse, `BoundBy`; e.g. SMB or NFS -- see [Sharing and permissions](../guides/sharing-and-permissions.md)) before unmount.
 - Stops `braid-online.service` itself after a successful unmount.
 
-`braid unlock` reverses the third step: it reactivates `braid-online.service` after mount, which restarts every consumer that is also `WantedBy=braid-online.service`. A consumer wired with only one of the two half-works -- `BindsTo` stops it before lock, `WantedBy` restarts it after unlock -- so wire both; the sharing guide shows the full setup.
+`braid unlock` reverses the third step: it reactivates `braid-online.service` after mount, which restarts every consumer configured through `braid.poolBoundServices` or otherwise wired with `WantedBy=braid-online.service`. A consumer wired with only one of the two half-works -- `BindsTo` stops it before lock, `WantedBy` restarts it after unlock -- so use `braid.poolBoundServices` for long-running pool consumers; the sharing guide shows the full setup.
 
 Standalone CLI installs (no NixOS module) skip all three -- there is no `braid-online.service` or scrub unit to stop.
 

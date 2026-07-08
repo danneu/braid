@@ -929,6 +929,26 @@
               linuxSystem
               ;
           };
+          eval-pool-bound-services-rejects-bad-names =
+            import ./tests/eval/pool-bound-services-assertion-fails.nix
+              {
+                inherit
+                  pkgs
+                  linuxPkgs
+                  nixpkgs
+                  linuxSystem
+                  ;
+              };
+          eval-pool-bound-services-accepts-acknowledged =
+            import ./tests/eval/pool-bound-services-assertion-ok.nix
+              {
+                inherit
+                  pkgs
+                  linuxPkgs
+                  nixpkgs
+                  linuxSystem
+                  ;
+              };
           eval-grammar-parity = import ./tests/eval/grammar-parity.nix { inherit pkgs; };
           eval-nixos-module-default-supplies-package = import ./tests/eval/nixos-module-default-package.nix {
             inherit pkgs self nixpkgs;
@@ -1102,6 +1122,11 @@
           );
           lock-stops-bound-consumers = pkgs.testers.nixosTest (
             import ./tests/module/lock-stops-bound-consumers.nix {
+              braid = linuxCrane.braid-cli-unwrapped;
+            }
+          );
+          pool-bound-services = pkgs.testers.nixosTest (
+            import ./tests/module/pool-bound-services.nix {
               braid = linuxCrane.braid-cli-unwrapped;
             }
           );

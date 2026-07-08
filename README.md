@@ -234,6 +234,7 @@ Add braid to your flake inputs and import the module:
 braid = {
   enable = true;
   mountPoint = "/mnt/storage";  # default
+  # poolBoundServices = [ "samba-smbd" ];  # start/stop shares with the pool
 };
 ```
 

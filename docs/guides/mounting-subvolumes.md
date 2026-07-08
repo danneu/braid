@@ -152,6 +152,8 @@ Bind the service to `var-lib-jellyfin-media.mount`, not directly to
 `braid-online.service`. That ensures Jellyfin starts only after its media path
 is mounted. During `braid lock`, systemd stops Jellyfin first, then the
 subvolume mount, then braid unmounts the management mount and closes LUKS.
+Do not put these subvolume consumers in `braid.poolBoundServices`; that option
+is for services that consume the main pool mount directly.
 
 The full triad pattern is the same lifecycle shape described in
 [Sharing and permissions](sharing-and-permissions.md#binding-shares-to-the-pool-lifecycle).

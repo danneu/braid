@@ -152,6 +152,12 @@ services.samba.settings = {
 By default, `samba-smbd.service` (the systemd unit NixOS creates from `services.samba.enable`) keeps running after `braid lock`. If a client is mid-transfer when you lock, `umount` blocks until the file handle is released. Wire the share into the pool lifecycle so systemd starts `samba-smbd` after `braid unlock` and stops it again before `braid lock` runs `umount`:
 
 ```nix
+braid.poolBoundServices = [ "samba-smbd" ];
+```
+
+That option appends this contract to `systemd.services.samba-smbd`:
+
+```nix
 systemd.services.samba-smbd = {
   # Start smbd when braid marks the pool online after a successful unlock.
   wantedBy = [ "braid-online.service" ];
@@ -175,6 +181,8 @@ All four fields are load-bearing and do different jobs:
 
 The condition matters even with `wantedBy`: NixOS also starts Samba at boot through `samba.target` (which `samba-smbd.service` is `wantedBy`), and that boot edge would start `smbd` before any unlock. `ConditionPathIsMountPoint` is what stops it from serving the empty, offline mount directory. Only `smbd` serves files from the pool and can hold it busy during lock, so leave `samba.target`, `nmbd`, and `winbindd` untouched.
 
+Use the bare `systemd.services.<name>` key, not the unit filename: `samba-smbd`, not `samba-smbd.service`. The module rejects suffixed names and names no other module defines, so typos fail before deployment instead of creating empty service skeletons.
+
 ## NFS
 
 The same approach works for NFS. Export the braid mount point and control access at the network level:
@@ -193,7 +201,13 @@ to server-root over pool files, which `nosuid,nodev` do not prevent.
 
 Adjust the subnet and options for your network. See `exports(5)` for the full option reference.
 
-The same `wantedBy` + `bindsTo` + `after` + `ConditionPathIsMountPoint` pattern on `braid-online.service` (see "Binding shares to the pool lifecycle" under Samba above) applies to `nfs-server.service` if you want NFS to stop before `braid lock` runs `umount` and start again after `braid unlock`. As with Samba, the condition gates NixOS's default `nfs-server.service` boot-start edge (`wantedBy = [ "multi-user.target" ]`) against an offline braid mount point.
+Add `nfs-server` to `braid.poolBoundServices` if you want NFS to stop before `braid lock` runs `umount` and start again after `braid unlock`:
+
+```nix
+braid.poolBoundServices = [ "nfs-server" ];
+```
+
+As with Samba, the generated condition gates NixOS's default `nfs-server.service` boot-start edge (`wantedBy = [ "multi-user.target" ]`) against an offline braid mount point.
 
 ## Auto-suspend integration
 

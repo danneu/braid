@@ -266,7 +266,7 @@ Services that depend on the pool being mounted use one of three patterns:
 
 **Infrequent periodic services** (scrub): The timer, scrub service, and resume trigger use `BindsTo` + `After` on `braid-online.service`; the timer and trigger are `wantedBy` the online unit. The timer's active lifecycle matches the pool's online period. `Persistent=true` handles catch-up for overdue fires. Unlike the monitor timer (which fires every 5 minutes and can afford missed runs), the monthly scrub timer cannot wait until next month if it misses -- lifecycle binding ensures it fires on the next unlock. The scrub service and resume trigger also get `ConditionPathIsMountPoint` as defense-in-depth. For manual lock, Rust dispatch stops the timer, resume trigger, and scrub service before unmount (see above).
 
-**Long-running services holding open files** (samba, nfs): Use the full `WantedBy=braid-online.service` + `BindsTo=braid-online.service` + `After=braid-online.service` triad (same shape as the scrub timer above), plus `ConditionPathIsMountPoint=<pool mount>`. `BindsTo` + `After` ensures systemd stops them *before* `braid lock` runs `ExecStop`, preventing unmount failures from busy filesystems; `WantedBy` ensures they restart automatically when `braid unlock` reactivates `braid-online.service`. The triad handles the unlock-start and lock-stop lifecycle, but these consumers carry their own boot or direct-start edges -- NixOS wants `samba-smbd.service` from `samba.target` and `nfs-server.service` from `multi-user.target`. For starts not initiated by `braid-online.service`, `ConditionPathIsMountPoint` is the load-bearing gate that prevents serving an offline mount directory. Rust dispatch iterates `BoundBy braid-online.service` and stops these consumers before unmount, mirroring the cascade systemd performs on shutdown for user-initiated lock. See `../../guides/sharing-and-permissions.md#binding-shares-to-the-pool-lifecycle` for the user-facing example.
+**Long-running services holding open files** (samba, nfs): `braid.poolBoundServices = [ "samba-smbd" "nfs-server" ];` is the canonical NixOS-module interface. It stamps the full `WantedBy=braid-online.service` + `BindsTo=braid-online.service` + `After=braid-online.service` triad (same shape as the scrub timer above), plus `ConditionPathIsMountPoint=<pool mount>`, onto services owned by other modules. `BindsTo` + `After` ensures systemd stops them *before* `braid lock` runs `ExecStop`, preventing unmount failures from busy filesystems; `WantedBy` ensures they restart automatically when `braid unlock` reactivates `braid-online.service`. The triad handles the unlock-start and lock-stop lifecycle, but these consumers carry their own boot or direct-start edges -- NixOS wants `samba-smbd.service` from `samba.target` and `nfs-server.service` from `multi-user.target`. For starts not initiated by `braid-online.service`, `ConditionPathIsMountPoint` is the load-bearing gate that prevents serving an offline mount directory. Rust dispatch iterates `BoundBy braid-online.service` and stops these consumers before unmount, mirroring the cascade systemd performs on shutdown for user-initiated lock. See `../../guides/sharing-and-permissions.md#binding-shares-to-the-pool-lifecycle` for the user-facing example.
 
 ## Key design constraints
 
@@ -279,6 +279,7 @@ Services that depend on the pool being mounted use one of three patterns:
 ## See
 
 - `modules/braid/storage.nix` — unit definitions
+- `modules/braid/pool-bound-services.nix` -- long-running consumer stamping
 - `modules/braid/monitor.nix` — monitor/alert units
 - `modules/braid/braid-wrapper.sh` — pure exec shim
 - [026-pool-lock-rust-owned.md](026-pool-lock-rust-owned.md) — Rust-owned pool lock and lifecycle synchronization
@@ -286,4 +287,5 @@ Services that depend on the pool being mounted use one of three patterns:
 - [017-runtime-disk-membership.md](017-runtime-disk-membership.md) — lifecycle model context
 - [033-systemd-unit-hardening.md](033-systemd-unit-hardening.md) -- systemd exec sandbox baseline and per-unit exceptions
 - `tests/module/systemd-lifecycle.py` — state machine test suite
+- `tests/module/pool-bound-services.py` -- pool-bound consumer lifecycle coverage
 - `tests/repro/btrfs-replace-rejected-during-scrub.py` -- kernel rejects a conflicting mutator during scrub; recovery hint classified

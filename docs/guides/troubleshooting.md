@@ -301,9 +301,13 @@ once you have investigated.
 
 This is intentional. On NixOS module installs, `braid lock` stops every service bound to `braid-online.service` via `BindsTo=braid-online.service` before it unmounts the pool. The cascade prevents busy-mount unmount failures.
 
-**Fix:** Run `braid unlock`. It reactivates `braid-online.service` after mount, and systemd restarts every consumer that is also `WantedBy=braid-online.service`.
+**Fix:** Run `braid unlock`. It reactivates `braid-online.service` after mount, and systemd restarts every enabled consumer listed in `braid.poolBoundServices`. List only services enabled on the host; for example, a host with both Samba and NFS uses:
 
-If the service does not restart on `braid unlock`, it is wired for the stop side (`BindsTo`) but not the start side (`WantedBy`). The recommended setup wires the share into the full pool lifecycle -- see [Binding shares to the pool lifecycle](sharing-and-permissions.md#binding-shares-to-the-pool-lifecycle).
+```nix
+braid.poolBoundServices = [ "samba-smbd" "nfs-server" ];
+```
+
+That option wires the full stop/start lifecycle: `BindsTo` for lock teardown, `WantedBy` for unlock restart, `After` for ordering, and `ConditionPathIsMountPoint` for boot or direct-start skips while the pool is locked. If the service does not restart on `braid unlock`, it is wired for the stop side but not the start side; use the option above instead of hand-writing only one edge. See [Binding shares to the pool lifecycle](sharing-and-permissions.md#binding-shares-to-the-pool-lifecycle).
 
 ## Pool is fragmented
 

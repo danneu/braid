@@ -93,6 +93,7 @@ When `braid.enable = true`, the module sets up:
 | `braid.package` | package or null | `null` | The braid CLI package; `nixosModules.default` defaults it to `braid-cli-unwrapped` |
 | `braid.mountPoint` | path | `/mnt/storage` | Canonical absolute path, with no whitespace or shell metacharacters |
 | `braid.poolAccessGroup` | string or null | `"storage"` | Group for mount point access. `null` to disable |
+| `braid.poolBoundServices` | list of strings | `[ ]` | Bare service names to start after unlock and stop before lock, e.g. `[ "samba-smbd" "nfs-server" ]` |
 | `braid.lockSystemdStopDeadlineSecs` | positive int | `270` | Seconds to wait for the pool lock during `braid-online.service` ExecStop; must stay below the unit's `TimeoutStopSec` |
 
 ### Tool overrides
@@ -222,6 +223,7 @@ braid = {
   # set only to build the CLI yourself.
   mountPoint = "/mnt/storage";   # default
   poolAccessGroup = "storage";   # default; null to disable
+  poolBoundServices = [ ];        # e.g. [ "samba-smbd" "nfs-server" ]
   lockSystemdStopDeadlineSecs = 270;  # default; must stay below braid-online TimeoutStopSec
 
   # Tool version overrides -- the recommended setup omits nixpkgs `follows`, so

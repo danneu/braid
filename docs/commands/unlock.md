@@ -77,7 +77,7 @@ If all mappers are already open and the pool is already mounted, unlock is a no-
 
 ### On NixOS module installs
 
-After a successful mount, `braid unlock` activates `braid-online.service`. Any unit you have wired into the pool lifecycle with `WantedBy=braid-online.service` (e.g. an SMB or NFS unit -- see [Sharing and permissions](../guides/sharing-and-permissions.md)) starts as part of that activation. `braid lock` stops them again on the way down via the matching `BindsTo=braid-online.service`.
+After a successful mount, `braid unlock` activates `braid-online.service`. Any unit configured through `braid.poolBoundServices` (or otherwise wired into the pool lifecycle with `WantedBy=braid-online.service`) starts as part of that activation. `braid lock` stops them again on the way down via the matching `BindsTo=braid-online.service`; see [Sharing and permissions](../guides/sharing-and-permissions.md).
 
 Standalone CLI installs (no NixOS module) skip this -- there is no `braid-online.service` to activate.
 

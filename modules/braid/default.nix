@@ -7,5 +7,6 @@
     ./auto-suspend.nix
     ./fan-control.nix
     ./ups.nix
+    ./pool-bound-services.nix
   ];
 }
