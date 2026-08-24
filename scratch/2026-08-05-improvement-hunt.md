@@ -90,7 +90,7 @@ task lands. `Rejected` tasks are retained for reference and are not pending work
 | TASK-30 | Open | -- | Developer tooling | Make `clippy-fix` actually apply clippy suggestions or rename it to match its behavior. |
 | TASK-31 | Open | -- | Simplification, API | Remove the unreachable dry-run boolean from the lock orchestrator callback seam. |
 | TASK-32 | Open | -- | Error handling, observability | Print `PoolLockError` so lock-file failures retain their braid-layer context. |
-| TASK-33 | Open | -- | Error handling, consistency | Tag recover probe failures consistently with other command-level errors. |
+| TASK-33 | Done | 2026-08-24 | Error handling, consistency | Tag recover probe failures consistently with other command-level errors. |
 | TASK-34 | Done | 2026-08-24 | Tooling, documentation | Track ASCII-guard allowances on the clap doc line that owns each buffered hit. |
 | TASK-35 | Open | -- | Simplification, control flow | Compute repeated recovery-plan predicates once and reuse them. |
 | TASK-36 | Open | -- | Documentation | Replace the parser test's citation to a deleted document. |

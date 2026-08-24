@@ -31,7 +31,7 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum RecoverError {
-    #[error("{0}")]
+    #[error("probe error: {0}")]
     Probe(#[from] ProbeError),
     #[error("command error: {0}")]
     Cmd(#[from] crate::cmd::CmdError),
