@@ -14,6 +14,7 @@ use crate::status_tag::{StatusTag, color_enabled_for_stderr, emit_status, status
 use crate::types::{
     Devid, DiskName, Fsid, LuksUuid, MapperName, MountPoint, PoolState, format_uuid_list,
 };
+use crate::util::detail_suffix;
 use std::collections::HashSet;
 use std::io::{self, Write};
 
@@ -1182,7 +1183,7 @@ where
 {
     cmd_lock_fn(runner, fs, config, membership, false).map_err(LockOrchestrateError::CmdLock)?;
     mark_done_fn().map_err(LockOrchestrateError::MarkDone)?;
-    let _ = mark_offline(config, online_ops);
+    mark_offline(config, online_ops);
     Ok(())
 }
 
@@ -1286,10 +1287,13 @@ fn stop_unit_silent(online_ops: &dyn OnlineStateOps, unit: &str) {
 fn stop_unit_warn_on_error(online_ops: &dyn OnlineStateOps, out: &mut dyn Write, unit: &str) {
     if let Err(e) = online_ops.systemctl_stop(unit, false) {
         match e {
-            OnlineError::SystemctlStop { exit_code, .. } => {
+            OnlineError::SystemctlStop {
+                exit_code, stderr, ..
+            } => {
                 writeln!(
                     out,
-                    "braid: WARNING: failed to stop {unit} (exit {exit_code}) -- continuing; umount may fail"
+                    "braid: WARNING: failed to stop {unit} (exit {exit_code}{}) -- continuing; umount may fail",
+                    detail_suffix(&stderr)
                 )
                 .ok();
             }
@@ -1755,9 +1759,10 @@ mod tests {
         assert_eq!(String::from_utf8(out).unwrap(), "");
     }
 
-    // Intent: run_lock_pre_steps warns byte-exactly on nonzero consumer stops.
-    // Why it exists: operators need the exit-code form when a BoundBy consumer
-    // blocks shutdown or unmount cleanup.
+    // Intent: run_lock_pre_steps reports the exit code and stderr from a
+    // nonzero consumer stop.
+    // Why it exists: operators need systemctl's diagnostic when a BoundBy
+    // consumer blocks shutdown or unmount cleanup.
     // Scenario: smbd.service is bound to braid-online.service but systemctl
     // stop returns a nonzero status during lock.
     #[test]
@@ -1779,7 +1784,7 @@ mod tests {
 
         assert_eq!(
             String::from_utf8(out).unwrap(),
-            "braid: WARNING: failed to stop smbd.service (exit 5) -- continuing; umount may fail\n"
+            "braid: WARNING: failed to stop smbd.service (exit 5: stop failed) -- continuing; umount may fail\n"
         );
         assert_eq!(
             ops.calls(),
@@ -1790,6 +1795,34 @@ mod tests {
                 "list_bound_by braid-online.service",
                 "stop smbd.service no_block=false",
             ]
+        );
+    }
+
+    // Intent: a nonzero consumer stop with empty stderr omits the diagnostic
+    // separator while retaining the exit code and operational consequence.
+    // Why it exists: systemctl may fail silently, and warning formatting must
+    // not imply that diagnostic text was accidentally truncated.
+    // Scenario: smbd.service remains active but systemctl stop emits no text.
+    #[test]
+    fn bound_by_pre_step_nonzero_stop_omits_empty_stderr_suffix() {
+        let config = lifecycle_config();
+        let ops = RecordingOnlineStateOps::new();
+        ops.set_bound_by_ok(vec!["smbd.service".into()]);
+        ops.set_systemctl_stop_err(
+            "smbd.service",
+            StagedOnlineFailure::SystemctlStop {
+                unit: "smbd.service".into(),
+                exit_code: 5,
+                stderr: String::new(),
+            },
+        );
+        let mut out = Vec::new();
+
+        run_lock_pre_steps(&config, &ops, &mut out);
+
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "braid: WARNING: failed to stop smbd.service (exit 5) -- continuing; umount may fail\n"
         );
     }
 

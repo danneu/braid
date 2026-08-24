@@ -62,7 +62,7 @@ task lands. `Rejected` tasks are retained for reference and are not pending work
 | TASK-2 | Done | 2026-08-24 | Documentation, CLI UX | Describe replace `--new` as a full `NAME=/dev/disk/by-id/...` disk spec. |
 | TASK-3 | Open | -- | Documentation, testing | Classify the cryptsetup LUKS dump parser as CLI-reachable and accurately describe its canary coverage. |
 | TASK-4 | Open | -- | Simplification, API | Delete three unused `UpscOutput` predicates superseded by `severity()`. |
-| TASK-5 | Open | -- | Error handling, observability | Preserve and print `systemctl_start` failure details in the online-state warning. |
+| TASK-5 | Done | 2026-08-24 | Error handling, observability | Preserve and print `systemctl_start` failure details in the online-state warning. |
 | TASK-6 | Open | -- | Testing | Add the omitted `root_check` and `tty_passphrase` integration targets to `test-rust`. |
 | TASK-7 | Open | -- | Simplification, dead code | Remove the obsolete TUI-wide dead-code allowance and let the compiler expose unused code. |
 | TASK-8 | Open | -- | Simplification, duplication | Extract the duplicated scoped `btrfs device scan --forget` warning-and-continue block. |
@@ -94,7 +94,7 @@ task lands. `Rejected` tasks are retained for reference and are not pending work
 | TASK-34 | Open | -- | Tooling, documentation | Track ASCII-guard allowances on the clap doc line that owns each buffered hit. |
 | TASK-35 | Open | -- | Simplification, control flow | Compute repeated recovery-plan predicates once and reuse them. |
 | TASK-36 | Open | -- | Documentation | Replace the parser test's citation to a deleted document. |
-| TASK-37 | Open | -- | Simplification, API | Make always-successful online-state helpers return `()` instead of `Result`. |
+| TASK-37 | Done | 2026-08-24 | Simplification, API | Make always-successful online-state helpers return `()` instead of `Result`. |
 | TASK-38 | Rejected | -- | Simplification, control flow | Merge duplicate-looking unmount terminal branches; rejected because their separation is deliberate. |
 | TASK-39 | Rejected | -- | Testing, data modeling | Share grammar samples across Nix and Rust; rejected because the claimed parity failure is not real. |
 

@@ -7,10 +7,12 @@
 use crate::cmd::{CmdError, CmdRequest, CommandRunner};
 use crate::config::Config;
 use crate::types::MountPoint;
+use crate::util::detail_suffix;
 use nix::unistd::{Group, User, chown};
 #[cfg(test)]
 use std::collections::HashMap;
 use std::fs;
+use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use thiserror::Error;
@@ -66,13 +68,13 @@ impl UnitActiveState {
 pub enum OnlineError {
     #[error("{source}")]
     Spawn { source: CmdError },
-    #[error("systemctl show {unit} failed (exit {exit_code}): {stderr}")]
+    #[error("systemctl show {unit} failed (exit {exit_code}){}", detail_suffix(.stderr))]
     SystemctlShow {
         unit: String,
         exit_code: i32,
         stderr: String,
     },
-    #[error("mountpoint check for {path} failed (exit {exit_code}): {stderr}")]
+    #[error("mountpoint check for {path} failed (exit {exit_code}){}", detail_suffix(.stderr))]
     Mountpoint {
         path: String,
         exit_code: i32,
@@ -94,13 +96,13 @@ pub enum OnlineError {
         path: String,
         source: std::io::Error,
     },
-    #[error("systemctl start {unit} failed (exit {exit_code}): {stderr}")]
+    #[error("systemctl start {unit} failed (exit {exit_code}){}", detail_suffix(.stderr))]
     SystemctlStart {
         unit: String,
         exit_code: i32,
         stderr: String,
     },
-    #[error("systemctl stop {unit} failed (exit {exit_code}): {stderr}")]
+    #[error("systemctl stop {unit} failed (exit {exit_code}){}", detail_suffix(.stderr))]
     SystemctlStop {
         unit: String,
         exit_code: i32,
@@ -258,35 +260,51 @@ pub fn snapshot(ops: &dyn OnlineStateOps) -> OnlineSnapshot {
 /// Uses this lock window's entry-state `OnlineSnapshot` to gate `braid-online.service` start.
 /// Skipping captured active/activating/deactivating states avoids queueing start behind stop;
 /// see the snapshot rule in docs/design/decisions/026-pool-lock-rust-owned.md.
-pub fn mark_online(
+pub fn mark_online(snap: Option<&OnlineSnapshot>, cfg: &Config, ops: &dyn OnlineStateOps) {
+    mark_online_to(snap, cfg, ops, &mut std::io::stderr());
+}
+
+/// Implements the online marker against an injected warning sink so its
+/// warn-and-continue contract is behaviorally testable without redirecting
+/// process-global stderr.
+fn mark_online_to(
     snap: Option<&OnlineSnapshot>,
     cfg: &Config,
     ops: &dyn OnlineStateOps,
-) -> Result<(), OnlineError> {
+    out: &mut dyn Write,
+) {
     let mount_point = Path::new(cfg.mount_point().as_str());
     let mounted = match ops.is_mountpoint(cfg.mount_point()) {
         Ok(mounted) => mounted,
         Err(e) => {
-            eprintln!("braid: WARNING: failed to check mountpoint {mount_point:?}: {e}");
-            return Ok(());
+            writeln!(
+                out,
+                "braid: WARNING: failed to check mountpoint {mount_point:?}: {e}"
+            )
+            .ok();
+            return;
         }
     };
     if !mounted {
-        return Ok(());
+        return;
     }
 
     if let Some(group) = cfg.pool_access_group() {
         if let Err(e) = ops.chown(mount_point, "root", group) {
-            eprintln!(
+            writeln!(
+                out,
                 "braid: WARNING: failed to set ownership on {}: {e}",
                 mount_point.display()
-            );
+            )
+            .ok();
         }
         if let Err(e) = ops.chmod(mount_point, 0o2770) {
-            eprintln!(
+            writeln!(
+                out,
                 "braid: WARNING: failed to set permissions on {}: {e}",
                 mount_point.display()
-            );
+            )
+            .ok();
         }
     }
 
@@ -295,16 +313,20 @@ pub fn mark_online(
     {
         match &snap.online_state {
             UnitActiveState::Inactive | UnitActiveState::Failed => {
-                if ops.systemctl_start(BRAID_ONLINE_UNIT).is_err() {
-                    eprintln!(
-                        "braid: WARNING: failed to activate braid-online.service -- pool is mounted but shutdown may not lock automatically"
-                    );
+                if let Err(e) = ops.systemctl_start(BRAID_ONLINE_UNIT) {
+                    writeln!(
+                        out,
+                        "braid: WARNING: failed to activate braid-online.service ({e}) -- pool is mounted but shutdown may not lock automatically"
+                    )
+                    .ok();
                 }
             }
             UnitActiveState::Unknown(reason) => {
-                eprintln!(
+                writeln!(
+                    out,
                     "braid: WARNING: could not read braid-online.service ActiveState ({reason}) -- pool is mounted but shutdown may not lock automatically"
-                );
+                )
+                .ok();
             }
             UnitActiveState::Active
             | UnitActiveState::Activating
@@ -314,8 +336,6 @@ pub fn mark_online(
             | UnitActiveState::Refreshing => {}
         }
     }
-
-    Ok(())
 }
 
 /// Shared online-side finalizer so dispatch cannot skip lifecycle
@@ -326,9 +346,21 @@ pub fn run_with_online_marker<E>(
     ops: &dyn OnlineStateOps,
     op: impl FnOnce() -> Result<(), E>,
 ) -> Result<(), E> {
+    run_with_online_marker_to(snap, cfg, ops, &mut std::io::stderr(), op)
+}
+
+/// Runs the online finalizer with an injected warning sink while preserving
+/// the wrapped operation's result as the only return value.
+fn run_with_online_marker_to<E>(
+    snap: Option<&OnlineSnapshot>,
+    cfg: Option<&Config>,
+    ops: &dyn OnlineStateOps,
+    out: &mut dyn Write,
+    op: impl FnOnce() -> Result<(), E>,
+) -> Result<(), E> {
     let result = op();
     if let Some(cfg) = cfg {
-        let _ = mark_online(snap, cfg, ops);
+        mark_online_to(snap, cfg, ops, out);
     }
     result
 }
@@ -338,26 +370,37 @@ pub fn run_with_online_marker<E>(
 /// docs/design/decisions/026-pool-lock-rust-owned.md instead.
 /// An unknown mountpoint state is treated as still-mounted -- mirrors
 /// `mark_online`'s fail-safe and skips the synchronous stop.
-pub fn mark_offline(cfg: &Config, ops: &dyn OnlineStateOps) -> Result<(), OnlineError> {
+pub fn mark_offline(cfg: &Config, ops: &dyn OnlineStateOps) {
+    mark_offline_to(cfg, ops, &mut std::io::stderr());
+}
+
+/// Implements the offline marker against an injected warning sink for the
+/// same testable warn-and-continue boundary as `mark_online_to`.
+fn mark_offline_to(cfg: &Config, ops: &dyn OnlineStateOps, out: &mut dyn Write) {
     let path = Path::new(cfg.mount_point().as_str());
     match ops.is_mountpoint(cfg.mount_point()) {
-        Ok(true) => return Ok(()),
+        Ok(true) => return,
         Ok(false) => {}
         Err(e) => {
-            eprintln!(
+            writeln!(
+                out,
                 "braid: WARNING: failed to check mountpoint {}: {e}",
                 path.display()
-            );
-            return Ok(());
+            )
+            .ok();
+            return;
         }
     }
 
     if cfg.systemd_lifecycle()
         && let Err(e) = ops.systemctl_stop(BRAID_ONLINE_UNIT, false)
     {
-        eprintln!("braid: WARNING: failed to deactivate braid-online.service: {e}");
+        writeln!(
+            out,
+            "braid: WARNING: failed to deactivate braid-online.service: {e}"
+        )
+        .ok();
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -365,6 +408,11 @@ pub fn mark_offline(cfg: &Config, ops: &dyn OnlineStateOps) -> Result<(), Online
 pub enum StagedOnlineFailure {
     Spawn(String),
     SystemctlShow {
+        unit: String,
+        exit_code: i32,
+        stderr: String,
+    },
+    SystemctlStart {
         unit: String,
         exit_code: i32,
         stderr: String,
@@ -392,6 +440,15 @@ impl StagedOnlineFailure {
                 exit_code,
                 stderr,
             },
+            Self::SystemctlStart {
+                unit,
+                exit_code,
+                stderr,
+            } => OnlineError::SystemctlStart {
+                unit,
+                exit_code,
+                stderr,
+            },
             Self::SystemctlStop {
                 unit,
                 exit_code,
@@ -411,6 +468,7 @@ pub struct RecordingOnlineStateOps {
     mounted: std::cell::RefCell<Result<bool, StagedOnlineFailure>>,
     calls: std::cell::RefCell<Vec<String>>,
     bound_by: std::cell::RefCell<Result<Vec<String>, StagedOnlineFailure>>,
+    systemctl_start_errs: std::cell::RefCell<HashMap<String, StagedOnlineFailure>>,
     systemctl_stop_errs: std::cell::RefCell<HashMap<String, StagedOnlineFailure>>,
     coord_file_path: Option<std::path::PathBuf>,
     coord_snapshots: std::cell::RefCell<Vec<Vec<u8>>>,
@@ -424,6 +482,7 @@ impl RecordingOnlineStateOps {
             mounted: std::cell::RefCell::new(Ok(true)),
             calls: std::cell::RefCell::new(Vec::new()),
             bound_by: std::cell::RefCell::new(Ok(Vec::new())),
+            systemctl_start_errs: std::cell::RefCell::new(HashMap::new()),
             systemctl_stop_errs: std::cell::RefCell::new(HashMap::new()),
             coord_file_path: None,
             coord_snapshots: std::cell::RefCell::new(Vec::new()),
@@ -459,6 +518,13 @@ impl RecordingOnlineStateOps {
 
     pub fn set_bound_by_err(&self, failure: StagedOnlineFailure) {
         *self.bound_by.borrow_mut() = Err(failure);
+    }
+
+    /// Stages a start failure for lifecycle-warning and finalizer tests.
+    pub fn set_systemctl_start_err(&self, unit: &str, failure: StagedOnlineFailure) {
+        self.systemctl_start_errs
+            .borrow_mut()
+            .insert(unit.to_owned(), failure);
     }
 
     pub fn set_systemctl_stop_err(&self, unit: &str, failure: StagedOnlineFailure) {
@@ -503,7 +569,10 @@ impl OnlineStateOps for RecordingOnlineStateOps {
 
     fn systemctl_start(&self, unit: &str) -> Result<(), OnlineError> {
         self.calls.borrow_mut().push(format!("start {unit}"));
-        Ok(())
+        match self.systemctl_start_errs.borrow().get(unit).cloned() {
+            Some(failure) => Err(failure.into_online_error()),
+            None => Ok(()),
+        }
     }
 
     fn systemctl_stop(&self, unit: &str, no_block: bool) -> Result<(), OnlineError> {
@@ -698,8 +767,7 @@ mod tests {
             }),
             &cfg,
             &ops,
-        )
-        .unwrap();
+        );
 
         let calls = ops.calls();
         assert!(calls.contains(&"mountpoint".into()));
@@ -722,8 +790,7 @@ mod tests {
             }),
             &cfg,
             &ops,
-        )
-        .unwrap();
+        );
 
         let calls = ops.calls();
         assert!(calls.contains(&"chown".into()));
@@ -742,8 +809,7 @@ mod tests {
                 }),
                 &cfg,
                 &ops,
-            )
-            .unwrap();
+            );
             assert!(ops.calls().contains(&format!("start {BRAID_ONLINE_UNIT}")));
         }
 
@@ -754,8 +820,7 @@ mod tests {
             }),
             &cfg,
             &ops,
-        )
-        .unwrap();
+        );
         assert!(!ops.calls().contains(&format!("start {BRAID_ONLINE_UNIT}")));
 
         let ops = RecordingOnlineStateOps::new();
@@ -765,9 +830,72 @@ mod tests {
             }),
             &cfg,
             &ops,
-        )
-        .unwrap();
+        );
         assert!(!ops.calls().contains(&format!("start {BRAID_ONLINE_UNIT}")));
+    }
+
+    // Intent: a failed braid-online start reports systemctl's exit code and
+    // diagnostic while preserving the wrapped command's original result.
+    // Why it exists: the lifecycle finalizer used to reduce OnlineError to a
+    // boolean, hiding the diagnostic needed to repair automatic shutdown.
+    // Scenario: add mounts the pool and then fails; its finalizer also cannot
+    // start braid-online.service because systemd rejects the request.
+    #[test]
+    fn online_finalizer_warns_with_start_failure_details_and_preserves_result() {
+        let cfg = cfg(r#"{"mount_point":"/mnt/storage","systemd_lifecycle":true}"#);
+        let ops = RecordingOnlineStateOps::new();
+        ops.set_systemctl_start_err(
+            BRAID_ONLINE_UNIT,
+            StagedOnlineFailure::SystemctlStart {
+                unit: BRAID_ONLINE_UNIT.into(),
+                exit_code: 5,
+                stderr: "Unit braid-online.service not loaded.".into(),
+            },
+        );
+        let snap = OnlineSnapshot {
+            online_state: UnitActiveState::Inactive,
+        };
+        let mut out = Vec::new();
+
+        let result = run_with_online_marker_to(Some(&snap), Some(&cfg), &ops, &mut out, || {
+            Err::<(), _>("post-mount failure")
+        });
+
+        assert_eq!(result, Err("post-mount failure"));
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "braid: WARNING: failed to activate braid-online.service (systemctl start braid-online.service failed (exit 5): Unit braid-online.service not loaded.) -- pool is mounted but shutdown may not lock automatically\n"
+        );
+    }
+
+    // Intent: a failed braid-online start with empty stderr still reports the
+    // exit code without rendering a contentless diagnostic separator.
+    // Why it exists: systemctl is not guaranteed to write stderr on every
+    // nonzero exit, and dangling punctuation makes the warning look truncated.
+    // Scenario: systemctl start exits 5 silently after the pool is mounted.
+    #[test]
+    fn mark_online_start_failure_omits_empty_stderr_suffix() {
+        let cfg = cfg(r#"{"mount_point":"/mnt/storage","systemd_lifecycle":true}"#);
+        let ops = RecordingOnlineStateOps::new();
+        ops.set_systemctl_start_err(
+            BRAID_ONLINE_UNIT,
+            StagedOnlineFailure::SystemctlStart {
+                unit: BRAID_ONLINE_UNIT.into(),
+                exit_code: 5,
+                stderr: String::new(),
+            },
+        );
+        let snap = OnlineSnapshot {
+            online_state: UnitActiveState::Failed,
+        };
+        let mut out = Vec::new();
+
+        mark_online_to(Some(&snap), &cfg, &ops, &mut out);
+
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "braid: WARNING: failed to activate braid-online.service (systemctl start braid-online.service failed (exit 5)) -- pool is mounted but shutdown may not lock automatically\n"
+        );
     }
 
     // Intent: mark_online tolerates a missing snapshot even when lifecycle is enabled.
@@ -780,7 +908,7 @@ mod tests {
         let cfg = cfg(r#"{"mount_point":"/mnt/storage","systemd_lifecycle":true}"#);
         let ops = RecordingOnlineStateOps::new();
 
-        mark_online(None, &cfg, &ops).unwrap();
+        mark_online(None, &cfg, &ops);
 
         assert!(!ops.calls().contains(&format!("start {BRAID_ONLINE_UNIT}")));
     }
@@ -878,7 +1006,7 @@ mod tests {
         let ops = RecordingOnlineStateOps::new();
         ops.set_mounted(false);
 
-        mark_offline(&cfg, &ops).unwrap();
+        mark_offline(&cfg, &ops);
 
         assert!(
             !ops.calls()
@@ -891,7 +1019,7 @@ mod tests {
         let cfg = cfg(r#"{"mount_point":"/mnt/storage","systemd_lifecycle":true}"#);
         let ops = RecordingOnlineStateOps::new();
         ops.set_mounted(false);
-        mark_offline(&cfg, &ops).unwrap();
+        mark_offline(&cfg, &ops);
         assert!(
             ops.calls()
                 .contains(&format!("stop {BRAID_ONLINE_UNIT} no_block=false"))
@@ -914,7 +1042,7 @@ mod tests {
             "mountpoint spawn failure".into(),
         ));
 
-        mark_offline(&cfg, &ops).unwrap();
+        mark_offline(&cfg, &ops);
 
         assert!(
             !ops.calls()
