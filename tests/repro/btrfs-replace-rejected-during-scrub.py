@@ -119,23 +119,29 @@ with subtest("Start scrub in background"):
 # (reference/btrfs-progs/cmds/replace.c:330-356).
 
 with subtest("Attempt braid-shape btrfs replace -- expect scrub rejection"):
+    stdout_path = "/tmp/btrfs-replace-during-scrub.out"
+    stderr_path = "/tmp/btrfs-replace-during-scrub.err"
     cmd = (
         "btrfs replace start --enqueue -r -f -B "
-        f"{disk2_devid} /dev/mapper/disk3 /mnt/storage 2>&1"
+        f"{disk2_devid} /dev/mapper/disk3 /mnt/storage "
+        f">{stdout_path} 2>{stderr_path}"
     )
     print("invoking: " + cmd)
-    (status, output) = machine.execute(cmd)
+    (status, _) = machine.execute(cmd)
+    stdout = machine.succeed(f"cat {stdout_path}")
+    stderr = machine.succeed(f"cat {stderr_path}")
     print("btrfs replace exit: " + str(status))
-    print("btrfs replace stderr/stdout:\n" + output)
+    print("btrfs replace stdout:\n" + stdout)
+    print("btrfs replace stderr:\n" + stderr)
 
     assert status != 0, (
-        "Expected btrfs replace to FAIL during scrub but it exited "
-        + str(status) + ". Output:\n" + output
+        f"Expected btrfs replace to FAIL during scrub but it exited {status}. "
+        f"stdout:\n{stdout}\nstderr:\n{stderr}"
     )
-    assert re.search(r"scrub is in progress", output, re.IGNORECASE), (
+    assert re.search(r"scrub is in progress", stderr, re.IGNORECASE), (
         "Expected stderr to contain 'scrub is in progress' (case-insensitive) "
         "-- the wording `cli/src/pool.rs::replace_error` classifies on. "
-        "Output:\n" + output
+        f"stdout:\n{stdout}\nstderr:\n{stderr}"
     )
     print(
         "CONFIRMED: btrfs replace rejected during scrub with the marker "

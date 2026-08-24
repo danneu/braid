@@ -74,7 +74,7 @@ task lands. `Rejected` tasks are retained for reference and are not pending work
 | TASK-14 | Open | -- | Data modeling, architecture | Move the crate-wide `Filesystem` seam out of the probe-specific module. |
 | TASK-15 | Done | 2026-08-24 | Error handling, recovery UX | Give remove-missing post-commit failures dedicated recovery-aware error variants. |
 | TASK-16 | Done | 2026-08-24 | Testing | Make the missing NVMe healthy fixture test fail instead of silently skipping. |
-| TASK-17 | Open | -- | Testing, error handling | Lock the live btrfs minimum-devices stderr contract used for recovery hints. |
+| TASK-17 | Done | 2026-08-24 | Testing, error handling | Lock the live btrfs minimum-devices stderr contract used for recovery hints. |
 | TASK-18 | Done | 2026-08-24 | Testing, reliability | Make the authoritative stable golden lane fail when required fixtures are missing. |
 | TASK-19 | Open | -- | Testing, error handling | Add a live-tool lock for the `btrfs balance pause` exit-code and stderr classifier. |
 | TASK-20 | Open | -- | Testing, tooling | Add a self-test proving the decision-document path checker can fail. |

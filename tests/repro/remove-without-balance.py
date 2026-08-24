@@ -54,8 +54,17 @@ with subtest("Setup: create 2-drive LUKS + btrfs RAID1 pool"):
 # --- Phase 2: btrfs device remove without balance — fails (raid1 minimum) ---
 
 with subtest("btrfs device remove without balance fails — raid1 requires 2 devices"):
+    stdout_path = "/tmp/remove-without-balance.out"
+    stderr_path = "/tmp/remove-without-balance.err"
     machine.fail(
-        "btrfs device remove /dev/mapper/disk2 /mnt/storage 2>&1"
+        "btrfs device remove /dev/mapper/disk2 /mnt/storage"
+        f" >{stdout_path} 2>{stderr_path}"
+    )
+    stdout = machine.succeed(f"cat {stdout_path}")
+    stderr = machine.succeed(f"cat {stderr_path}")
+    assert "unable to go below" in stderr.lower(), (
+        "Expected btrfs minimum-devices marker on stderr.\n"
+        f"stdout:\n{stdout}\nstderr:\n{stderr}"
     )
 
     fi_show = machine.succeed("btrfs fi show /mnt/storage")
