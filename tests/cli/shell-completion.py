@@ -1,11 +1,11 @@
 # Test: braid shell completion
 #
-# What: End-to-end tests for shell completion -- registration script generation
-# for bash/zsh/fish, subcommand and flag candidate correctness, dynamic disk
-# name candidates from config, --config override, and missing-config fallback.
+# What: End-to-end tests for shell completion -- registration script generation,
+# subcommand and flag candidate correctness, and role-correct dynamic member
+# name candidates from pool membership.
 #
 # Why: Completions are user-facing and must stay in sync with the CLI structure
-# and the NixOS-generated config. Regressions here silently break the UX.
+# and each argument's accepted grammar. Regressions here silently break the UX.
 #
 # Dependencies: Rust braid binary with clap_complete CompleteEnv support.
 
@@ -46,7 +46,7 @@ SCRIPT
 chmod +x /tmp/get-completions.sh
 """)
 
-with subtest("disk name completion is in DiskName order"):
+with subtest("member-name completion is ordered and limited to existing-member inputs"):
     pool = {
         "disks": {
             "11111111-1111-1111-1111-111111111111": {
@@ -63,11 +63,25 @@ with subtest("disk name completion is in DiskName order"):
     machine.succeed(
         "cat > /var/lib/braid/pool.json << 'EOF'\n" + json.dumps(pool) + "\nEOF"
     )
-    output = machine.succeed("bash /tmp/get-completions.sh braid add ''")
-    candidates = [c for c in output.splitlines() if c in ("alpha", "zeta")]
-    assert candidates == ["alpha", "zeta"], (
-        "completion candidates must be in DiskName order, got: " + str(candidates)
-    )
+    for command in ("remove", "replace --old"):
+        output = machine.succeed(
+            f"bash /tmp/get-completions.sh braid {command} ''"
+        )
+        candidates = [c for c in output.splitlines() if c in ("alpha", "zeta")]
+        assert candidates == ["alpha", "zeta"], (
+            f"{command} member candidates must be in DiskName order, got: "
+            + str(candidates)
+        )
+
+    for command in ("add", "replace --old alpha --new"):
+        output = machine.succeed(
+            f"bash /tmp/get-completions.sh braid {command} ''"
+        )
+        candidates = [c for c in output.splitlines() if c in ("alpha", "zeta")]
+        assert candidates == [], (
+            f"{command} must not suggest existing members as new disk specs, got: "
+            + str(candidates)
+        )
 
 with subtest("subcommand completion"):
     output = machine.succeed("bash /tmp/get-completions.sh braid ''")

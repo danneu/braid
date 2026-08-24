@@ -102,6 +102,50 @@ fn help_subcommand_works_without_root() {
     );
 }
 
+// Intent: `braid monitor --help` documents every public exit tier, including
+//   the non-beeping Warning path.
+// Why it exists: the Warning exit was added after the command summary and the
+//   generated help silently retained the older 0/1/2 contract.
+// Scenario: an operator checks terminal help before wiring monitor into an
+//   external supervisor and needs to distinguish Critical from Warning.
+#[test]
+fn monitor_help_documents_warning_exit() {
+    let output = braid()
+        .args(["monitor", "--help"])
+        .output()
+        .expect("failed to execute braid");
+    assert!(output.status.success(), "monitor help should succeed");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("exit 1 = Critical alert"),
+        "monitor help should identify the Critical exit, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("exit 3 = Warning-only alert"),
+        "monitor help should identify the Warning exit, got: {stdout}"
+    );
+}
+
+// Intent: `braid replace --help` describes `--new` using the full disk-spec
+//   grammar enforced by the command planner.
+// Why it exists: replace migrated from configured names to runtime disk specs,
+//   but its generated help retained the old bare-name contract.
+// Scenario: an operator consults terminal help and can construct a valid
+//   replacement command without first triggering a validation error.
+#[test]
+fn replace_help_documents_new_disk_spec() {
+    let output = braid()
+        .args(["replace", "--help"])
+        .output()
+        .expect("failed to execute braid");
+    assert!(output.status.success(), "replace help should succeed");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Disk spec for the replacement disk: NAME=/dev/disk/by-id/..."),
+        "replace help should document the full --new disk spec, got: {stdout}"
+    );
+}
+
 #[test]
 fn version_works_without_root() {
     if is_root() {

@@ -75,7 +75,7 @@ enum Commands {
     /// resume saved work or start a fresh scrub when nothing is resumable.
     #[command(hide = true)]
     ScrubResumeOrStart(ScrubMountArgs),
-    /// Check disk health: exit 0 = ok/offline/lock-contended, exit 1 = alert (incl. probe/compute failure latched as ComputationError), exit 2 = setup error (e.g. pool-lock I/O, config load)
+    /// Check disk health: exit 0 = ok/offline/lock-contended, exit 1 = Critical alert (incl. probe/compute failure latched as ComputationError), exit 2 = setup error (e.g. pool-lock I/O, config load), exit 3 = Warning-only alert (ENOSPC risk; no beep)
     Monitor,
     /// Acknowledge current alerts and silence notifications: exit 0 = acknowledged or nothing to ack, exit 1 = lock contention or ack failure, exit 2 = setup error (config load, pool-lock I/O)
     Ack,
@@ -319,7 +319,11 @@ struct LuksFormatArgs {
 #[derive(Debug, Args)]
 struct AddArgs {
     /// Disk specs: NAME=/dev/disk/by-id/... (e.g. toshiba=/dev/disk/by-id/ata-TOSHIBA_MN07)
-    #[arg(required = true, num_args(1..), add = ArgValueCandidates::new(disk_name_candidates))]
+    #[arg(
+        required = true,
+        num_args(1..),
+        value_name = "NAME=/dev/disk/by-id/..."
+    )]
     disks: Vec<String>,
     /// Directory containing braid.key to enroll in the new disk (LUKS slot 1)
     #[arg(long = "enroll")]
@@ -355,8 +359,8 @@ struct ReplaceArgs {
     /// Disk name of the disk to replace
     #[arg(long, add = ArgValueCandidates::new(disk_name_candidates))]
     old: String,
-    /// Disk name of the new replacement disk
-    #[arg(long, add = ArgValueCandidates::new(disk_name_candidates))]
+    /// Disk spec for the replacement disk: NAME=/dev/disk/by-id/... (e.g. wd1=/dev/disk/by-id/ata-WDC_WD120EFBX)
+    #[arg(long, value_name = "NAME=/dev/disk/by-id/...")]
     new: String,
     /// Optional cross-check for a dead disk: assert the missing btrfs devid. braid refuses if it disagrees with the devid pool.json records for --old. Never required.
     #[arg(long)]
