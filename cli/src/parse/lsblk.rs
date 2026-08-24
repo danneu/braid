@@ -87,14 +87,7 @@ pub fn parse_lsblk_json(raw: &RawCommandOutput) -> Result<LsblkOutput, ParseErro
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn fixture(name: &str) -> String {
-        let path = format!(
-            "{}/tests/fixtures/nixos-26.05/{name}",
-            env!("CARGO_MANIFEST_DIR")
-        );
-        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("fixture {name}: {e}"))
-    }
+    use crate::test_fixtures::read_stable_fixture as fixture;
 
     fn raw_lsblk(stdout: &str) -> RawCommandOutput {
         RawCommandOutput {

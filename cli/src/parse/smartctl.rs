@@ -383,6 +383,7 @@ fn nvme_evidence(nvme: &RawNvmeHealth) -> SmartEvidence {
 mod tests {
     use super::*;
     use crate::cmd::RawCommandOutput;
+    use crate::test_fixtures::read_stable_fixture as fixture;
 
     fn raw(stdout: &str) -> RawCommandOutput {
         RawCommandOutput {
@@ -400,12 +401,6 @@ mod tests {
             stderr: String::new(),
             exit_status,
         }
-    }
-
-    const FIXTURE_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/nixos-26.05");
-
-    fn fixture(name: &str) -> String {
-        std::fs::read_to_string(format!("{FIXTURE_DIR}/{name}")).expect("selftest fixture reads")
     }
 
     // Intent: the required stable NVMe contract fixture parses as healthy and

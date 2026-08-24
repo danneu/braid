@@ -67,7 +67,7 @@ task lands. `Rejected` tasks are retained for reference and are not pending work
 | TASK-7 | Done | 2026-08-24 | Simplification, dead code | Remove the obsolete TUI-wide dead-code allowance and let the compiler expose unused code. |
 | TASK-8 | Open | -- | Simplification, duplication | Extract the duplicated scoped `btrfs device scan --forget` warning-and-continue block. |
 | TASK-9 | Open | -- | Simplification, error modeling | Centralize mapper-ownership messages shared by `LuksError` and `ProbeError`. |
-| TASK-10 | Open | -- | Simplification, testing | Centralize the fixture-path helper copied across 13 parser modules. |
+| TASK-10 | Done | 2026-08-24 | Simplification, testing | Centralize the fixture-path helper copied across 13 parser modules. |
 | TASK-11 | Done | 2026-08-24 | Simplification, dead code | Remove six unused fixture re-exports and their suppressing allowances. |
 | TASK-12 | Open | -- | Simplification, dry-run | Share returned-disk enrollment preview steps between add and replace. |
 | TASK-13 | Open | -- | Simplification, data modeling | Delete the uninhabited partial-preview scaffolding and stale completeness claims. |

@@ -17,6 +17,24 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tempfile::TempDir;
 
+const STABLE_FIXTURE_LANE: &str = "nixos-26.05";
+
+pub(crate) fn read_fixture(relative_path: &str) -> String {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(relative_path);
+    std::fs::read_to_string(&path).unwrap_or_else(|error| {
+        panic!(
+            "required fixture missing or unreadable: {} ({error})",
+            path.display()
+        )
+    })
+}
+
+pub(crate) fn read_stable_fixture(name: &str) -> String {
+    read_fixture(&format!("{STABLE_FIXTURE_LANE}/{name}"))
+}
+
 // ---------------------------------------------------------------------------
 // UUID-keyed fixture helpers (introduced ahead of the recover.rs / per-command
 // fixture rekey so subsequent fixture rekeys are mechanical).
@@ -650,6 +668,19 @@ impl PoolFixture {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Intent: runtime fixture readers fail closed when a required stable
+    //   fixture is missing and identify the resolved path.
+    // Why it exists: parser contract tests must not silently skip a deleted or
+    //   renamed committed fixture.
+    // Scenario: a stable fixture reference survives after its file is removed.
+    #[test]
+    #[should_panic(
+        expected = "tests/fixtures/nixos-26.05/__braid_required_fixture_missing_sentinel__"
+    )]
+    fn missing_stable_fixture_reports_resolved_path() {
+        let _ = read_stable_fixture("__braid_required_fixture_missing_sentinel__");
+    }
 
     #[test]
     // Intent: pin the shared raw-device-usage fixture builder to btrfs-progs'

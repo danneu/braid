@@ -1,12 +1,14 @@
 //! Test-only shared fixtures for `replace`, `add`, `remove`,
 //! `remove_missing`, `recover`, `doctor`, `mount`, `enroll_key_file`,
 //! `unlock`, `status`, `lock`, `ack`, `monitor`, `idle`, `scrub`,
-//! `discover`, and `ups`.
+//! `discover`, `ups`, and parser modules.
 //!
 //! These fixtures consolidate the per-test scaffolding that previously
 //! lived as one-off `*Runner` structs and inline `tempdir + config + pass +
 //! membership` setups. The split is:
 //!
+//!   * Runtime fixture readers -- resolve required files from the fixture root
+//!     or authoritative stable lane and fail closed with the resolved path.
 //!   * `MockFs` -- generic `Filesystem` mock with the canonical
 //!     `/proc/self/mountinfo` body and an optional sysfs override.
 //!   * `ReplacementPool` -- canonical pool-topology mock-handler
@@ -201,7 +203,8 @@ pub(crate) use shared::{
     TEST_PASSPHRASE_BYTES, assert_exact_lines_in_order, assert_lines_in_order,
     btrfs_remove_devid_error, btrfs_remove_path_error, canonical_luks_uuid, device_usage_raw_body,
     disk_member, disk_member_with, line_index, mock_ok, mock_virtio_backing_path_resolver,
-    mock_virtio_offset_backing_path_resolver, test_uuid, with_lsblk_hw_info,
+    mock_virtio_offset_backing_path_resolver, read_fixture, read_stable_fixture, test_uuid,
+    with_lsblk_hw_info,
 };
 pub(crate) use status::{
     status_btrfs_device_usage_raw_1disk, status_btrfs_df_single, status_btrfs_scrub_aborted,

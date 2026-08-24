@@ -378,9 +378,7 @@ pub(crate) fn smartctl_selftest_json(
     fixture_name: &str,
     exit_status: i32,
 ) -> (CmdRequest, RawCommandOutput) {
-    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/nixos-26.05");
-    let stdout =
-        std::fs::read_to_string(format!("{dir}/{fixture_name}")).expect("selftest fixture reads");
+    let stdout = crate::test_fixtures::read_stable_fixture(fixture_name);
     (
         CmdRequest::SmartctlSelftestLogJson {
             device: device.to_owned(),

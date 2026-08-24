@@ -18,9 +18,7 @@ include!("support/golden_common.rs");
 // of the stable contract.
 #[test]
 fn golden_smartctl_sata_with_temperature() {
-    let path = format!("{FIXTURE_DIR}/smartctl-sata-with-temperature.json");
-    let stdout = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("required fixture missing: {path} ({e})"));
+    let stdout = fixture("smartctl-sata-with-temperature.json");
     let raw = RawCommandOutput {
         cmd: "smartctl -H -A --json".into(),
         stdout,
