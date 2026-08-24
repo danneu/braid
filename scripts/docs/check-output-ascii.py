@@ -186,8 +186,7 @@ class _RustScan:
                 elif DERIVE_RE.match(stripped) and CLAP_DERIVE_RE.search(stripped):
                     # Doc block immediately preceding a clap item is its about-text.
                     for ln, ch in self.doc_buffer:
-                        if not self.line_allow:
-                            self._emit(ln, ch)
+                        self._emit(ln, ch)
                     self.doc_buffer.clear()
                     self.clap_pending = True
         elif kind == "blank":
@@ -201,11 +200,11 @@ class _RustScan:
     # -- doc-comment scanning -------------------------------------------------
 
     def _scan_doc(self, line: str, text_start: int) -> None:
-        if self.skip is not None:
+        if self.skip is not None or self.line_allow:
             return
         if self._clap_active():
             for k in range(text_start, len(line)):
-                if line[k] in DENY and not self.line_allow:
+                if line[k] in DENY:
                     self._emit(self.line_no, line[k])
         else:
             for k in range(text_start, len(line)):
@@ -561,6 +560,28 @@ def _selftest() -> int:
     check(
         "escape marker suppresses",
         rs(f'fn f() {{\n    eprintln!("legacy {EM}"); {ALLOW_MARKER}\n}}\n') == [],
+    )
+
+    check(
+        "escape marker suppresses buffered clap doc on its own line",
+        rs(
+            f"/// Do the {EM} thing {ALLOW_MARKER}\n"
+            "#[derive(Subcommand)]\n"
+            "enum Cmd { Run }\n"
+        )
+        == [],
+    )
+
+    check(
+        "escape marker on derive does not suppress buffered clap doc",
+        len(
+            rs(
+                f"/// Do the {EM} thing\n"
+                f"#[derive(Subcommand)] {ALLOW_MARKER}\n"
+                "enum Cmd { Run }\n"
+            )
+        )
+        >= 1,
     )
 
     check(
