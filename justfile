@@ -133,11 +133,11 @@ fmt-nix:
 
 # Run clippy lints
 clippy:
-    cargo clippy --manifest-path cli/Cargo.toml --tests
+    cargo clippy --manifest-path cli/Cargo.toml --all-targets
 
-# Auto-fix compiler warnings in CLI tests where possible
+# Auto-fix Clippy and compiler warnings in all CLI targets where possible
 clippy-fix:
-    cargo fix --manifest-path cli/Cargo.toml --tests --allow-dirty
+    cargo clippy --manifest-path cli/Cargo.toml --all-targets --fix --allow-dirty
 
 # Capture tool output fixtures into cli/tests/fixtures/nixos-26.05/
 capture-fixtures:

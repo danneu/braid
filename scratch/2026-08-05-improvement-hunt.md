@@ -87,7 +87,7 @@ task lands. `Rejected` tasks are retained for reference and are not pending work
 | TASK-27 | Done | 2026-08-24 | Documentation, configuration | Correct ADR 020's NUT package-option name. |
 | TASK-28 | Done | 2026-08-24 | Documentation, CLI UX | Make add `--enroll` help clear that every adopted disk is enrolled. |
 | TASK-29 | Done | 2026-08-24 | Simplification, testing | Remove duplicated probe-event rendering and test the production rendering path. |
-| TASK-30 | Open | -- | Developer tooling | Make `clippy-fix` actually apply clippy suggestions or rename it to match its behavior. |
+| TASK-30 | Done | 2026-08-24 | Developer tooling | Make `clippy-fix` actually apply clippy suggestions and align its scope with `clippy`. |
 | TASK-31 | Open | -- | Simplification, API | Remove the unreachable dry-run boolean from the lock orchestrator callback seam. |
 | TASK-32 | Done | 2026-08-24 | Error handling, observability | Print `PoolLockError` so lock-file failures retain their braid-layer context. |
 | TASK-33 | Done | 2026-08-24 | Error handling, consistency | Tag recover probe failures consistently with other command-level errors. |
@@ -1207,6 +1207,8 @@ Either rename the recipe to match what it does (`fix:`, keeping the accurate "Au
 **Verifier's correction:** The recipe named `clippy-fix` runs `cargo fix`, which never loads the clippy driver and therefore cannot auto-apply any `clippy::` lint suggestion -- it only fixes the rustc-lint subset that `just clippy` happens to also surface, so the claim "cannot fix anything `just clippy` reports" is overstated. Of the two proposed fixes, the rename (`fix:`, keeping the already-accurate comment) is the safer one: `cargo clippy --fix` implies `--all-targets` (widening scope past `--tests`) and generally also wants `--allow-staged` alongside `--allow-dirty`.
 
 **Verifier's reasoning:** I read `justfile` lines 134-140 and the "before" block is verbatim accurate: `clippy:` runs `cargo clippy --manifest-path cli/Cargo.toml --tests` while `clippy-fix:` runs `cargo fix ... --tests --allow-dirty`. `cargo fix` invokes plain rustc, not the clippy driver, so no `clippy::` lint suggestion (and nothing gated by `[workspace.lints.clippy]` in `Cargo.toml`) is reachable by it -- a real name/effect mismatch, and `cargo clippy --help` confirms `--fix` exists as the correct companion. Git history (`e31ed735 apply clippy fix`) shows the recipe was added in the same commit that added `--tests` to `clippy:`, with no ADR, doc, or principle sanctioning the naming; `rg` finds zero references to `clippy-fix` anywhere in docs, plans, scripts, or `.github`, so renaming breaks no caller or CI. Only the evidence's absolute claim is off: `cargo clippy` output also includes ordinary rustc warnings (unused imports/variables), which `cargo fix` *does* auto-apply, so `clippy-fix` is not a total no-op for a `just clippy` failure.
+
+**Implemented:** Made `clippy-fix` run `cargo clippy --fix` and aligned both Clippy recipes on `--all-targets`, so checking and automatic fixes cover the same CLI target set. Kept `--allow-dirty`, which current Cargo documents as permitting both unstaged and staged changes.
 
 #### TASK-31: `cli/src/lock.rs:1180` [low/trivial]
 
