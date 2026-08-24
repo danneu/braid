@@ -47,6 +47,19 @@ with subtest("Setup: create 3-disk pool"):
     machine.succeed("echo 'persistent data' > /mnt/storage/test.txt")
     machine.succeed("sync")
 
+# Intent: Pin the live btrfs-progs exit code used to classify the benign
+# finished-before-pause race in systemd-stop lock execution.
+# Why it exists: Mocked Rust tests cannot detect an upstream exit-code change;
+# without this lock, a nixpkgs bump could silently make shutdown fail closed.
+# Scenario: The pool is mounted and idle when a late pause request arrives
+# after the balance observed during planning has already finished.
+with subtest("Live btrfs balance pause on an idle pool returns exit 2"):
+    exit_code, stderr = machine.execute("btrfs balance pause /mnt/storage 2>&1")
+    assert exit_code == 2, (
+        f"expected exit 2 for an idle balance pause, got {exit_code}; "
+        f"stderr: {stderr}"
+    )
+
 # --- Test 1: Happy path ---
 # Intent: pool mounted, all mappers open → braid lock closes everything.
 # Why: This is the primary use case — lock a running pool.

@@ -680,19 +680,21 @@ impl LockPlan {
                 })?;
                 if pause_result.exit_status == 0 {
                     emit_status(&line(StatusTag::Ok, "pool: balance paused"));
+                } else if pause_result.exit_status == 2 {
+                    // btrfs-progs v6.19.1, cmds/balance.c
+                    // (cmd_balance_pause) maps only ENOTCONN to exit 2;
+                    // every other failure returns 1. The wording paired with
+                    // ENOTCONN is diagnostic, not part of this classifier.
+                    emit_status(&line(
+                        StatusTag::Warn,
+                        "pool: balance was no longer running -- continuing",
+                    ));
                 } else {
                     let stderr = pause_result.stderr.trim();
-                    if pause_result.exit_status == 2 && stderr.contains("Not running") {
-                        emit_status(&line(
-                            StatusTag::Warn,
-                            "pool: balance was no longer running -- continuing",
-                        ));
-                    } else {
-                        return Err(LockError::Failed(format!(
-                            "btrfs balance pause {mount_point} failed (exit {}): {stderr}",
-                            pause_result.exit_status
-                        )));
-                    }
+                    return Err(LockError::Failed(format!(
+                        "btrfs balance pause {mount_point} failed (exit {}): {stderr}",
+                        pause_result.exit_status
+                    )));
                 }
             }
 
@@ -4013,6 +4015,90 @@ mod tests {
             cryptsetup_close_request_count(&runner),
             2,
             "expected both member mappers to close"
+        );
+    }
+
+    // Intent: systemd-stop treats btrfs balance-pause exit 2 as the benign
+    //   "balance finished before pause" race regardless of stderr wording.
+    // Why it exists: btrfs-progs maps ENOTCONN uniquely to exit 2 on this
+    //   subcommand, while its human-readable diagnostic can change across
+    //   releases. Requiring both signals can strand shutdown before unmount.
+    // Scenario: planning observes a running balance, but it finishes before
+    //   execute issues the pause; teardown must warn and continue.
+    #[test]
+    fn systemd_stop_balance_pause_exit2_continues_regardless_of_wording() {
+        let runner = mounted_systemd_stop_runner().with_output(
+            CmdRequest::BtrfsBalancePause {
+                mount_point: MountPoint::new("/mnt/storage".to_owned()),
+            },
+            lock_err_raw(
+                "btrfs balance pause /mnt/storage",
+                2,
+                "Balance already completed.",
+            ),
+        );
+        let fs =
+            lock_fs(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]).with_excl_op("balance");
+        let config = lock_test_config();
+        let membership = lock_test_membership();
+
+        let mut result = None;
+        let captured = crate::status_tag::testing::capture_with_color(false, || {
+            result = Some(cmd_lock_systemd_stop(&runner, &fs, &config, &membership));
+        });
+        result
+            .expect("captured systemd-stop result")
+            .expect("exit 2 should continue teardown");
+
+        assert!(
+            captured
+                .lines()
+                .any(|line| line == "[warn] pool: balance was no longer running -- continuing"),
+            "expected benign-race warning, got:\n{captured}"
+        );
+        assert_eq!(umount_request_count(&runner), 1, "expected one umount");
+        assert_eq!(
+            cryptsetup_close_request_count(&runner),
+            2,
+            "expected both member mappers to close"
+        );
+    }
+
+    // Intent: systemd-stop still fails closed when balance pause returns a
+    //   non-ENOTCONN exit code.
+    // Why it exists: accepting the benign exit-2 race must not turn every
+    //   pause failure into permission to unmount and close pool devices.
+    // Scenario: the pause ioctl fails with a generic btrfs error before
+    //   teardown starts.
+    #[test]
+    fn systemd_stop_balance_pause_non_exit2_fails_before_unmount() {
+        let runner = mounted_systemd_stop_runner().with_output(
+            CmdRequest::BtrfsBalancePause {
+                mount_point: MountPoint::new("/mnt/storage".to_owned()),
+            },
+            lock_err_raw("btrfs balance pause /mnt/storage", 1, "Input/output error"),
+        );
+        let fs =
+            lock_fs(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]).with_excl_op("balance");
+        let config = lock_test_config();
+        let membership = lock_test_membership();
+
+        let err = cmd_lock_systemd_stop(&runner, &fs, &config, &membership)
+            .expect_err("non-exit-2 pause failure must abort teardown");
+
+        assert!(
+            matches!(err, LockError::Failed(ref msg) if msg == "btrfs balance pause /mnt/storage failed (exit 1): Input/output error"),
+            "expected exact pause failure, got: {err:?}"
+        );
+        assert_eq!(
+            umount_request_count(&runner),
+            0,
+            "pause failure must precede umount"
+        );
+        assert_eq!(
+            cryptsetup_close_request_count(&runner),
+            0,
+            "pause failure must precede mapper close"
         );
     }
 

@@ -76,7 +76,7 @@ task lands. `Rejected` tasks are retained for reference and are not pending work
 | TASK-16 | Done | 2026-08-24 | Testing | Make the missing NVMe healthy fixture test fail instead of silently skipping. |
 | TASK-17 | Done | 2026-08-24 | Testing, error handling | Lock the live btrfs minimum-devices stderr contract used for recovery hints. |
 | TASK-18 | Done | 2026-08-24 | Testing, reliability | Make the authoritative stable golden lane fail when required fixtures are missing. |
-| TASK-19 | Open | -- | Testing, error handling | Add a live-tool lock for the `btrfs balance pause` exit-code and stderr classifier. |
+| TASK-19 | Done | 2026-08-24 | Testing, error handling | Add a live-tool lock for the `btrfs balance pause` exit-code and stderr classifier. |
 | TASK-20 | Done | 2026-08-24 | Testing, tooling | Add a self-test proving the decision-document path checker can fail. |
 | TASK-21 | Open | -- | Performance, simplification | Replace three per-disk `lsblk` calls with one parsed JSON invocation. |
 | TASK-22 | Open | -- | Simplification, dead code | Delete the unused `PanicBtrfsDevInfo` test scaffold and allowance. |
