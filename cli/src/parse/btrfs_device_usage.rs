@@ -270,9 +270,12 @@ mod tests {
         assert_eq!(missing.allocations[0].bytes, 67_108_864);
     }
 
-    /// Unknown keys from future btrfs-progs versions are silently ignored.
-    /// Known fields and allocations still parse correctly.
-    /// See cli/docs/command-capabilities.md.
+    // Intent: unknown non-allocation keys are ignored while required fields
+    //   and allocation rows still parse correctly.
+    // Why it exists: btrfs-progs may add per-device summary keys, and an
+    //   additive key must not break braid's typed view of device usage.
+    // Scenario: an updated or overridden btrfs-progs emits a new `FutureField`
+    //   between the required summary keys and an existing allocation row.
     #[test]
     fn device_usage_ignores_unknown_keys() {
         let raw = RawCommandOutput {

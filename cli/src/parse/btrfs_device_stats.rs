@@ -123,8 +123,12 @@ mod tests {
         assert_eq!(out.devices[1].read_io_errs, 0);
     }
 
-    /// Unknown fields from future btrfs-progs versions are silently ignored.
-    /// Known fields still parse correctly. See cli/docs/command-capabilities.md.
+    // Intent: unknown JSON fields are ignored while the known device-stat
+    //   fields still parse correctly.
+    // Why it exists: btrfs-progs may add counters in a future update, and an
+    //   additive field must not break braid's typed view of the stable counters.
+    // Scenario: an updated or overridden btrfs-progs emits a new `discard_errs`
+    //   counter alongside the counters braid consumes.
     #[test]
     fn device_stats_ignores_unknown_fields_parses_known() {
         let raw = RawCommandOutput {
@@ -151,7 +155,8 @@ mod tests {
         assert_eq!(out.devices.len(), 1);
         assert_eq!(out.devices[0].read_io_errs, 2);
         assert_eq!(out.devices[0].write_io_errs, 0);
-        // discard_errs (unknown) is silently dropped — not in DeviceErrorStats
+        // discard_errs is intentionally dropped because DeviceErrorStats does
+        // not expose it.
     }
 
     #[test]

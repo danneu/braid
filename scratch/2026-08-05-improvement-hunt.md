@@ -93,7 +93,7 @@ task lands. `Rejected` tasks are retained for reference and are not pending work
 | TASK-33 | Done | 2026-08-24 | Error handling, consistency | Tag recover probe failures consistently with other command-level errors. |
 | TASK-34 | Done | 2026-08-24 | Tooling, documentation | Track ASCII-guard allowances on the clap doc line that owns each buffered hit. |
 | TASK-35 | Open | -- | Simplification, control flow | Compute repeated recovery-plan predicates once and reuse them. |
-| TASK-36 | Open | -- | Documentation | Replace the parser test's citation to a deleted document. |
+| TASK-36 | Done | 2026-08-24 | Documentation | Remove stale parser-test citations and document tolerant parsing inline. |
 | TASK-37 | Done | 2026-08-24 | Simplification, API | Make always-successful online-state helpers return `()` instead of `Result`. |
 | TASK-38 | Rejected | -- | Simplification, control flow | Merge duplicate-looking unmount terminal branches; rejected because their separation is deliberate. |
 | TASK-39 | Rejected | -- | Testing, data modeling | Share grammar samples across Nix and Rust; rejected because the claimed parity failure is not real. |
