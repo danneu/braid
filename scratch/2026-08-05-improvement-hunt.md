@@ -1,5 +1,10 @@
 # braid improvement hunt -- full report (2026-08-05)
 
+## Status: Fully implemented
+
+All confirmed findings were implemented by 2026-08-24. The two rejected
+findings are retained below for reference and intentionally were not implemented.
+
 Multi-agent audit of the repo at commit `9aa31021` (master, clean tree).
 
 ## Launch a verification tab
