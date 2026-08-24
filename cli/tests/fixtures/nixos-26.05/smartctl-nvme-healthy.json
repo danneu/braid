@@ -1,0 +1,24 @@
+{
+  "smartctl": {
+    "version": [
+      7,
+      5
+    ],
+    "exit_status": 0
+  },
+  "device": {
+    "name": "/dev/nvme0",
+    "type": "nvme",
+    "protocol": "NVMe"
+  },
+  "smart_status": {
+    "passed": true
+  },
+  "nvme_smart_health_information_log": {
+    "critical_warning": 0,
+    "available_spare": 100,
+    "available_spare_threshold": 10,
+    "percentage_used": 12,
+    "media_errors": 0
+  }
+}

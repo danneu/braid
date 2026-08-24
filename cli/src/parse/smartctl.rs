@@ -408,18 +408,26 @@ mod tests {
         std::fs::read_to_string(format!("{FIXTURE_DIR}/{name}")).expect("selftest fixture reads")
     }
 
+    // Intent: the required stable NVMe contract fixture parses as healthy and
+    //   preserves every evidence field braid uses for its health verdict.
+    // Why it exists: the old test silently returned when the fixture was
+    //   absent, so it asserted nothing from its introduction onward.
+    // Scenario: a healthy NVMe reports no warnings or media errors, ample
+    //   spare capacity, and low endurance usage through smartctl JSON.
     #[test]
     fn nvme_fixture_healthy() {
-        let path = format!("{FIXTURE_DIR}/smartctl-nvme-healthy.json");
-        let content = match std::fs::read_to_string(&path) {
-            Ok(c) => c,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                eprintln!("SKIP: fixture not captured yet");
-                return;
-            }
-            Err(e) => panic!("reading fixture: {e}"),
-        };
-        assert_eq!(parse_smartctl(&raw(&content)).health, SmartHealth::Healthy);
+        let probe = parse_smartctl(&raw(&fixture("smartctl-nvme-healthy.json")));
+        assert_eq!(probe.health, SmartHealth::Healthy);
+        assert_eq!(
+            probe.evidence,
+            Some(SmartEvidence::Nvme {
+                media_errors: 0,
+                critical_warning: 0,
+                percentage_used: 12,
+                available_spare: 100,
+                available_spare_threshold: 10,
+            })
+        );
     }
 
     #[test]

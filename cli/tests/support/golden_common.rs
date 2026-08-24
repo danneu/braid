@@ -3,11 +3,7 @@
 // Included (via include!) by golden_nixos_26_05.rs and golden_nixos_unstable.rs.
 // Expects the including file to define:
 //   const FIXTURE_DIR: &str = "...";
-//   const REQUIRE_FIXTURES: bool = true | false;
 //   const EXPECTED_LUKS_LABEL: Option<&str> = Some("braid-vdb") | None;
-//
-// When REQUIRE_FIXTURES is true, missing fixtures panic (unstable lane).
-// When false, missing fixtures skip the test (stable lane).
 
 use braid_cli::types::Devid;
 
@@ -21,18 +17,20 @@ fn is_dm_or_mapper_path(s: &str) -> bool {
     s.starts_with("/dev/dm-") || s.starts_with("/dev/mapper/braid-")
 }
 
-fn fixture(name: &str) -> Option<String> {
+fn fixture(name: &str) -> String {
     let path = format!("{FIXTURE_DIR}/{name}");
-    match std::fs::read_to_string(&path) {
-        Ok(contents) => Some(contents),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            if REQUIRE_FIXTURES {
-                panic!("required fixture missing: {name} (run capture commands first)");
-            }
-            None
-        }
-        Err(e) => panic!("reading fixture {name}: {e}"),
-    }
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("required fixture missing or unreadable: {name}: {e}"))
+}
+
+// Intent: every golden lane fails when a referenced fixture is absent.
+// Why it exists: the authoritative stable lane used to return successfully
+//   without assertions, while the forecast lane failed on the same omission.
+// Scenario: a fixture is deleted or renamed without updating its golden test.
+#[test]
+#[should_panic(expected = "required fixture missing or unreadable")]
+fn missing_fixture_fails_closed() {
+    let _ = fixture("__braid_required_fixture_missing_sentinel__");
 }
 
 macro_rules! golden_test {
@@ -42,13 +40,7 @@ macro_rules! golden_test {
     ($name:ident, $fixture:expr, $cmd:expr, $parse_fn:expr, $assert_fn:expr, exit_status: $exit:expr) => {
         #[test]
         fn $name() {
-            let Some(content) = fixture($fixture) else {
-                eprintln!(
-                    "SKIP: fixture {} not captured yet (run `just capture-fixtures`)",
-                    $fixture
-                );
-                return;
-            };
+            let content = fixture($fixture);
             let raw = RawCommandOutput {
                 cmd: $cmd.into(),
                 stdout: content,
@@ -363,7 +355,7 @@ golden_test!(
     }
 );
 
-// --- TUI-only parsers (not exercised by CLI commands in VM tests) ---
+// --- Additional parser contracts ---
 
 golden_test!(
     golden_cryptsetup_luks_dump,
@@ -614,11 +606,8 @@ golden_test!(
 
 #[test]
 fn golden_cryptsetup_status_inactive() {
-    let Some(stdout) = fixture("cryptsetup-status-inactive.stdout") else {
-        eprintln!("SKIP: fixture not captured yet");
-        return;
-    };
-    let stderr = fixture("cryptsetup-status-inactive.stderr").unwrap_or_default();
+    let stdout = fixture("cryptsetup-status-inactive.stdout");
+    let stderr = fixture("cryptsetup-status-inactive.stderr");
     let raw = RawCommandOutput {
         cmd: "cryptsetup status".into(),
         stdout,
@@ -637,13 +626,12 @@ fn golden_cryptsetup_status_inactive() {
 // authoritative and the unstable sibling tracks upstream drift. See
 // docs/design/decisions/010-toolchain-pinning.md for the pinning contract.
 
-fn upsc_fixture(name: &str) -> Option<String> {
+fn upsc_fixture(name: &str) -> String {
     fixture(&format!("upsc/{name}"))
 }
 
-fn upsc_ok(name: &str) -> Option<braid_cli::parse::types::UpscOutput> {
-    let stdout = upsc_fixture(name)?;
-    Some(braid_cli::parse::parse_upsc(&stdout))
+fn upsc_ok(name: &str) -> braid_cli::parse::types::UpscOutput {
+    braid_cli::parse::parse_upsc(&upsc_fixture(name))
 }
 
 // Intent: the online fixture parses with exactly `{OL}` and surfaces the
@@ -654,10 +642,7 @@ fn upsc_ok(name: &str) -> Option<braid_cli::parse::types::UpscOutput> {
 // Scenario: UPS on utility power, full charge, no active alerts.
 #[test]
 fn golden_upsc_online() {
-    let Some(out) = upsc_ok("upsc-online.txt") else {
-        eprintln!("SKIP: upsc/upsc-online.txt not captured yet");
-        return;
-    };
+    let out = upsc_ok("upsc-online.txt");
     use parse::types::UpsStatusFlag;
     assert!(out.status_flags.contains(&UpsStatusFlag::Ol));
     assert_eq!(out.status_flags.len(), 1, "online state is exactly {{OL}}");
@@ -681,10 +666,7 @@ fn golden_upsc_online() {
 // yet dropped below battery.charge.low.
 #[test]
 fn golden_upsc_onbattery() {
-    let Some(out) = upsc_ok("upsc-onbattery.txt") else {
-        eprintln!("SKIP: upsc/upsc-onbattery.txt not captured yet");
-        return;
-    };
+    let out = upsc_ok("upsc-onbattery.txt");
     use parse::types::UpsStatusFlag;
     assert!(out.status_flags.contains(&UpsStatusFlag::Ob));
     assert!(
@@ -706,10 +688,7 @@ fn golden_upsc_onbattery() {
 // fire SHUTDOWNCMD at this point.
 #[test]
 fn golden_upsc_lowbattery() {
-    let Some(out) = upsc_ok("upsc-lowbattery.txt") else {
-        eprintln!("SKIP: upsc/upsc-lowbattery.txt not captured yet");
-        return;
-    };
+    let out = upsc_ok("upsc-lowbattery.txt");
     use parse::types::UpsStatusFlag;
     assert!(out.status_flags.contains(&UpsStatusFlag::Ob));
     assert!(out.status_flags.contains(&UpsStatusFlag::Lb));
@@ -732,10 +711,7 @@ fn golden_upsc_lowbattery() {
 // nothing is actually wrong right now.
 #[test]
 fn golden_upsc_replace_battery() {
-    let Some(out) = upsc_ok("upsc-replace-battery.txt") else {
-        eprintln!("SKIP: upsc/upsc-replace-battery.txt not captured yet");
-        return;
-    };
+    let out = upsc_ok("upsc-replace-battery.txt");
     use parse::types::UpsStatusFlag;
     assert!(out.status_flags.contains(&UpsStatusFlag::Ol));
     assert!(out.status_flags.contains(&UpsStatusFlag::Rb));

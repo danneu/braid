@@ -60,7 +60,7 @@ task lands. `Rejected` tasks are retained for reference and are not pending work
 | --- | --- | --- | --- | --- |
 | TASK-1 | Done | 2026-08-24 | Documentation, CLI UX | Document monitor exit 3 for Warning-only alerts in clap help. |
 | TASK-2 | Done | 2026-08-24 | Documentation, CLI UX | Describe replace `--new` as a full `NAME=/dev/disk/by-id/...` disk spec. |
-| TASK-3 | Open | -- | Documentation, testing | Classify the cryptsetup LUKS dump parser as CLI-reachable and accurately describe its canary coverage. |
+| TASK-3 | Done | 2026-08-24 | Documentation, testing | Classify the cryptsetup LUKS dump parser as CLI-reachable and accurately describe its canary coverage. |
 | TASK-4 | Open | -- | Simplification, API | Delete three unused `UpscOutput` predicates superseded by `severity()`. |
 | TASK-5 | Done | 2026-08-24 | Error handling, observability | Preserve and print `systemctl_start` failure details in the online-state warning. |
 | TASK-6 | Done | 2026-08-24 | Testing | Add the omitted `root_check` and `tty_passphrase` integration targets to `test-rust`. |
@@ -73,9 +73,9 @@ task lands. `Rejected` tasks are retained for reference and are not pending work
 | TASK-13 | Open | -- | Simplification, data modeling | Delete the uninhabited partial-preview scaffolding and stale completeness claims. |
 | TASK-14 | Open | -- | Data modeling, architecture | Move the crate-wide `Filesystem` seam out of the probe-specific module. |
 | TASK-15 | Open | -- | Error handling, recovery UX | Give remove-missing post-commit failures dedicated recovery-aware error variants. |
-| TASK-16 | Open | -- | Testing | Make the missing NVMe healthy fixture test fail instead of silently skipping. |
+| TASK-16 | Done | 2026-08-24 | Testing | Make the missing NVMe healthy fixture test fail instead of silently skipping. |
 | TASK-17 | Open | -- | Testing, error handling | Lock the live btrfs minimum-devices stderr contract used for recovery hints. |
-| TASK-18 | Open | -- | Testing, reliability | Make the authoritative stable golden lane fail when required fixtures are missing. |
+| TASK-18 | Done | 2026-08-24 | Testing, reliability | Make the authoritative stable golden lane fail when required fixtures are missing. |
 | TASK-19 | Open | -- | Testing, error handling | Add a live-tool lock for the `btrfs balance pause` exit-code and stderr classifier. |
 | TASK-20 | Open | -- | Testing, tooling | Add a self-test proving the decision-document path checker can fail. |
 | TASK-21 | Open | -- | Performance, simplification | Replace three per-disk `lsblk` calls with one parsed JSON invocation. |

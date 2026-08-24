@@ -308,11 +308,10 @@ mod tests {
     //   round-trip.
     // Why it exists: `parse_kv_line` parses values as i64 and clamps with
     //   `.max(0) as u64` only because btrfs reports negative Unallocated
-    //   mid-remove. The captured `btrfs-device-usage-removing.txt` fixture is
-    //   otherwise the only coverage, and the stable lane skips it when absent
-    //   (REQUIRE_FIXTURES = false); a refactor back to `parse_u64` would
-    //   regress silently. This synthetic test fails immediately under
-    //   `just test-rust` with no VM fixture round-trip.
+    //   mid-remove. The captured `btrfs-device-usage-removing.txt` fixture
+    //   locks the live output shape, while this synthetic test isolates the
+    //   signed-value clamp so a refactor back to `parse_u64` fails immediately
+    //   without requiring a VM fixture round-trip.
     // Scenario: the transient state captured by the
     //   `device remove progress observed` subtest in
     //   `tests/progress-monitoring.py` -- a device shedding block groups

@@ -2,13 +2,12 @@
 //!
 //! These tests parse actual tool output captured from a nixos-26.05 VM
 //! (via `just capture-fixtures`) and verify the parsers handle it correctly.
-//! If fixtures haven't been captured yet, tests are skipped.
+//! The committed stable-contract fixtures are required; missing files fail.
 
 use braid_cli::cmd::RawCommandOutput;
 use braid_cli::parse;
 
 const FIXTURE_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/nixos-26.05");
-const REQUIRE_FIXTURES: bool = false;
 const EXPECTED_LUKS_LABEL: Option<&str> = Some("braid-vdb");
 
 include!("support/golden_common.rs");
