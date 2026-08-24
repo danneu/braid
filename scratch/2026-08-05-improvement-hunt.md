@@ -79,7 +79,7 @@ task lands. `Rejected` tasks are retained for reference and are not pending work
 | TASK-19 | Done | 2026-08-24 | Testing, error handling | Add a live-tool lock for the `btrfs balance pause` exit-code and stderr classifier. |
 | TASK-20 | Done | 2026-08-24 | Testing, tooling | Add a self-test proving the decision-document path checker can fail. |
 | TASK-21 | Open | -- | Performance, simplification | Replace three per-disk `lsblk` calls with one parsed JSON invocation. |
-| TASK-22 | Open | -- | Simplification, dead code | Delete the unused `PanicBtrfsDevInfo` test scaffold and allowance. |
+| TASK-22 | Done | 2026-08-24 | Simplification, testing | Use `PanicBtrfsDevInfo` to enforce every no-probe replace boundary and remove its allowance. |
 | TASK-23 | Open | -- | Simplification, configuration | Remove the redundant positive-timeout assertion already enforced by the Nix type. |
 | TASK-24 | Open | -- | Simplification, duplication | Construct the replace RAID1 soft-balance preview step in one place. |
 | TASK-25 | Open | -- | Simplification, duplication | Share the open-step literal and vary only the keyfile/passphrase command. |
@@ -899,6 +899,8 @@ Delete the struct, its `impl BtrfsDevInfo`, and the `#[allow(dead_code)]` from `
 **Verifier's correction:** The claim survives, with one nuance worth recording: the plan that introduced it intended `PanicBtrfsDevInfo` for planner-boundary tests, but the in-module test shims `plan_replace`/`cmd_replace` in `cli/src/replace.rs` inject `replace_dev_info_sufficient()` (a permissive `MockBtrfsDevInfo`) even in the `&PanicRunner`/`&PanicFilesystem` boundary tests, so the intent was never wired up. Deleting is correct today; the equally valid alternative is to plumb a dev_info parameter through those shims and pass `PanicBtrfsDevInfo` in the abort-before-any-probe tests.
 
 **Verifier's reasoning:** I read cli/src/btrfs_ioctl.rs lines 84-127: the "before" snippet matches the current source exactly (`#[allow(dead_code)]` at 116, `pub(crate) struct PanicBtrfsDevInfo;` at 117, impl at 119), inside a `#[cfg(test)] pub(crate) mod tests_support`. A whole-repo `rg` for `PanicBtrfsDevInfo` returns only the definition, its impl, and one prose line in the already-implemented plan `plans/impl/2026-05-23-replace-target-size-preflight.md`; the sibling `MockBtrfsDevInfo` is imported by cli/src/preflight.rs, cli/src/replace.rs, and cli/src/test_fixtures/replace.rs and carries no allow, so the allow is marking exactly this unreached item. Nothing in AGENTS.md, docs/design/principles.md, or the ADRs blesses keeping unused test scaffolding, and the deliberate-keep convention that does exist (the "KEEP &PanicRunner / &PanicFilesystem" comment at cli/src/replace.rs) is absent here; since the code is `#[cfg(test)]`-only and referenced nowhere, deletion compiles and changes no behavior or test.
+
+**Implemented:** Kept the purpose-built sentinel, passed it directly to every replace test whose contract forbids all injected probes, and removed the dead-code allowance. The ordinary replace-test shims continue to use the permissive `MockBtrfsDevInfo` fixture.
 
 #### TASK-23: `modules/braid/options.nix:119` [low/trivial]
 

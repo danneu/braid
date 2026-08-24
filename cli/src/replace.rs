@@ -2182,6 +2182,7 @@ fn format_replace_confirm(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::btrfs_ioctl::tests_support::PanicBtrfsDevInfo;
     use crate::cmd::{CmdRequest, MockRunner, RawCommandOutput};
     use crate::state_paths::StatePaths;
     use crate::test_fixtures::{
@@ -7005,7 +7006,7 @@ mod tests {
     }
 
     // Intent: a same-name `braid replace --old/--new` typo aborts in the
-    // planner before any shell or Filesystem-backed probe.
+    // planner before any injected probe boundary.
     // Why it exists: the pre-hoist preserved-note behavior conflated a pure
     // input-shape error with I/O-precondition context; this path now fails
     // before preflight can accumulate state-context notes.
@@ -7017,9 +7018,10 @@ mod tests {
         let paths = StatePaths::custom(state_tmp.path().into());
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
         let confirm = crate::confirm::RecordingConfirm::new();
-        let failure = match plan_replace(
+        let failure = match super::plan_replace(
             &PanicRunner,
             &PanicFilesystem,
+            &PanicBtrfsDevInfo,
             &ReplaceParams {
                 config: &test_config(),
                 old_name: "disk2",
@@ -7062,7 +7064,7 @@ mod tests {
     }
 
     // Intent: `braid replace --enroll` rejects a missing braid.key during
-    // planning, before shell probes or Filesystem-backed pool/disk probes.
+    // planning, before any injected probe boundary.
     // Why it exists: a typoed keyfile path must not let replace format the
     // new disk and then fail only at keyfile enrollment.
     // Scenario: user passes a nonexistent enroll directory while replacing a
@@ -7076,9 +7078,10 @@ mod tests {
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
         let confirm = crate::confirm::RecordingConfirm::new();
 
-        let report = plan_replace(
+        let report = super::plan_replace(
             &PanicRunner,
             &PanicFilesystem,
+            &PanicBtrfsDevInfo,
             &ReplaceParams {
                 config: &test_config(),
                 old_name: "disk2",
@@ -7120,7 +7123,7 @@ mod tests {
     }
 
     // Intent: `braid replace --enroll` rejects a directory at braid.key during
-    // planning, before shell probes or Filesystem-backed pool/disk probes.
+    // planning, before any injected probe boundary.
     // Why it exists: checking only existence would still allow an invalid
     // keyfile path to reach destructive LUKS work before enrollment fails.
     // Scenario: user points --enroll at a directory containing a subdirectory
@@ -7135,9 +7138,10 @@ mod tests {
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
         let confirm = crate::confirm::RecordingConfirm::new();
 
-        let report = plan_replace(
+        let report = super::plan_replace(
             &PanicRunner,
             &PanicFilesystem,
+            &PanicBtrfsDevInfo,
             &ReplaceParams {
                 config: &test_config(),
                 old_name: "disk2",
@@ -7785,17 +7789,17 @@ mod tests {
     // command returns the validation error and stderr has no busy-op note.
     #[test]
     fn cmd_replace_old_equals_new_aborts_before_any_probe() {
-        // KEEP &PanicRunner / &PanicFilesystem -- the assertion is precisely
-        // that no probe runs before validation; substituting a regular
-        // runner/fs would let an accidental pre-validation probe pass
-        // silently. PoolFixture::empty supplies the temp dirs + config and
+        // KEEP the panic runner, filesystem, and dev-info reader -- the
+        // assertion is precisely that no injected probe boundary runs before
+        // validation. PoolFixture::empty supplies the temp dirs + config and
         // ReplaceParamsBuilder constructs identical params, with
         // passphrase_file=None preserved.
         let f = PoolFixture::empty();
         let (result, stderr) = super::replace_stderr_capture::capture(|| {
-            cmd_replace(
+            super::cmd_replace(
                 &PanicRunner,
                 &PanicFilesystem,
+                &PanicBtrfsDevInfo,
                 &f.replace_params()
                     .new_disk("disk2=/dev/disk/by-id/virtio-disk2")
                     .passphrase_file(None)
@@ -8606,9 +8610,10 @@ mod tests {
             let inhibitor = crate::inhibit::RecordingInhibitor::new();
             let confirm = crate::confirm::RecordingConfirm::new();
             let bad = vec![token.to_owned()];
-            let result = plan_replace(
+            let result = super::plan_replace(
                 &PanicRunner,
                 &PanicFilesystem,
+                &PanicBtrfsDevInfo,
                 &ReplaceParams {
                     config: &test_config(),
                     old_name: "disk2",

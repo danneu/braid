@@ -113,7 +113,6 @@ pub(crate) mod tests_support {
         }
     }
 
-    #[allow(dead_code)]
     pub(crate) struct PanicBtrfsDevInfo;
 
     impl BtrfsDevInfo for PanicBtrfsDevInfo {
