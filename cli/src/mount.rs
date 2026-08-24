@@ -4,7 +4,10 @@ use crate::credential_verify::{
     Credential, CredentialVerifyError, CredentialVerifyTarget, verify_credential_for_targets,
 };
 use crate::luks::{self, BackingPathResolver, LuksError, OpenOutcome};
-use crate::mapper_close::{CloseContext, CloseMapperError, TrackedMapper, emit_close_progress};
+use crate::mapper_close::{
+    CloseContext, CloseMapperError, TrackedMapper, emit_close_progress,
+    forget_existing_scanned_devices_best_effort,
+};
 use crate::membership::PoolMembership;
 use crate::preview::{self, NoteLevel, PerDiskStyle, PreviewNote};
 use crate::probe::{self, Filesystem, ProbeError};
@@ -700,37 +703,11 @@ where
         return Ok(());
     }
 
-    let forget_devs: Vec<String> = opened
+    let forget_devs = opened
         .iter()
         .map(|tracked| tracked.mapper.dev_path())
-        .filter(|path| fs.exists(path))
         .collect();
-    if !forget_devs.is_empty() {
-        let forget_result = runner.run(&CmdRequest::BtrfsDeviceScanForget {
-            devices: forget_devs,
-        });
-        match forget_result {
-            Ok(r) if r.exit_status == 0 => {}
-            Ok(r) => {
-                emit_status(&status_line(
-                    StatusTag::Warn,
-                    color_enabled,
-                    &format!(
-                        "btrfs device scan --forget failed (exit {}): {} (continuing)",
-                        r.exit_status,
-                        r.stderr.trim()
-                    ),
-                ));
-            }
-            Err(e) => {
-                emit_status(&status_line(
-                    StatusTag::Warn,
-                    color_enabled,
-                    &format!("btrfs device scan --forget failed: {e} (continuing)"),
-                ));
-            }
-        }
-    }
+    forget_existing_scanned_devices_best_effort(runner, fs, forget_devs, color_enabled);
 
     let mut first_error = None;
     for tracked in opened {

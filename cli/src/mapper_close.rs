@@ -1,4 +1,5 @@
 use crate::cmd::{CmdError, CmdRequest, CommandRunner};
+use crate::probe::Filesystem;
 use crate::progress::Sleeper;
 use crate::status_tag::{StatusTag, emit_status, status_line};
 use crate::types::{DiskName, MapperName};
@@ -56,6 +57,49 @@ impl CloseContext {
         match self {
             CloseContext::Normal => format!("lock failed ({e})"),
             CloseContext::Cleanup => format!("lock failed (cleanup, {e})"),
+        }
+    }
+}
+
+/// Best-effort pre-close release of btrfs kernel scan state for mapper paths
+/// whose ownership the caller has already established. Filtering immediately
+/// before execution handles disappearing mappers and, critically, suppresses
+/// the empty no-argument form because that form is kernel-global rather than
+/// scoped to braid's close work. Failures warn and continue so this stale-cache
+/// mitigation never prevents callers from attempting their owned closes.
+pub(crate) fn forget_existing_scanned_devices_best_effort<
+    R: CommandRunner,
+    F: Filesystem + ?Sized,
+>(
+    runner: &R,
+    fs: &F,
+    mut devices: Vec<String>,
+    color_enabled: bool,
+) {
+    devices.retain(|path| fs.exists(path));
+    if devices.is_empty() {
+        return;
+    }
+
+    match runner.run(&CmdRequest::BtrfsDeviceScanForget { devices }) {
+        Ok(result) if result.exit_status == 0 => {}
+        Ok(result) => {
+            emit_status(&status_line(
+                StatusTag::Warn,
+                color_enabled,
+                &format!(
+                    "btrfs device scan --forget failed (exit {}): {} (continuing)",
+                    result.exit_status,
+                    result.stderr.trim()
+                ),
+            ));
+        }
+        Err(error) => {
+            emit_status(&status_line(
+                StatusTag::Warn,
+                color_enabled,
+                &format!("btrfs device scan --forget failed: {error} (continuing)"),
+            ));
         }
     }
 }
@@ -177,6 +221,125 @@ mod tests {
     use super::*;
     use crate::cmd::{MockRunner, RawCommandOutput};
     use crate::progress::NoopSleeper;
+    use crate::test_fixtures::MockFs;
+
+    fn forget_request(devices: &[&str]) -> CmdRequest {
+        CmdRequest::BtrfsDeviceScanForget {
+            devices: devices.iter().map(|device| (*device).to_owned()).collect(),
+        }
+    }
+
+    fn forget_output(exit_status: i32, stderr: &str) -> RawCommandOutput {
+        RawCommandOutput {
+            cmd: "btrfs device scan --forget".into(),
+            stdout: String::new(),
+            stderr: stderr.into(),
+            exit_status,
+        }
+    }
+
+    // Intent: best-effort scan forget sends only still-existing scoped paths
+    // and stays silent when the command succeeds.
+    // Why it exists: mount and lock supply different ownership sets, but both
+    // require the same last-moment disappearance guard before mapper close.
+    // Scenario: one planned mapper still exists and one disappeared after
+    // planning; btrfs receives only the surviving path.
+    #[test]
+    fn forget_existing_scanned_devices_best_effort_filters_and_succeeds_silently() {
+        let request = forget_request(&["/dev/mapper/braid-disk1"]);
+        let runner = MockRunner::default().with_output(request.clone(), forget_output(0, ""));
+        let fs = MockFs::unmounted(vec!["/dev/mapper/braid-disk1".into()]);
+
+        let captured = crate::status_tag::testing::capture_with_color(false, || {
+            forget_existing_scanned_devices_best_effort(
+                &runner,
+                &fs,
+                vec![
+                    "/dev/mapper/braid-disk1".into(),
+                    "/dev/mapper/braid-disk2".into(),
+                ],
+                false,
+            );
+        });
+
+        assert_eq!(runner.requests(), vec![request]);
+        assert_eq!(captured, "");
+    }
+
+    // Intent: best-effort scan forget never emits the kernel-global empty
+    // `btrfs device scan --forget` form.
+    // Why it exists: filtering can remove every caller-owned mapper path, and
+    // the no-argument command would affect unrelated btrfs filesystems.
+    // Scenario: the only planned mapper disappeared before execution.
+    #[test]
+    fn forget_existing_scanned_devices_best_effort_skips_empty_request() {
+        let runner = MockRunner::default();
+        let fs = MockFs::unmounted(vec![]);
+
+        let captured = crate::status_tag::testing::capture_with_color(false, || {
+            forget_existing_scanned_devices_best_effort(
+                &runner,
+                &fs,
+                vec!["/dev/mapper/braid-disk1".into()],
+                false,
+            );
+        });
+
+        assert!(runner.requests().is_empty());
+        assert_eq!(captured, "");
+    }
+
+    // Intent: a non-zero scoped scan-forget result uses the shared warning and
+    // remains non-fatal.
+    // Why it exists: mount and lock must not silently drift in their
+    // operator-facing best-effort policy.
+    // Scenario: btrfs rejects the surviving mapper path with exit 1.
+    #[test]
+    fn forget_existing_scanned_devices_best_effort_warns_on_nonzero_exit() {
+        let request = forget_request(&["/dev/mapper/braid-disk1"]);
+        let runner =
+            MockRunner::default().with_output(request, forget_output(1, "forget failed\n"));
+        let fs = MockFs::unmounted(vec!["/dev/mapper/braid-disk1".into()]);
+
+        let captured = crate::status_tag::testing::capture_with_color(false, || {
+            forget_existing_scanned_devices_best_effort(
+                &runner,
+                &fs,
+                vec!["/dev/mapper/braid-disk1".into()],
+                false,
+            );
+        });
+
+        assert_eq!(
+            captured,
+            "[warn] btrfs device scan --forget failed (exit 1): forget failed (continuing)\n"
+        );
+    }
+
+    // Intent: a scoped scan-forget invocation error uses the shared warning
+    // and remains non-fatal.
+    // Why it exists: runner errors and non-zero tool exits are separate paths
+    // that previously carried duplicated wording in both callers.
+    // Scenario: the command runner cannot execute the forget request.
+    #[test]
+    fn forget_existing_scanned_devices_best_effort_warns_on_runner_error() {
+        let runner = MockRunner::default();
+        let fs = MockFs::unmounted(vec!["/dev/mapper/braid-disk1".into()]);
+
+        let captured = crate::status_tag::testing::capture_with_color(false, || {
+            forget_existing_scanned_devices_best_effort(
+                &runner,
+                &fs,
+                vec!["/dev/mapper/braid-disk1".into()],
+                false,
+            );
+        });
+
+        assert_eq!(
+            captured,
+            "[warn] btrfs device scan --forget failed: mock output missing for request (continuing)\n"
+        );
+    }
 
     fn close_output(exit_status: i32, stderr: &str) -> RawCommandOutput {
         RawCommandOutput {

@@ -1,6 +1,8 @@
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, Step};
 use crate::config::{Config, braid_disk_name};
-use crate::mapper_close::{CloseMapperError, close_mapper_with_retry};
+use crate::mapper_close::{
+    CloseMapperError, close_mapper_with_retry, forget_existing_scanned_devices_best_effort,
+};
 use crate::membership::{MembershipError, PoolMembership};
 use crate::online_state::{OnlineError, OnlineStateOps, RealOnlineStateOps, mark_offline};
 use crate::parse::types::{BackingDevice, CryptsetupStatusOutput};
@@ -715,37 +717,12 @@ impl LockPlan {
                         &format!("pool: unmounted {mount_point}"),
                     ));
 
-                    // Clear btrfs kernel scan registry so that cryptsetup close
-                    // doesn't race against stale device references on multi-device
-                    // pools. Scope to the close set (membership + orphan mappers)
-                    // -- the no-arg form is kernel-global and would invalidate
-                    // scan entries for unrelated btrfs filesystems on the host.
-                    let mut forget_devs = self.close_set.forget_paths();
-                    forget_devs.retain(|p| fs.exists(p));
-                    if !forget_devs.is_empty() {
-                        let forget_result = runner.run(&CmdRequest::BtrfsDeviceScanForget {
-                            devices: forget_devs,
-                        });
-                        match forget_result {
-                            Ok(r) if r.exit_status == 0 => {}
-                            Ok(r) => {
-                                emit_status(&line(
-                                    StatusTag::Warn,
-                                    &format!(
-                                        "btrfs device scan --forget failed (exit {}): {} (continuing)",
-                                        r.exit_status,
-                                        r.stderr.trim()
-                                    ),
-                                ));
-                            }
-                            Err(e) => {
-                                emit_status(&line(
-                                    StatusTag::Warn,
-                                    &format!("btrfs device scan --forget failed: {e} (continuing)"),
-                                ));
-                            }
-                        }
-                    }
+                    forget_existing_scanned_devices_best_effort(
+                        runner,
+                        fs,
+                        self.close_set.forget_paths(),
+                        color_enabled,
+                    );
                 }
                 Err(err @ LockError::Cmd(_)) => return Err(err),
                 Err(err) => {
