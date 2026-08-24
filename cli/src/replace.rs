@@ -54,6 +54,12 @@ impl fmt::Display for DuplicateUuidScope {
 pub enum ReplaceError {
     #[error("{0}")]
     Validation(String),
+    #[error("{source}\n{advice}")]
+    JournalLifecycle {
+        #[source]
+        source: Box<ReplaceError>,
+        advice: String,
+    },
     /// Pre-journal-write refusal raised when the new target's UUID
     /// (generated for fresh-LUKS or probed for existing-LUKS) collides
     /// with a UUID already present in membership (excluding `old_uuid`,
@@ -421,6 +427,27 @@ impl ReplacePlan {
         fs: &F,
         params: &ReplaceParams<'_>,
     ) -> Result<(), ReplaceError> {
+        let mut journal_state = journal::JournalWriteState::NotAttempted;
+        self.execute_inner(runner, fs, params, &mut journal_state)
+            .map_err(|error| {
+                if journal_state == journal::JournalWriteState::NotAttempted {
+                    error
+                } else {
+                    ReplaceError::JournalLifecycle {
+                        source: Box::new(error),
+                        advice: journal::mutation_error_advice(params.paths, journal_state),
+                    }
+                }
+            })
+    }
+
+    fn execute_inner<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
+        self,
+        runner: &R,
+        fs: &F,
+        params: &ReplaceParams<'_>,
+        journal_state: &mut journal::JournalWriteState,
+    ) -> Result<(), ReplaceError> {
         let color_enabled = color_enabled_for_stderr();
         let ReplacePlan { notes, work_plan } = self;
         let ReplaceWorkPlan {
@@ -610,7 +637,7 @@ impl ReplacePlan {
                 restore_raid1_after_commit,
             },
         );
-        journal::write_journal(params.paths, &journal)
+        journal::write_journal_tracked(params.paths, &journal, journal_state)
             .map_err(|e| ReplaceError::Validation(e.to_string()))?;
 
         // Step 1: Init new disk (LUKS format/open) -- irreversible from here.
@@ -3772,7 +3799,11 @@ mod tests {
         let result = plan.execute(&runner, &fs, &f.replace_params().build());
 
         assert!(
-            matches!(result, Err(ReplaceError::Pool(_))),
+            matches!(
+                result,
+                Err(ReplaceError::JournalLifecycle { ref source, .. })
+                    if matches!(source.as_ref(), ReplaceError::Pool(_))
+            ),
             "expected downstream pool failure after clean re-check, got: {result:?}"
         );
         assert_eq!(
@@ -3961,6 +3992,14 @@ mod tests {
             "replace should fail when btrfs replace fails"
         );
         assert!(
+            result
+                .as_ref()
+                .unwrap_err()
+                .to_string()
+                .contains("run `braid recover` before retrying"),
+            "post-journal replace failure must use the shared recovery advice"
+        );
+        assert!(
             journal::load_journal(&f.paths).unwrap().is_some(),
             "pending-op.json must survive error exit so braid recover can reconcile"
         );
@@ -4114,12 +4153,16 @@ mod tests {
         let result = cmd_replace(&runner, &fs, &f.replace_params().build());
 
         match &result {
-            Err(ReplaceError::Pool(crate::pool::PoolError::Failed(msg))) => {
-                assert!(
-                    msg.contains("btrfs filesystem resize failed"),
-                    "expected typed PoolError::Failed carrying resize message, got: {msg}"
-                );
-            }
+            Err(ReplaceError::JournalLifecycle { source, advice }) => match source.as_ref() {
+                ReplaceError::Pool(crate::pool::PoolError::Failed(msg)) => {
+                    assert!(
+                        msg.contains("btrfs filesystem resize failed"),
+                        "expected typed PoolError::Failed carrying resize message, got: {msg}"
+                    );
+                    assert!(advice.contains("run `braid recover`"));
+                }
+                other => panic!("expected PoolError::Failed source, got: {other:?}"),
+            },
             other => {
                 panic!("expected Err(ReplaceError::Pool(PoolError::Failed(..))), got: {other:?}")
             }
@@ -4985,10 +5028,18 @@ mod tests {
                 _ => None,
             });
         let result = cmd_replace(&runner, &fs, &f.replace_params().build());
+        let rendered = result
+            .as_ref()
+            .expect_err("wrong passphrase must fail")
+            .to_string();
 
         assert!(
             matches!(result, Err(ReplaceError::Validation(_))),
             "expected Err(ReplaceError::Validation(_)) for wrong passphrase on a closed-LUKS new disk, got: {result:?}"
+        );
+        assert!(
+            !rendered.contains("braid recover"),
+            "pre-journal refusal must not direct the operator to recovery: {rendered}"
         );
         assert!(
             journal::load_journal(&f.paths).unwrap().is_none(),
@@ -5157,7 +5208,11 @@ mod tests {
         // prerequisite for the zero-counts below to mean "not called"
         // instead of "test aborted early".
         assert!(
-            matches!(result, Err(ReplaceError::Pool(_))),
+            matches!(
+                result,
+                Err(ReplaceError::JournalLifecycle { ref source, .. })
+                    if matches!(source.as_ref(), ReplaceError::Pool(_))
+            ),
             "expected Err(ReplaceError::Pool(_)) from btrfs replace start failure, got: {result:?}"
         );
         assert!(
@@ -5390,15 +5445,19 @@ mod tests {
         );
 
         match result {
-            Err(ReplaceError::NewTargetUuidMismatchAtOpen {
-                by_id,
-                expected,
-                observed,
-            }) => {
-                assert_eq!(by_id.as_str(), "/dev/disk/by-id/virtio-disk3");
-                assert_eq!(expected, u_new);
-                assert_eq!(observed, u_foreign.as_str());
-            }
+            Err(ReplaceError::JournalLifecycle { source, advice }) => match *source {
+                ReplaceError::NewTargetUuidMismatchAtOpen {
+                    by_id,
+                    expected,
+                    observed,
+                } => {
+                    assert_eq!(by_id.as_str(), "/dev/disk/by-id/virtio-disk3");
+                    assert_eq!(expected, u_new);
+                    assert_eq!(observed, u_foreign.as_str());
+                    assert!(advice.contains("run `braid recover`"));
+                }
+                other => panic!("expected UUID mismatch source, got: {other:?}"),
+            },
             other => panic!("expected NewTargetUuidMismatchAtOpen, got: {other:?}"),
         }
         let log = runner.requests();
@@ -5624,15 +5683,19 @@ mod tests {
         );
 
         match result {
-            Err(ReplaceError::NewTargetUuidMismatchAtOpen {
-                by_id,
-                expected,
-                observed,
-            }) => {
-                assert_eq!(by_id.as_str(), "/dev/disk/by-id/virtio-disk3");
-                assert_eq!(expected, u_new);
-                assert_eq!(observed, u_foreign.as_str());
-            }
+            Err(ReplaceError::JournalLifecycle { source, advice }) => match *source {
+                ReplaceError::NewTargetUuidMismatchAtOpen {
+                    by_id,
+                    expected,
+                    observed,
+                } => {
+                    assert_eq!(by_id.as_str(), "/dev/disk/by-id/virtio-disk3");
+                    assert_eq!(expected, u_new);
+                    assert_eq!(observed, u_foreign.as_str());
+                    assert!(advice.contains("run `braid recover`"));
+                }
+                other => panic!("expected UUID mismatch source, got: {other:?}"),
+            },
             other => panic!("expected NewTargetUuidMismatchAtOpen, got: {other:?}"),
         }
         let log = runner.requests();
@@ -5908,12 +5971,16 @@ mod tests {
         );
 
         match &result {
-            Err(ReplaceError::Pool(crate::pool::PoolError::Failed(msg))) => {
-                assert!(
-                    msg.contains("btrfs filesystem resize failed"),
-                    "expected typed PoolError::Failed carrying resize message, got: {msg}"
-                );
-            }
+            Err(ReplaceError::JournalLifecycle { source, advice }) => match source.as_ref() {
+                ReplaceError::Pool(crate::pool::PoolError::Failed(msg)) => {
+                    assert!(
+                        msg.contains("btrfs filesystem resize failed"),
+                        "expected typed PoolError::Failed carrying resize message, got: {msg}"
+                    );
+                    assert!(advice.contains("run `braid recover`"));
+                }
+                other => panic!("expected PoolError::Failed source, got: {other:?}"),
+            },
             other => {
                 panic!("expected Err(ReplaceError::Pool(PoolError::Failed(..))), got: {other:?}")
             }
@@ -6233,7 +6300,11 @@ mod tests {
         );
 
         match &result {
-            Err(ReplaceError::Pool(_)) => {}
+            Err(ReplaceError::JournalLifecycle { source, advice })
+                if matches!(source.as_ref(), ReplaceError::Pool(_)) =>
+            {
+                assert!(advice.contains("run `braid recover`"));
+            }
             other => panic!("expected Err(ReplaceError::Pool(..)), got: {other:?}"),
         }
 

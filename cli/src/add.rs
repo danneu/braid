@@ -53,10 +53,15 @@ use std::path::{Path, PathBuf};
 pub enum AddError {
     #[error("{0}")]
     Validation(String),
+    #[error("{source}\n{advice}")]
+    JournalLifecycle {
+        #[source]
+        source: Box<AddError>,
+        advice: String,
+    },
     #[error(
         "pool was modified, but acked-stats cleanup failed at {stage}: {detail}\n\
-         pending-op.json is preserved -- rm /var/lib/braid/acked-stats.json before trusting \
-         `braid monitor`, then run `braid recover` to finish."
+         rm /var/lib/braid/acked-stats.json before trusting `braid monitor`."
     )]
     AckCleanupFailed { stage: &'static str, detail: String },
     /// Post-mutation, pre-persist failure in the live-pool add loop:
@@ -66,11 +71,9 @@ pub enum AddError {
     /// `AckCleanupFailed` because acked-stats was never reached -- the
     /// PoolMutation journal is still pending, so the remediation is
     /// `braid recover` (which replays the journal and skips already-live
-    /// members), not deleting alert baselines.
-    #[error(
-        "disk added to pool, but pool.json was not persisted: {detail}\n\
-         pending-op.json is preserved -- run `braid recover` to finish persisting pool membership."
-    )]
+    /// members), not deleting alert baselines. The command-boundary
+    /// classifier supplies that lifecycle remediation.
+    #[error("disk added to pool, but pool.json was not persisted: {detail}")]
     PostAddProbeFailed { detail: String },
     /// Pre-journal-write refusal: a target's LUKS UUID collides with
     /// another in-flight add target or an existing pool member. Raised by
@@ -1049,6 +1052,27 @@ impl AddPlan {
         fs: &F,
         params: &AddParams<'_>,
     ) -> Result<(), AddError> {
+        let mut journal_state = journal::JournalWriteState::NotAttempted;
+        self.execute_inner(runner, fs, params, &mut journal_state)
+            .map_err(|error| {
+                if journal_state == journal::JournalWriteState::NotAttempted {
+                    error
+                } else {
+                    AddError::JournalLifecycle {
+                        source: Box::new(error),
+                        advice: journal::mutation_error_advice(params.paths, journal_state),
+                    }
+                }
+            })
+    }
+
+    fn execute_inner<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
+        self,
+        runner: &R,
+        fs: &F,
+        params: &AddParams<'_>,
+        journal_state: &mut journal::JournalWriteState,
+    ) -> Result<(), AddError> {
         let color_enabled = color_enabled_for_stderr();
         // Render accumulated notes to stderr BEFORE any mutation via
         // the shared renderer. Warn notes emit as the canonical
@@ -1325,7 +1349,7 @@ impl AddPlan {
                 targets: journal_targets.clone(),
             },
         );
-        journal::write_journal(params.paths, &journal)
+        journal::write_journal_tracked(params.paths, &journal, journal_state)
             .map_err(|e| AddError::Validation(e.to_string()))?;
 
         // Pass 2: execute irreversible operations for fresh disks.
@@ -1587,7 +1611,7 @@ impl AddPlan {
             if let journal::OpKind::Add { phase, .. } = &mut balance_journal.op {
                 *phase = journal::AddPhase::PostAddBalanceRaid1;
             }
-            journal::write_journal(params.paths, &balance_journal)
+            journal::write_journal_tracked(params.paths, &balance_journal, journal_state)
                 .map_err(|e| AddError::Validation(e.to_string()))?;
 
             // Authoritative live gate for the hard post-add convert. The
@@ -6622,9 +6646,13 @@ mod tests {
         );
 
         match result {
-            Err(AddError::AckCleanupFailed { stage, .. }) => {
-                assert_eq!(stage, "live-pool add");
-            }
+            Err(AddError::JournalLifecycle { source, advice }) => match *source {
+                AddError::AckCleanupFailed { stage, .. } => {
+                    assert_eq!(stage, "live-pool add");
+                    assert!(advice.contains("run `braid recover`"));
+                }
+                other => panic!("expected live-pool AckCleanupFailed source, got {other:?}"),
+            },
             other => panic!("expected live-pool AckCleanupFailed, got {other:?}"),
         }
         assert_eq!(
@@ -6678,9 +6706,13 @@ mod tests {
         );
 
         match result {
-            Err(AddError::AckCleanupFailed { stage, .. }) => {
-                assert_eq!(stage, "bootstrap");
-            }
+            Err(AddError::JournalLifecycle { source, advice }) => match *source {
+                AddError::AckCleanupFailed { stage, .. } => {
+                    assert_eq!(stage, "bootstrap");
+                    assert!(advice.contains("run `braid recover`"));
+                }
+                other => panic!("expected bootstrap AckCleanupFailed source, got {other:?}"),
+            },
             other => panic!("expected bootstrap AckCleanupFailed, got {other:?}"),
         }
         assert!(
@@ -6693,9 +6725,10 @@ mod tests {
      * Intent: post-add probe failures are fatal with the typed
      * `PostAddProbeFailed` variant, both when the probe command itself fails
      * and when the freshly added mapper is absent from the successful probe
-     * result. The variant directs the operator to `braid recover` (the
-     * journal is still pending and pool.json was never saved), not to acked-
-     * stats deletion -- the acked-stats cleanup was never reached.
+     * result. The command-boundary classifier directs the operator to
+     * `braid recover` (the journal is still pending and pool.json was never
+     * saved), not to acked-stats deletion -- the acked-stats cleanup was never
+     * reached.
      *
      * Why it exists: live-add cleanup needs the assigned btrfs devid. If braid
      * cannot prove which devid was assigned, it must fail closed instead of
@@ -6747,7 +6780,10 @@ mod tests {
             );
 
             match result {
-                Err(AddError::PostAddProbeFailed { .. }) => {}
+                Err(AddError::JournalLifecycle { source, advice }) => {
+                    assert!(matches!(*source, AddError::PostAddProbeFailed { .. }));
+                    assert!(advice.contains("run `braid recover`"));
+                }
                 other => panic!("{label}: expected PostAddProbeFailed, got {other:?}"),
             }
             assert_eq!(
@@ -6820,7 +6856,8 @@ mod tests {
         let err = result.expect_err("final probe disappearance should fail closed");
         let rendered = err.to_string();
         match err {
-            AddError::PostAddProbeFailed { .. } => {}
+            AddError::JournalLifecycle { source, .. }
+                if matches!(*source, AddError::PostAddProbeFailed { .. }) => {}
             other => panic!("expected PostAddProbeFailed, got {other:?}"),
         }
         assert!(
@@ -7638,14 +7675,18 @@ mod tests {
         );
 
         match result {
-            Err(AddError::Luks(crate::luks::LuksError::MapperBackingMismatch {
-                expected_path,
-                found_path,
-                ..
-            })) => {
-                assert_eq!(expected_path, "/dev/vdb");
-                assert_eq!(found_path, "/dev/vdz");
-            }
+            Err(AddError::JournalLifecycle { source, advice }) => match *source {
+                AddError::Luks(crate::luks::LuksError::MapperBackingMismatch {
+                    expected_path,
+                    found_path,
+                    ..
+                }) => {
+                    assert_eq!(expected_path, "/dev/vdb");
+                    assert_eq!(found_path, "/dev/vdz");
+                    assert!(advice.contains("run `braid recover`"));
+                }
+                other => panic!("expected MapperBackingMismatch source, got {other:?}"),
+            },
             other => panic!("expected MapperBackingMismatch, got {other:?}"),
         }
         let requests = runner.requests();
@@ -9126,6 +9167,10 @@ mod tests {
         assert!(
             err.contains("disk1"),
             "error must name the locked member, got: {err}"
+        );
+        assert!(
+            !err.contains("braid recover"),
+            "pre-journal refusal must not direct the operator to recovery: {err}"
         );
         assert!(
             !runner.saw_format(),

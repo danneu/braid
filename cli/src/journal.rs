@@ -11,6 +11,55 @@ use thiserror::Error;
 
 const PENDING_OP_MANUAL_REMEDIATION: &str = "Remove /var/lib/braid/pending-op.json after manual reconciliation (see docs/internals/luks-unlock.md) and re-run.";
 
+/// Tracks whether a mutation crossed the pending-journal installation seam so
+/// its command boundary can leave preflight errors unchanged while classifying
+/// every failure at or after the first write attempt.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum JournalWriteState {
+    #[default]
+    NotAttempted,
+    AttemptFailed,
+    Installed,
+}
+
+/// Attempt a journal write while recording whether a durable journal was
+/// installed; subsequent phase rewrites leave an `Installed` state unchanged.
+pub(crate) fn write_journal_tracked(
+    paths: &StatePaths,
+    journal: &Journal,
+    state: &mut JournalWriteState,
+) -> Result<(), JournalError> {
+    if *state == JournalWriteState::NotAttempted {
+        *state = JournalWriteState::AttemptFailed;
+    }
+    write_journal(paths, journal)?;
+    *state = JournalWriteState::Installed;
+    Ok(())
+}
+
+/// Derive recovery guidance after a mutation has attempted its initial journal
+/// write; the command-specific wrapper preserves the original error first.
+pub(crate) fn mutation_error_advice(paths: &StatePaths, state: JournalWriteState) -> String {
+    let loaded = load_journal(paths);
+    let observation = loaded.as_ref().map(|journal| journal.is_some());
+    mutation_error_advice_for_observation(state, observation)
+}
+
+/// Render remediation from an already-observed journal result so the state
+/// table can be tested without privilege-dependent filesystem failures.
+fn mutation_error_advice_for_observation(
+    state: JournalWriteState,
+    observation: Result<bool, &JournalError>,
+) -> String {
+    match observation {
+        Ok(true) => "pending-op.json is present -- run `braid recover` before retrying the original mutation.".to_string(),
+        Ok(false) if state == JournalWriteState::AttemptFailed => "pending-op.json is not present, so no mutation started -- repair the reported state-write fault and retry the original command.".to_string(),
+        Ok(false) => "pending-op.json is absent, but deletion durability was not confirmed -- repair state-directory I/O; run `braid recover` only if pending-op.json reappears after a restart.".to_string(),
+        Err(e @ JournalError::Parse { .. }) => format!("observed journal error: {e}"),
+        Err(e) => format!("observed journal error: {e}. {PENDING_OP_MANUAL_REMEDIATION}"),
+    }
+}
+
 /// A pending-operation journal records the full context of a mutation in progress.
 /// When this file exists, braid enters recovery mode: `add`, `remove`,
 /// `remove-missing`, `replace`, `unlock`, `enroll`, and `discover --write`
@@ -390,6 +439,80 @@ mod tests {
             map.insert(uuid, t).expect("test add-target insert");
         }
         map
+    }
+
+    // Intent: mutation remediation is derived from the authoritative journal
+    // observation plus whether the initial write completed.
+    // Why it exists: lifecycle advice must never contradict the state that
+    // `braid recover` can actually consume.
+    // Scenario: failures cover a visible journal, both absent-journal write
+    // states, and unreadable/unparseable journal contents.
+    #[test]
+    fn mutation_error_advice_covers_authoritative_state_table() {
+        let parse = JournalError::Parse {
+            detail: "bad json".into(),
+        };
+        let io = JournalError::Io {
+            path: PathBuf::from("/var/lib/braid/pending-op.json"),
+            source: std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied"),
+        };
+
+        let visible = mutation_error_advice_for_observation(JournalWriteState::Installed, Ok(true));
+        assert!(visible.contains("run `braid recover` before retrying"));
+        let visible_after_failed_install =
+            mutation_error_advice_for_observation(JournalWriteState::AttemptFailed, Ok(true));
+        assert!(visible_after_failed_install.contains("run `braid recover` before retrying"));
+
+        let failed_install =
+            mutation_error_advice_for_observation(JournalWriteState::AttemptFailed, Ok(false));
+        assert!(failed_install.contains("no mutation started"));
+        assert!(!failed_install.contains("run `braid recover`"));
+
+        let cleared =
+            mutation_error_advice_for_observation(JournalWriteState::Installed, Ok(false));
+        assert!(cleared.contains("deletion durability was not confirmed"));
+        assert!(cleared.contains("only if pending-op.json reappears"));
+
+        let unparseable =
+            mutation_error_advice_for_observation(JournalWriteState::Installed, Err(&parse));
+        assert!(unparseable.contains("observed journal error"));
+        assert!(!unparseable.contains("run `braid recover`"));
+
+        let unreadable =
+            mutation_error_advice_for_observation(JournalWriteState::Installed, Err(&io));
+        assert!(unreadable.contains("observed journal error"));
+        assert!(unreadable.contains("after manual reconciliation"));
+        assert!(!unreadable.contains("run `braid recover`"));
+    }
+
+    // Intent: the tracked writer distinguishes a failed initial install from
+    // a failure after an earlier journal write completed.
+    // Why it exists: absent-journal remediation depends on this one bit of
+    // lifecycle history when the filesystem cannot prove deletion durability.
+    // Scenario: the initial write targets an invalid state-directory path,
+    // while a later rewrite fails after the state was already Installed.
+    #[test]
+    fn tracked_write_preserves_initial_install_outcome() {
+        let tmp = tempfile::tempdir().unwrap();
+        let blocker = tmp.path().join("not-a-directory");
+        std::fs::write(&blocker, b"x").unwrap();
+        let paths = StatePaths::custom(blocker);
+        let journal = build_journal(
+            PoolMembership::empty(),
+            PoolMembership::empty(),
+            OpKind::Remove {
+                luks_uuid: test_uuid(299),
+                name: DiskName::parse("disk1").unwrap(),
+            },
+        );
+
+        let mut initial = JournalWriteState::NotAttempted;
+        write_journal_tracked(&paths, &journal, &mut initial).unwrap_err();
+        assert_eq!(initial, JournalWriteState::AttemptFailed);
+
+        let mut later = JournalWriteState::Installed;
+        write_journal_tracked(&paths, &journal, &mut later).unwrap_err();
+        assert_eq!(later, JournalWriteState::Installed);
     }
 
     // -------------------------------------------------------------------

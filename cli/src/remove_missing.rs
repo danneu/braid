@@ -21,6 +21,12 @@ use crate::types::{Devid, DiskName, LuksUuid, MountPoint, PoolState};
 pub enum RemoveMissingError {
     #[error("{0}")]
     Validation(String),
+    #[error("{source}\n{advice}")]
+    JournalLifecycle {
+        #[source]
+        source: Box<RemoveMissingError>,
+        advice: String,
+    },
     /// `--missing-id <devid>` had no matching member in `pool.json` --
     /// the membership has never been enriched for that devid (or the
     /// devid is from a different pool). Pinned by the plan's
@@ -151,6 +157,27 @@ impl RemoveMissingPlan {
         fs: &F,
         params: &RemoveMissingParams<'_>,
     ) -> Result<(), RemoveMissingError> {
+        let mut journal_state = journal::JournalWriteState::NotAttempted;
+        self.execute_inner(runner, fs, params, &mut journal_state)
+            .map_err(|error| {
+                if journal_state == journal::JournalWriteState::NotAttempted {
+                    error
+                } else {
+                    RemoveMissingError::JournalLifecycle {
+                        source: Box::new(error),
+                        advice: journal::mutation_error_advice(params.paths, journal_state),
+                    }
+                }
+            })
+    }
+
+    fn execute_inner<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
+        self,
+        runner: &R,
+        fs: &F,
+        params: &RemoveMissingParams<'_>,
+        journal_state: &mut journal::JournalWriteState,
+    ) -> Result<(), RemoveMissingError> {
         // Render accumulated notes to stderr via the shared helper
         // before any mutation. Warn notes emit as the canonical
         // `[warn] <body>` (same as dry-run stdout), so both modes
@@ -213,7 +240,7 @@ impl RemoveMissingPlan {
                 restore_raid1_after_commit: work_plan.restore_raid1_after_commit,
             },
         );
-        journal::write_journal(params.paths, &journal)
+        journal::write_journal_tracked(params.paths, &journal, journal_state)
             .map_err(|e| RemoveMissingError::Validation(e.to_string()))?;
 
         // Execute
@@ -1085,6 +1112,10 @@ mod tests {
         assert!(
             !msg.contains("replace --missing-id"),
             "error must not request replace --missing-id; got: {msg}"
+        );
+        assert!(
+            !msg.contains("braid recover"),
+            "pre-journal refusal must not direct the operator to recovery: {msg}"
         );
 
         assert_eq!(
@@ -2215,6 +2246,10 @@ mod tests {
         assert!(
             err.contains("btrfs device remove failed (exit 1)"),
             "remove-missing should fail from the device-remove step: {err}"
+        );
+        assert!(
+            err.contains("run `braid recover` before retrying"),
+            "post-journal failure must use the shared recovery advice: {err}"
         );
         let journal = journal::load_journal(&f.paths)
             .unwrap()

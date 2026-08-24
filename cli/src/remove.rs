@@ -27,16 +27,18 @@ use std::collections::BTreeMap;
 pub enum RemoveError {
     #[error("{0}")]
     Validation(String),
+    #[error("{source}\n{advice}")]
+    JournalLifecycle {
+        #[source]
+        source: Box<RemoveError>,
+        advice: String,
+    },
     #[error(
         "pool was modified but membership persist failed: {0}\n\
-         pool.json may be stale -- run `braid recover` to reconcile from live state."
+         pool.json may be stale."
     )]
     MembershipPersistFailure(String),
-    #[error(
-        "pool was modified and membership persisted, but journal clear failed: {0}\n\
-         Recovery mode remains active until pending-op.json is cleared -- \
-         run `braid recover`."
-    )]
+    #[error("pool was modified and membership persisted, but journal clear failed: {0}")]
     JournalClearFailure(String),
     #[error("probe error: {0}")]
     Probe(#[from] ProbeError),
@@ -252,6 +254,27 @@ impl RemovePlan {
         fs: &F,
         params: &RemoveParams<'_>,
     ) -> Result<(), RemoveError> {
+        let mut journal_state = journal::JournalWriteState::NotAttempted;
+        self.execute_inner(runner, fs, params, &mut journal_state)
+            .map_err(|error| {
+                if journal_state == journal::JournalWriteState::NotAttempted {
+                    error
+                } else {
+                    RemoveError::JournalLifecycle {
+                        source: Box::new(error),
+                        advice: journal::mutation_error_advice(params.paths, journal_state),
+                    }
+                }
+            })
+    }
+
+    fn execute_inner<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
+        self,
+        runner: &R,
+        fs: &F,
+        params: &RemoveParams<'_>,
+        journal_state: &mut journal::JournalWriteState,
+    ) -> Result<(), RemoveError> {
         // Render accumulated notes to stderr via the shared helper
         // before any mutation. Warn notes emit as the canonical
         // `[warn] <body>` (same as dry-run stdout), so both modes
@@ -384,7 +407,7 @@ impl RemovePlan {
                 name: work_plan.name.clone(),
             },
         );
-        journal::write_journal(params.paths, &journal)
+        journal::write_journal_tracked(params.paths, &journal, journal_state)
             .map_err(|e| RemoveError::Validation(e.to_string()))?;
 
         // (Post-journal) last-moment safety gate: catch drift in the small
@@ -406,14 +429,13 @@ impl RemovePlan {
             let detail = drift.detail();
             let suffix = if drift.is_target_hot_unplug() {
                 "cryptsetup reports `device: (null)` (hot-unplug). \
-                 Run `braid recover` to reconcile pool.json. \
                  The broken mapper does not self-heal on replug; if \
                  `cryptsetup status` still reports `device: (null)` after \
-                 recover, close + reopen the mappers (`braid lock` then \
+                 recovery, close + reopen the mappers (`braid lock` then \
                  `braid unlock`, or reboot then `braid unlock`) before \
                  retrying the remove."
             } else {
-                "Run `braid recover` to reconcile."
+                "Pool topology changed after the operation entered recovery mode."
             };
             RemoveError::Validation(format!("{detail}. {suffix}"))
         })?;
@@ -1927,7 +1949,7 @@ mod tests {
 
     #[test]
     // Intent: the real post-commit mapping function classifies a
-    //   save_membership failure as MembershipPersistFailure with remediation
+    //   save_membership failure as MembershipPersistFailure with subsystem
     //   text that names pool.json as the stale artifact.
     //
     // Why: previously wrapped as RemoveError::Validation, which reads like a
@@ -1959,13 +1981,13 @@ mod tests {
         let display = classified.to_string();
         assert!(display.contains("pool was modified"), "got: {display}");
         assert!(display.contains("pool.json may be stale"), "got: {display}");
-        assert!(display.contains("braid recover"), "got: {display}");
+        assert!(!display.contains("braid recover"), "got: {display}");
     }
 
     #[test]
     // Intent: the real post-commit mapping function classifies a
-    //   clear_journal failure as JournalClearFailure with remediation text
-    //   that names recovery mode / pending-op.json as the latched artifact.
+    //   clear_journal failure as JournalClearFailure while leaving lifecycle
+    //   remediation to the command-boundary classifier.
     //
     // Why: this is the only post-commit mode where pool.json is already
     //   correct and the *journal* is keeping the system in recovery mode. A
@@ -1995,12 +2017,8 @@ mod tests {
             "got: {display}"
         );
         assert!(display.contains("journal clear failed"), "got: {display}");
-        assert!(
-            display.contains("Recovery mode remains active"),
-            "got: {display}"
-        );
         assert!(display.contains("pending-op.json"), "got: {display}");
-        assert!(display.contains("braid recover"), "got: {display}");
+        assert!(!display.contains("braid recover"), "got: {display}");
     }
 
     #[test]
