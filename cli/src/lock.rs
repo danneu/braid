@@ -1129,35 +1129,25 @@ where
     O: OnlineStateOps,
 {
     cmd_lock_orchestrate_impl(
-        runner,
-        fs,
         online_ops,
         config,
-        membership,
-        |runner, fs, config, membership, dry_run| {
-            cmd_lock(runner, fs, config, membership, dry_run, Vec::new())
-        },
+        || cmd_lock(runner, fs, config, membership, false, Vec::new()),
         || coordinator_guard.mark_done(),
     )
 }
 
-fn cmd_lock_orchestrate_impl<R, F, O, CL, MD>(
-    runner: &R,
-    fs: &F,
+fn cmd_lock_orchestrate_impl<O, CL, MD>(
     online_ops: &O,
     config: &Config,
-    membership: &PoolMembership,
     cmd_lock_fn: CL,
     mark_done_fn: MD,
 ) -> Result<(), LockOrchestrateError>
 where
-    R: CommandRunner,
-    F: Filesystem + ?Sized,
     O: OnlineStateOps,
-    CL: FnOnce(&R, &F, &Config, &PoolMembership, bool) -> Result<(), LockError>,
+    CL: FnOnce() -> Result<(), LockError>,
     MD: FnOnce() -> io::Result<()>,
 {
-    cmd_lock_fn(runner, fs, config, membership, false).map_err(LockOrchestrateError::CmdLock)?;
+    cmd_lock_fn().map_err(LockOrchestrateError::CmdLock)?;
     mark_done_fn().map_err(LockOrchestrateError::MarkDone)?;
     mark_offline(config, online_ops);
     Ok(())
@@ -1477,21 +1467,13 @@ mod tests {
         let coord_path = tmp.path().join("coord");
         let coordinator = RealStopCoordinator::new(coord_path.clone());
         let _coordinator_guard = coordinator.acquire().unwrap();
-        let runner = MockRunner::default();
-        let fs = lock_fs(&[]);
         let ops = offline_lifecycle_ops();
         let config = lifecycle_config();
-        let membership = lock_test_membership();
 
         let result = cmd_lock_orchestrate_impl(
-            &runner,
-            &fs,
             &ops,
             &config,
-            &membership,
-            |_runner, _fs, _config, _membership, _dry_run| {
-                Err(LockError::Failed("synthetic lock failure".into()))
-            },
+            || Err(LockError::Failed("synthetic lock failure".into())),
             || -> io::Result<()> { panic!("mark_done must not be called after cmd_lock fails") },
         );
 
@@ -1512,22 +1494,12 @@ mod tests {
         let coord_path = tmp.path().join("coord");
         let coordinator = RealStopCoordinator::new(coord_path.clone());
         let coordinator_guard = coordinator.acquire().unwrap();
-        let runner = MockRunner::default();
-        let fs = lock_fs(&[]);
         let ops = RecordingOnlineStateOps::new().with_coord_file(coord_path.clone());
         ops.set_mounted(false);
         let config = lifecycle_config();
-        let membership = lock_test_membership();
 
-        let result = cmd_lock_orchestrate_impl(
-            &runner,
-            &fs,
-            &ops,
-            &config,
-            &membership,
-            |_runner, _fs, _config, _membership, _dry_run| Ok(()),
-            || coordinator_guard.mark_done(),
-        );
+        let result =
+            cmd_lock_orchestrate_impl(&ops, &config, || Ok(()), || coordinator_guard.mark_done());
 
         assert!(result.is_ok());
         let calls = ops.calls();
@@ -1550,19 +1522,13 @@ mod tests {
     // stop-coordinator done marker due to an I/O error.
     #[test]
     fn mark_done_failure_does_not_call_mark_offline() {
-        let runner = MockRunner::default();
-        let fs = lock_fs(&[]);
         let ops = offline_lifecycle_ops();
         let config = lifecycle_config();
-        let membership = lock_test_membership();
 
         let result = cmd_lock_orchestrate_impl(
-            &runner,
-            &fs,
             &ops,
             &config,
-            &membership,
-            |_runner, _fs, _config, _membership, _dry_run| Ok(()),
+            || Ok(()),
             || Err(io::Error::other("synthetic mark_done failure")),
         );
 

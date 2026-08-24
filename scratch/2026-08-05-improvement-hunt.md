@@ -88,7 +88,7 @@ task lands. `Rejected` tasks are retained for reference and are not pending work
 | TASK-28 | Done | 2026-08-24 | Documentation, CLI UX | Make add `--enroll` help clear that every adopted disk is enrolled. |
 | TASK-29 | Done | 2026-08-24 | Simplification, testing | Remove duplicated probe-event rendering and test the production rendering path. |
 | TASK-30 | Done | 2026-08-24 | Developer tooling | Make `clippy-fix` actually apply clippy suggestions and align its scope with `clippy`. |
-| TASK-31 | Open | -- | Simplification, API | Remove the unreachable dry-run boolean from the lock orchestrator callback seam. |
+| TASK-31 | Done | 2026-08-24 | Simplification, API | Remove the unreachable dry-run boolean from the lock orchestrator callback seam. |
 | TASK-32 | Done | 2026-08-24 | Error handling, observability | Print `PoolLockError` so lock-file failures retain their braid-layer context. |
 | TASK-33 | Done | 2026-08-24 | Error handling, consistency | Tag recover probe failures consistently with other command-level errors. |
 | TASK-34 | Done | 2026-08-24 | Tooling, documentation | Track ASCII-guard allowances on the clap doc line that owns each buffered hit. |
@@ -1239,6 +1239,8 @@ Drop the trailing `bool` from the `CL` bound and from the call: `CL: FnOnce(&R, 
 **Verifier's correction:** Two small adjustments. (1) The third test closure is at lock.rs:1585, not 1584 (the `cmd_lock_orchestrate_impl` call sites 1506/1542/1579 are correct). (2) A minor tradeoff the candidate does not mention: today the `false` decision sits inside the unit-tested `cmd_lock_orchestrate_impl`, and the "after" moves it into the untested production wrapper `cmd_lock_orchestrate`. That is still net-better -- with no `bool` in the seam at all, "plain lock is never a preview" becomes structural rather than a value nothing asserts -- but the change is API hygiene on a private test seam, not a correctness fix.
 
 **Verifier's reasoning:** The "before" text matches `cli/src/lock.rs` verbatim: line 1180 is the `CL: FnOnce(&R, &F, &Config, &PoolMembership, bool)` bound and line 1183 calls `cmd_lock_fn(runner, fs, config, membership, false)`. `rg` shows `cmd_lock_orchestrate_impl` is private and has exactly four callers -- the production wrapper `cmd_lock_orchestrate` (lock.rs:1154, reached only from `run_plain_lock` at main.rs:1318) and three tests at 1506/1542/1579, all of which bind and ignore the flag (`|_runner, _fs, _config, _membership, _dry_run|`). Dry-run lock never touches the orchestrator: `run_dry_run_lock` (main.rs:1275-1286) calls `cmd_lock(..., true, extra_notes)` directly, so `true` is unreachable through this seam. It is not deliberate -- `git show 9aac1bb0` (the commit that introduced the orchestrator, with plan `plans/impl/2026-05-20-run-plain-lock-test-gap.md`) shows the bool was mirrored from `cmd_lock`'s arity, and the plan file never mentions `dry_run`; no doc, test, or Active ADR (022 governs planner/preview seams, not this closure) references it, and the fix is mechanical and behavior-preserving.
+
+**Implemented:** Replaced the full argument-forwarding callback with a zero-argument injected lock operation. The production plain-lock wrapper now captures its command dependencies and owns the fixed non-preview choice, while the ordering tests no longer construct or ignore unrelated runner, filesystem, membership, or dry-run inputs.
 
 #### TASK-32: `cli/src/main.rs:1198` [low/trivial]
 
