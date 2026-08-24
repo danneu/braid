@@ -8,11 +8,11 @@ use crate::credential_verify::{
 use crate::inhibit::AcquireSleepInhibitor;
 use crate::journal;
 use crate::luks::{
-    BackingPathResolver, HeaderBackupPath, KeySlotState, LUKS_SLOT_KEYFILE, OpenOutcome,
-    PassphraseReader, backup_luks_header_post_mutation, check_key_slot, ensure_luks_open,
+    BackingPathResolver, KeySlotState, LUKS_SLOT_KEYFILE, OpenOutcome, PassphraseReader,
+    backup_luks_header_post_mutation, check_key_slot, ensure_luks_open,
     format_keyfile_asymmetry_warning, format_keyfile_enrollment_probe_failure,
     format_target_keyfile_probe_failure, luks_format, luks_header_backup_path,
-    probe_pool_keyfile_enrollment, read_passphrase_with,
+    probe_pool_keyfile_enrollment, push_enrollment_preview_steps, read_passphrase_with,
 };
 use crate::mapper_close::{CloseContext, TrackedMapper, close_mapper_best_effort};
 use crate::membership::{self, DiskMember, LuksUuidMap, PoolMembership};
@@ -701,30 +701,12 @@ impl AddWorkPlan {
                             extra_opts: target.luks_format_extra_opts.clone(),
                         }],
                     });
-                    if let Some(kf) = &target.enroll_key_file {
-                        steps.push(Step {
-                            risk: "safe",
-                            description: format!(
-                                "enroll keyfile -> LUKS slot 1 on {}",
-                                target.by_id
-                            ),
-                            commands: vec![CmdRequest::CryptsetupLuksAddKeyFile {
-                                device: target.by_id.as_str().to_owned(),
-                                key_file_path: kf.as_path().display().to_string(),
-                            }],
-                        });
-                    }
-                    steps.push(Step {
-                        risk: "safe",
-                        description: format!(
-                            "LUKS header backup -> {}",
-                            header_backup_path.as_path().display()
-                        ),
-                        commands: vec![CmdRequest::CryptsetupLuksHeaderBackup {
-                            device: target.by_id.as_str().to_owned(),
-                            backup_path: header_backup_path.as_path().display().to_string(),
-                        }],
-                    });
+                    push_enrollment_preview_steps(
+                        &mut steps,
+                        &target.by_id,
+                        target.enroll_key_file.as_ref(),
+                        &header_backup_path,
+                    );
                     steps.push(Step {
                         risk: "safe",
                         description: format!("LUKS open -> {}", target.mapper_name),
@@ -739,10 +721,10 @@ impl AddWorkPlan {
                         let target_mapper = mapper_name(&target.name);
                         let header_backup_path =
                             luks_header_backup_path(&self.luks_headers_dir, &target_mapper);
-                        push_returned_disk_enrollment_steps(
+                        push_enrollment_preview_steps(
                             &mut steps,
                             &target.by_id,
-                            kf,
+                            Some(kf),
                             &header_backup_path,
                         );
                     }
@@ -767,10 +749,10 @@ impl AddWorkPlan {
                     if let Some(kf) = &target.enroll_key_file {
                         let header_backup_path =
                             luks_header_backup_path(&self.luks_headers_dir, &target.mapper_name);
-                        push_returned_disk_enrollment_steps(
+                        push_enrollment_preview_steps(
                             &mut steps,
                             &target.by_id,
-                            kf,
+                            Some(kf),
                             &header_backup_path,
                         );
                     }
@@ -867,37 +849,6 @@ impl AddWorkPlan {
 
         steps
     }
-}
-
-/// Render the `cryptsetup luksAddKey` + `cryptsetup luksHeaderBackup`
-/// pair for a returned-disk add target carrying `--enroll DIR`. Order
-/// matches the FreshLuks render: addKey before backup so slot 1 is
-/// captured in the post-mutation header backup.
-fn push_returned_disk_enrollment_steps(
-    steps: &mut Vec<Step>,
-    by_id: &ByIdPath,
-    key_file: &KeyFilePath,
-    header_backup_path: &HeaderBackupPath,
-) {
-    steps.push(Step {
-        risk: "safe",
-        description: format!("enroll keyfile -> LUKS slot 1 on {}", by_id),
-        commands: vec![CmdRequest::CryptsetupLuksAddKeyFile {
-            device: by_id.as_str().to_owned(),
-            key_file_path: key_file.as_path().display().to_string(),
-        }],
-    });
-    steps.push(Step {
-        risk: "safe",
-        description: format!(
-            "LUKS header backup -> {}",
-            header_backup_path.as_path().display()
-        ),
-        commands: vec![CmdRequest::CryptsetupLuksHeaderBackup {
-            device: by_id.as_str().to_owned(),
-            backup_path: header_backup_path.as_path().display().to_string(),
-        }],
-    });
 }
 
 fn forced_returned_device_add_step(

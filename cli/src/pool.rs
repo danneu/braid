@@ -1,4 +1,4 @@
-use crate::cmd::{CmdError, CmdRequest, CommandRunner, RawCommandOutput};
+use crate::cmd::{CmdError, CmdRequest, CommandRunner, RawCommandOutput, Step};
 use crate::probe::{Filesystem, probe_pool};
 use crate::progress::{
     self, ProgressOutput, run_device_remove_with_progress, run_replace_with_progress,
@@ -437,6 +437,21 @@ pub(crate) fn should_restore_raid1(clears_last_missing: bool, present_after: usi
     clears_last_missing && present_after >= 2
 }
 
+/// Keeps the normal remove-missing and replace dry-run description aligned
+/// with the shared soft-balance command used to restore RAID1 redundancy.
+/// Recovery keeps its separate commandless placeholder because replay is
+/// conditional on an additional live balance-status check.
+pub(crate) fn restore_raid1_preview_step(mount_point: &MountPoint) -> Step {
+    Step {
+        risk: "long",
+        description: "btrfs balance -dconvert=raid1,soft -mconvert=raid1,soft (restore redundancy)"
+            .into(),
+        commands: vec![CmdRequest::BtrfsBalanceRaid1Soft {
+            mount_point: mount_point.clone(),
+        }],
+    }
+}
+
 /// Authoritative live-pool predicate for execute-time RAID1 balance gates.
 /// Shared so add's hard grow-balance gate and restore's soft balance gate
 /// cannot drift on the topology required to host RAID1 right now.
@@ -686,6 +701,21 @@ mod tests {
 
     fn mp() -> MountPoint {
         MountPoint::new("/mnt/storage".into())
+    }
+
+    // Intent: the shared live-plan preview step pins the operator wording,
+    //   risk, and representative soft-balance command in one place.
+    // Why it exists: replace and remove-missing formerly built identical
+    //   steps independently, allowing their dry-run output to drift.
+    // Scenario: either command clears the last missing device and previews
+    //   the follow-up RAID1 redundancy restoration.
+    #[test]
+    fn restore_raid1_preview_step_pins_rendered_contract() {
+        assert_eq!(
+            Step::render_dry_run(&[restore_raid1_preview_step(&mp())]),
+            "[long] btrfs balance -dconvert=raid1,soft -mconvert=raid1,soft (restore redundancy)\n\
+$ btrfs balance start --enqueue '-dconvert=raid1,soft' '-mconvert=raid1,soft' /mnt/storage\n"
+        );
     }
 
     #[test]

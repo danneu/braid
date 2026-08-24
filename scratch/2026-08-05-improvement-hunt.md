@@ -69,7 +69,7 @@ task lands. `Rejected` tasks are retained for reference and are not pending work
 | TASK-9 | Done | 2026-08-24 | Simplification, error modeling | Centralize mapper-ownership messages shared by `LuksError` and `ProbeError`. |
 | TASK-10 | Done | 2026-08-24 | Simplification, testing | Centralize the fixture-path helper copied across 13 parser modules. |
 | TASK-11 | Done | 2026-08-24 | Simplification, dead code | Remove six unused fixture re-exports and their suppressing allowances. |
-| TASK-12 | Open | -- | Simplification, dry-run | Share returned-disk enrollment preview steps between add and replace. |
+| TASK-12 | Done | 2026-08-24 | Simplification, dry-run | Share LUKS enrollment and header-backup preview steps across add, replace, and enroll. |
 | TASK-13 | Open | -- | Simplification, data modeling | Delete the uninhabited partial-preview scaffolding and stale completeness claims. |
 | TASK-14 | Open | -- | Data modeling, architecture | Move the crate-wide `Filesystem` seam out of the probe-specific module. |
 | TASK-15 | Done | 2026-08-24 | Error handling, recovery UX | Give remove-missing post-commit failures dedicated recovery-aware error variants. |
@@ -81,7 +81,7 @@ task lands. `Rejected` tasks are retained for reference and are not pending work
 | TASK-21 | Open | -- | Performance, simplification | Replace three per-disk `lsblk` calls with one parsed JSON invocation. |
 | TASK-22 | Done | 2026-08-24 | Simplification, testing | Use `PanicBtrfsDevInfo` to enforce every no-probe replace boundary and remove its allowance. |
 | TASK-23 | Open | -- | Simplification, configuration | Remove the redundant positive-timeout assertion already enforced by the Nix type. |
-| TASK-24 | Open | -- | Simplification, duplication | Construct the replace RAID1 soft-balance preview step in one place. |
+| TASK-24 | Done | 2026-08-24 | Simplification, duplication | Construct the replace RAID1 soft-balance preview step in one place. |
 | TASK-25 | Open | -- | Simplification, duplication | Share the open-step literal and vary only the keyfile/passphrase command. |
 | TASK-26 | Open | -- | Simplification, control flow | Merge consecutive normal-mode branches in TUI command completion. |
 | TASK-27 | Open | -- | Documentation, configuration | Correct ADR 020's NUT package-option name. |

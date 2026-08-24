@@ -7,7 +7,7 @@ use crate::journal;
 use crate::membership;
 use crate::parse::types::BtrfsDeviceUsageEntry;
 use crate::parse::{ParseError, parse_btrfs_device_usage};
-use crate::pool::pool_remove_missing_device;
+use crate::pool::{pool_remove_missing_device, restore_raid1_preview_step};
 use crate::preflight;
 use crate::preview::{self, PerDiskStyle, PlanFailure, Preview, PreviewCompleteness, PreviewNote};
 use crate::probe::{Filesystem, ProbeError, probe_pool};
@@ -128,15 +128,7 @@ impl RemoveMissingWorkPlan {
             }],
         });
         if self.restore_raid1_after_commit {
-            steps.push(Step {
-                risk: "long",
-                description:
-                    "btrfs balance -dconvert=raid1,soft -mconvert=raid1,soft (restore redundancy)"
-                        .into(),
-                commands: vec![CmdRequest::BtrfsBalanceRaid1Soft {
-                    mount_point: self.mount_point.clone(),
-                }],
-            });
+            steps.push(restore_raid1_preview_step(&self.mount_point));
         }
         steps
     }

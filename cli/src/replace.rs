@@ -12,12 +12,12 @@ use crate::luks::{
     backup_luks_header_post_mutation, check_key_slot, classify_mapper_ownership, ensure_luks_open,
     format_keyfile_asymmetry_warning, format_keyfile_enrollment_probe_failure,
     format_target_keyfile_probe_failure, luks_format, luks_header_backup_path,
-    probe_pool_keyfile_enrollment, read_passphrase,
+    probe_pool_keyfile_enrollment, push_enrollment_preview_steps, read_passphrase,
 };
 use crate::mapper_close::{CloseContext, close_mapper_best_effort};
 use crate::membership::{self, PoolMembership};
 use crate::parse::{parse_btrfs_device_stats, parse_cryptsetup_luks_uuid};
-use crate::pool::{pool_replace_device, pool_resize_device};
+use crate::pool::{pool_replace_device, pool_resize_device, restore_raid1_preview_step};
 use crate::preflight;
 use crate::preview::{self, PerDiskStyle, PlanFailure, Preview, PreviewCompleteness, PreviewNote};
 use crate::probe::{Filesystem, ProbeError, probe_config_disk, probe_pool};
@@ -281,27 +281,12 @@ impl ReplaceWorkPlan {
                         extra_opts: extra_opts.clone(),
                     }],
                 });
-                if let Some(kf) = enroll_key_file {
-                    steps.push(Step {
-                        risk: "safe",
-                        description: format!("enroll keyfile -> LUKS slot 1 on {}", self.new_by_id),
-                        commands: vec![CmdRequest::CryptsetupLuksAddKeyFile {
-                            device: self.new_by_id.as_str().to_owned(),
-                            key_file_path: kf.as_path().display().to_string(),
-                        }],
-                    });
-                }
-                steps.push(Step {
-                    risk: "safe",
-                    description: format!(
-                        "LUKS header backup -> {}",
-                        header_backup_path.as_path().display()
-                    ),
-                    commands: vec![CmdRequest::CryptsetupLuksHeaderBackup {
-                        device: self.new_by_id.as_str().to_owned(),
-                        backup_path: header_backup_path.as_path().display().to_string(),
-                    }],
-                });
+                push_enrollment_preview_steps(
+                    &mut steps,
+                    &self.new_by_id,
+                    enroll_key_file.as_ref(),
+                    &header_backup_path,
+                );
                 steps.push(Step {
                     risk: "safe",
                     description: format!("LUKS open -> {}", self.new_mapper),
@@ -318,25 +303,12 @@ impl ReplaceWorkPlan {
                 if let Some(kf) = enroll_key_file {
                     let header_backup_path =
                         luks_header_backup_path(&self.luks_headers_dir, &self.new_mapper);
-                    steps.push(Step {
-                        risk: "safe",
-                        description: format!("enroll keyfile -> LUKS slot 1 on {}", self.new_by_id),
-                        commands: vec![CmdRequest::CryptsetupLuksAddKeyFile {
-                            device: self.new_by_id.as_str().to_owned(),
-                            key_file_path: kf.as_path().display().to_string(),
-                        }],
-                    });
-                    steps.push(Step {
-                        risk: "safe",
-                        description: format!(
-                            "LUKS header backup -> {}",
-                            header_backup_path.as_path().display()
-                        ),
-                        commands: vec![CmdRequest::CryptsetupLuksHeaderBackup {
-                            device: self.new_by_id.as_str().to_owned(),
-                            backup_path: header_backup_path.as_path().display().to_string(),
-                        }],
-                    });
+                    push_enrollment_preview_steps(
+                        &mut steps,
+                        &self.new_by_id,
+                        Some(kf),
+                        &header_backup_path,
+                    );
                 }
                 if !mapper_open {
                     steps.push(Step {
@@ -394,15 +366,7 @@ impl ReplaceWorkPlan {
         });
 
         if self.restore_raid1_after_commit {
-            steps.push(Step {
-                risk: "long",
-                description:
-                    "btrfs balance -dconvert=raid1,soft -mconvert=raid1,soft (restore redundancy)"
-                        .into(),
-                commands: vec![CmdRequest::BtrfsBalanceRaid1Soft {
-                    mount_point: self.config.mount_point().clone(),
-                }],
-            });
+            steps.push(restore_raid1_preview_step(self.config.mount_point()));
         }
 
         steps

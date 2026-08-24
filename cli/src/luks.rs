@@ -1,4 +1,4 @@
-use crate::cmd::{CmdError, CmdRequest, CommandRunner, RawCommandOutput};
+use crate::cmd::{CmdError, CmdRequest, CommandRunner, RawCommandOutput, Step};
 use crate::config::mapper_name;
 use crate::parse::types::{BackingDevice, CryptsetupStatusOutput};
 use crate::parse::{
@@ -513,6 +513,39 @@ impl std::fmt::Display for HeaderBackupPath {
 /// slot-1 keyfile at any render site.
 pub(crate) fn luks_header_backup_path(headers_dir: &Path, mapper: &MapperName) -> HeaderBackupPath {
     HeaderBackupPath(headers_dir.join(format!("{}.luksheader", mapper.as_str())))
+}
+
+/// Keeps the optional slot-1 enrollment and required post-mutation header
+/// backup preview wording and order shared across add, replace, and enroll.
+/// Callers decide whether a backup-only sequence applies by invoking this
+/// helper when `key_file` is `None`.
+pub(crate) fn push_enrollment_preview_steps(
+    steps: &mut Vec<Step>,
+    by_id: &ByIdPath,
+    key_file: Option<&KeyFilePath>,
+    header_backup_path: &HeaderBackupPath,
+) {
+    if let Some(key_file) = key_file {
+        steps.push(Step {
+            risk: "safe",
+            description: format!("enroll keyfile -> LUKS slot 1 on {by_id}"),
+            commands: vec![CmdRequest::CryptsetupLuksAddKeyFile {
+                device: by_id.as_str().to_owned(),
+                key_file_path: key_file.as_path().display().to_string(),
+            }],
+        });
+    }
+    steps.push(Step {
+        risk: "safe",
+        description: format!(
+            "LUKS header backup -> {}",
+            header_backup_path.as_path().display()
+        ),
+        commands: vec![CmdRequest::CryptsetupLuksHeaderBackup {
+            device: by_id.as_str().to_owned(),
+            backup_path: header_backup_path.as_path().display().to_string(),
+        }],
+    });
 }
 
 /// Back up the LUKS header to `dir/<mapper>.luksheader`.
@@ -1344,6 +1377,41 @@ mod tests {
         assert_eq!(
             luks_header_backup_path(dir, &mapper).as_path(),
             PathBuf::from("/var/lib/braid/luks-headers/braid-disk1.luksheader"),
+        );
+    }
+
+    // Intent: the shared enrollment-preview boundary renders the optional
+    //   slot-1 mutation before the unconditional post-mutation header backup.
+    // Why it exists: add, replace, and enroll formerly constructed these
+    //   operator-facing steps independently, so wording and ordering could
+    //   drift even though they represented the same LUKS operation.
+    // Scenario: a fresh target requests enrollment, while a second fresh
+    //   target needs only its mandatory header backup.
+    #[test]
+    fn enrollment_preview_steps_pin_optional_enroll_then_required_backup() {
+        let by_id = ByIdPath::parse("/dev/disk/by-id/disk1").unwrap();
+        let key_file = KeyFilePath::new(PathBuf::from("/mnt/usb/braid.key"));
+        let header_backup_path = luks_header_backup_path(
+            Path::new("/var/lib/braid/luks-headers"),
+            &MapperName::from_basename("braid-disk1".to_owned()),
+        );
+
+        let mut enrolled = Vec::new();
+        push_enrollment_preview_steps(&mut enrolled, &by_id, Some(&key_file), &header_backup_path);
+        assert_eq!(
+            Step::render_dry_run(&enrolled),
+            "[safe] enroll keyfile -> LUKS slot 1 on /dev/disk/by-id/disk1\n\
+$ cryptsetup luksAddKey --key-slot 1 --new-keyfile-size 4096 /dev/disk/by-id/disk1 /mnt/usb/braid.key\n\
+[safe] LUKS header backup -> /var/lib/braid/luks-headers/braid-disk1.luksheader\n\
+$ cryptsetup luksHeaderBackup --header-backup-file /var/lib/braid/luks-headers/braid-disk1.luksheader /dev/disk/by-id/disk1\n"
+        );
+
+        let mut backup_only = Vec::new();
+        push_enrollment_preview_steps(&mut backup_only, &by_id, None, &header_backup_path);
+        assert_eq!(
+            Step::render_dry_run(&backup_only),
+            "[safe] LUKS header backup -> /var/lib/braid/luks-headers/braid-disk1.luksheader\n\
+$ cryptsetup luksHeaderBackup --header-backup-file /var/lib/braid/luks-headers/braid-disk1.luksheader /dev/disk/by-id/disk1\n"
         );
     }
 

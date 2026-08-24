@@ -465,23 +465,13 @@ pub fn compile_enroll_steps(
 
     for c in candidates {
         let mn = mapper_name(&c.name);
-        steps.push(Step {
-            risk: "safe",
-            description: format!("enroll keyfile -> LUKS slot 1 on {}", c.by_id),
-            commands: vec![CmdRequest::CryptsetupLuksAddKeyFile {
-                device: c.by_id.as_str().to_owned(),
-                key_file_path: key_file_path.as_path().display().to_string(),
-            }],
-        });
         let backup_path = luks::luks_header_backup_path(&paths.luks_headers_dir(), &mn);
-        steps.push(Step {
-            risk: "safe",
-            description: format!("LUKS header backup -> {}", backup_path.as_path().display()),
-            commands: vec![CmdRequest::CryptsetupLuksHeaderBackup {
-                device: c.by_id.as_str().to_owned(),
-                backup_path: backup_path.as_path().display().to_string(),
-            }],
-        });
+        luks::push_enrollment_preview_steps(
+            &mut steps,
+            &c.by_id,
+            Some(key_file_path),
+            &backup_path,
+        );
     }
 
     steps
