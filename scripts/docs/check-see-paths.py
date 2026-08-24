@@ -3,8 +3,11 @@
 
 from __future__ import annotations
 
+import io
 import re
 import sys
+import tempfile
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 
@@ -49,7 +52,12 @@ def clean_target(target: str) -> str:
     return target
 
 
-def validate_bullet(path: Path, line_no: int, line: str) -> list[str]:
+def validate_bullet(
+    path: Path,
+    line_no: int,
+    line: str,
+    root: Path,
+) -> list[str]:
     stripped = line.strip()
     if not stripped.startswith("- "):
         return []
@@ -61,18 +69,70 @@ def validate_bullet(path: Path, line_no: int, line: str) -> list[str]:
         cleaned = clean_target(target)
         if not cleaned:
             continue
-        if not (ROOT / cleaned).exists():
+        if not (root / cleaned).exists():
             failures.append(
-                f"{path.relative_to(ROOT)}:{line_no}: unresolved See path `{target}`"
+                f"{path.relative_to(root)}:{line_no}: unresolved See path `{target}`"
             )
     return failures
 
 
-def main() -> int:
+def _selftest() -> int:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        decisions = root / "docs/design/decisions"
+        decisions.mkdir(parents=True)
+        (root / "existing.rs").write_text("", encoding="utf-8")
+        (decisions / "fixture.md").write_text(
+            "\n".join(
+                [
+                    "# Fixture",
+                    "",
+                    "## See",
+                    "",
+                    "- `existing.rs` -- resolves",
+                    "- `missing.rs` -- must fail",
+                    "",
+                    "## Later section",
+                    "",
+                    "- `also-missing.rs` -- outside See",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            status = run_check(root, decisions)
+
+    expected_stderr = (
+        "See path check failed:\n"
+        "  docs/design/decisions/fixture.md:6: "
+        "unresolved See path `missing.rs`\n"
+    )
+    if status != 1 or stdout.getvalue() or stderr.getvalue() != expected_stderr:
+        print("See path selftest FAILED:", file=sys.stderr)
+        print(f"  expected status: 1; actual status: {status}", file=sys.stderr)
+        print(
+            f"  expected stdout: ''; actual stdout: {stdout.getvalue()!r}",
+            file=sys.stderr,
+        )
+        print(
+            f"  expected stderr: {expected_stderr!r}; actual stderr: {stderr.getvalue()!r}",
+            file=sys.stderr,
+        )
+        return 1
+
+    print("See path selftest ok")
+    return 0
+
+
+def run_check(root: Path, decisions: Path) -> int:
     failures: list[str] = []
-    for path in sorted(DECISIONS.glob("*.md")):
+    for path in sorted(decisions.glob("*.md")):
         for line_no, line in see_section_lines(path):
-            failures.extend(validate_bullet(path, line_no, line))
+            failures.extend(validate_bullet(path, line_no, line, root))
 
     if failures:
         print("See path check failed:", file=sys.stderr)
@@ -84,5 +144,11 @@ def main() -> int:
     return 0
 
 
+def main(argv: list[str]) -> int:
+    if "--selftest" in argv:
+        return _selftest()
+    return run_check(ROOT, DECISIONS)
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(sys.argv[1:]))

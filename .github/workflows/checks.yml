@@ -15,8 +15,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Check decision-doc See paths
-        run: python3 scripts/docs/check-see-paths.py
+      - name: Check decision-doc See paths (selftest first)
+        run: |
+          python3 scripts/docs/check-see-paths.py --selftest
+          python3 scripts/docs/check-see-paths.py
 
   output-ascii:
     runs-on: ubuntu-latest

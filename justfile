@@ -343,8 +343,9 @@ check-line-cites:
     python3 scripts/docs/check-line-cites.py --selftest
     python3 scripts/docs/check-line-cites.py
 
-# Verify decision-doc See-section code-span paths resolve
+# Verify decision-doc See-section code-span paths resolve (selftest first)
 check-docs-see-paths:
+    python3 scripts/docs/check-see-paths.py --selftest
     python3 scripts/docs/check-see-paths.py
 
 # Guard: no typographic Unicode in user-facing CLI output (selftest first)
