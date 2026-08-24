@@ -75,8 +75,8 @@ resolves. Cite external upstream code by its **shape**:
   sees the contract without fetching `reference/`. Stamp it `pkg <version>, <path> (fn name)`
   and drop the line number. Fence the excerpt with a non-`rust` language tag -- `c` for
   source, `text` for tool output -- so rustdoc does not run it as a doctest. An unannotated
-  or `rust`-tagged block becomes a failing doctest, caught by `cargo test -p braid-cli --doc`
-  (not `just test-rust`, whose `--lib --bin --test` selectors skip doctests).
+  or `rust`-tagged block becomes a failing doctest, caught by `just test-rust` (or the
+  narrower `cargo test -p braid-cli --doc`).
   Precedent: `cli/src/parse/cryptsetup_luks_version.rs#parse_cryptsetup_luks_version`. An
   inline code span (`` `printf(...)` ``) is fine for a tight function or field doc where a
   fenced block is too heavy. The `pkg <version>` stamp is the upstream release tag (`git -C

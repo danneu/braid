@@ -9,6 +9,15 @@ publish = false # Cargo-level guard: a direct `cargo publish` refuses outright, 
 name = "braid"
 path = "src/main.rs"
 
+[features]
+# Keep forecast fixtures out of the stable, auto-discovered Cargo test suite.
+unstable-golden = []
+
+[[test]]
+name = "golden_nixos_unstable"
+path = "tests/golden_nixos_unstable.rs"
+required-features = ["unstable-golden"]
+
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 clap_complete = { version = "4.5", features = ["unstable-dynamic"] }

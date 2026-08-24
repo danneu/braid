@@ -115,10 +115,10 @@ test-fast:
 test-parsers *args:
     just test-vm braid-status-rust braid-status-during-balance braid-status-ups braid-idle braid-discover braid-tui-browse {{args}}
 
-# Run Rust unit tests (excludes unstable golden tests). The CLI crate's package
-# name is `braid-cli` (not `braid`); prefer this recipe over `cargo test -p <name>`.
+# Run all stable Rust tests. The unstable golden target is feature-gated so
+# Cargo can auto-discover every stable target without an omission-prone allowlist.
 test-rust:
-    cargo test --lib --bin braid --test golden_nixos_26_05 --test tty_guard --test confirm_yes
+    cargo test
     just test-state-modes
 
 # Run state-mode tests that mutate process-wide umask; keep them serial and
@@ -202,7 +202,7 @@ capture-all-fixtures-unstable:
 
 # Run golden parser tests against unstable fixtures (requires capture-all-fixtures-unstable first)
 test-rust-unstable:
-    cargo test --test golden_nixos_unstable
+    cargo test --features unstable-golden --test golden_nixos_unstable
 
 # Boot interactive VM with btrfs + Samba playground
 playground:
