@@ -23,7 +23,7 @@ use crate::pool::{
     pool_can_host_raid1,
 };
 use crate::preflight;
-use crate::preview::{self, PerDiskStyle, PlanFailure, Preview, PreviewCompleteness, PreviewNote};
+use crate::preview::{self, PerDiskStyle, PlanFailure, Preview, PreviewNote};
 use crate::probe::{Filesystem, ProbeError, probe_config_disk, probe_pool};
 use crate::progress::ProgressOutput;
 use crate::progress::RealSleeper;
@@ -991,7 +991,6 @@ pub struct AddPlan {
 impl AddPlan {
     pub fn preview(&self) -> Preview {
         Preview {
-            completeness: PreviewCompleteness::Complete,
             notes: self.notes.clone(),
             steps: self.work_plan.render_steps(),
         }

@@ -6,44 +6,21 @@
 //! side-effect-free probes may still emit status rows to stderr; see
 //! `docs/design/decisions/022-dry-run-preview-model.md`.
 //!
-//! PR 0 lands the types and rendering primitives only -- no command
-//! migrations.
-
-use serde::Serialize;
+//! Every mutating command with a dry-run mode renders through this
+//! shared boundary.
 
 use crate::cmd::Step;
 use crate::status_tag::{StatusTag, color_enabled_for_stdout, status_line};
 
 /// One renderable dry-run preview. `notes` and `steps` render in the
-/// fixed order documented on `Preview::render`. `Step` is not yet
-/// `Serialize`, so the field is skipped from the JSON shape; future
-/// `--format json` work either derives `Serialize` on `Step` (and the
-/// `CmdRequest` cascade) or projects steps separately.
-#[derive(Debug, Clone, Serialize)]
+/// fixed order documented on `Preview::render`.
+#[derive(Debug, Clone)]
 pub struct Preview {
-    pub completeness: PreviewCompleteness,
     pub notes: Vec<PreviewNote>,
-    #[serde(skip)]
     pub steps: Vec<Step>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(tag = "kind", rename_all = "kebab-case")]
-pub enum PreviewCompleteness {
-    Complete,
-    Partial { reasons: Vec<PreviewGap> },
-}
-
-/// Reasons a preview is incomplete. Empty in PR 0; the first variant
-/// lands alongside the first migration that needs to surface
-/// incompleteness. Keep the `tag` / `content` discipline so later
-/// variants are non-breaking JSON.
-#[derive(Debug, Clone, Serialize)]
-#[serde(tag = "reason", content = "detail", rename_all = "kebab-case")]
-pub enum PreviewGap {}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(tag = "kind", rename_all = "kebab-case")]
+#[derive(Debug, Clone)]
 pub enum PreviewNote {
     Info(String),
     Warn(String),
@@ -87,8 +64,7 @@ impl<E> PlanFailure<E> {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Debug, Clone, Copy)]
 pub enum NoteLevel {
     Ok,
     Skip,
@@ -242,9 +218,6 @@ impl Preview {
     /// 2. Steps via `Step::render_dry_run`. If `steps` is empty *and*
     ///    no `Info` note is present, the literal `nothing to do.\n`
     ///    is emitted (preserves `lock`'s today contract).
-    /// 3. If `completeness == Partial`, one
-    ///    `note: preview incomplete -- <reason>` line per
-    ///    `PreviewGap`. Empty in PR 0.
     pub fn render(&self) -> String {
         self.render_with(false)
     }
@@ -289,17 +262,6 @@ impl Preview {
             out.push_str(&Step::render_dry_run(&self.steps));
         }
 
-        if let PreviewCompleteness::Partial { reasons } = &self.completeness {
-            for _reason in reasons {
-                // PreviewGap is uninhabited in PR 0; this body is
-                // unreachable today. The first variant adds:
-                //   out.push_str(&format!(
-                //       "note: preview incomplete -- {}\n",
-                //       reason.label(),
-                //   ));
-            }
-        }
-
         out
     }
 
@@ -335,7 +297,6 @@ mod tests {
     #[test]
     fn render_emits_notes_before_steps() {
         let preview = Preview {
-            completeness: PreviewCompleteness::Complete,
             notes: vec![PreviewNote::Warn("scan failed".into())],
             steps: vec![sample_step("btrfs device scan")],
         };
@@ -358,7 +319,6 @@ $ btrfs device scan
     #[test]
     fn render_with_colors_only_warn_tag_before_steps() {
         let preview = Preview {
-            completeness: PreviewCompleteness::Complete,
             notes: vec![PreviewNote::Warn("scan failed".into())],
             steps: vec![sample_step("btrfs device scan")],
         };
@@ -381,7 +341,6 @@ $ btrfs device scan
     #[test]
     fn render_emits_nothing_to_do_when_empty() {
         let preview = Preview {
-            completeness: PreviewCompleteness::Complete,
             notes: vec![],
             steps: vec![],
         };
@@ -400,7 +359,6 @@ $ btrfs device scan
     #[test]
     fn render_info_note_suppresses_nothing_to_do() {
         let preview = Preview {
-            completeness: PreviewCompleteness::Complete,
             notes: vec![PreviewNote::Info("nothing to do -- already in pool".into())],
             steps: vec![],
         };
@@ -422,7 +380,6 @@ $ btrfs device scan
     #[test]
     fn render_warn_note_does_not_suppress_nothing_to_do() {
         let preview = Preview {
-            completeness: PreviewCompleteness::Complete,
             notes: vec![PreviewNote::Warn("orphan scan failed".into())],
             steps: vec![],
         };
@@ -444,7 +401,6 @@ $ btrfs device scan
     #[test]
     fn render_per_disk_note_uses_bracketed_style() {
         let preview = Preview {
-            completeness: PreviewCompleteness::Complete,
             notes: vec![PreviewNote::PerDisk {
                 name: "disk1".into(),
                 level: NoteLevel::Skip,
@@ -479,29 +435,6 @@ $ btrfs device scan
             rendered.contains(&format!("disk {long_name}: locked")),
             "long-name row must keep a colon+space delimiter, got: {rendered:?}",
         );
-    }
-
-    /* Intent: Partial completeness with zero PreviewGap reasons
-     * renders identically to Complete -- the footer loop has nothing
-     * to iterate.
-     * Why it exists: PR 0 ships an empty PreviewGap enum; the Partial
-     * branch must still type-check and remain a no-op until the first
-     * variant lands. This test catches accidental footer emission
-     * (e.g. a stray "preview incomplete" header) before there are any
-     * gap reasons to justify it.
-     * Scenario: Partial with reasons: vec![] vs Complete with the same
-     * notes/steps -- both renderings must be byte-identical.
-     */
-    #[test]
-    fn render_partial_with_no_reasons_matches_complete() {
-        let make = |c| Preview {
-            completeness: c,
-            notes: vec![PreviewNote::Info("entry".into())],
-            steps: vec![sample_step("scan")],
-        };
-        let complete = make(PreviewCompleteness::Complete);
-        let partial = make(PreviewCompleteness::Partial { reasons: vec![] });
-        assert_eq!(complete.render(), partial.render());
     }
 
     /* Intent: render_per_disk_notes filters out non-PerDisk notes and

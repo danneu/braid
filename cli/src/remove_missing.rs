@@ -9,7 +9,7 @@ use crate::parse::types::BtrfsDeviceUsageEntry;
 use crate::parse::{ParseError, parse_btrfs_device_usage};
 use crate::pool::{pool_remove_missing_device, restore_raid1_preview_step};
 use crate::preflight;
-use crate::preview::{self, PerDiskStyle, PlanFailure, Preview, PreviewCompleteness, PreviewNote};
+use crate::preview::{self, PerDiskStyle, PlanFailure, Preview, PreviewNote};
 use crate::probe::{Filesystem, ProbeError, probe_pool};
 use crate::progress::{self, ProgressOutput};
 use crate::repair_hint;
@@ -137,7 +137,6 @@ impl RemoveMissingWorkPlan {
 impl RemoveMissingPlan {
     pub fn preview(&self) -> Preview {
         Preview {
-            completeness: PreviewCompleteness::Complete,
             notes: self.notes.clone(),
             steps: self.work_plan.render_steps(),
         }

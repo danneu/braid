@@ -19,7 +19,7 @@ use crate::membership::{self, PoolMembership};
 use crate::parse::{parse_btrfs_device_stats, parse_cryptsetup_luks_uuid};
 use crate::pool::{pool_replace_device, pool_resize_device, restore_raid1_preview_step};
 use crate::preflight;
-use crate::preview::{self, PerDiskStyle, PlanFailure, Preview, PreviewCompleteness, PreviewNote};
+use crate::preview::{self, PerDiskStyle, PlanFailure, Preview, PreviewNote};
 use crate::probe::{Filesystem, ProbeError, probe_config_disk, probe_pool};
 use crate::probe_mapper_uuid::{
     MapperOwnership, probe_observed_mapper_uuid, warn_close_skipped_inactive,
@@ -379,7 +379,6 @@ impl ReplacePlan {
     /// `!params.yes` gate and does not appear here.
     pub fn preview(&self) -> Preview {
         Preview {
-            completeness: PreviewCompleteness::Complete,
             notes: self.notes.clone(),
             steps: self.work_plan.render_steps(),
         }

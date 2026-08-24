@@ -11,7 +11,7 @@ use crate::pool::{
     DeviceIdentity, pool_balance_single, pool_remove_device, validate_pool_topology,
 };
 use crate::preflight;
-use crate::preview::{self, PerDiskStyle, PlanFailure, Preview, PreviewCompleteness, PreviewNote};
+use crate::preview::{self, PerDiskStyle, PlanFailure, Preview, PreviewNote};
 use crate::probe::{Filesystem, ProbeError, probe_pool};
 use crate::probe_mapper_uuid::{
     MapperOwnership, probe_observed_mapper_uuid, warn_close_skipped_inactive,
@@ -242,7 +242,6 @@ impl RemovePlan {
     /// gate and does not appear here.
     pub fn preview(&self) -> Preview {
         Preview {
-            completeness: PreviewCompleteness::Complete,
             notes: self.notes.clone(),
             steps: self.work_plan.render_steps(),
         }

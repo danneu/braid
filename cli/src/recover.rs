@@ -13,7 +13,7 @@ use crate::mount::{self, MountError, OpenPlan};
 use crate::mount_check;
 use crate::parse::btrfs_filesystem_show::{DeviceBtrfsProbe, classify_btrfs_probe};
 use crate::parse::{ReplaceState, parse_btrfs_replace_status};
-use crate::preview::{self, PerDiskStyle, PlanFailure, Preview, PreviewCompleteness, PreviewNote};
+use crate::preview::{self, PerDiskStyle, PlanFailure, Preview, PreviewNote};
 use crate::probe::{self, Filesystem, ProbeError};
 use crate::probe_mapper_uuid::{MapperOwnership, probe_observed_mapper_uuid};
 use crate::progress::{self, ProgressOutput, Sleeper};
@@ -1246,7 +1246,6 @@ pub fn format_recover_entry(journal: &Journal) -> String {
 impl RecoverPlan {
     pub fn preview(&self) -> Preview {
         Preview {
-            completeness: PreviewCompleteness::Complete,
             notes: self.notes.clone(),
             steps: self.work_plan.render_steps(),
         }

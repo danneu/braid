@@ -3,7 +3,7 @@ use crate::config::Config;
 use crate::membership::{self, PoolMembership};
 use crate::mount::{self, MountError, OpenPlan, ProbeEvent};
 use crate::preflight;
-use crate::preview::{self, PerDiskStyle, PlanFailure, Preview, PreviewCompleteness, PreviewNote};
+use crate::preview::{self, PerDiskStyle, PlanFailure, Preview, PreviewNote};
 use crate::probe::{self, Filesystem};
 use crate::state_paths::StatePaths;
 use crate::status_tag::color_enabled_for_stderr;
@@ -63,7 +63,6 @@ pub struct UnlockPlan {
 impl UnlockPlan {
     pub fn preview(&self) -> Preview {
         Preview {
-            completeness: PreviewCompleteness::Complete,
             notes: self.notes.clone(),
             steps: self.steps.clone(),
         }

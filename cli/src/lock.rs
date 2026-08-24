@@ -9,7 +9,7 @@ use crate::parse::types::{BackingDevice, CryptsetupStatusOutput};
 use crate::parse::{parse_cryptsetup_luks_uuid, parse_cryptsetup_status};
 use crate::pool_lock::StopCoordinatorGuard;
 use crate::preflight;
-use crate::preview::{self, PerDiskStyle, Preview, PreviewCompleteness, PreviewNote};
+use crate::preview::{self, PerDiskStyle, Preview, PreviewNote};
 use crate::probe::{Filesystem, ProbeError, probe_fsid, probe_pool};
 use crate::progress::{RealSleeper, Sleeper};
 use crate::status_tag::{StatusTag, color_enabled_for_stderr, emit_status, status_line};
@@ -644,7 +644,6 @@ impl LockPlan {
             ));
         }
         Preview {
-            completeness: PreviewCompleteness::Complete,
             notes,
             steps: compile_lock_steps(
                 self.pool_was_mounted,

@@ -11,9 +11,7 @@ use crate::luks::{
 use crate::membership::PoolMembership;
 use crate::parse::parse_cryptsetup_luks_uuid;
 use crate::preflight;
-use crate::preview::{
-    self, NoteLevel, PerDiskStyle, PlanFailure, Preview, PreviewCompleteness, PreviewNote,
-};
+use crate::preview::{self, NoteLevel, PerDiskStyle, PlanFailure, Preview, PreviewNote};
 use crate::probe::{self, Filesystem};
 use crate::secret::Passphrase;
 use crate::state_paths::StatePaths;
@@ -513,7 +511,6 @@ impl EnrollPlan {
 
     pub fn preview(&self) -> Preview {
         Preview {
-            completeness: PreviewCompleteness::Complete,
             notes: self.notes.clone(),
             steps: self.steps.clone(),
         }
