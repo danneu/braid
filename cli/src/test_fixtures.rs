@@ -127,7 +127,6 @@ mod status;
 mod unlock;
 mod ups;
 
-#[allow(unused_imports)]
 pub(crate) use ack::{
     ACK_DEVICE_SIZE, ACK_FSID, AckPanicFilesystem, AckPanicRunner, ack_fs_btrfs, ack_fs_ext4,
     ack_fs_not_mounted, ack_mounted_fs_that_touches_smartd, ack_mounted_probe_runner,
@@ -138,11 +137,9 @@ pub(crate) use ack::{
     ack_mounted_probe_runner_with_zero_size_real_path_enospc_usage, ack_mp, ack_noop_beeper,
     ack_offline_fs_that_touches_scrub_failed, ack_offline_fs_that_touches_smartd, ack_write_latch,
 };
-#[allow(unused_imports)]
 pub(crate) use discover::{
     DiscoverLabelMap, discover_create_by_id_symlink, discover_create_target,
 };
-#[allow(unused_imports)]
 pub(crate) use doctor::{
     DF_METADATA_20_USED, DF_METADATA_78_USED, DF_MIXED, DF_MIXED_METADATA, DF_RAID1_CLEAN,
     DfQueryFailureRunner, DoctorMockFs, PoolMissingDevicesRunner, UpscSpawnFailureRunner, beep_ctx,
@@ -162,24 +159,22 @@ pub(crate) use enroll_key_file::{
     enroll_test_keyfile_fail, enroll_test_keyfile_ok, enroll_test_passphrase_fail,
     enroll_test_passphrase_ok, enroll_with_mountpoint_fail, enroll_with_mountpoint_ok,
 };
-#[allow(unused_imports)]
 pub(crate) use idle::{
     IDLE_FSID, IDLE_FSID_OTHER, IdleMockFs, assert_idle_busy_unknown_prefix, idle_mp,
-    idle_ready_for_sysfs_check, idle_runner_with_scrub_finished, idle_scrub_finished,
-    idle_scrub_running, idle_scrub_running_no_bytes,
+    idle_ready_for_sysfs_check, idle_runner_with_scrub_finished, idle_scrub_running,
+    idle_scrub_running_no_bytes,
 };
 pub(crate) use lock::{
     LockNoopSleeper, RecordingRunner as LockRecordingRunner, lock_count_forget_steps, lock_err_raw,
     lock_forget_step_devices, lock_fs, lock_mounted_runner, lock_ok_raw, lock_test_config,
     lock_test_membership, lock_umount_failed_runner, lock_with_fsid_probe_mocks,
 };
-#[allow(unused_imports)]
 pub(crate) use monitor::{
     BTRFS_SHOW_2DISK_1MISSING, BTRFS_SHOW_2DISK_NO_UUID, MONITOR_FSID, MonitorOverride,
     MonitorReconcileRunner, MonitorTestRunner, USAGE_DEVICE_SIZE,
     assert_monitor_single_computation_error, missing_pool_key, monitor_fs_btrfs, monitor_fs_ext4,
     monitor_fs_mountinfo_error, monitor_fs_not_mounted, monitor_mp, usage_2disk,
-    usage_2disk_healthy, usage_2disk_one_missing, usage_4disk_one_low,
+    usage_2disk_one_missing, usage_4disk_one_low,
 };
 pub(crate) use mount::{
     MOUNT_TEST_PASSPHRASE_BYTES, NoopSleeper, arbitrary_fallback, base_two_disk_runner,
@@ -188,24 +183,19 @@ pub(crate) use mount::{
     ok_raw, open_and_mount_for_test, test_config, test_passphrase, test_passphrase_fail,
     three_disk_membership, two_disk_membership,
 };
-#[allow(unused_imports)]
-pub(crate) use recover::{RecoverParamsBuilder, RemountHarness};
-#[allow(unused_imports)]
+pub(crate) use recover::RemountHarness;
 pub(crate) use remove::{
-    RemovalPool, RemoveParamsBuilder, overcommitted_survivor_df_json,
-    overcommitted_survivor_usage_stdout, target_device, valid_three_disk_df_json,
-    valid_three_disk_usage_stdout, valid_two_disk_df_json, valid_two_disk_usage_stdout,
+    RemovalPool, overcommitted_survivor_df_json, overcommitted_survivor_usage_stdout,
+    target_device, valid_three_disk_df_json, valid_three_disk_usage_stdout, valid_two_disk_df_json,
+    valid_two_disk_usage_stdout,
 };
-#[allow(unused_imports)]
-pub(crate) use remove_missing::{RemoveMissingParamsBuilder, RemoveMissingPool};
+pub(crate) use remove_missing::RemoveMissingPool;
 pub(crate) use replace::{ReplacementPool, replace_dev_info_sufficient};
-#[allow(unused_imports)]
 pub(crate) use scrub::{
     scrub_cancel_not_running, scrub_cancel_ok, scrub_cancel_real_failure, scrub_mp,
     scrub_resume_output, scrub_start_output, scrub_status_aborted, scrub_status_finished,
     scrub_status_interrupted, scrub_status_never, scrub_status_running, scrub_status_unknown,
 };
-#[allow(unused_imports)]
 pub(crate) use shared::{
     DeviceUsageSpec, MockBackingPathResolver, MockFs, PoolFixture, RecordingSleeper,
     TEST_PASSPHRASE_BYTES, assert_exact_lines_in_order, assert_lines_in_order,
@@ -213,24 +203,21 @@ pub(crate) use shared::{
     disk_member, disk_member_with, line_index, mock_ok, mock_virtio_backing_path_resolver,
     mock_virtio_offset_backing_path_resolver, test_uuid, with_lsblk_hw_info,
 };
-#[allow(unused_imports)]
 pub(crate) use status::{
-    status_btrfs_device_stats_3disk, status_btrfs_device_usage_raw_1disk,
-    status_btrfs_device_usage_raw_3disk, status_btrfs_df_raid1, status_btrfs_df_single,
-    status_btrfs_scrub_aborted, status_btrfs_scrub_aborted_no_start, status_btrfs_scrub_finished,
+    status_btrfs_device_usage_raw_1disk, status_btrfs_df_single, status_btrfs_scrub_aborted,
+    status_btrfs_scrub_aborted_no_start, status_btrfs_scrub_finished,
     status_btrfs_scrub_finished_with_errors, status_btrfs_scrub_interrupted,
     status_btrfs_scrub_never, status_btrfs_scrub_running, status_btrfs_show_1disk,
-    status_btrfs_show_3disk, status_btrfs_show_3disk_1missing,
-    status_btrfs_show_3disk_1null_underlying_1missing, status_btrfs_show_3disk_missing_devid3,
-    status_btrfs_usage_raw, status_cfg_absent, status_cfg_present_not_luks, status_config,
-    status_cryptsetup_status_active, status_cryptsetup_uuid_ok, status_disk_report_missing,
-    status_disk_report_named, status_fs_ext4, status_fs_mounted, status_fs_not_mounted,
-    status_fs_one_disk, status_fs_three_disk, status_is_luks_raw, status_lsblk_field_ok,
-    status_membership_1disk, status_membership_3disk, status_mp, status_pool_empty,
-    status_report_with_alerts, status_report_with_scrub, status_runner_healthy_3disk_base,
+    status_btrfs_show_3disk_1missing, status_btrfs_show_3disk_1null_underlying_1missing,
+    status_btrfs_show_3disk_missing_devid3, status_btrfs_usage_raw, status_cfg_absent,
+    status_cfg_present_not_luks, status_config, status_cryptsetup_status_active,
+    status_cryptsetup_uuid_ok, status_disk_report_missing, status_disk_report_named,
+    status_fs_ext4, status_fs_mounted, status_fs_not_mounted, status_fs_one_disk,
+    status_fs_three_disk, status_is_luks_raw, status_lsblk_field_ok, status_membership_1disk,
+    status_membership_3disk, status_mp, status_pool_empty, status_report_with_alerts,
+    status_report_with_scrub, status_runner_healthy_3disk_base,
     status_runner_healthy_3disk_verbose,
 };
-#[allow(unused_imports)]
 pub(crate) use unlock::{
     unlock_btrfs_balance_status_idle, unlock_btrfs_balance_status_paused,
     unlock_btrfs_balance_status_paused_skip_balance, unlock_btrfs_device_scan_ok,
@@ -238,7 +225,6 @@ pub(crate) use unlock::{
     unlock_with_mount_degraded_ok, unlock_with_mount_ok, unlock_with_open_mapper_ok,
     unlock_with_test_passphrase_ok, unlock_with_three_mappers_open,
 };
-#[allow(unused_imports)]
 pub(crate) use ups::{
     ups_query_connection_refused_no_newline, ups_query_connection_refused_with_newline,
     ups_query_empty_stderr_exit_1, ups_query_healthy_minimal, ups_write_config,
