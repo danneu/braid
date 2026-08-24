@@ -8,6 +8,7 @@ use crate::capacity;
 use crate::cmd::{CmdError, CmdRequest, CommandRunner};
 use crate::config::{Config, mapper_name};
 use crate::confirm::query_disk_hw_info;
+use crate::filesystem::Filesystem;
 use crate::journal;
 use crate::luks::{self, BackingPathResolver};
 use crate::membership::{self, PoolMembership};
@@ -18,7 +19,7 @@ use crate::parse::{
     parse_btrfs_device_stats, parse_btrfs_device_usage, parse_btrfs_df_json,
     parse_btrfs_filesystem_usage, parse_btrfs_scrub_status, parse_smartctl,
 };
-use crate::probe::{Filesystem, ProbeError, probe_config_disk, probe_pool};
+use crate::probe::{ProbeError, probe_config_disk, probe_pool};
 use crate::profile_summary::{self, ProfileJson, Redundancy};
 use crate::progress::scrub_running_pct;
 use crate::repair_hint;

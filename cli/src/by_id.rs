@@ -12,7 +12,7 @@
 /// Discover does not use this trait -- it reads and canonicalizes its injectable
 /// by-id directory directly via `std::fs`, driving real udev-style symlinks in a
 /// tempdir under test. Recover is the trait's only consumer and substitutes a
-/// mock at this boundary. Kept separate from `probe::Filesystem` so tests can
+/// mock at this boundary. Kept separate from `filesystem::Filesystem` so tests can
 /// substitute this narrow boundary without widening a shared trait that already
 /// has many mock impls. `RealByIdResolver` is the production implementation.
 pub trait ByIdResolver {

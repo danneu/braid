@@ -22,6 +22,7 @@ struct NotifierConfig {
 use crate::capacity;
 use crate::cmd::{CmdRequest, CommandRunner, RealRunner};
 use crate::config::{Config, DEFAULT_CONFIG_PATH};
+use crate::filesystem::{Filesystem, RealFilesystem};
 use crate::luks;
 use crate::membership;
 use crate::mountpoint_guard::{GuardError, MountpointGuard, RealMountpointGuard};
@@ -34,7 +35,7 @@ use crate::parse::{
     parse_btrfs_device_usage, parse_btrfs_df_json, parse_cryptsetup_luks_uuid,
     parse_smartctl_selftest_log,
 };
-use crate::probe::{self, Filesystem, ProbeError, RealFilesystem};
+use crate::probe::{self, ProbeError};
 use crate::repair_hint;
 use crate::state_paths::StatePaths;
 use crate::status::{BalanceReport, format_bytes, get_balance_report, paused_balance_advice};

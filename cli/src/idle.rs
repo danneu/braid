@@ -1,7 +1,7 @@
 use crate::cmd::{CmdRequest, CommandRunner};
+use crate::filesystem::Filesystem;
 use crate::parse::{ScrubState, parse_btrfs_scrub_status};
 use crate::preflight::{ExclusiveOp, ExclusiveOpError, check_any_btrfs_exclusive_op};
-use crate::probe::Filesystem;
 use crate::progress::scrub_running_pct;
 use crate::types::MountPoint;
 

@@ -18,8 +18,8 @@ use super::shared::{
 use crate::alert::AlertCause;
 use crate::cmd::{CmdRequest, MockRunner, RawCommandOutput};
 use crate::config::{Config, mapper_name};
+use crate::filesystem::Filesystem;
 use crate::membership::PoolMembership;
-use crate::probe::Filesystem;
 use crate::profile_summary::ProfileJson;
 use crate::status::{
     AlertCauseReport, DiskReport, DiskStatus, ScrubReport, StatusCode, StatusReport,

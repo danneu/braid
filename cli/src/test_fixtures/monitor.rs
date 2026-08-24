@@ -7,8 +7,8 @@
 use super::shared::{DeviceUsageSpec, device_usage_raw_body, mock_ok};
 use crate::alert::{AlertCause, PoolKey};
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, RawCommandOutput};
+use crate::filesystem::Filesystem;
 use crate::monitor::MonitorResult;
-use crate::probe::Filesystem;
 use crate::types::{Devid, Fsid, MountPoint};
 use std::sync::Mutex;
 

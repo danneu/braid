@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use braid_cli::cmd::RealRunner;
 use braid_cli::config::{DEFAULT_CONFIG_PATH, config_read};
 use braid_cli::doctor::{DoctorOptions, cmd_doctor};
+use braid_cli::filesystem::RealFilesystem;
 use braid_cli::membership::{MembershipError, PoolMembership};
 use braid_cli::online_state::{RealOnlineStateOps, run_with_online_marker, snapshot};
 use braid_cli::pool_lock::{
@@ -14,7 +15,6 @@ use braid_cli::pool_lock::{
 };
 use braid_cli::preflight;
 use braid_cli::preview::{PerDiskStyle, PreviewNote};
-use braid_cli::probe::RealFilesystem;
 use braid_cli::progress::{ProgressMode, resolve_progress_output};
 use braid_cli::state_paths::StatePaths;
 use braid_cli::types::MountPoint;
@@ -829,7 +829,7 @@ fn main() {
         Commands::Idle => {
             let config = load_config_or_exit(Path::new(&config_path), 2);
             let runner = RealRunner;
-            let fs = braid_cli::probe::RealFilesystem;
+            let fs = braid_cli::filesystem::RealFilesystem;
             match braid_cli::idle::cmd_idle(&runner, &fs, config.mount_point()) {
                 braid_cli::idle::IdleResult::PoolOffline => {
                     println!("idle: pool is offline");

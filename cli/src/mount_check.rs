@@ -1,6 +1,6 @@
 use std::io;
 
-use crate::probe::Filesystem;
+use crate::filesystem::Filesystem;
 
 const MOUNTINFO_PATH: &str = "/proc/self/mountinfo";
 

@@ -1,5 +1,5 @@
 use crate::cmd::{CmdError, CmdRequest, CommandRunner};
-use crate::probe::Filesystem;
+use crate::filesystem::Filesystem;
 use crate::progress::Sleeper;
 use crate::status_tag::{StatusTag, emit_status, status_line};
 use crate::types::{DiskName, MapperName};

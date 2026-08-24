@@ -1,7 +1,7 @@
 use std::io::{self, IsTerminal};
 use std::time::SystemTime;
 
-use crate::probe::Filesystem;
+use crate::filesystem::Filesystem;
 use crate::types::MountPoint;
 
 fn require_tty_inner(cmd: &str, stdin_tty: bool, stdout_tty: bool) -> io::Result<()> {

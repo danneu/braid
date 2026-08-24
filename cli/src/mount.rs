@@ -3,6 +3,7 @@ use crate::config::{Config, mapper_name};
 use crate::credential_verify::{
     Credential, CredentialVerifyError, CredentialVerifyTarget, verify_credential_for_targets,
 };
+use crate::filesystem::Filesystem;
 use crate::luks::{self, BackingPathResolver, LuksError, OpenOutcome};
 use crate::mapper_close::{
     CloseContext, CloseMapperError, TrackedMapper, emit_close_progress,
@@ -10,7 +11,7 @@ use crate::mapper_close::{
 };
 use crate::membership::PoolMembership;
 use crate::preview::{self, NoteLevel, PerDiskStyle, PreviewNote};
-use crate::probe::{self, Filesystem, ProbeError};
+use crate::probe::{self, ProbeError};
 use crate::progress::Sleeper;
 use crate::status_tag::{StatusTag, color_enabled_for_stderr, emit_status, status_line};
 use crate::types::{ByIdPath, ConfigDiskState, DiskName, MountPoint};

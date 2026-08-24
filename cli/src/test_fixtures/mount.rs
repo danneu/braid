@@ -23,12 +23,12 @@ use super::shared;
 use crate::cmd::{CmdRequest, CommandRunner, MockRunner, RawCommandOutput};
 use crate::config::Config;
 use crate::credential::OpenCredential;
+use crate::filesystem::Filesystem;
 use crate::membership::PoolMembership;
 use crate::mount::{
     MountError, OpenPlan, UnlockAndMountFailure, execute_mount_only, execute_unlock_and_mount,
     plan_open_pool,
 };
-use crate::probe::Filesystem;
 use crate::progress::Sleeper;
 use crate::secret::Passphrase;
 use crate::types::{ByIdPath, DiskName, LuksUuid, MapperName, MountPoint};

@@ -9,9 +9,10 @@ use crate::alert::{
 };
 use crate::capacity::{ENOSPC_REARM_MARGIN, evaluate_enospc_risk};
 use crate::cmd::{CmdRequest, CommandRunner};
+use crate::filesystem::Filesystem;
 use crate::parse::types::BtrfsDeviceUsageEntry;
 use crate::parse::{parse_btrfs_device_stats, parse_btrfs_device_usage};
-use crate::probe::{Filesystem, ProbeError, probe_pool_alerts};
+use crate::probe::{ProbeError, probe_pool_alerts};
 use crate::state_paths::StatePaths;
 use crate::types::{Fsid, MountPoint};
 

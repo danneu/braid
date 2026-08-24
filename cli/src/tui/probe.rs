@@ -1,5 +1,6 @@
 use crate::cmd::{CmdRequest, CommandRunner};
 use crate::config::{FanControl, mapper_name};
+use crate::filesystem::Filesystem;
 use crate::luks::{self, BackingPathResolver, MapperOwnershipFailure};
 use crate::parse::types::{
     BackingDevice, CryptsetupStatusOutput, ScrubState, SmartHealth, SmartProbe,
@@ -9,7 +10,7 @@ use crate::parse::{
     parse_cryptsetup_luks_dump, parse_cryptsetup_luks_uuid, parse_cryptsetup_status,
     parse_lsblk_json, parse_smartctl,
 };
-use crate::probe::{Filesystem, ProbeError, probe_config_disk, probe_pool};
+use crate::probe::{ProbeError, probe_config_disk, probe_pool};
 use crate::state_paths::StatePaths;
 use crate::status::resolve_alert_state;
 use crate::status::{DiskErrors, estimate_pool_capacity, get_balance_report};

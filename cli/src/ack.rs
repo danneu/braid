@@ -6,8 +6,9 @@ use crate::alert::{
 };
 use crate::capacity::evaluate_enospc_risk;
 use crate::cmd::{CmdRequest, CommandRunner, apply_child_env};
+use crate::filesystem::Filesystem;
 use crate::parse::{parse_btrfs_device_stats, parse_btrfs_device_usage};
-use crate::probe::{AlertPoolState, Filesystem, ProbeError, probe_pool_alerts};
+use crate::probe::{AlertPoolState, ProbeError, probe_pool_alerts};
 use crate::state_paths::StatePaths;
 use crate::types::MountPoint;
 use crate::util::detail_suffix;

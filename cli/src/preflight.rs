@@ -6,6 +6,7 @@ use crate::capacity;
 use crate::cmd::CmdRequest;
 use crate::cmd::CommandRunner;
 use crate::confirm;
+use crate::filesystem::Filesystem;
 use crate::journal;
 use crate::luks::LUKS2_DEFAULT_HDR_SIZE;
 use crate::membership::PoolMembership;
@@ -15,7 +16,6 @@ use crate::parse::types::{
     BtrfsBgType, BtrfsDeviceUsageEntry, BtrfsDfOutput, Luks2SegmentSize, UpsSeverity,
 };
 use crate::preview::PreviewNote;
-use crate::probe::Filesystem;
 use crate::repair_hint;
 use crate::state_paths::StatePaths;
 use crate::status::format_bytes;
@@ -707,7 +707,7 @@ mod tests {
     use super::*;
     use crate::btrfs_ioctl::tests_support::MockBtrfsDevInfo;
     use crate::cmd::{CmdRequest, MockRunner, RawCommandOutput};
-    use crate::probe::Filesystem;
+    use crate::filesystem::Filesystem;
 
     struct MockFs {
         files: std::collections::HashMap<String, String>,

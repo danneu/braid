@@ -2,6 +2,7 @@ use crate::alert;
 use crate::cmd::{CmdRequest, CommandRunner, Step};
 use crate::config::Config;
 use crate::confirm;
+use crate::filesystem::Filesystem;
 use crate::inhibit::AcquireSleepInhibitor;
 use crate::journal;
 use crate::mapper_close::{CloseContext, close_mapper_best_effort};
@@ -12,7 +13,7 @@ use crate::pool::{
 };
 use crate::preflight;
 use crate::preview::{self, PerDiskStyle, PlanFailure, Preview, PreviewNote};
-use crate::probe::{Filesystem, ProbeError, probe_pool};
+use crate::probe::{ProbeError, probe_pool};
 use crate::probe_mapper_uuid::{
     MapperOwnership, probe_observed_mapper_uuid, warn_close_skipped_inactive,
 };

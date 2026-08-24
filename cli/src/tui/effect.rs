@@ -66,7 +66,7 @@ pub fn execute_effect(effect: Effect, cmd_tx: &mpsc::Sender<Event>) {
                 move || {
                     let start = std::time::Instant::now();
                     let runner = RealRunner;
-                    let fs = crate::probe::RealFilesystem;
+                    let fs = crate::filesystem::RealFilesystem;
                     let backing_path_resolver = crate::luks::RealBackingPathResolver;
                     let result = crate::tui::probe::probe_pool_for_tui(
                         &runner,

@@ -4,10 +4,10 @@
 use crate::cmd::{CmdRequest, MockRunner, RawCommandOutput};
 use crate::config::Config;
 use crate::confirm::RecordingConfirm;
+use crate::filesystem::Filesystem;
 use crate::inhibit::RecordingInhibitor;
 use crate::luks::BackingPathResolver;
 use crate::membership::{self, DiskMember, PoolMembership};
-use crate::probe::Filesystem;
 use crate::progress::Sleeper;
 use crate::state_paths::StatePaths;
 use crate::types::{ByIdPath, Devid, DiskName, LuksUuid, MountPoint};

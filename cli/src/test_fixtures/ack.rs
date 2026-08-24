@@ -8,7 +8,7 @@
 use super::shared::{DeviceUsageSpec, device_usage_raw_body, mock_ok};
 use crate::alert::{AlertCause, AlertState, LatchedCause, save_alert_latch};
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, MockRunner, RawCommandOutput};
-use crate::probe::Filesystem;
+use crate::filesystem::Filesystem;
 use crate::state_paths::StatePaths;
 use crate::types::{MapperName, MountPoint};
 

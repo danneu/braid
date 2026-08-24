@@ -1,5 +1,6 @@
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, RawCommandOutput, Step};
-use crate::probe::{Filesystem, probe_pool};
+use crate::filesystem::Filesystem;
+use crate::probe::probe_pool;
 use crate::progress::{
     self, ProgressOutput, run_device_remove_with_progress, run_replace_with_progress,
     run_with_progress,

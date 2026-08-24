@@ -5,6 +5,7 @@ use crate::confirm;
 use crate::credential_verify::{
     Credential, CredentialVerifyError, CredentialVerifyTarget, verify_credential_for_targets,
 };
+use crate::filesystem::Filesystem;
 use crate::inhibit::AcquireSleepInhibitor;
 use crate::journal;
 use crate::luks::{
@@ -24,7 +25,7 @@ use crate::pool::{
 };
 use crate::preflight;
 use crate::preview::{self, PerDiskStyle, PlanFailure, Preview, PreviewNote};
-use crate::probe::{Filesystem, ProbeError, probe_config_disk, probe_pool};
+use crate::probe::{ProbeError, probe_config_disk, probe_pool};
 use crate::progress::ProgressOutput;
 use crate::progress::RealSleeper;
 use crate::repair_hint;
@@ -2551,7 +2552,7 @@ mod tests {
     #[test]
     fn duplicate_name_rejected() {
         use crate::cmd::MockRunner;
-        use crate::probe::Filesystem;
+        use crate::filesystem::Filesystem;
         use std::io::Write;
 
         struct MockFs;
@@ -5359,7 +5360,7 @@ mod tests {
     }
 
     struct AddMockFs(Vec<String>);
-    impl crate::probe::Filesystem for AddMockFs {
+    impl crate::filesystem::Filesystem for AddMockFs {
         fn exists(&self, path: &str) -> bool {
             self.0.iter().any(|p| p == path)
         }
@@ -5387,7 +5388,7 @@ mod tests {
     }
 
     struct AddOfflineMockFs(Vec<String>);
-    impl crate::probe::Filesystem for AddOfflineMockFs {
+    impl crate::filesystem::Filesystem for AddOfflineMockFs {
         fn exists(&self, path: &str) -> bool {
             self.0.iter().any(|p| p == path)
         }
@@ -5836,7 +5837,7 @@ mod tests {
         mounted: Arc<AtomicBool>,
     }
 
-    impl crate::probe::Filesystem for AddFullPathFs {
+    impl crate::filesystem::Filesystem for AddFullPathFs {
         fn exists(&self, path: &str) -> bool {
             self.paths.iter().any(|p| p == path)
         }
@@ -10698,7 +10699,7 @@ mod tests {
         }
     }
 
-    impl crate::probe::Filesystem for AddMockFsWithSysfs {
+    impl crate::filesystem::Filesystem for AddMockFsWithSysfs {
         fn exists(&self, path: &str) -> bool {
             self.inner.exists(path)
         }

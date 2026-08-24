@@ -13,7 +13,7 @@
 use super::shared::{DeviceUsageSpec, device_usage_raw_body};
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, MockRunner, RawCommandOutput};
 use crate::doctor::{DiskState, DoctorContext, DoctorOptions};
-use crate::probe::Filesystem;
+use crate::filesystem::Filesystem;
 use crate::state_paths::StatePaths;
 use crate::types::{Devid, LuksUuid, MapperName, MountPoint};
 use std::io::Write;

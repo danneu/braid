@@ -71,7 +71,7 @@ task lands. `Rejected` tasks are retained for reference and are not pending work
 | TASK-11 | Done | 2026-08-24 | Simplification, dead code | Remove six unused fixture re-exports and their suppressing allowances. |
 | TASK-12 | Done | 2026-08-24 | Simplification, dry-run | Share LUKS enrollment and header-backup preview steps across add, replace, and enroll. |
 | TASK-13 | Done | 2026-08-24 | Simplification, data modeling | Delete the uninhabited partial-preview scaffolding and stale completeness claims. |
-| TASK-14 | Open | -- | Data modeling, architecture | Move the crate-wide `Filesystem` seam out of the probe-specific module. |
+| TASK-14 | Done | 2026-08-24 | Data modeling, architecture | Move the crate-wide `Filesystem` seam out of the probe-specific module. |
 | TASK-15 | Done | 2026-08-24 | Error handling, recovery UX | Give remove-missing post-commit failures dedicated recovery-aware error variants. |
 | TASK-16 | Done | 2026-08-24 | Testing | Make the missing NVMe healthy fixture test fail instead of silently skipping. |
 | TASK-17 | Done | 2026-08-24 | Testing, error handling | Lock the live btrfs minimum-devices stderr contract used for recovery hints. |

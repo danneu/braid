@@ -1,10 +1,11 @@
 use crate::cmd::{CommandRunner, Step};
 use crate::config::Config;
+use crate::filesystem::Filesystem;
 use crate::membership::{self, PoolMembership};
 use crate::mount::{self, MountError, OpenPlan, ProbeEvent};
 use crate::preflight;
 use crate::preview::{self, PerDiskStyle, PlanFailure, Preview, PreviewNote};
-use crate::probe::{self, Filesystem};
+use crate::probe;
 use crate::state_paths::StatePaths;
 use crate::status_tag::color_enabled_for_stderr;
 use std::path::Path;

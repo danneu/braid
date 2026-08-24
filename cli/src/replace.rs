@@ -5,6 +5,7 @@ use crate::confirm;
 use crate::credential_verify::{
     Credential, CredentialVerifyError, CredentialVerifyTarget, verify_credential_for_targets,
 };
+use crate::filesystem::Filesystem;
 use crate::inhibit::AcquireSleepInhibitor;
 use crate::journal;
 use crate::luks::{
@@ -20,7 +21,7 @@ use crate::parse::{parse_btrfs_device_stats, parse_cryptsetup_luks_uuid};
 use crate::pool::{pool_replace_device, pool_resize_device, restore_raid1_preview_step};
 use crate::preflight;
 use crate::preview::{self, PerDiskStyle, PlanFailure, Preview, PreviewNote};
-use crate::probe::{Filesystem, ProbeError, probe_config_disk, probe_pool};
+use crate::probe::{ProbeError, probe_config_disk, probe_pool};
 use crate::probe_mapper_uuid::{
     MapperOwnership, probe_observed_mapper_uuid, warn_close_skipped_inactive,
 };

@@ -4,6 +4,7 @@ use crate::cmd::{CmdRequest, CommandRunner, Step};
 use crate::config::{self, Config};
 use crate::credential::{self, OpenCredential};
 use crate::credential_verify::{Credential, CredentialVerifyTarget, verify_credential_for_targets};
+use crate::filesystem::Filesystem;
 use crate::inhibit::AcquireSleepInhibitor;
 use crate::journal::{self, Journal};
 use crate::luks::{self, BackingPathResolver, VerifyOutcome};
@@ -14,7 +15,7 @@ use crate::mount_check;
 use crate::parse::btrfs_filesystem_show::{DeviceBtrfsProbe, classify_btrfs_probe};
 use crate::parse::{ReplaceState, parse_btrfs_replace_status};
 use crate::preview::{self, PerDiskStyle, PlanFailure, Preview, PreviewNote};
-use crate::probe::{self, Filesystem, ProbeError};
+use crate::probe::{self, ProbeError};
 use crate::probe_mapper_uuid::{MapperOwnership, probe_observed_mapper_uuid};
 use crate::progress::{self, ProgressOutput, Sleeper};
 use crate::secret::Passphrase;
@@ -3740,12 +3741,12 @@ mod tests {
     use super::*;
     use crate::by_id::test_helpers::{MockByIdResolver, resolver_for};
     use crate::cmd::{CmdError, CmdRequest, CommandRunner, MockRunner, RawCommandOutput};
+    use crate::filesystem::Filesystem;
     use crate::journal::{self, OpKind};
     use crate::luks::ScriptedPassphraseReader;
     use crate::mapper_close::{CLOSE_RETRY_ATTEMPTS, CLOSE_RETRY_DELAY};
     use crate::mount::MountError;
     use crate::preview::NoteLevel;
-    use crate::probe::Filesystem;
     use crate::test_fixtures::{
         PoolFixture, RecordingSleeper, RemountHarness, TEST_PASSPHRASE_BYTES, test_uuid,
     };

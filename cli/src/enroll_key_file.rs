@@ -4,6 +4,7 @@ use crate::credential_verify::{
     Credential, CredentialVerifyError, CredentialVerifyTarget, probe_keyfile_enrollment,
     verify_credential_for_targets,
 };
+use crate::filesystem::Filesystem;
 use crate::luks::{
     self, BackingPathResolver, KEYFILE_NAME, KEYFILE_SIZE, KeySlotState, LUKS_SLOT_KEYFILE,
     LuksError, VerifyOutcome,
@@ -12,7 +13,7 @@ use crate::membership::PoolMembership;
 use crate::parse::parse_cryptsetup_luks_uuid;
 use crate::preflight;
 use crate::preview::{self, NoteLevel, PerDiskStyle, PlanFailure, Preview, PreviewNote};
-use crate::probe::{self, Filesystem};
+use crate::probe;
 use crate::secret::Passphrase;
 use crate::state_paths::StatePaths;
 use crate::status_tag::{StatusTag, color_enabled_for_stderr, emit_status, status_line};

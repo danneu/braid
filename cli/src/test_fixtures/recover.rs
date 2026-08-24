@@ -15,9 +15,9 @@
 use super::shared::{PoolFixture, mock_virtio_backing_path_resolver};
 use crate::cmd::{CmdRequest, CommandRunner, MockRunner, RawCommandOutput};
 use crate::config::Config;
+use crate::filesystem::Filesystem;
 use crate::inhibit::{AcquireSleepInhibitor, SleepGuard};
 use crate::luks;
-use crate::probe::Filesystem;
 use crate::progress::{self, ProgressOutput, Sleeper};
 use crate::recover::RecoverParams;
 use crate::state_paths::StatePaths;

@@ -17,6 +17,7 @@ pub mod credential;
 pub mod discover;
 pub mod doctor;
 pub mod enroll_key_file;
+pub mod filesystem;
 pub mod idle;
 pub mod inhibit;
 pub mod journal;

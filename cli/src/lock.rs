@@ -1,5 +1,6 @@
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, Step};
 use crate::config::{Config, braid_disk_name};
+use crate::filesystem::Filesystem;
 use crate::mapper_close::{
     CloseMapperError, close_mapper_with_retry, forget_existing_scanned_devices_best_effort,
 };
@@ -10,7 +11,7 @@ use crate::parse::{parse_cryptsetup_luks_uuid, parse_cryptsetup_status};
 use crate::pool_lock::StopCoordinatorGuard;
 use crate::preflight;
 use crate::preview::{self, PerDiskStyle, Preview, PreviewNote};
-use crate::probe::{Filesystem, ProbeError, probe_fsid, probe_pool};
+use crate::probe::{ProbeError, probe_fsid, probe_pool};
 use crate::progress::{RealSleeper, Sleeper};
 use crate::status_tag::{StatusTag, color_enabled_for_stderr, emit_status, status_line};
 use crate::types::{

@@ -6,8 +6,8 @@
 
 use super::shared::mock_ok;
 use crate::cmd::{CmdRequest, MockRunner, RawCommandOutput};
+use crate::filesystem::Filesystem;
 use crate::idle::{BusyReason, IdleResult};
-use crate::probe::Filesystem;
 use crate::types::MountPoint;
 use std::collections::HashMap;
 use std::io::ErrorKind;
