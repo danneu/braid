@@ -115,10 +115,6 @@ in
         assertion = !(cfg.autoScrub.enable && config.services.btrfs.autoScrub.enable);
         message = "braid.autoScrub replaces services.btrfs.autoScrub. Disable one to avoid duplicate scrubs.";
       }
-      {
-        assertion = cfg.autoUnlock.enable -> cfg.autoUnlock.timeoutSec > 0;
-        message = "braid.autoUnlock.timeoutSec must be positive.";
-      }
     ];
 
     # A warning, not an assertion: running your own monitoring while braid does
