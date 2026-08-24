@@ -8,7 +8,7 @@ use crate::credential_verify::{
 use crate::inhibit::AcquireSleepInhibitor;
 use crate::journal;
 use crate::luks::{
-    BackingPathResolver, KeySlotState, LUKS_SLOT_KEYFILE, OwnershipError,
+    BackingPathResolver, KeySlotState, LUKS_SLOT_KEYFILE, MapperOwnershipFailure, OwnershipError,
     backup_luks_header_post_mutation, check_key_slot, classify_mapper_ownership, ensure_luks_open,
     format_keyfile_asymmetry_warning, format_keyfile_enrollment_probe_failure,
     format_target_keyfile_probe_failure, luks_format, luks_header_backup_path,
@@ -1075,29 +1075,33 @@ fn verify_existing_luks_open_mapper_target<R: CommandRunner>(
     )
     .map(|_| ())
     .map_err(|e| match e {
-        OwnershipError::BackingPathMismatch {
-            expected_path,
-            found_path,
-            ..
-        } => ReplaceError::NewTargetMapperBackingMismatch {
-            by_id: new_by_id.clone(),
-            mapper: new_mapper.clone(),
-            expected_path,
-            found_path,
-        },
-        OwnershipError::BackingPathResolveError { by_id, source, .. } => {
-            ReplaceError::NewTargetMapperBackingResolveError {
+        OwnershipError::MapperOwnership(failure) => match failure {
+            MapperOwnershipFailure::BackingPathMismatch {
+                expected_path,
+                found_path,
+                ..
+            } => ReplaceError::NewTargetMapperBackingMismatch {
                 by_id: new_by_id.clone(),
-                resolved: by_id,
-                source_message: source.to_string(),
+                mapper: new_mapper.clone(),
+                expected_path,
+                found_path,
+            },
+            MapperOwnershipFailure::BackingPathResolveError { by_id, source, .. } => {
+                ReplaceError::NewTargetMapperBackingResolveError {
+                    by_id: new_by_id.clone(),
+                    resolved: by_id,
+                    source_message: source.to_string(),
+                }
             }
-        }
-        OwnershipError::Conflict { found, .. } => ReplaceError::NewTargetUuidMismatchAtOpen {
-            by_id: new_by_id.clone(),
-            expected: new_uuid.clone(),
-            observed: found
-                .map(|u| u.as_str().to_owned())
-                .unwrap_or_else(|| "(no backing)".into()),
+            MapperOwnershipFailure::Conflict { found, .. } => {
+                ReplaceError::NewTargetUuidMismatchAtOpen {
+                    by_id: new_by_id.clone(),
+                    expected: new_uuid.clone(),
+                    observed: found
+                        .map(|u| u.as_str().to_owned())
+                        .unwrap_or_else(|| "(no backing)".into()),
+                }
+            }
         },
         OwnershipError::Parse(e) => ReplaceError::Validation(e.to_string()),
         OwnershipError::Cmd(e) => ReplaceError::Validation(e.to_string()),
@@ -4022,10 +4026,10 @@ mod tests {
     // Why it exists: the `--old == --new` guard in `plan_replace` is a
     //   user-visible CLI contract (operator typo protection). It fires
     //   before probe_config_disk's mapper-conflict detection would
-    //   otherwise surface the same bug as a confusing MapperConflict
+    //   otherwise surface the same bug as a confusing mapper conflict
     //   probe error. Without direct cmd-level coverage, a refactor that
     //   drops the guard would change the rejection variant from
-    //   Validation("must be different") to Probe(MapperConflict), and a
+    //   Validation("must be different") to Probe(MapperOwnership), and a
     //   refactor that moved the guard past the inhibitor/journal seam
     //   would strand a pending-op.json and a held logind inhibitor on
     //   what is conceptually a preflight rejection. Replaces a prior
@@ -8296,7 +8300,7 @@ mod tests {
     /// resolve-error arm. Resolver failures must stay distinct from both
     /// UUID mismatch and backing mismatch.
     //
-    // Intent: maps OwnershipError::BackingPathResolveError to the
+    // Intent: maps MapperOwnershipFailure::BackingPathResolveError to the
     //   replace-specific NewTargetMapperBackingResolveError variant.
     // Why: stale by-id/udev failures have different operator remediation.
     // Scenario: cryptsetup status sees braid-disk3, but canonicalizing the
@@ -8357,12 +8361,12 @@ mod tests {
     /// arm. When the open mapper's backing kernel path canonicalizes to
     /// the configured by-id target but the backing device's LUKS UUID
     /// disagrees with the journaled `new_uuid`, the classifier returns
-    /// `OwnershipError::Conflict` and `verify_existing_luks_open_mapper_target`
+    /// `MapperOwnershipFailure::Conflict` and `verify_existing_luks_open_mapper_target`
     /// maps it to `NewTargetUuidMismatchAtOpen` before any
     /// `BtrfsReplaceStart`.
     //
     // Intent: verify_existing_luks_open_mapper_target maps
-    //   OwnershipError::Conflict to NewTargetUuidMismatchAtOpen on the
+    //   MapperOwnershipFailure::Conflict to NewTargetUuidMismatchAtOpen on the
     //   mapper_open=true path, with no replace mutation issued.
     // Why: pins the only untested arm of the 4-arm OwnershipError ->
     //   ReplaceError map in `verify_existing_luks_open_mapper_target`;

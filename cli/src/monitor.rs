@@ -87,9 +87,7 @@ pub fn cmd_monitor_at<R: CommandRunner, F: Filesystem + ?Sized>(
                 | ProbeError::Parse(_)
                 | ProbeError::PoolDevice { .. }
                 | ProbeError::UnsupportedLuksVersion { .. }
-                | ProbeError::MapperConflict { .. }
-                | ProbeError::MapperBackingMismatch { .. }
-                | ProbeError::MapperBackingResolveError { .. }
+                | ProbeError::MapperOwnership(_)
                 | ProbeError::MountInfo(_)),
             ) => return Err(e.to_string()),
         };
@@ -819,7 +817,7 @@ mod tests {
      * stays silent.
      *
      * Why it exists: every ProbeError variant (Cmd, Parse, PoolDevice,
-     * UnsupportedLuksVersion, MapperConflict) used to flow through
+     * UnsupportedLuksVersion, mapper ownership) used to flow through
      * MonitorError::Probe -> exit 2 with no fail-closed signal. ADR 014
      * requires fail-closed: indeterminate pool state must beep.
      *

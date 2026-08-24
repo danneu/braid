@@ -1076,10 +1076,7 @@ pub(crate) fn paused_balance_warning<R: CommandRunner>(
 /// (pinned by `config_probe_advisory_names_disk`).
 fn config_probe_advisory(name: &DiskName, e: &ProbeError) -> String {
     match e {
-        ProbeError::MapperConflict { .. }
-        | ProbeError::MapperBackingMismatch { .. }
-        | ProbeError::MapperBackingResolveError { .. }
-        | ProbeError::UnsupportedLuksVersion { .. } => e.to_string(),
+        ProbeError::MapperOwnership(_) | ProbeError::UnsupportedLuksVersion { .. } => e.to_string(),
         _ => format!("disk '{name}' probe failed -- {e}"),
     }
 }
@@ -7365,7 +7362,7 @@ mod tests {
     }
 
     /*
-     * Intent: a MapperConflict on a present member's expected mapper surfaces
+     * Intent: a mapper conflict on a present member's expected mapper surfaces
      *   as a non-fatal advisory while the healthy pool still renders. The probe
      *   sweep is still the status-side fault surface for config-side mapper
      *   drift, but build_status no longer aborts on it: the report comes back
@@ -7457,7 +7454,7 @@ mod tests {
                 ),
             )
             // probe_config_disk for "disk1": by-id UUID = 11111111, mapper
-            // backing reports 99999999 → MapperConflict.
+            // backing reports 99999999 -> mapper conflict.
             .with_output(
                 CmdRequest::CryptsetupLuksUuid {
                     device: "/dev/disk/by-id/disk1".into(),
@@ -7497,7 +7494,7 @@ mod tests {
         let backing_path_resolver = crate::test_fixtures::MockBackingPathResolver::default()
             .with_path("/dev/disk/by-id/disk1", "/dev/vdz");
         let built = build_status(&runner, &fs, &config, &paths, &backing_path_resolver)
-            .expect("a MapperConflict on a present member must not blank status");
+            .expect("a mapper conflict on a present member must not blank status");
 
         // The healthy pool still renders: the conflict degrades one member, not
         // the whole report.
@@ -7722,6 +7719,7 @@ mod tests {
     #[test]
     fn config_probe_advisory_names_disk() {
         use crate::cmd::CmdError;
+        use crate::luks::MapperOwnershipFailure;
         use crate::parse::ParseError;
         use crate::probe::ProbeError;
         use crate::types::LuksUuid;
@@ -7733,21 +7731,21 @@ mod tests {
                 cmd: "cryptsetup luksDump".into(),
                 detail: "no Version line".into(),
             }),
-            ProbeError::MapperConflict {
+            ProbeError::MapperOwnership(MapperOwnershipFailure::Conflict {
                 name: "disk1".into(),
                 expected: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
                 found: Some(LuksUuid::parse("99999999-9999-9999-9999-999999999999").unwrap()),
-            },
-            ProbeError::MapperBackingMismatch {
+            }),
+            ProbeError::MapperOwnership(MapperOwnershipFailure::BackingPathMismatch {
                 name: "disk1".into(),
                 expected_path: "/dev/disk/by-id/disk1".into(),
                 found_path: "/dev/vdz".into(),
-            },
-            ProbeError::MapperBackingResolveError {
+            }),
+            ProbeError::MapperOwnership(MapperOwnershipFailure::BackingPathResolveError {
                 name: "disk1".into(),
                 by_id: "/dev/disk/by-id/disk1".into(),
                 source: std::io::Error::from(std::io::ErrorKind::NotFound),
-            },
+            }),
             ProbeError::UnsupportedLuksVersion {
                 name: "disk1".into(),
                 version: 1,

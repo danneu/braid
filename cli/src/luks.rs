@@ -114,6 +114,20 @@ pub enum LuksError {
         hint: &'static str,
         stderr: String,
     },
+    #[error("{0}")]
+    MapperOwnership(#[from] MapperOwnershipFailure),
+    #[error("parse error: {0}")]
+    Parse(#[from] ParseError),
+    #[error("command failed: {0}")]
+    Cmd(#[from] CmdError),
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+}
+
+/// Operator-facing failures proving that an active mapper is not owned by its
+/// configured disk, or that ownership could not be established safely.
+#[derive(Debug, thiserror::Error)]
+pub enum MapperOwnershipFailure {
     #[error(
         "disk '{name}' mapper '/dev/mapper/braid-{name}' is open but not \
          backed by the configured disk. Expected LUKS UUID {expected}, \
@@ -121,7 +135,7 @@ pub enum LuksError {
          'sudo cryptsetup close braid-{name}' and re-run.",
         mapper_conflict_found_display(found)
     )]
-    MapperConflict {
+    Conflict {
         name: String,
         expected: LuksUuid,
         found: Option<LuksUuid>,
@@ -132,7 +146,7 @@ pub enum LuksError {
          the conflicting mapper with 'sudo cryptsetup close braid-{name}' and \
          re-run."
     )]
-    MapperBackingMismatch {
+    BackingPathMismatch {
         name: String,
         expected_path: String,
         found_path: String,
@@ -142,22 +156,14 @@ pub enum LuksError {
          canonicalize '{by_id}' ({source}). Check that the configured disk is \
          plugged in and that udev has populated /dev/disk/by-id/."
     )]
-    MapperBackingResolveError {
+    BackingPathResolveError {
         name: String,
         by_id: String,
         source: std::io::Error,
     },
-    #[error("parse error: {0}")]
-    Parse(#[from] ParseError),
-    #[error("command failed: {0}")]
-    Cmd(#[from] CmdError),
-    #[error("I/O error: {0}")]
-    Io(#[from] std::io::Error),
 }
 
-/// Centralized mapper-conflict backing rendering so probe and LUKS errors
-/// preserve the same LUKS UUID wording.
-pub(crate) fn mapper_conflict_found_display(found: &Option<LuksUuid>) -> String {
+fn mapper_conflict_found_display(found: &Option<LuksUuid>) -> String {
     match found {
         Some(uuid) => uuid.to_string(),
         None => "no backing (stale mapper)".to_owned(),
@@ -840,27 +846,8 @@ pub(crate) enum MapperOwnership {
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum OwnershipError {
-    #[error(
-        "mapper conflict on '{name}': expected {expected}, found {}",
-        mapper_conflict_found_display(found)
-    )]
-    Conflict {
-        name: String,
-        expected: LuksUuid,
-        found: Option<LuksUuid>,
-    },
-    #[error("mapper backing mismatch on '{name}': expected {expected_path}, found {found_path}")]
-    BackingPathMismatch {
-        name: String,
-        expected_path: String,
-        found_path: String,
-    },
-    #[error("mapper backing path resolve error on '{name}' for '{by_id}': {source}")]
-    BackingPathResolveError {
-        name: String,
-        by_id: String,
-        source: std::io::Error,
-    },
+    #[error("{0}")]
+    MapperOwnership(#[from] MapperOwnershipFailure),
     #[error("parse error: {0}")]
     Parse(#[from] ParseError),
     #[error("command failed: {0}")]
@@ -870,33 +857,7 @@ pub(crate) enum OwnershipError {
 impl From<OwnershipError> for LuksError {
     fn from(err: OwnershipError) -> Self {
         match err {
-            OwnershipError::Conflict {
-                name,
-                expected,
-                found,
-            } => LuksError::MapperConflict {
-                name,
-                expected,
-                found,
-            },
-            OwnershipError::BackingPathMismatch {
-                name,
-                expected_path,
-                found_path,
-            } => LuksError::MapperBackingMismatch {
-                name,
-                expected_path,
-                found_path,
-            },
-            OwnershipError::BackingPathResolveError {
-                name,
-                by_id,
-                source,
-            } => LuksError::MapperBackingResolveError {
-                name,
-                by_id,
-                source,
-            },
+            OwnershipError::MapperOwnership(err) => LuksError::MapperOwnership(err),
             OwnershipError::Parse(err) => LuksError::Parse(err),
             OwnershipError::Cmd(err) => LuksError::Cmd(err),
         }
@@ -940,11 +901,12 @@ where
             backing: BackingDevice::Null,
         } => {
             let expected = expected_uuid()?;
-            return Err(OwnershipError::Conflict {
+            return Err(MapperOwnershipFailure::Conflict {
                 name: name.as_str().to_owned(),
                 expected,
                 found: None,
-            });
+            }
+            .into());
         }
         CryptsetupStatusOutput::Active {
             backing: BackingDevice::Path(device),
@@ -954,24 +916,25 @@ where
 
     let expected_path = backing_path_resolver
         .canonicalize(expected_by_id.as_str())
-        .map_err(|e| OwnershipError::BackingPathResolveError {
+        .map_err(|e| MapperOwnershipFailure::BackingPathResolveError {
             name: name.as_str().to_owned(),
             by_id: expected_by_id.as_str().to_owned(),
             source: e,
         })?;
     let found_path = backing_path_resolver
         .canonicalize(underlying)
-        .map_err(|e| OwnershipError::BackingPathResolveError {
+        .map_err(|e| MapperOwnershipFailure::BackingPathResolveError {
             name: name.as_str().to_owned(),
             by_id: underlying.to_owned(),
             source: e,
         })?;
     if expected_path != found_path {
-        return Err(OwnershipError::BackingPathMismatch {
+        return Err(MapperOwnershipFailure::BackingPathMismatch {
             name: name.as_str().to_owned(),
             expected_path,
             found_path,
-        });
+        }
+        .into());
     }
 
     let expected = expected_uuid()?;
@@ -981,11 +944,12 @@ where
     let found = match parse_cryptsetup_luks_uuid(&backing_raw) {
         Ok(out) => out.uuid,
         Err(_) if cryptsetup_luks_uuid_reports_not_luks(&backing_raw) => {
-            return Err(OwnershipError::Conflict {
+            return Err(MapperOwnershipFailure::Conflict {
                 name: name.as_str().to_owned(),
                 expected,
                 found: None,
-            });
+            }
+            .into());
         }
         Err(e) => return Err(OwnershipError::Parse(e)),
     };
@@ -993,11 +957,12 @@ where
     if found == expected {
         Ok(MapperOwnership::Owned)
     } else {
-        Err(OwnershipError::Conflict {
+        Err(MapperOwnershipFailure::Conflict {
             name: name.as_str().to_owned(),
             expected,
             found: Some(found),
-        })
+        }
+        .into())
     }
 }
 
@@ -1246,43 +1211,91 @@ mod tests {
         }
     }
 
-    // Intent: LuksError::MapperConflict renders the configured and found
-    //   LUKS UUIDs with the operator remediation text.
-    // Why it exists: probe and LUKS mapper-conflict errors share wording, so
-    //   this locks the LUKS public Display string against helper drift.
-    // Scenario: a mapper named for disk1 is active but backed by a different
-    //   LUKS container than the configured disk.
+    // Intent: the shared mapper-ownership failure is the authoritative exact
+    //   rendering for every condition, and both public wrappers preserve it.
+    // Why it exists: duplicate LUKS and probe variants previously allowed the
+    //   same operator message to drift independently at each boundary.
+    // Scenario: an active disk1 mapper has a foreign UUID, no backing device,
+    //   a different canonical backing path, or an unresolvable configured path.
     #[test]
-    fn luks_mapper_conflict_display_found_uuid() {
-        let err = LuksError::MapperConflict {
-            name: "disk1".to_owned(),
-            expected: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
-            found: Some(LuksUuid::parse("99999999-9999-9999-9999-999999999999").unwrap()),
-        };
+    fn mapper_ownership_failures_render_identically_through_public_wrappers() {
+        let expected_uuid = LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap();
+        let found_uuid = LuksUuid::parse("99999999-9999-9999-9999-999999999999").unwrap();
 
+        let cases = [
+            (
+                MapperOwnershipFailure::Conflict {
+                    name: "disk1".into(),
+                    expected: expected_uuid.clone(),
+                    found: Some(found_uuid.clone()),
+                },
+                "disk 'disk1' mapper '/dev/mapper/braid-disk1' is open but not backed by the configured disk. Expected LUKS UUID 11111111-1111-1111-1111-111111111111, found 99999999-9999-9999-9999-999999999999. Close the conflicting mapper with 'sudo cryptsetup close braid-disk1' and re-run.",
+            ),
+            (
+                MapperOwnershipFailure::Conflict {
+                    name: "disk1".into(),
+                    expected: expected_uuid.clone(),
+                    found: None,
+                },
+                "disk 'disk1' mapper '/dev/mapper/braid-disk1' is open but not backed by the configured disk. Expected LUKS UUID 11111111-1111-1111-1111-111111111111, found no backing (stale mapper). Close the conflicting mapper with 'sudo cryptsetup close braid-disk1' and re-run.",
+            ),
+            (
+                MapperOwnershipFailure::BackingPathMismatch {
+                    name: "disk1".into(),
+                    expected_path: "/dev/vdb".into(),
+                    found_path: "/dev/vdz".into(),
+                },
+                "disk 'disk1' mapper '/dev/mapper/braid-disk1' is open but backed by '/dev/vdz', not the configured disk at '/dev/vdb'. Close the conflicting mapper with 'sudo cryptsetup close braid-disk1' and re-run.",
+            ),
+        ];
+
+        let expected_messages = [cases[0].1, cases[1].1, cases[2].1];
+        for (failure, expected) in cases {
+            assert_eq!(failure.to_string(), expected);
+            assert_eq!(LuksError::MapperOwnership(failure).to_string(), expected);
+        }
+
+        let resolution_failure = || MapperOwnershipFailure::BackingPathResolveError {
+            name: "disk1".into(),
+            by_id: "/dev/disk/by-id/disk1".into(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "synthetic resolution failure",
+            ),
+        };
+        let expected = "disk 'disk1' mapper backing-path check failed: could not canonicalize '/dev/disk/by-id/disk1' (synthetic resolution failure). Check that the configured disk is plugged in and that udev has populated /dev/disk/by-id/.";
+        assert_eq!(resolution_failure().to_string(), expected);
         assert_eq!(
-            err.to_string(),
-            "disk 'disk1' mapper '/dev/mapper/braid-disk1' is open but not backed by the configured disk. Expected LUKS UUID 11111111-1111-1111-1111-111111111111, found 99999999-9999-9999-9999-999999999999. Close the conflicting mapper with 'sudo cryptsetup close braid-disk1' and re-run.",
+            LuksError::MapperOwnership(resolution_failure()).to_string(),
+            expected
         );
-    }
 
-    // Intent: LuksError::MapperConflict renders stale mappers as having no
-    //   backing rather than a missing UUID placeholder.
-    // Why it exists: hot-unplug conflict wording is operator-facing recovery
-    //   text and must stay aligned with the probe-layer error.
-    // Scenario: a mapper named for disk1 is active after its backing device
-    //   disappeared, so no found LUKS UUID can be read.
-    #[test]
-    fn luks_mapper_conflict_display_no_backing() {
-        let err = LuksError::MapperConflict {
-            name: "disk1".to_owned(),
-            expected: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
-            found: None,
-        };
-
+        let probe_cases = [
+            MapperOwnershipFailure::Conflict {
+                name: "disk1".into(),
+                expected: expected_uuid.clone(),
+                found: Some(found_uuid),
+            },
+            MapperOwnershipFailure::Conflict {
+                name: "disk1".into(),
+                expected: expected_uuid,
+                found: None,
+            },
+            MapperOwnershipFailure::BackingPathMismatch {
+                name: "disk1".into(),
+                expected_path: "/dev/vdb".into(),
+                found_path: "/dev/vdz".into(),
+            },
+        ];
+        for (failure, expected) in probe_cases.into_iter().zip(expected_messages) {
+            assert_eq!(
+                crate::probe::ProbeError::MapperOwnership(failure).to_string(),
+                expected
+            );
+        }
         assert_eq!(
-            err.to_string(),
-            "disk 'disk1' mapper '/dev/mapper/braid-disk1' is open but not backed by the configured disk. Expected LUKS UUID 11111111-1111-1111-1111-111111111111, found no backing (stale mapper). Close the conflicting mapper with 'sudo cryptsetup close braid-disk1' and re-run.",
+            crate::probe::ProbeError::MapperOwnership(resolution_failure()).to_string(),
+            expected
         );
     }
 
@@ -2200,11 +2213,11 @@ mod tests {
         .unwrap_err();
 
         match err {
-            OwnershipError::BackingPathMismatch {
+            OwnershipError::MapperOwnership(MapperOwnershipFailure::BackingPathMismatch {
                 name,
                 expected_path,
                 found_path,
-            } => {
+            }) => {
                 assert_eq!(name, "disk1");
                 assert_eq!(expected_path, "/dev/vdb");
                 assert_eq!(found_path, "/dev/vdz");
@@ -2292,11 +2305,11 @@ mod tests {
         .unwrap_err();
 
         match err {
-            OwnershipError::BackingPathResolveError {
+            OwnershipError::MapperOwnership(MapperOwnershipFailure::BackingPathResolveError {
                 name,
                 by_id,
                 source,
-            } => {
+            }) => {
                 assert_eq!(name, "disk1");
                 assert_eq!(by_id, "/dev/disk/by-id/disk1");
                 assert_eq!(source.kind(), std::io::ErrorKind::NotFound);
@@ -2337,11 +2350,11 @@ mod tests {
         .unwrap_err();
 
         match err {
-            OwnershipError::BackingPathResolveError {
+            OwnershipError::MapperOwnership(MapperOwnershipFailure::BackingPathResolveError {
                 name,
                 by_id,
                 source,
-            } => {
+            }) => {
                 assert_eq!(name, "disk1");
                 assert_eq!(by_id, "/dev/vdb");
                 assert_eq!(source.kind(), std::io::ErrorKind::PermissionDenied);
@@ -2375,16 +2388,16 @@ mod tests {
         let msg = err.to_string();
 
         match &err {
-            LuksError::MapperBackingResolveError {
+            LuksError::MapperOwnership(MapperOwnershipFailure::BackingPathResolveError {
                 name,
                 by_id,
                 source,
-            } => {
+            }) => {
                 assert_eq!(name, "disk1");
                 assert_eq!(by_id, "/dev/disk/by-id/disk1");
                 assert_eq!(source.kind(), std::io::ErrorKind::NotFound);
             }
-            other => panic!("expected MapperBackingResolveError, got {other:?}"),
+            other => panic!("expected mapper backing-path resolve error, got {other:?}"),
         }
         assert!(
             msg.contains("Check that the configured disk is plugged in"),
@@ -2431,11 +2444,11 @@ mod tests {
             .unwrap_err();
 
         match err {
-            LuksError::MapperConflict {
+            LuksError::MapperOwnership(MapperOwnershipFailure::Conflict {
                 name,
                 expected,
                 found,
-            } => {
+            }) => {
                 assert_eq!(name, "disk1");
                 assert_eq!(expected.as_str(), expected_uuid);
                 assert_eq!(
@@ -2443,7 +2456,7 @@ mod tests {
                     Some(found_uuid.to_owned())
                 );
             }
-            other => panic!("expected MapperConflict, got {other:?}"),
+            other => panic!("expected mapper conflict, got {other:?}"),
         }
         assert!(
             !runner
@@ -2489,16 +2502,16 @@ mod tests {
         .unwrap_err();
 
         match err {
-            LuksError::MapperConflict {
+            LuksError::MapperOwnership(MapperOwnershipFailure::Conflict {
                 name,
                 expected,
                 found,
-            } => {
+            }) => {
                 assert_eq!(name, "disk1");
                 assert_eq!(expected.as_str(), expected_uuid);
                 assert_eq!(found, None);
             }
-            other => panic!("expected MapperConflict, got {other:?}"),
+            other => panic!("expected mapper conflict, got {other:?}"),
         }
     }
 
@@ -2539,7 +2552,10 @@ mod tests {
         let err = ensure_luks_open(&runner, &disk("disk1"), &by_id, &resolver, &zpass("pass"))
             .unwrap_err();
 
-        assert!(matches!(err, LuksError::MapperConflict { found: None, .. }));
+        assert!(matches!(
+            err,
+            LuksError::MapperOwnership(MapperOwnershipFailure::Conflict { found: None, .. })
+        ));
         assert!(
             !runner
                 .requests()
@@ -2639,7 +2655,7 @@ mod tests {
 
         assert!(matches!(
             err,
-            LuksError::MapperConflict { found: Some(_), .. }
+            LuksError::MapperOwnership(MapperOwnershipFailure::Conflict { found: Some(_), .. })
         ));
         assert!(
             !runner
@@ -2684,12 +2700,15 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(matches!(err, LuksError::MapperConflict { found: None, .. }));
+        assert!(matches!(
+            err,
+            LuksError::MapperOwnership(MapperOwnershipFailure::Conflict { found: None, .. })
+        ));
     }
 
     /*
      * Intent: malformed active cryptsetup status output propagates as
-     *   LuksError::Parse, not MapperConflict.
+     *   LuksError::Parse, not a mapper-ownership failure.
      * Why it exists: parser failures should stay parser failures; treating
      *   malformed tool output as an ownership conflict hides compatibility drift.
      * Scenario: cryptsetup status says active but omits the required device line.
@@ -2721,7 +2740,7 @@ mod tests {
 
     /*
      * Intent: invalid UUID text from an active backing device propagates as
-     *   LuksError::Parse, not MapperConflict.
+     *   LuksError::Parse, not a mapper-ownership failure.
      * Why it exists: an exit-0 luksUUID response with malformed text is parser
      *   drift, while a non-LUKS exit is an ownership conflict.
      * Scenario: requested by-id UUID parses, but backing luksUUID emits junk.

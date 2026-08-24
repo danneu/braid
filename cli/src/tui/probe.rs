@@ -1,6 +1,6 @@
 use crate::cmd::{CmdRequest, CommandRunner};
 use crate::config::{FanControl, mapper_name};
-use crate::luks::{self, BackingPathResolver};
+use crate::luks::{self, BackingPathResolver, MapperOwnershipFailure};
 use crate::parse::types::{
     BackingDevice, CryptsetupStatusOutput, ScrubState, SmartHealth, SmartProbe,
 };
@@ -403,8 +403,10 @@ pub fn probe_pool_for_tui<R: CommandRunner, F: Filesystem + ?Sized>(
                     );
                     continue;
                 }
-                Err(ProbeError::MapperBackingMismatch { .. })
-                | Err(ProbeError::MapperConflict { .. }) => {
+                Err(ProbeError::MapperOwnership(
+                    MapperOwnershipFailure::BackingPathMismatch { .. }
+                    | MapperOwnershipFailure::Conflict { .. },
+                )) => {
                     // Surface mapper hijack / drift / stale dm-crypt
                     // explicitly so operators see a distinct red cell instead
                     // of the yellow "missing" used for unplugged disks. Both
@@ -420,7 +422,7 @@ pub fn probe_pool_for_tui<R: CommandRunner, F: Filesystem + ?Sized>(
                 // unwrap_or_else renders the default yellow "missing" cell (its
                 // documented fallback "for disks the unpooled probe couldn't
                 // classify"). Cmd/Parse are environmental (spawn failure, output
-                // drift). MapperBackingResolveError fires when braid-<name> is
+                // drift). BackingPathResolveError fires when braid-<name> is
                 // open but a backing path won't canonicalize, so NO ownership
                 // conflict was ever established: it must not be classified as
                 // MapperHijacked (the red "mapper conflict" cell asserts a
@@ -430,7 +432,9 @@ pub fn probe_pool_for_tui<R: CommandRunner, F: Filesystem + ?Sized>(
                 Err(
                     ProbeError::Cmd(_)
                     | ProbeError::Parse(_)
-                    | ProbeError::MapperBackingResolveError { .. },
+                    | ProbeError::MapperOwnership(MapperOwnershipFailure::BackingPathResolveError {
+                        ..
+                    }),
                 ) => continue,
                 // Unreachable from probe_config_disk today -- these arise only
                 // on the pool-probing paths -- but enumerated so a newly-wired
@@ -2840,7 +2844,7 @@ mod tests {
     // `UnpooledDiskRender::MapperHijacked`.
     //
     // Why it exists: this is the common unrelated-device hijack shape. The old
-    // catch-all swallowed `ProbeError::MapperBackingMismatch`, so the TUI
+    // catch-all swallowed mapper backing-path mismatch failures, so the TUI
     // fell back to the same yellow "missing" cell used for unplugged disks.
     //
     // Scenario: 1-disk live pool. Second declared disk exists and is LUKS2,
@@ -2916,7 +2920,7 @@ mod tests {
     // expected mapper is active with no backing as
     // `UnpooledDiskRender::MapperHijacked`.
     //
-    // Why it exists: stale dm-crypt produces `ProbeError::MapperConflict {
+    // Why it exists: stale dm-crypt produces `MapperOwnershipFailure::Conflict {
     // found: None }`. It needs the same visible red TUI state as
     // path-mismatch hijacks instead of disappearing into the generic
     // graceful-degrade path.
@@ -2994,7 +2998,7 @@ mod tests {
     // the view layer falls back to its default "missing" cell -- it is NOT
     // classified as MapperHijacked.
     //
-    // Why it exists: ProbeError::MapperBackingResolveError is reachable from
+    // Why it exists: MapperOwnershipFailure::BackingPathResolveError is reachable from
     // probe_config_disk but is deliberately routed to the catch-all `continue`
     // (no unpooled_disks entry -> unpooled_disk_status_cell None-fallback):
     // canonicalization fails before any ownership conflict can be established,

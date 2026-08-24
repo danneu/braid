@@ -7676,18 +7676,20 @@ mod tests {
 
         match result {
             Err(AddError::JournalLifecycle { source, advice }) => match *source {
-                AddError::Luks(crate::luks::LuksError::MapperBackingMismatch {
-                    expected_path,
-                    found_path,
-                    ..
-                }) => {
+                AddError::Luks(crate::luks::LuksError::MapperOwnership(
+                    crate::luks::MapperOwnershipFailure::BackingPathMismatch {
+                        expected_path,
+                        found_path,
+                        ..
+                    },
+                )) => {
                     assert_eq!(expected_path, "/dev/vdb");
                     assert_eq!(found_path, "/dev/vdz");
                     assert!(advice.contains("run `braid recover`"));
                 }
-                other => panic!("expected MapperBackingMismatch source, got {other:?}"),
+                other => panic!("expected mapper backing-path mismatch source, got {other:?}"),
             },
-            other => panic!("expected MapperBackingMismatch, got {other:?}"),
+            other => panic!("expected mapper backing-path mismatch, got {other:?}"),
         }
         let requests = runner.requests();
         assert!(

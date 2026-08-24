@@ -3,8 +3,8 @@ use std::collections::BTreeSet;
 use crate::cmd::{CmdError, CmdRequest, CommandRunner};
 use crate::config::mapper_name;
 use crate::luks::{
-    BackingPathResolver, MapperOwnership, OwnershipError, classify_mapper_ownership,
-    mapper_conflict_found_display,
+    BackingPathResolver, MapperOwnership, MapperOwnershipFailure, OwnershipError,
+    classify_mapper_ownership,
 };
 use crate::parse::types::{BackingDevice, CryptsetupStatusOutput};
 use crate::parse::{
@@ -88,39 +88,8 @@ pub enum ProbeError {
          (braid will reformat it as LUKS2)."
     )]
     UnsupportedLuksVersion { name: String, version: u32 },
-    #[error(
-        "disk '{name}' mapper '/dev/mapper/braid-{name}' is open but not \
-         backed by the configured disk. Expected LUKS UUID {expected}, \
-         found {}. Close the conflicting mapper with \
-         'sudo cryptsetup close braid-{name}' and re-run.",
-        mapper_conflict_found_display(found)
-    )]
-    MapperConflict {
-        name: String,
-        expected: LuksUuid,
-        found: Option<LuksUuid>,
-    },
-    #[error(
-        "disk '{name}' mapper '/dev/mapper/braid-{name}' is open but backed by \
-         '{found_path}', not the configured disk at '{expected_path}'. Close \
-         the conflicting mapper with 'sudo cryptsetup close braid-{name}' and \
-         re-run."
-    )]
-    MapperBackingMismatch {
-        name: String,
-        expected_path: String,
-        found_path: String,
-    },
-    #[error(
-        "disk '{name}' mapper backing-path check failed: could not \
-         canonicalize '{by_id}' ({source}). Check that the configured disk is \
-         plugged in and that udev has populated /dev/disk/by-id/."
-    )]
-    MapperBackingResolveError {
-        name: String,
-        by_id: String,
-        source: std::io::Error,
-    },
+    #[error("{0}")]
+    MapperOwnership(#[from] MapperOwnershipFailure),
     #[error("mountinfo error: {0}")]
     MountInfo(#[from] crate::mount_check::MountInfoError),
 }
@@ -128,33 +97,7 @@ pub enum ProbeError {
 impl From<OwnershipError> for ProbeError {
     fn from(err: OwnershipError) -> Self {
         match err {
-            OwnershipError::Conflict {
-                name,
-                expected,
-                found,
-            } => ProbeError::MapperConflict {
-                name,
-                expected,
-                found,
-            },
-            OwnershipError::BackingPathMismatch {
-                name,
-                expected_path,
-                found_path,
-            } => ProbeError::MapperBackingMismatch {
-                name,
-                expected_path,
-                found_path,
-            },
-            OwnershipError::BackingPathResolveError {
-                name,
-                by_id,
-                source,
-            } => ProbeError::MapperBackingResolveError {
-                name,
-                by_id,
-                source,
-            },
+            OwnershipError::MapperOwnership(err) => ProbeError::MapperOwnership(err),
             OwnershipError::Parse(err) => ProbeError::Parse(err),
             OwnershipError::Cmd(err) => ProbeError::Cmd(err),
         }
@@ -251,7 +194,7 @@ pub fn probe_config_disk<R: CommandRunner, F: Filesystem + ?Sized>(
 ///
 /// Returns `Ok(true)` when the mapper is open and its backing LUKS
 /// container's UUID matches `expected_uuid`. Returns `Ok(false)` when the
-/// mapper is inactive. Returns `ProbeError::MapperConflict` when the
+/// mapper is inactive. Returns `ProbeError::MapperOwnership` when the
 /// mapper is active but its backing is missing (stale dm-crypt) or
 /// holds a different LUKS UUID (external mapper aliasing over our name).
 fn probe_mapper_open<R: CommandRunner>(
@@ -677,46 +620,6 @@ mod tests {
 
     // -- probe_config_disk tests --
 
-    // Intent: ProbeError::MapperConflict renders the configured and found
-    //   LUKS UUIDs with the operator remediation text.
-    // Why it exists: probe and LUKS mapper-conflict errors share wording, so
-    //   this locks the probe public Display string against helper drift.
-    // Scenario: a mapper named for disk1 is active but backed by a different
-    //   LUKS container than the configured disk.
-    #[test]
-    fn probe_mapper_conflict_display_found_uuid() {
-        let err = ProbeError::MapperConflict {
-            name: "disk1".to_owned(),
-            expected: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
-            found: Some(LuksUuid::parse("99999999-9999-9999-9999-999999999999").unwrap()),
-        };
-
-        assert_eq!(
-            err.to_string(),
-            "disk 'disk1' mapper '/dev/mapper/braid-disk1' is open but not backed by the configured disk. Expected LUKS UUID 11111111-1111-1111-1111-111111111111, found 99999999-9999-9999-9999-999999999999. Close the conflicting mapper with 'sudo cryptsetup close braid-disk1' and re-run.",
-        );
-    }
-
-    // Intent: ProbeError::MapperConflict renders stale mappers as having no
-    //   backing rather than a missing UUID placeholder.
-    // Why it exists: hot-unplug conflict wording is operator-facing recovery
-    //   text and must stay aligned with the LUKS-layer error.
-    // Scenario: a mapper named for disk1 is active after its backing device
-    //   disappeared, so no found LUKS UUID can be read.
-    #[test]
-    fn probe_mapper_conflict_display_no_backing() {
-        let err = ProbeError::MapperConflict {
-            name: "disk1".to_owned(),
-            expected: LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap(),
-            found: None,
-        };
-
-        assert_eq!(
-            err.to_string(),
-            "disk 'disk1' mapper '/dev/mapper/braid-disk1' is open but not backed by the configured disk. Expected LUKS UUID 11111111-1111-1111-1111-111111111111, found no backing (stale mapper). Close the conflicting mapper with 'sudo cryptsetup close braid-disk1' and re-run.",
-        );
-    }
-
     #[test]
     fn probe_config_disk_absent() {
         let runner = MockRunner::default();
@@ -957,7 +860,7 @@ mod tests {
     /*
      * Intent: when /dev/mapper/braid-<name> is open but backed by a LUKS
      *   container with a different UUID than the configured disk, the
-     *   probe must surface ProbeError::MapperConflict instead of
+     *   probe must surface ProbeError::MapperOwnership(Conflict) instead of
      *   reporting mapper_open=true.
      * Why it exists: this is the failure-layer test for the
      *   path-existence regression in `probe_mapper_open`.
@@ -1014,16 +917,16 @@ mod tests {
         )
         .unwrap_err();
         match err {
-            ProbeError::MapperBackingMismatch {
+            ProbeError::MapperOwnership(MapperOwnershipFailure::BackingPathMismatch {
                 name,
                 expected_path,
                 found_path,
-            } => {
+            }) => {
                 assert_eq!(name, "toshiba");
                 assert_eq!(expected_path, "/dev/disk/by-id/disk-1");
                 assert_eq!(found_path, "/dev/vdz");
             }
-            other => panic!("expected ProbeError::MapperBackingMismatch, got: {other:?}"),
+            other => panic!("expected mapper backing-path mismatch, got: {other:?}"),
         }
         let by_id_luks_uuid_requests = runner
             .requests()
@@ -1082,16 +985,16 @@ mod tests {
         let err = probe_config_disk(&runner, &fs, &dn("toshiba"), &d, &resolver).unwrap_err();
         let msg = err.to_string();
         match &err {
-            ProbeError::MapperBackingResolveError {
+            ProbeError::MapperOwnership(MapperOwnershipFailure::BackingPathResolveError {
                 name,
                 by_id,
                 source,
-            } => {
+            }) => {
                 assert_eq!(name, "toshiba");
                 assert_eq!(by_id, "/dev/disk/by-id/disk-1");
                 assert_eq!(source.kind(), std::io::ErrorKind::NotFound);
             }
-            other => panic!("expected MapperBackingResolveError, got {other:?}"),
+            other => panic!("expected mapper backing-path resolve error, got {other:?}"),
         }
         assert!(
             msg.contains("Check that the configured disk is plugged in"),
@@ -1100,7 +1003,7 @@ mod tests {
     }
 
     // Intent: when an active mapper is backed by a non-LUKS device, the
-    //   probe surfaces ProbeError::MapperConflict with found=None.
+    //   probe surfaces ProbeError::MapperOwnership(Conflict) with found=None.
     // Why it exists: mapper ownership failure should use the same recovery
     //   path as executor-time checks, not a generic parse error.
     // Scenario: a foreign mapper is aliased over braid's mapper name but its
@@ -1147,11 +1050,11 @@ mod tests {
         let err = probe_config_disk(&runner, &fs, &dn("toshiba"), &d, &resolver).unwrap_err();
 
         match err {
-            ProbeError::MapperConflict {
+            ProbeError::MapperOwnership(MapperOwnershipFailure::Conflict {
                 name,
                 expected,
                 found,
-            } => {
+            }) => {
                 assert_eq!(name, "toshiba");
                 assert_eq!(
                     expected,
@@ -1159,7 +1062,7 @@ mod tests {
                 );
                 assert_eq!(found, None);
             }
-            other => panic!("expected ProbeError::MapperConflict, got: {other:?}"),
+            other => panic!("expected mapper conflict, got: {other:?}"),
         }
     }
 
@@ -1224,7 +1127,7 @@ mod tests {
     /*
      * Intent: when cryptsetup status reports the mapper as active but
      *   with device = (null), the probe must surface
-     *   ProbeError::MapperConflict with found=None so downstream
+     *   ProbeError::MapperOwnership(Conflict) with found=None so downstream
      *   mutations do not operate on a stale mapper whose backing disk
      *   is gone.
      * Why it exists: hot-unplug leaves the mapper structure present but
@@ -1271,11 +1174,11 @@ mod tests {
         )
         .unwrap_err();
         match err {
-            ProbeError::MapperConflict {
+            ProbeError::MapperOwnership(MapperOwnershipFailure::Conflict {
                 name,
                 expected,
                 found,
-            } => {
+            }) => {
                 assert_eq!(name, "toshiba");
                 assert_eq!(
                     expected,
@@ -1283,7 +1186,7 @@ mod tests {
                 );
                 assert_eq!(found, None);
             }
-            other => panic!("expected ProbeError::MapperConflict, got: {other:?}"),
+            other => panic!("expected mapper conflict, got: {other:?}"),
         }
     }
 
