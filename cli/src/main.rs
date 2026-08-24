@@ -1067,13 +1067,11 @@ fn main() {
                 },
             ) {
                 Ok(()) => {}
-                Err(braid_cli::recover::RecoverError::Mount(
-                    braid_cli::mount::MountError::DegradedRefused(msg),
-                )) => {
-                    print_cli_error(&msg);
-                    std::process::exit(2);
-                }
                 Err(e) => {
+                    if e.is_degraded_refusal() {
+                        print_cli_error(&e.to_string());
+                        std::process::exit(2);
+                    }
                     print_cli_error(&e.to_string());
                     std::process::exit(1);
                 }

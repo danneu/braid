@@ -140,4 +140,4 @@ README's recovery summary synchronized.
 ## Commit progress
 
 - [x] 1. fix(cli): classify journal-bearing mutation failures
-- [ ] 2. fix(recover): classify recovery failures from journal state
+- [x] 2. fix(recover): classify recovery failures from journal state

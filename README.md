@@ -328,7 +328,10 @@ sudo braid remove wd1 --yes
 An interrupted mutation leaves `/var/lib/braid/pending-op.json` behind, and
 other commands refuse to run until you finish recovery with `sudo braid
 recover`. Recovery completes the part that is safe to finish and refuses
-anything ambiguous rather than guess. Details:
+anything ambiguous rather than guess. If recovery fails, its final guidance is
+derived from `pending-op.json`: retry recovery when a valid journal remains,
+repair state-directory I/O when a just-cleared journal's deletion could not be
+confirmed, and reconcile manually when the journal cannot be read or parsed. Details:
 [recover](docs/commands/recover.md) and
 [Recovery scenarios](docs/guides/recovery-scenarios.md).
 

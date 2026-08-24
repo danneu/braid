@@ -47,10 +47,18 @@ pub enum RecoverError {
     Luks(#[from] crate::luks::LuksError),
     #[error("{0}")]
     Failed(String),
+    /// Command-boundary wrapper that preserves the typed recovery failure while
+    /// appending remediation from the final authoritative journal observation.
+    #[error("{source}\n{advice}")]
+    JournalLifecycle {
+        #[source]
+        source: Box<RecoverError>,
+        advice: String,
+    },
     #[error(
         "pool was modified by recovery, but acked-stats cleanup failed at {stage}: {detail}\n\
          pending-op.json is preserved; rm /var/lib/braid/acked-stats.json before \
-         trusting `braid monitor`, then re-run `braid recover`."
+         trusting `braid monitor`."
     )]
     AckCleanupFailed { stage: &'static str, detail: String },
     /// Journaled-snapshot corruption: the same `devid` resolves to two or
@@ -71,6 +79,18 @@ pub enum RecoverError {
         "no member in journaled membership has devid {devid}; the journal entry was written against a never-enriched member -- see docs/internals/luks-unlock.md and docs/guides/recovery-scenarios.md before removing /var/lib/braid/pending-op.json"
     )]
     NoMemberForJournaledDevid { devid: Devid },
+}
+
+impl RecoverError {
+    /// Preserve the dedicated degraded-mount exit status through the
+    /// command-boundary lifecycle wrapper.
+    pub fn is_degraded_refusal(&self) -> bool {
+        match self {
+            Self::Mount(MountError::DegradedRefused(_)) => true,
+            Self::JournalLifecycle { source, .. } => source.is_degraded_refusal(),
+            _ => false,
+        }
+    }
 }
 
 /// Recover-local snapshot-walk errors raised by `live_pool_matches_membership`
@@ -176,7 +196,7 @@ fn resolve_by_id_for_underlying(
              udevadm info --query=symlink --name {underlying}\n\
              If the output contains no `disk/by-id/...` entries, ensure udev \
              is running and the device's hardware identifiers are exposed by \
-             the kernel, then re-run `braid recover`. If by-id entries exist \
+             the kernel. If by-id entries exist \
              but none match this device's canonical path, file a braid bug \
              with the udevadm output."
         )));
@@ -605,8 +625,7 @@ impl RecoverCompletion {
                      an operator may have remounted it. pool.json was not \
                      written and the pending-op journal is preserved. \
                      Investigate with `btrfs check` and remount read-write \
-                     with `mount -o remount,rw {mp}`, then re-run braid \
-                     recover.",
+                     with `mount -o remount,rw {mp}`.",
                     entry.vfs_options,
                     entry.fs_options,
                     mp = plan.mount_point
@@ -631,7 +650,7 @@ impl RecoverCompletion {
                  expected a mounted pool with members. pool.json was not \
                  written and the pending-op journal is preserved. Investigate \
                  (external umount? btrfs auto-remount-ro? mount_point \
-                 mismatch?) and re-run braid recover.",
+                 mismatch?).",
                 plan.mount_point, probe_state
             )));
         }
@@ -1358,10 +1377,10 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
                  dev_replace on this mount session, leaving stale in-memory device \
                  state that probe_pool cannot distinguish from real topology.\n\n\
                  To recover safely, fully cycle the mount yourself first:\n  \
-                 sudo braid lock\n  sudo braid recover\n\n\
+                 sudo braid lock\n\n\
                  braid lock works with a pending-operation journal and unmounts + \
-                 closes LUKS, after which braid recover opens a fresh mount session \
-                 and clears the staleness via the relock cycle."
+                 closes LUKS so the next recovery attempt can open a fresh mount \
+                 session and clear the staleness via the relock cycle."
                     .to_owned(),
             ),
         ));
@@ -1391,7 +1410,7 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
                          (vfs_options={:?}, fs_options={:?}) -- execute \
                          would refuse. Investigate with `btrfs check` and \
                          remount read-write with `mount -o remount,rw {mp}` \
-                         before re-running braid recover. pool.json and the \
+                         before continuing. pool.json and the \
                          pending-op journal are unchanged.",
                         entry.vfs_options,
                         entry.fs_options,
@@ -1591,6 +1610,20 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
 /// Planning loads the journal, resolves admission membership, and plans mount/open;
 /// execute verifies credentials and replays journal actions.
 pub fn cmd_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
+    runner: &R,
+    fs: &F,
+    by_id_resolver: &dyn ByIdResolver,
+    params: &RecoverParams<'_>,
+) -> Result<(), RecoverError> {
+    cmd_recover_inner(runner, fs, by_id_resolver, params).map_err(|error| {
+        RecoverError::JournalLifecycle {
+            source: Box::new(error),
+            advice: journal::recovery_error_advice(params.paths),
+        }
+    })
+}
+
+fn cmd_recover_inner<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
     by_id_resolver: &dyn ByIdResolver,
@@ -1922,7 +1955,7 @@ fn foreign_live_device_not_admitted(dev: &PoolDevice) -> RecoverError {
         "device {} (LUKS UUID {}) is in the live pool but has no journaled by-id \
          binding in the recovery admission membership for this phase.\n\
          This must be resolved manually -- provide the correct \
-         /dev/disk/by-id/ path and re-run recovery.",
+         /dev/disk/by-id/ path.",
         dev.mapper, dev.luks_uuid
     ))
 }
@@ -3346,7 +3379,7 @@ fn wait_for_kernel_replace_to_finish<R: CommandRunner>(
             }
             ReplaceState::Suspended { pct } => {
                 let message = format!(
-                    "pool: kernel dev_replace is suspended at {pct:.1}% (target device unavailable). Run `btrfs replace cancel {mount_point}` to clear it, then re-run `braid recover`."
+                    "pool: kernel dev_replace is suspended at {pct:.1}% (target device unavailable). Run `btrfs replace cancel {mount_point}` to clear it."
                 );
                 emit_status(&status_line(StatusTag::Fail, color_enabled, &message));
                 return Err(RecoverError::Failed(message));
@@ -3719,7 +3752,7 @@ mod tests {
     use crate::preview::NoteLevel;
     use crate::probe::Filesystem;
     use crate::test_fixtures::{
-        PoolFixture, RecordingSleeper, RemountHarness, TEST_PASSPHRASE_BYTES,
+        PoolFixture, RecordingSleeper, RemountHarness, TEST_PASSPHRASE_BYTES, test_uuid,
     };
     use crate::types::{
         ByIdPath, DiskName, LuksFormatExtraOpts, LuksUuid, MapperName, MountPoint,
@@ -3822,6 +3855,127 @@ mod tests {
         fn create_dir_all(&self, _path: &str) -> Result<(), std::io::Error> {
             Ok(())
         }
+    }
+
+    // Intent: every recovery failure is wrapped at the command boundary with
+    // advice derived from the journal state visible after that failure.
+    // Why it exists: lower-level recovery branches must not independently
+    // decide whether the operator can rerun recovery.
+    // Scenario: recovery fails with a valid visible journal and preserves the
+    // typed source error before one shared rerun instruction.
+    #[test]
+    fn cmd_recover_classifies_failure_with_visible_journal() {
+        let f = PoolFixture::empty();
+        let pending = journal::build_journal(
+            PoolMembership::empty(),
+            PoolMembership::empty(),
+            OpKind::Remove {
+                luks_uuid: test_uuid(975),
+                name: DiskName::parse("disk1").unwrap(),
+            },
+        );
+        journal::write_journal(&f.paths, &pending).unwrap();
+
+        let err = cmd_recover(
+            &MockRunner::default(),
+            &MockFs::without_mounted_pool(&[]),
+            &MockByIdResolver::default(),
+            &f.recover_params().passphrase_file(None).build(),
+        )
+        .unwrap_err();
+
+        match err {
+            RecoverError::JournalLifecycle { source, advice } => {
+                assert!(!matches!(*source, RecoverError::JournalLifecycle { .. }));
+                assert!(advice.contains("re-run `braid recover`"));
+                assert_eq!(advice.matches("re-run `braid recover`").count(), 1);
+            }
+            other => panic!("expected journal lifecycle wrapper, got {other:?}"),
+        }
+    }
+
+    // Intent: an absent journal after a recovery error renders uncertain
+    // deletion guidance without directing the operator into recovery.
+    // Why it exists: every journal-clear branch returns through this same
+    // boundary, so an absent final observation must not claim a rerun is safe.
+    // Scenario: the command starts with no journal, preserving its original
+    // refusal as the typed source while classifying the absent final state.
+    #[test]
+    fn cmd_recover_classifies_failure_with_absent_journal() {
+        let f = PoolFixture::empty();
+        let err = cmd_recover(
+            &MockRunner::default(),
+            &MockFs::new(&[]),
+            &MockByIdResolver::default(),
+            &f.recover_params().passphrase_file(None).build(),
+        )
+        .unwrap_err();
+
+        match err {
+            RecoverError::JournalLifecycle { source, advice } => {
+                assert!(matches!(*source, RecoverError::Failed(_)));
+                assert!(advice.contains("deletion durability was not confirmed"));
+                assert!(!advice.contains("re-run `braid recover`"));
+            }
+            other => panic!("expected journal lifecycle wrapper, got {other:?}"),
+        }
+    }
+
+    // Intent: journals that recovery cannot consume render storage/manual
+    // remediation instead of a contradictory recovery retry.
+    // Why it exists: the classifier must use `load_journal`, including its
+    // parse and I/O distinctions, rather than a path-existence check.
+    // Scenario: pending-op.json is first invalid JSON and then an unreadable
+    // filesystem object at the recovery command boundary.
+    #[test]
+    fn cmd_recover_classifies_unparseable_and_unreadable_journals() {
+        let f = PoolFixture::empty();
+        std::fs::write(f.paths.pending_op_json(), b"not json").unwrap();
+        let err = cmd_recover(
+            &MockRunner::default(),
+            &MockFs::new(&[]),
+            &MockByIdResolver::default(),
+            &f.recover_params().passphrase_file(None).build(),
+        )
+        .unwrap_err();
+        let RecoverError::JournalLifecycle { advice, .. } = err else {
+            panic!("expected journal lifecycle wrapper");
+        };
+        assert!(advice.contains("observed journal error"));
+        assert!(!advice.contains("re-run `braid recover`"));
+
+        std::fs::remove_file(f.paths.pending_op_json()).unwrap();
+        std::fs::create_dir(f.paths.pending_op_json()).unwrap();
+        let err = cmd_recover(
+            &MockRunner::default(),
+            &MockFs::new(&[]),
+            &MockByIdResolver::default(),
+            &f.recover_params().passphrase_file(None).build(),
+        )
+        .unwrap_err();
+        let RecoverError::JournalLifecycle { advice, .. } = err else {
+            panic!("expected journal lifecycle wrapper");
+        };
+        assert!(advice.contains("observed journal error"));
+        assert!(advice.contains("after manual reconciliation"));
+        assert!(!advice.contains("re-run `braid recover`"));
+    }
+
+    // Intent: recovery lifecycle classification does not change the dedicated
+    // degraded-mount exit-code signal consumed by the CLI boundary.
+    // Why it exists: wrapping all recovery errors would otherwise hide the
+    // typed refusal that main maps to exit status 2.
+    // Scenario: a degraded refusal is nested under lifecycle advice.
+    #[test]
+    fn recovery_wrapper_preserves_degraded_refusal() {
+        let err = RecoverError::JournalLifecycle {
+            source: Box::new(RecoverError::Mount(MountError::DegradedRefused(
+                "degraded".into(),
+            ))),
+            advice: "advice".into(),
+        };
+        assert!(err.is_degraded_refusal());
+        assert_eq!(err.to_string(), "degraded\nadvice");
     }
 
     struct FailingInhibitor;
@@ -4098,7 +4252,7 @@ mod tests {
             vec![
                 "[wait] pool: waiting for kernel dev_replace to finish...",
                 "  ... 5.0%",
-                "[fail] pool: kernel dev_replace is suspended at 12.5% (target device unavailable). Run `btrfs replace cancel /mnt/storage` to clear it, then re-run `braid recover`.",
+                "[fail] pool: kernel dev_replace is suspended at 12.5% (target device unavailable). Run `btrfs replace cancel /mnt/storage` to clear it.",
             ],
         );
     }
@@ -14996,7 +15150,7 @@ mod tests {
 
         let err = result.expect_err("should refuse degraded mount");
         assert!(
-            matches!(&err, RecoverError::Mount(MountError::DegradedRefused(_))),
+            err.is_degraded_refusal(),
             "expected DegradedRefused, got: {err:?}"
         );
         let msg = err.to_string();
@@ -19206,8 +19360,8 @@ mod tests {
                 "dry_run={dry_run}: error must direct to `sudo braid lock`, got: {err:?}",
             );
             assert!(
-                err.contains("sudo braid recover"),
-                "dry_run={dry_run}: error must direct to `sudo braid recover`, got: {err:?}",
+                !err.contains("sudo braid recover"),
+                "dry_run={dry_run}: planner error must leave retry guidance to the command boundary, got: {err:?}",
             );
 
             assert_eq!(

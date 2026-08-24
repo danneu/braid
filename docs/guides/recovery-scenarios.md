@@ -115,6 +115,19 @@ Recover will:
 sudo braid status
 ```
 
+If recovery itself fails, its final guidance comes from a fresh authoritative
+read of `pending-op.json`:
+
+- A valid journal is still visible: address the reported failure, then rerun
+  `sudo braid recover`. Recovery is designed to retry from the journaled phase.
+- The journal is absent: there is no recovery state to retry. If recovery had
+  just cleared the journal, deletion durability was not confirmed; repair
+  state-directory I/O, restart, and run recovery only if `pending-op.json`
+  reappears.
+- The journal cannot be read or parsed: do not keep rerunning recovery. Repair
+  state-directory access, or follow [Pending-op file corruption](#pending-op-file-corruption)
+  for manual reconciliation of invalid contents.
+
 ### Interrupted between returned-disk wipe and add
 
 If an existing braid-labeled disk was being returned to the pool and the add was interrupted after `wipefs --types btrfs` but before `btrfs device add`, run:

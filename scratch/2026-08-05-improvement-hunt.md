@@ -72,7 +72,7 @@ task lands. `Rejected` tasks are retained for reference and are not pending work
 | TASK-12 | Open | -- | Simplification, dry-run | Share returned-disk enrollment preview steps between add and replace. |
 | TASK-13 | Open | -- | Simplification, data modeling | Delete the uninhabited partial-preview scaffolding and stale completeness claims. |
 | TASK-14 | Open | -- | Data modeling, architecture | Move the crate-wide `Filesystem` seam out of the probe-specific module. |
-| TASK-15 | Open | -- | Error handling, recovery UX | Give remove-missing post-commit failures dedicated recovery-aware error variants. |
+| TASK-15 | Done | 2026-08-24 | Error handling, recovery UX | Give remove-missing post-commit failures dedicated recovery-aware error variants. |
 | TASK-16 | Done | 2026-08-24 | Testing | Make the missing NVMe healthy fixture test fail instead of silently skipping. |
 | TASK-17 | Open | -- | Testing, error handling | Lock the live btrfs minimum-devices stderr contract used for recovery hints. |
 | TASK-18 | Done | 2026-08-24 | Testing, reliability | Make the authoritative stable golden lane fail when required fixtures are missing. |

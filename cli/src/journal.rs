@@ -45,6 +45,25 @@ pub(crate) fn mutation_error_advice(paths: &StatePaths, state: JournalWriteState
     mutation_error_advice_for_observation(state, observation)
 }
 
+/// Derive retry guidance for a failed recovery from the journal state that a
+/// subsequent `braid recover` invocation would actually observe.
+pub(crate) fn recovery_error_advice(paths: &StatePaths) -> String {
+    let loaded = load_journal(paths);
+    let observation = loaded.as_ref().map(|journal| journal.is_some());
+    recovery_error_advice_for_observation(observation)
+}
+
+/// Render recovery-specific remediation from an already-observed journal
+/// result so the state table can be tested without filesystem fault injection.
+fn recovery_error_advice_for_observation(observation: Result<bool, &JournalError>) -> String {
+    match observation {
+        Ok(true) => "pending-op.json is present -- address the reported failure, then re-run `braid recover`.".to_string(),
+        Ok(false) => "pending-op.json is absent -- there is no recovery state to retry. If the journal was just cleared, deletion durability was not confirmed; repair state-directory I/O, and run `braid recover` only if pending-op.json reappears after a restart.".to_string(),
+        Err(e @ JournalError::Parse { .. }) => format!("observed journal error: {e}"),
+        Err(e) => format!("observed journal error: {e}. {PENDING_OP_MANUAL_REMEDIATION}"),
+    }
+}
+
 /// Render remediation from an already-observed journal result so the state
 /// table can be tested without privilege-dependent filesystem failures.
 fn mutation_error_advice_for_observation(
@@ -483,6 +502,39 @@ mod tests {
         assert!(unreadable.contains("observed journal error"));
         assert!(unreadable.contains("after manual reconciliation"));
         assert!(!unreadable.contains("run `braid recover`"));
+    }
+
+    // Intent: recovery remediation is derived from the final authoritative
+    // journal observation at the command boundary.
+    // Why it exists: failed recovery must distinguish an idempotent rerun from
+    // uncertain journal deletion and from state that recovery cannot consume.
+    // Scenario: recovery fails with a valid, absent, unreadable, or
+    // unparseable pending-operation journal.
+    #[test]
+    fn recovery_error_advice_covers_authoritative_state_table() {
+        let parse = JournalError::Parse {
+            detail: "bad json".into(),
+        };
+        let io = JournalError::Io {
+            path: PathBuf::from("/var/lib/braid/pending-op.json"),
+            source: std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied"),
+        };
+
+        let visible = recovery_error_advice_for_observation(Ok(true));
+        assert!(visible.contains("re-run `braid recover`"));
+
+        let absent = recovery_error_advice_for_observation(Ok(false));
+        assert!(absent.contains("deletion durability was not confirmed"));
+        assert!(absent.contains("only if pending-op.json reappears"));
+
+        let unparseable = recovery_error_advice_for_observation(Err(&parse));
+        assert!(unparseable.contains("observed journal error"));
+        assert!(!unparseable.contains("re-run `braid recover`"));
+
+        let unreadable = recovery_error_advice_for_observation(Err(&io));
+        assert!(unreadable.contains("observed journal error"));
+        assert!(unreadable.contains("after manual reconciliation"));
+        assert!(!unreadable.contains("re-run `braid recover`"));
     }
 
     // Intent: the tracked writer distinguishes a failed initial install from
