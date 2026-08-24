@@ -84,7 +84,7 @@ task lands. `Rejected` tasks are retained for reference and are not pending work
 | TASK-24 | Done | 2026-08-24 | Simplification, duplication | Construct the replace RAID1 soft-balance preview step in one place. |
 | TASK-25 | Done | 2026-08-24 | Simplification, duplication | Share the open-step literal and vary only the keyfile/passphrase command. |
 | TASK-26 | Done | 2026-08-24 | Simplification, control flow | Merge consecutive normal-mode branches in TUI command completion. |
-| TASK-27 | Open | -- | Documentation, configuration | Correct ADR 020's NUT package-option name. |
+| TASK-27 | Done | 2026-08-24 | Documentation, configuration | Correct ADR 020's NUT package-option name. |
 | TASK-28 | Done | 2026-08-24 | Documentation, CLI UX | Make add `--enroll` help clear that every adopted disk is enrolled. |
 | TASK-29 | Done | 2026-08-24 | Simplification, testing | Remove duplicated probe-event rendering and test the production rendering path. |
 | TASK-30 | Open | -- | Developer tooling | Make `clippy-fix` actually apply clippy suggestions or rename it to match its behavior. |
