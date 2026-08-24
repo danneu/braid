@@ -332,19 +332,12 @@ pub fn render_probe_events(events: &[ProbeEvent]) -> String {
     preview::render_notes_for_stderr(&notes, PerDiskStyle::Bracketed)
 }
 
-/// Thin stderr wrapper around `render_probe_events`. Callers invoke
-/// this after `plan_open_pool` but before propagating any error, so
-/// per-disk context always precedes a failure message.
+/// Adapt probe events to preview notes and emit them through the standard
+/// color-aware stderr boundary. Callers invoke this after `plan_open_pool`
+/// but before propagating errors so per-disk context appears first.
 pub fn print_probe_events(events: &[ProbeEvent]) {
     let notes: Vec<PreviewNote> = events.iter().map(ProbeEvent::to_preview_note).collect();
-    let text = preview::render_notes_for_stderr_with(
-        &notes,
-        PerDiskStyle::Bracketed,
-        color_enabled_for_stderr(),
-    );
-    if !text.is_empty() {
-        eprint!("{text}");
-    }
+    preview::emit_notes_to_stderr(&notes, PerDiskStyle::Bracketed);
 }
 
 /// Compile output-only dry-run preview steps from a validated `OpenPlan`.
@@ -359,26 +352,23 @@ pub fn compile_open_steps(
 
     for (name, by_id) in &plan.to_unlock {
         let mn = mapper_name(name);
-        if let Some(kf) = key_file {
-            steps.push(Step {
-                risk: "safe",
-                description: format!("LUKS open {} -> {}", by_id, mn),
-                commands: vec![CmdRequest::CryptsetupLuksOpenKeyFile {
-                    device: by_id.as_str().to_owned(),
-                    mapper: mn.clone(),
-                    key_file_path: kf.display().to_string(),
-                }],
-            });
-        } else {
-            steps.push(Step {
-                risk: "safe",
-                description: format!("LUKS open {} -> {}", by_id, mn),
-                commands: vec![CmdRequest::CryptsetupLuksOpen {
-                    device: by_id.as_str().to_owned(),
-                    mapper: mn.clone(),
-                }],
-            });
-        }
+        let description = format!("LUKS open {} -> {}", by_id, mn);
+        let command = match key_file {
+            Some(kf) => CmdRequest::CryptsetupLuksOpenKeyFile {
+                device: by_id.as_str().to_owned(),
+                mapper: mn,
+                key_file_path: kf.display().to_string(),
+            },
+            None => CmdRequest::CryptsetupLuksOpen {
+                device: by_id.as_str().to_owned(),
+                mapper: mn,
+            },
+        };
+        steps.push(Step {
+            risk: "safe",
+            description,
+            commands: vec![command],
+        });
     }
 
     steps.push(Step {
@@ -1877,6 +1867,33 @@ pool already mounted at /mnt/storage
         assert_eq!(
             rendered, expected,
             "render_probe_events output drifted from the pre-refactor stderr format"
+        );
+    }
+
+    // Intent: the public probe-event stderr boundary applies the active color
+    //   policy while preserving the event-to-note wording and order.
+    // Why it exists: the recover remount cycle calls `print_probe_events`
+    //   directly, so pure renderer tests alone cannot catch boundary drift.
+    // Scenario: a TTY-enabled recover re-probe emits an Info line followed by
+    //   a colored per-disk status tag whose message body remains uncolored.
+    #[test]
+    fn print_probe_events_honors_stderr_color_policy() {
+        let events = vec![
+            ProbeEvent::AlreadyMounted {
+                mount_point: "/mnt/storage".to_owned(),
+            },
+            ProbeEvent::DiskAvailable {
+                name: "disk1".to_owned(),
+            },
+        ];
+
+        let rendered = crate::status_tag::testing::capture_with_color(true, || {
+            print_probe_events(&events);
+        });
+
+        assert_eq!(
+            rendered,
+            "pool already mounted at /mnt/storage\n\x1b[32m[ok]\x1b[0m   disk disk1: found\n"
         );
     }
 
