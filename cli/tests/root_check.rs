@@ -127,9 +127,10 @@ fn monitor_help_documents_warning_exit() {
 }
 
 // Intent: `braid replace --help` describes `--new` using the full disk-spec
-//   grammar enforced by the command planner.
+//   grammar and names the `--enroll` value as the directory both planners use.
 // Why it exists: replace migrated from configured names to runtime disk specs,
-//   but its generated help retained the old bare-name contract.
+//   but its generated help retained the old bare-name contract; the default
+//   enrollment placeholder also implied that callers should pass a key file.
 // Scenario: an operator consults terminal help and can construct a valid
 //   replacement command without first triggering a validation error.
 #[test]
@@ -143,6 +144,38 @@ fn replace_help_documents_new_disk_spec() {
     assert!(
         stdout.contains("Disk spec for the replacement disk: NAME=/dev/disk/by-id/..."),
         "replace help should document the full --new disk spec, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("--enroll <DIR>"),
+        "replace help should identify --enroll as a directory, got: {stdout}"
+    );
+}
+
+// Intent: `braid add --help` describes `--enroll` as a directory applied to
+//   every fresh or returning disk adopted by the invocation.
+// Why it exists: add accepts multiple disk specs and can recover returning
+//   braid disks, but its generated help described enrollment on one new disk.
+// Scenario: an operator adds several disks with a USB keyfile and checks help
+//   to learn which targets will receive slot-1 enrollment.
+#[test]
+fn add_help_documents_enrollment_scope() {
+    let output = braid()
+        .args(["add", "--help"])
+        .output()
+        .expect("failed to execute braid");
+    assert!(output.status.success(), "add help should succeed");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("--enroll <DIR>"),
+        "add help should identify --enroll as a directory, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("on each adopted disk (fresh or returning)"),
+        "add help should describe the full enrollment scope, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("disks where it already authenticates slot 1 are skipped"),
+        "add help should describe the idempotent skip, got: {stdout}"
     );
 }
 

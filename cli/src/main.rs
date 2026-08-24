@@ -325,8 +325,8 @@ struct AddArgs {
         value_name = "NAME=/dev/disk/by-id/..."
     )]
     disks: Vec<String>,
-    /// Directory containing braid.key to enroll in the new disk (LUKS slot 1)
-    #[arg(long = "enroll")]
+    /// Directory containing braid.key to enroll into LUKS slot 1 on each adopted disk (fresh or returning); disks where it already authenticates slot 1 are skipped
+    #[arg(long = "enroll", value_name = "DIR")]
     enroll_key_file: Option<std::path::PathBuf>,
     #[command(flatten)]
     luks_format: LuksFormatArgs,
@@ -366,7 +366,7 @@ struct ReplaceArgs {
     #[arg(long)]
     missing_id: Option<u64>,
     /// Directory containing braid.key to enroll in the new disk (LUKS slot 1)
-    #[arg(long = "enroll")]
+    #[arg(long = "enroll", value_name = "DIR")]
     enroll_key_file: Option<std::path::PathBuf>,
     #[command(flatten)]
     luks_format: LuksFormatArgs,
