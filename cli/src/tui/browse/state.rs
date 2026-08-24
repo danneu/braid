@@ -723,9 +723,6 @@ impl BrowseState {
                     Err(_) => self.systemd_units.clear(),
                 }
             }
-        }
-
-        if self.mode == BrowseMode::Normal {
             self.cache.insert(
                 self.current_selection(),
                 CachedOutput {

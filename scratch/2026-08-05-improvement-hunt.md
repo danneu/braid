@@ -83,7 +83,7 @@ task lands. `Rejected` tasks are retained for reference and are not pending work
 | TASK-23 | Open | -- | Simplification, configuration | Remove the redundant positive-timeout assertion already enforced by the Nix type. |
 | TASK-24 | Done | 2026-08-24 | Simplification, duplication | Construct the replace RAID1 soft-balance preview step in one place. |
 | TASK-25 | Open | -- | Simplification, duplication | Share the open-step literal and vary only the keyfile/passphrase command. |
-| TASK-26 | Open | -- | Simplification, control flow | Merge consecutive normal-mode branches in TUI command completion. |
+| TASK-26 | Done | 2026-08-24 | Simplification, control flow | Merge consecutive normal-mode branches in TUI command completion. |
 | TASK-27 | Open | -- | Documentation, configuration | Correct ADR 020's NUT package-option name. |
 | TASK-28 | Open | -- | Documentation, CLI UX | Make add `--enroll` help clear that every adopted disk is enrolled. |
 | TASK-29 | Open | -- | Simplification, testing | Remove duplicated probe-event rendering and test the production rendering path. |
