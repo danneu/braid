@@ -428,7 +428,6 @@ mod tests {
             watts_estimated: None,
             raw_text: String::new(),
             daemon: DaemonStatus::Active,
-            probed_at: Instant::now(),
         }
     }
 
@@ -451,7 +450,6 @@ mod tests {
             fan: None,
             driving: None,
             daemon: DaemonStatus::Active,
-            probed_at: Instant::now(),
         }
     }
 

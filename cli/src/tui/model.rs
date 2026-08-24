@@ -158,7 +158,6 @@ pub struct FanSnapshot {
     pub fan: Option<FanReading>,
     pub driving: Option<DrivingDrive>,
     pub daemon: DaemonStatus,
-    pub probed_at: Instant,
 }
 
 impl FanSnapshot {
@@ -169,7 +168,6 @@ impl FanSnapshot {
             fan: None,
             driving: None,
             daemon: DaemonStatus::Unknown,
-            probed_at: Instant::now(),
         }
     }
 }
@@ -195,7 +193,6 @@ pub struct UpsSnapshot {
     /// view without widening the parsed `braid ups status --json` model.
     pub raw_text: String,
     pub daemon: DaemonStatus,
-    pub probed_at: Instant,
 }
 
 impl UpsSnapshot {
@@ -209,7 +206,6 @@ impl UpsSnapshot {
             watts_estimated: None,
             raw_text: String::new(),
             daemon: DaemonStatus::Unknown,
-            probed_at: Instant::now(),
         }
     }
 }
@@ -326,7 +322,6 @@ pub struct PoolState {
     pub balance: BalanceReport,
     pub capacity_total_bytes: Option<u64>,
     pub capacity_used_bytes: u64,
-    pub probed_at: Instant,
 }
 
 /// Device a hardware (SMART) probe must target for a disk: the live backing

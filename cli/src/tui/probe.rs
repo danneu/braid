@@ -1,7 +1,3 @@
-use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
-use std::time::Instant;
-
 use crate::cmd::{CmdRequest, CommandRunner};
 use crate::config::{FanControl, mapper_name};
 use crate::luks::{self, BackingPathResolver};
@@ -23,6 +19,8 @@ use crate::tui::model::{
     UpsSnapshot, smart_query_device,
 };
 use crate::types::{ByIdPath, ConfigDiskState, Devid, DiskName, LuksUuid, MountPoint};
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
 /// Best-effort ownership-aware lock classifier for a disk that the mounted
 /// pool probe could not identify by LUKS UUID or persisted devid.
@@ -505,7 +503,6 @@ pub fn probe_pool_for_tui<R: CommandRunner, F: Filesystem + ?Sized>(
             balance,
             capacity_total_bytes,
             capacity_used_bytes,
-            probed_at: Instant::now(),
         }),
     ))
 }
@@ -551,7 +548,6 @@ pub fn probe_fan_for_tui<R: CommandRunner>(
         fan,
         driving,
         daemon,
-        probed_at: Instant::now(),
     }
 }
 
@@ -835,7 +831,6 @@ pub fn probe_ups_for_tui<R: CommandRunner>(runner: &R, name: &str) -> UpsSnapsho
         // the unit status just in case the upstream check captures a
         // transitional state worth rendering (active / failed).
         daemon: probe_daemon_status(runner, UPS_DAEMON_UNIT),
-        probed_at: Instant::now(),
     }
 }
 
@@ -850,7 +845,6 @@ fn ups_snapshot_query_failed<R: CommandRunner>(runner: &R) -> UpsSnapshot {
         // Fall back to the unit probe so we can still distinguish
         // "daemon has crashed" vs. "nothing running" vs. "transitional".
         daemon: probe_daemon_status(runner, UPS_DAEMON_UNIT),
-        probed_at: Instant::now(),
     }
 }
 

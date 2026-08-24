@@ -1,6 +1,3 @@
-use std::collections::HashMap;
-use std::time::Instant;
-
 use crate::parse::types::{
     BtrfsBgType, BtrfsDfEntry, BtrfsProfile, DeviceAllocation, ScrubState, ScrubTimestamp,
     SmartEvidence, SmartHealth, SmartProbe,
@@ -8,6 +5,7 @@ use crate::parse::types::{
 use crate::status::{BalanceReport, DiskErrors};
 use crate::tui::model::{DiskLockState, DiskLuksInfo, DiskLuksState, DiskUsage, PoolState};
 use crate::types::MountPoint;
+use std::collections::HashMap;
 
 pub(crate) fn sample_disk_names() -> Vec<String> {
     vec![
@@ -287,6 +285,5 @@ pub(crate) fn sample_pool() -> PoolState {
         balance: BalanceReport::Idle,
         capacity_total_bytes: Some(8_001_568_641_024),
         capacity_used_bytes: 2_308_094_370_816,
-        probed_at: Instant::now(),
     }
 }

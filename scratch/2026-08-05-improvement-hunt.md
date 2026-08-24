@@ -64,7 +64,7 @@ task lands. `Rejected` tasks are retained for reference and are not pending work
 | TASK-4 | Done | 2026-08-24 | Simplification, API | Delete three unused `UpscOutput` predicates superseded by `severity()`. |
 | TASK-5 | Done | 2026-08-24 | Error handling, observability | Preserve and print `systemctl_start` failure details in the online-state warning. |
 | TASK-6 | Done | 2026-08-24 | Testing | Add the omitted `root_check` and `tty_passphrase` integration targets to `test-rust`. |
-| TASK-7 | Open | -- | Simplification, dead code | Remove the obsolete TUI-wide dead-code allowance and let the compiler expose unused code. |
+| TASK-7 | Done | 2026-08-24 | Simplification, dead code | Remove the obsolete TUI-wide dead-code allowance and let the compiler expose unused code. |
 | TASK-8 | Open | -- | Simplification, duplication | Extract the duplicated scoped `btrfs device scan --forget` warning-and-continue block. |
 | TASK-9 | Open | -- | Simplification, error modeling | Centralize mapper-ownership messages shared by `LuksError` and `ProbeError`. |
 | TASK-10 | Open | -- | Simplification, testing | Centralize the fixture-path helper copied across 13 parser modules. |

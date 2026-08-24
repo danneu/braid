@@ -351,8 +351,6 @@ mod tests {
     use crate::tui::test_support::{buffer_to_string, snap};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
-    use std::time::Instant;
-
     fn render(model: &Model, width: u16, height: u16) -> Terminal<TestBackend> {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -405,7 +403,6 @@ mod tests {
             load_pct: Some(20),
             watts_estimated: Some(100),
             daemon: DaemonStatus::Active,
-            probed_at: Instant::now(),
             raw_text: "ups.status: OL\nbattery.charge: 100\n".into(),
         }
     }

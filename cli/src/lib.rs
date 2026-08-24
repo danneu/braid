@@ -63,9 +63,6 @@ pub mod status;
 pub mod status_tag;
 #[cfg(test)]
 pub(crate) mod test_fixtures;
-// TUI is stubbed out — suppress unused-code warnings for now.
-// TODO: remove #[allow(dead_code)] once the TUI is more developed.
-#[allow(dead_code)]
 pub mod tui;
 pub mod types;
 pub mod unlock;

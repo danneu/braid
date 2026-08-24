@@ -2507,7 +2507,6 @@ pub(crate) mod tests {
                 celsius: 38,
             }),
             daemon: DaemonStatus::Active,
-            probed_at: Instant::now(),
         }
     }
 
@@ -2519,7 +2518,6 @@ pub(crate) mod tests {
                 celsius: 38,
             }),
             daemon: DaemonStatus::Active,
-            probed_at: Instant::now(),
         }
     }
 
@@ -2531,7 +2529,6 @@ pub(crate) mod tests {
             }),
             driving: None,
             daemon: DaemonStatus::Active,
-            probed_at: Instant::now(),
         }
     }
 
@@ -2546,7 +2543,6 @@ pub(crate) mod tests {
                 celsius: 38,
             }),
             daemon: DaemonStatus::Failed,
-            probed_at: Instant::now(),
         }
     }
 
@@ -2601,7 +2597,6 @@ pub(crate) mod tests {
                 celsius: 35,
             }),
             daemon: DaemonStatus::Active,
-            probed_at: Instant::now(),
         });
         let terminal = render(&model, 72, 28);
         let buf = buffer_to_string(&terminal);
@@ -2875,7 +2870,6 @@ pub(crate) mod tests {
             watts_estimated: None,
             raw_text: String::new(),
             daemon: DaemonStatus::Active,
-            probed_at: Instant::now(),
         });
 
         let terminal = render(&model, 60, 24);
@@ -2899,7 +2893,6 @@ pub(crate) mod tests {
             watts_estimated: None,
             raw_text: String::new(),
             daemon: DaemonStatus::Active,
-            probed_at: Instant::now(),
         };
         assert_eq!(format_ups_load(&s), "40%");
         s.watts_estimated = Some(132);

@@ -839,10 +839,6 @@ impl BrowseState {
             && self.mode == BrowseMode::Normal
     }
 
-    pub(crate) fn is_subvolume_detail(&self) -> bool {
-        self.mode == BrowseMode::SubvolDetail
-    }
-
     pub(crate) fn is_detail(&self) -> bool {
         self.mode != BrowseMode::Normal
     }
@@ -1311,12 +1307,10 @@ fn wrap_index(idx: usize, len: usize, delta: isize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-    use std::time::Instant;
-
     use super::*;
     use crate::status::BalanceReport;
     use crate::tui::model::PoolState;
+    use std::collections::HashMap;
 
     fn pool() -> PoolStatus {
         PoolStatus::Mounted(PoolState {
@@ -1335,7 +1329,6 @@ mod tests {
             balance: BalanceReport::Idle,
             capacity_total_bytes: None,
             capacity_used_bytes: 0,
-            probed_at: Instant::now(),
         })
     }
 
@@ -2264,7 +2257,7 @@ mod tests {
                 ..
             })
         ));
-        assert!(state.is_subvolume_detail());
+        assert!(state.is_detail());
     }
 
     // Intent: Enter on a selected SMART device dispatches the active
@@ -2363,7 +2356,7 @@ mod tests {
         let effect = state.enter(&pool(), &DiskInventory { by_id: &disks });
 
         assert!(effect.is_none());
-        assert!(!state.is_subvolume_detail());
+        assert!(!state.is_detail());
         assert!(state.subvolumes().is_empty());
     }
 
@@ -2390,7 +2383,7 @@ mod tests {
         let disks = HashMap::new();
         let _ = state.enter(&pool(), &DiskInventory { by_id: &disks });
         state.back();
-        assert!(!state.is_subvolume_detail());
+        assert!(!state.is_detail());
         assert_eq!(
             state.output(),
             &["ID 256 gen 10 top level 5 path data".to_owned()]
