@@ -1197,7 +1197,7 @@ fn handle_pool_lock_error(error: PoolLockError) {
         PoolLockError::AlreadyHeld | PoolLockError::DeadlineExpired { .. } => {
             eprintln!("{error}");
         }
-        PoolLockError::Io(e) => print_cli_error(&e.to_string()),
+        PoolLockError::Io(_) => print_cli_error(&error.to_string()),
     }
 }
 
@@ -1299,8 +1299,8 @@ fn run_plain_lock(
             eprintln!("{}", PoolLockError::AlreadyHeld);
             std::process::exit(1);
         }
-        Err(StopCoordinatorError::Io(e)) => {
-            print_cli_error(&e.to_string());
+        Err(error @ StopCoordinatorError::Io(_)) => {
+            print_cli_error(&error.to_string());
             std::process::exit(1);
         }
     };
@@ -1354,8 +1354,8 @@ fn run_systemd_stop_lock(
                 }
             }
         }
-        Err(StopCoordinatorError::Io(e)) => {
-            print_cli_error(&e.to_string());
+        Err(error @ StopCoordinatorError::Io(_)) => {
+            print_cli_error(&error.to_string());
             std::process::exit(1);
         }
     };

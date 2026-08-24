@@ -94,6 +94,9 @@ with subtest("braid ack exits 2 on pool-lock I/O failure"):
     status, output = machine.execute("braid ack 2>&1")
     machine.succeed("rmdir /run/braid-pool.lock")
     assert status == 2, f"pool-lock I/O must exit 2, got {status}: {output}"
+    assert "error: pool lock I/O error:" in output, (
+        f"expected pool-lock layer context, got: {output}"
+    )
     assert "directory" in output.lower(), (
         f"expected directory-shaped lock I/O diagnostic, got: {output}"
     )

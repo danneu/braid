@@ -20,6 +20,27 @@ machine.wait_for_unit("multi-user.target", timeout=120)
 passphrase = "testpassphrase"
 pq = shlex.quote(passphrase)
 
+# Intent: the systemd-stop entry point reports which braid lock layer failed
+# when the stop coordinator path cannot be opened.
+# Why it exists: printing only the inner OS error makes an early shutdown-lock
+# failure indistinguishable from unrelated filesystem I/O in the journal.
+# Scenario: a stale directory occupies the coordinator lock-file path when
+# ExecStop invokes the bounded systemd-stop lock mode.
+with subtest("Systemd-stop lock retains stop-coordinator I/O context"):
+    machine.succeed("rm -f /run/braid-stop-coordinator.lock")
+    machine.succeed("mkdir /run/braid-stop-coordinator.lock")
+    status, output = machine.execute(
+        "braid lock --systemd-stop --deadline-secs 5 2>&1"
+    )
+    machine.succeed("rmdir /run/braid-stop-coordinator.lock")
+    assert status == 1, f"coordinator I/O must exit 1, got {status}: {output}"
+    assert "error: stop coordinator I/O error:" in output, (
+        f"expected stop-coordinator layer context, got: {output}"
+    )
+    assert "directory" in output.lower(), (
+        f"expected directory-shaped coordinator I/O diagnostic, got: {output}"
+    )
+
 with subtest("Unlock pool and activate braid-online"):
     machine.succeed(f"printf %s\\\\n {pq} | braid unlock --passphrase-stdin")
     machine.succeed("mountpoint -q /mnt/storage")
