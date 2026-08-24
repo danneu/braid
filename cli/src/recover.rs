@@ -1354,6 +1354,7 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             return Err(PlanFailure::with_notes(notes, recover_mount_error(e)));
         }
     };
+    let replace_pool_mutation = is_replace_pool_mutation(&journal.op);
 
     // Refuse Replace recovery on an already-mounted pool. The cycle that
     // scrubs stale in-memory btrfs_fs_devices after a kernel-resumed
@@ -1367,7 +1368,7 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     // Operator's recovery path: `braid lock` (works with a journal present
     // -- no pending-op preflight in lock.rs) then `braid recover`, which
     // opens its own mount and takes the just_mounted == true cycle path.
-    if open_plan.is_none() && is_replace_pool_mutation(&journal.op) {
+    if open_plan.is_none() && replace_pool_mutation {
         return Err(PlanFailure::with_notes(
             notes,
             RecoverError::Failed(
@@ -1434,27 +1435,21 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     };
 
     let mut actions = Vec::new();
-    if open_plan.is_some() {
+    if let Some(initial_open_plan) = &open_plan {
         actions.push(RecoverWorkAction::InitialOpenPool);
-    }
 
-    if is_replace_pool_mutation(&journal.op) && open_plan.is_some() {
-        actions.push(RecoverWorkAction::WaitForKernelReplace);
-    }
-
-    if let Some(initial_open_plan) = &open_plan
-        && is_replace_pool_mutation(&journal.op)
-    {
-        let mut cycle_reopen_names: Vec<DiskName> = Vec::new();
-        for event in &report.events {
-            let Some(name) = (match event {
-                mount::ProbeEvent::DiskAvailable { name }
-                | mount::ProbeEvent::DiskAlreadyOpen { name } => Some(name),
-                _ => None,
-            }) else {
-                continue;
-            };
-            let parsed = DiskName::parse(name).map_err(|e| {
+        if replace_pool_mutation {
+            actions.push(RecoverWorkAction::WaitForKernelReplace);
+            let mut cycle_reopen_names: Vec<DiskName> = Vec::new();
+            for event in &report.events {
+                let Some(name) = (match event {
+                    mount::ProbeEvent::DiskAvailable { name }
+                    | mount::ProbeEvent::DiskAlreadyOpen { name } => Some(name),
+                    _ => None,
+                }) else {
+                    continue;
+                };
+                let parsed = DiskName::parse(name).map_err(|e| {
                 PlanFailure::with_notes(
                     notes.clone(),
                     RecoverError::Failed(format!(
@@ -1462,43 +1457,44 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
                     )),
                 )
             })?;
-            cycle_reopen_names.push(parsed);
-        }
-        let cycle_close_names: Vec<DiskName> = admission_membership
-            .iter()
-            .filter_map(|(_, member)| {
-                let name = &member.name;
-                if cycle_reopen_names.contains(name) {
-                    return Some(name.clone());
-                }
-                let mapper_path = config::mapper_name(name).dev_path();
-                fs.exists(&mapper_path).then(|| name.clone())
-            })
-            .collect();
+                cycle_reopen_names.push(parsed);
+            }
+            let cycle_close_names: Vec<DiskName> = admission_membership
+                .iter()
+                .filter_map(|(_, member)| {
+                    let name = &member.name;
+                    if cycle_reopen_names.contains(name) {
+                        return Some(name.clone());
+                    }
+                    let mapper_path = config::mapper_name(name).dev_path();
+                    fs.exists(&mapper_path).then(|| name.clone())
+                })
+                .collect();
 
-        for name in &cycle_reopen_names {
-            if admission_membership.by_name(name).is_none() {
+            for name in &cycle_reopen_names {
+                if admission_membership.by_name(name).is_none() {
+                    return Err(PlanFailure::with_notes(
+                        notes,
+                        RecoverError::Failed(format!(
+                            "recover remount cycle preview: disk '{name}' missing from recovery admission membership"
+                        )),
+                    ));
+                }
+            }
+            if cycle_reopen_names.is_empty() {
                 return Err(PlanFailure::with_notes(
                     notes,
-                    RecoverError::Failed(format!(
-                        "recover remount cycle preview: disk '{name}' missing from recovery admission membership"
-                    )),
+                    RecoverError::Failed(
+                        "recover remount cycle preview: no disks available to reopen".into(),
+                    ),
                 ));
             }
+            actions.push(RecoverWorkAction::RemountCycle {
+                close_names: cycle_close_names,
+                reopen_names: cycle_reopen_names,
+                any_missing_member: initial_open_plan.any_missing_member,
+            });
         }
-        if cycle_reopen_names.is_empty() {
-            return Err(PlanFailure::with_notes(
-                notes,
-                RecoverError::Failed(
-                    "recover remount cycle preview: no disks available to reopen".into(),
-                ),
-            ));
-        }
-        actions.push(RecoverWorkAction::RemountCycle {
-            close_names: cycle_close_names,
-            reopen_names: cycle_reopen_names,
-            any_missing_member: initial_open_plan.any_missing_member,
-        });
     }
 
     let completion = match &journal.op {
@@ -17194,7 +17190,7 @@ mod tests {
     // `RecoverWorkAction::execute` is defense-in-depth on top of
     // `plan_recover`'s already-mounted refusal (pinned by
     // `plan_recover_refuses_replace_on_externally_mounted_pool`) and its
-    // `open_plan.is_some()` push gate. Without this test, a
+    // open-plan presence gate. Without this test, a
     // regression that flips the gate (`if !state.just_mounted`) or removes it
     // would compile and pass `just test-rust`, leaving production safety
     // dependent solely on the planner refusal.
@@ -17295,7 +17291,7 @@ mod tests {
     // WaitForKernelReplace -- the `if state.just_mounted` gate in
     // `RecoverWorkAction::execute` guards relock_and_remount (umount +
     // scan-forget + LUKS close+reopen + remount), all backstopped by
-    // `plan_recover`'s `open_plan.is_some()` push gate. A regression
+    // `plan_recover`'s open-plan presence gate. A regression
     // here would attempt to umount a foreign mount session.
     //
     // Scenario: Same TOCTOU window as the WaitForKernelReplace no-op
