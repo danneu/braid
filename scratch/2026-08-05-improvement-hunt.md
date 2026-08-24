@@ -61,7 +61,7 @@ task lands. `Rejected` tasks are retained for reference and are not pending work
 | TASK-1 | Done | 2026-08-24 | Documentation, CLI UX | Document monitor exit 3 for Warning-only alerts in clap help. |
 | TASK-2 | Done | 2026-08-24 | Documentation, CLI UX | Describe replace `--new` as a full `NAME=/dev/disk/by-id/...` disk spec. |
 | TASK-3 | Done | 2026-08-24 | Documentation, testing | Classify the cryptsetup LUKS dump parser as CLI-reachable and accurately describe its canary coverage. |
-| TASK-4 | Open | -- | Simplification, API | Delete three unused `UpscOutput` predicates superseded by `severity()`. |
+| TASK-4 | Done | 2026-08-24 | Simplification, API | Delete three unused `UpscOutput` predicates superseded by `severity()`. |
 | TASK-5 | Done | 2026-08-24 | Error handling, observability | Preserve and print `systemctl_start` failure details in the online-state warning. |
 | TASK-6 | Done | 2026-08-24 | Testing | Add the omitted `root_check` and `tty_passphrase` integration targets to `test-rust`. |
 | TASK-7 | Open | -- | Simplification, dead code | Remove the obsolete TUI-wide dead-code allowance and let the compiler expose unused code. |

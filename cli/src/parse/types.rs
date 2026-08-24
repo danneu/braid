@@ -765,30 +765,6 @@ impl UpscOutput {
     pub fn severity(&self) -> UpsSeverity {
         UpsSeverity::classify(&self.status_flags)
     }
-
-    /// True when the UPS is reporting any critical state. See
-    /// `UpsStatusFlag::is_critical` for the token list.
-    pub fn is_critical(&self) -> bool {
-        self.status_flags.iter().any(UpsStatusFlag::is_critical)
-    }
-
-    /// True when the UPS reports it is running on battery (without
-    /// necessarily having crossed the low-battery threshold yet). Used
-    /// by preflight to refuse mutations that would start during an
-    /// outage, narrowing the recovery surface.
-    pub fn is_on_battery(&self) -> bool {
-        self.status_flags.contains(&UpsStatusFlag::Ob)
-    }
-
-    /// True when the UPS explicitly reports utility (line) power via the
-    /// `OL` flag. Separate from `!is_on_battery()` because preflight
-    /// requires affirmative line-power proof, not merely the absence of
-    /// `OB`: a status set with neither `OL` nor `OB`, or only unknown
-    /// tokens, is not trustworthy evidence that line power is present.
-    /// See `preflight::check_ups_not_on_battery`.
-    pub fn reports_utility_power(&self) -> bool {
-        self.status_flags.contains(&UpsStatusFlag::Ol)
-    }
 }
 
 impl Serialize for UpsStatusFlag {
