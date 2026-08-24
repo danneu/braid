@@ -1,7 +1,8 @@
 use std::io::Read;
 use zeroize::Zeroizing;
 
-use crate::cmd::{CmdRequest, CommandRunner, LsblkFieldKind};
+use crate::cmd::{CmdRequest, CommandRunner};
+use crate::parse::parse_lsblk_json;
 
 // ---------------------------------------------------------------------------
 // Confirm seam
@@ -102,39 +103,13 @@ pub fn format_bytes(bytes: u64) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// lsblk field helpers
-// ---------------------------------------------------------------------------
-
-pub fn get_lsblk_field<R: CommandRunner>(
-    runner: &R,
-    device: &str,
-    field: LsblkFieldKind,
-) -> Option<String> {
-    let raw = runner
-        .run(&CmdRequest::LsblkField {
-            device: device.to_owned(),
-            field,
-        })
-        .ok()?;
-    if raw.exit_status != 0 {
-        return None;
-    }
-    let trimmed = raw.stdout.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_owned())
-    }
-}
-
-// ---------------------------------------------------------------------------
 // DiskHwInfo
 // ---------------------------------------------------------------------------
 
 /// Hardware details for a disk, queried via lsblk.
 /// All fields are optional because lsblk may fail (missing disk, permission
 /// error, etc.).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DiskHwInfo {
     pub model: Option<String>,
     pub serial: Option<String>,
@@ -144,14 +119,34 @@ pub struct DiskHwInfo {
 /// Query model, serial, and size for a device path via lsblk.
 /// Returns None values gracefully for missing/dead disks.
 pub fn query_disk_hw_info<R: CommandRunner>(runner: &R, device: &str) -> DiskHwInfo {
-    let model = get_lsblk_field(runner, device, LsblkFieldKind::Model);
-    let serial = get_lsblk_field(runner, device, LsblkFieldKind::Serial);
-    let size_str = get_lsblk_field(runner, device, LsblkFieldKind::Size);
-    let size = size_str.and_then(|s| s.parse::<u64>().ok());
+    let Some(raw) = runner
+        .run(&CmdRequest::LsblkDeviceJson {
+            device: device.to_owned(),
+        })
+        .ok()
+    else {
+        return DiskHwInfo::default();
+    };
+    let Some(mut devices) = parse_lsblk_json(&raw)
+        .ok()
+        .map(|output| output.blockdevices)
+    else {
+        return DiskHwInfo::default();
+    };
+    if devices.len() != 1 {
+        return DiskHwInfo::default();
+    }
+    let parsed = devices.pop().expect("length checked above");
+    let normalize = |value: Option<String>| {
+        value.and_then(|value| {
+            let trimmed = value.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_owned())
+        })
+    };
     DiskHwInfo {
-        model,
-        serial,
-        size,
+        model: normalize(parsed.model),
+        serial: normalize(parsed.serial),
+        size: parsed.size,
     }
 }
 
@@ -280,64 +275,140 @@ mod tests {
         assert!(format_hw_info_line(&info).is_none());
     }
 
-    // --- get_lsblk_field ---
+    // --- query_disk_hw_info ---
 
-    fn lsblk_field_runner(output: RawCommandOutput) -> MockRunner {
+    fn lsblk_device_runner(output: RawCommandOutput) -> MockRunner {
         MockRunner::default().with_output(
-            CmdRequest::LsblkField {
+            CmdRequest::LsblkDeviceJson {
                 device: "/dev/sda".into(),
-                field: LsblkFieldKind::Model,
             },
             output,
         )
     }
 
-    // Intent: single-field lsblk queries trim successful output.
+    fn lsblk_device_json(blockdevices: &str) -> String {
+        format!(r#"{{"blockdevices":[{blockdevices}]}}"#)
+    }
+
+    fn lsblk_device(model: &str, serial: &str, size: &str) -> String {
+        format!(
+            r#"{{
+                "name":"sda","type":"disk","size":{size},
+                "model":{model},"serial":{serial},"uuid":null,
+                "rota":true,"tran":"sata"
+            }}"#,
+        )
+    }
+
+    // Intent: one structured query returns and normalizes every hardware field.
     // Why it exists: callers display plain hardware labels and should not
-    //   inherit lsblk padding or trailing newlines.
-    // Scenario: lsblk prints a disk model with surrounding whitespace.
+    //   inherit lsblk whitespace or issue one subprocess per field.
+    // Scenario: lsblk returns a padded model, blank serial, and numeric size.
     #[test]
-    fn lsblk_field_trim_returns_value() {
-        let runner = lsblk_field_runner(RawCommandOutput {
+    fn disk_hw_query_normalizes_one_structured_result() {
+        let runner = lsblk_device_runner(RawCommandOutput {
             cmd: "lsblk".into(),
-            stdout: "  Samsung SSD 870  \n".into(),
+            stdout: lsblk_device_json(&lsblk_device(
+                r#""  Samsung SSD 870  ""#,
+                r#""   ""#,
+                "1000000",
+            )),
             stderr: String::new(),
             exit_status: 0,
         });
-        let value = get_lsblk_field(&runner, "/dev/sda", LsblkFieldKind::Model);
-        assert_eq!(value.as_deref(), Some("Samsung SSD 870"));
+        let info = query_disk_hw_info(&runner, "/dev/sda");
+
+        assert_eq!(
+            info,
+            DiskHwInfo {
+                model: Some("Samsung SSD 870".into()),
+                serial: None,
+                size: Some(1_000_000),
+            }
+        );
+        assert_eq!(runner.requests().len(), 1);
     }
 
-    // Intent: whitespace-only lsblk output is treated as a missing field.
-    // Why it exists: callers use `None` for unavailable model, serial, or size
-    //   values instead of displaying blank metadata.
-    // Scenario: lsblk succeeds but the requested disk field is empty.
+    // Intent: explicit JSON nulls degrade fields independently.
+    // Why it exists: real disks may omit model or serial without making SIZE
+    //   unavailable to replacement preflight.
+    // Scenario: lsblk reports only SIZE for a device.
     #[test]
-    fn lsblk_field_whitespace_only_returns_none() {
-        let runner = lsblk_field_runner(RawCommandOutput {
+    fn disk_hw_query_preserves_nullable_fields() {
+        let runner = lsblk_device_runner(RawCommandOutput {
             cmd: "lsblk".into(),
-            stdout: "  \n".into(),
+            stdout: lsblk_device_json(&lsblk_device("null", "null", "42")),
             stderr: String::new(),
             exit_status: 0,
         });
-        let value = get_lsblk_field(&runner, "/dev/sda", LsblkFieldKind::Model);
-        assert_eq!(value, None);
+        let info = query_disk_hw_info(&runner, "/dev/sda");
+
+        assert_eq!(info.model, None);
+        assert_eq!(info.serial, None);
+        assert_eq!(info.size, Some(42));
     }
 
-    // Intent: failed lsblk field queries collapse to `None`.
+    // Intent: command and JSON failures collapse to unavailable metadata.
     // Why it exists: hardware metadata is best-effort, so missing disks and
     //   lsblk failures should not abort status or confirmation flows.
-    // Scenario: lsblk rejects a path that is not a block device.
+    // Scenario: lsblk rejects a path or returns malformed structured output.
     #[test]
-    fn lsblk_field_nonzero_exit_returns_none() {
-        let runner = lsblk_field_runner(RawCommandOutput {
+    fn disk_hw_query_failures_return_empty_info() {
+        let failed = lsblk_device_runner(RawCommandOutput {
             cmd: "lsblk".into(),
             stdout: String::new(),
             stderr: "not a block device".into(),
             exit_status: 32,
         });
-        let value = get_lsblk_field(&runner, "/dev/sda", LsblkFieldKind::Model);
-        assert_eq!(value, None);
+        let malformed = lsblk_device_runner(RawCommandOutput {
+            cmd: "lsblk".into(),
+            stdout: "not json".into(),
+            stderr: String::new(),
+            exit_status: 0,
+        });
+
+        assert_eq!(
+            query_disk_hw_info(&failed, "/dev/sda"),
+            DiskHwInfo::default()
+        );
+        assert_eq!(
+            query_disk_hw_info(&malformed, "/dev/sda"),
+            DiskHwInfo::default()
+        );
+        assert_eq!(
+            query_disk_hw_info(&MockRunner::default(), "/dev/sda"),
+            DiskHwInfo::default()
+        );
+    }
+
+    // Intent: a device-scoped query must identify exactly one device.
+    // Why it exists: silently selecting one row could attach another disk's
+    //   hardware to a destructive confirmation prompt.
+    // Scenario: an unexpected lsblk result contains zero or two roots.
+    #[test]
+    fn disk_hw_query_rejects_ambiguous_result_shapes() {
+        let empty = lsblk_device_runner(RawCommandOutput {
+            cmd: "lsblk".into(),
+            stdout: lsblk_device_json(""),
+            stderr: String::new(),
+            exit_status: 0,
+        });
+        let row = lsblk_device("null", "null", "42");
+        let multiple = lsblk_device_runner(RawCommandOutput {
+            cmd: "lsblk".into(),
+            stdout: lsblk_device_json(&format!("{row},{row}")),
+            stderr: String::new(),
+            exit_status: 0,
+        });
+
+        assert_eq!(
+            query_disk_hw_info(&empty, "/dev/sda"),
+            DiskHwInfo::default()
+        );
+        assert_eq!(
+            query_disk_hw_info(&multiple, "/dev/sda"),
+            DiskHwInfo::default()
+        );
     }
 
     // --- confirm_yes_from ---

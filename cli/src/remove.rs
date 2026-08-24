@@ -1107,9 +1107,9 @@ mod tests {
     //   governs which device `query_disk_hw_info` is handed, but nothing pinned
     //   the routing through execute() -- the only hw-line tests were pure
     //   formatter tests, and the other execute-level confirm tests run against
-    //   runners with no LsblkField handler, so `get_lsblk_field`'s `.ok()?`
-    //   swallow of `MissingMock` silently blanks the line regardless of which
-    //   device was queried. Registering hw ONLY on /dev/vdc makes the model and
+    //   runners with no LsblkDeviceJson response, so best-effort discovery
+    //   silently blanks the line regardless of which device was queried.
+    //   Registering hw ONLY on /dev/vdc makes the model and
     //   serial appear iff the probe hit the live backing path; a regression to
     //   the mapper path or a by-id handle leaves the line blank and fails.
     // Scenario: removing disk2 from a two-disk pool, the operator's confirm

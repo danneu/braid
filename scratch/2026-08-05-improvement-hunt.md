@@ -78,7 +78,7 @@ task lands. `Rejected` tasks are retained for reference and are not pending work
 | TASK-18 | Done | 2026-08-24 | Testing, reliability | Make the authoritative stable golden lane fail when required fixtures are missing. |
 | TASK-19 | Done | 2026-08-24 | Testing, error handling | Add a live-tool lock for the `btrfs balance pause` exit-code and stderr classifier. |
 | TASK-20 | Done | 2026-08-24 | Testing, tooling | Add a self-test proving the decision-document path checker can fail. |
-| TASK-21 | Open | -- | Performance, simplification | Replace three per-disk `lsblk` calls with one parsed JSON invocation. |
+| TASK-21 | Done | 2026-08-24 | Performance, simplification | Replace three per-disk `lsblk` calls with one parsed JSON invocation. |
 | TASK-22 | Done | 2026-08-24 | Simplification, testing | Use `PanicBtrfsDevInfo` to enforce every no-probe replace boundary and remove its allowance. |
 | TASK-23 | Done | 2026-08-24 | Simplification, configuration | Remove the redundant positive-timeout assertion already enforced by the Nix type. |
 | TASK-24 | Done | 2026-08-24 | Simplification, duplication | Construct the replace RAID1 soft-balance preview step in one place. |

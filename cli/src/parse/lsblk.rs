@@ -122,6 +122,26 @@ mod tests {
         assert_eq!(out.blockdevices[0].children[0].device_type, "crypt");
     }
 
+    // Intent: device-scoped lsblk queries omit dependency children.
+    // Why it exists: hardware discovery uses --nodeps but shares this parser
+    //   with the whole-system TUI query.
+    // Scenario: lsblk returns one childless whole-disk row for a by-id target.
+    #[test]
+    fn lsblk_accepts_nodeps_childless_device() {
+        let out = parse_lsblk_json(&raw_lsblk(
+            r#"{"blockdevices":[{
+                "name":"vdb","type":"disk","size":1073741824,
+                "model":"Disk Model","serial":"serial-1","uuid":null,
+                "rota":true,"tran":"sata"
+            }]}"#,
+        ))
+        .unwrap();
+
+        assert_eq!(out.blockdevices.len(), 1);
+        assert!(out.blockdevices[0].children.is_empty());
+        assert_eq!(out.blockdevices[0].size, Some(1073741824));
+    }
+
     // --- Synthetic tests (inline) ---
 
     #[test]

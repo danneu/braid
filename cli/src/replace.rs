@@ -3354,8 +3354,8 @@ mod tests {
     //   sources (`pool.underlying_for_uuid` for the present old disk, `new_by_id`
     //   for the not-yet-present new disk), but nothing pinned that routing
     //   through execute(): the sibling confirm test builds both prompts from
-    //   `DiskHwInfo::default()` against a runner with no LsblkField handler, so
-    //   `get_lsblk_field`'s `.ok()?` swallow of `MissingMock` blanks both lines
+    //   `DiskHwInfo::default()` against a runner with no LsblkDeviceJson
+    //   response, so best-effort discovery blanks both lines
     //   no matter which path is queried. Distinct old/new values plus a
     //   byte-exact assertion make this both path-sensitive (wrong path -> blank
     //   line -> mismatch) and swap-sensitive (old/new args transposed -> old
@@ -6647,11 +6647,12 @@ mod tests {
                         exit_status: 1,
                     }))
                 }
-                CmdRequest::LsblkField {
-                    device,
-                    field: crate::cmd::LsblkFieldKind::Size,
-                } if device == "/dev/disk/by-id/new" => {
-                    Some(Ok(mock_ok(&format!("lsblk -b {device}"), "536870912\n")))
+                CmdRequest::LsblkDeviceJson { device } if device == "/dev/disk/by-id/new" => {
+                    Some(Ok(crate::test_fixtures::lsblk_device_json_output(
+                        None,
+                        None,
+                        Some(536_870_912),
+                    )))
                 }
                 _ => None,
             });

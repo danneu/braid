@@ -1,7 +1,7 @@
 //! Cross-scope fixture core: `mock_ok`, `MockFs`, and the `PoolFixture`
 //! struct + ctors shared by every command scope.
 
-use crate::cmd::{CmdRequest, LsblkFieldKind, MockRunner, RawCommandOutput};
+use crate::cmd::{CmdRequest, MockRunner, RawCommandOutput};
 use crate::config::Config;
 use crate::confirm::RecordingConfirm;
 use crate::inhibit::RecordingInhibitor;
@@ -198,18 +198,44 @@ pub(crate) fn assert_exact_lines_in_order(rendered: &str, expected: &[&str]) {
     }
 }
 
-/// Register `lsblk` Model/Serial/Size outputs for `device` so a confirm
+/// Build one successful device-scoped lsblk JSON response.
+pub(crate) fn lsblk_device_json_output(
+    model: Option<&str>,
+    serial: Option<&str>,
+    size: Option<u64>,
+) -> RawCommandOutput {
+    RawCommandOutput {
+        cmd: "lsblk --json --bytes --nodeps".into(),
+        stdout: serde_json::json!({
+            "blockdevices": [{
+                "name": "test-disk",
+                "type": "disk",
+                "size": size,
+                "model": model,
+                "serial": serial,
+                "uuid": null,
+                "rota": true,
+                "tran": "test"
+            }]
+        })
+        .to_string(),
+        stderr: String::new(),
+        exit_status: 0,
+    }
+}
+
+/// Register one `lsblk` Model/Serial/Size response for `device` so a confirm
 /// prompt's hw line resolves only when the probe is routed to THIS path.
 /// Lets routing tests pin that a present-disk prompt queries the live
 /// backing path (decision 024) and a target prompt queries the by-id handle:
-/// `query_disk_hw_info` swallows a `MissingMock` to `None`, so a probe sent
-/// to any other path leaves the hw line blank and fails the assertion.
+/// `query_disk_hw_info` degrades a `MissingMock` to empty hardware info, so a
+/// probe sent to any other path leaves the hw line blank and fails the assertion.
 ///
-/// Emits exit-0 outputs via `mock_ok`; `get_lsblk_field` trims them and
-/// parses `Size` with `parse::<u64>()`, so `size` is rendered as its integer.
+/// Emits one exit-0 structured response; `query_disk_hw_info` normalizes the
+/// text fields while serde decodes `Size` as an integer.
 /// `.with_output` resolves only after a fixture's `with_handler` closures
-/// return `None` for `LsblkField`, so wrapping a fixture-installed runner
-/// falls through to these cleanly.
+/// return `None` for `LsblkDeviceJson`, so wrapping a fixture-installed
+/// runner falls through to this cleanly.
 pub(crate) fn with_lsblk_hw_info(
     runner: MockRunner,
     device: &str,
@@ -217,28 +243,12 @@ pub(crate) fn with_lsblk_hw_info(
     serial: &str,
     size: u64,
 ) -> MockRunner {
-    runner
-        .with_output(
-            CmdRequest::LsblkField {
-                device: device.to_owned(),
-                field: LsblkFieldKind::Model,
-            },
-            mock_ok("lsblk", model),
-        )
-        .with_output(
-            CmdRequest::LsblkField {
-                device: device.to_owned(),
-                field: LsblkFieldKind::Serial,
-            },
-            mock_ok("lsblk", serial),
-        )
-        .with_output(
-            CmdRequest::LsblkField {
-                device: device.to_owned(),
-                field: LsblkFieldKind::Size,
-            },
-            mock_ok("lsblk", &format!("{size}")),
-        )
+    runner.with_output(
+        CmdRequest::LsblkDeviceJson {
+            device: device.to_owned(),
+        },
+        lsblk_device_json_output(Some(model), Some(serial), Some(size)),
+    )
 }
 
 /// Device stanza spec for faithful `btrfs device usage --raw` fixture output.

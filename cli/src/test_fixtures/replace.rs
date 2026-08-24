@@ -3,10 +3,10 @@
 
 use super::shared::{
     DeviceUsageSpec, PoolFixture, canonical_luks_uuid, device_usage_raw_body, disk_member_with,
-    mock_ok, mock_virtio_offset_backing_path_resolver,
+    lsblk_device_json_output, mock_ok, mock_virtio_offset_backing_path_resolver,
 };
 use crate::btrfs_ioctl::tests_support::MockBtrfsDevInfo;
-use crate::cmd::{CmdError, CmdRequest, LsblkFieldKind, MockRunner, RawCommandOutput};
+use crate::cmd::{CmdError, CmdRequest, MockRunner, RawCommandOutput};
 use crate::config::Config;
 use crate::confirm::RecordingConfirm;
 use crate::inhibit::RecordingInhibitor;
@@ -328,13 +328,15 @@ impl ReplacementPool {
                     r#"{"keyslots":{"0":{"type":"luks2"}}}"#,
                 )))
             }
-            CmdRequest::LsblkField {
-                device,
-                field: LsblkFieldKind::Size,
-            } if device == "/dev/disk/by-id/virtio-disk3" => Some(Ok(mock_ok(
-                &format!("lsblk -b {device}"),
-                &format!("{REPLACE_FIXTURE_RAW_SIZE}\n"),
-            ))),
+            CmdRequest::LsblkDeviceJson { device }
+                if device == "/dev/disk/by-id/virtio-disk3" =>
+            {
+                Some(Ok(lsblk_device_json_output(
+                    None,
+                    None,
+                    Some(REPLACE_FIXTURE_RAW_SIZE),
+                )))
+            }
             CmdRequest::BtrfsBalanceStatus { .. } => Some(Ok(mock_ok(
                 "btrfs balance status",
                 "No balance found on '/mnt/storage'\n",

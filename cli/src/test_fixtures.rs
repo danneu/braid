@@ -202,9 +202,9 @@ pub(crate) use shared::{
     DeviceUsageSpec, MockBackingPathResolver, MockFs, PoolFixture, RecordingSleeper,
     TEST_PASSPHRASE_BYTES, assert_exact_lines_in_order, assert_lines_in_order,
     btrfs_remove_devid_error, btrfs_remove_path_error, canonical_luks_uuid, device_usage_raw_body,
-    disk_member, disk_member_with, line_index, mock_ok, mock_virtio_backing_path_resolver,
-    mock_virtio_offset_backing_path_resolver, read_fixture, read_stable_fixture, test_uuid,
-    with_lsblk_hw_info,
+    disk_member, disk_member_with, line_index, lsblk_device_json_output, mock_ok,
+    mock_virtio_backing_path_resolver, mock_virtio_offset_backing_path_resolver, read_fixture,
+    read_stable_fixture, test_uuid, with_lsblk_hw_info,
 };
 pub(crate) use status::{
     status_btrfs_device_usage_raw_1disk, status_btrfs_df_single, status_btrfs_scrub_aborted,
@@ -216,10 +216,9 @@ pub(crate) use status::{
     status_cfg_present_not_luks, status_config, status_cryptsetup_status_active,
     status_cryptsetup_uuid_ok, status_disk_report_missing, status_disk_report_named,
     status_fs_ext4, status_fs_mounted, status_fs_not_mounted, status_fs_one_disk,
-    status_fs_three_disk, status_is_luks_raw, status_lsblk_field_ok, status_membership_1disk,
-    status_membership_3disk, status_mp, status_pool_empty, status_report_with_alerts,
-    status_report_with_scrub, status_runner_healthy_3disk_base,
-    status_runner_healthy_3disk_verbose,
+    status_fs_three_disk, status_is_luks_raw, status_membership_1disk, status_membership_3disk,
+    status_mp, status_pool_empty, status_report_with_alerts, status_report_with_scrub,
+    status_runner_healthy_3disk_base, status_runner_healthy_3disk_verbose,
 };
 pub(crate) use unlock::{
     unlock_btrfs_balance_status_idle, unlock_btrfs_balance_status_paused,

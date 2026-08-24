@@ -706,7 +706,7 @@ pub fn systemd_stop_lock_requires_balance_pause<F: Filesystem + ?Sized>(
 mod tests {
     use super::*;
     use crate::btrfs_ioctl::tests_support::MockBtrfsDevInfo;
-    use crate::cmd::{CmdRequest, LsblkFieldKind, MockRunner, RawCommandOutput};
+    use crate::cmd::{CmdRequest, MockRunner, RawCommandOutput};
     use crate::probe::Filesystem;
 
     struct MockFs {
@@ -796,16 +796,10 @@ mod tests {
 
     fn runner_with_target_size(size: u64) -> MockRunner {
         MockRunner::default().with_output(
-            CmdRequest::LsblkField {
+            CmdRequest::LsblkDeviceJson {
                 device: TARGET.into(),
-                field: LsblkFieldKind::Size,
             },
-            RawCommandOutput {
-                cmd: "lsblk --bytes".into(),
-                stdout: format!("{size}\n"),
-                stderr: String::new(),
-                exit_status: 0,
-            },
+            crate::test_fixtures::lsblk_device_json_output(None, None, Some(size)),
         )
     }
 
@@ -1041,7 +1035,7 @@ mod tests {
     }
 
     #[test]
-    // Intent: missing `lsblk -b` size for the target is refused.
+    // Intent: missing structured lsblk size for the target is refused.
     // Why it exists: target capacity cannot be checked if raw disk size is
     //   unknown, and this branch precedes destructive format.
     // Scenario: the runner has no size output for the replacement by-id path.
@@ -1056,6 +1050,35 @@ mod tests {
             ReplaceTargetProbe::PresentNotLuks { by_id: TARGET },
         )
         .unwrap_err();
+        assert!(
+            err.contains("failed to read raw size"),
+            "unexpected error: {err}"
+        );
+    }
+
+    // Intent: an explicit nullable SIZE cannot satisfy replacement preflight.
+    // Why it exists: structured lsblk distinguishes a present-but-null column
+    //   from command failure, but neither proves the target capacity.
+    // Scenario: lsblk returns a valid device row whose SIZE value is null.
+    #[test]
+    fn check_replace_target_capacity_refuses_when_lsblk_size_is_null() {
+        let runner = MockRunner::default().with_output(
+            CmdRequest::LsblkDeviceJson {
+                device: TARGET.into(),
+            },
+            crate::test_fixtures::lsblk_device_json_output(None, None, None),
+        );
+        let dev_info = dev_info_with_total(SOURCE_TOTAL);
+
+        let err = check_replace_target_capacity(
+            &runner,
+            &dev_info,
+            Path::new("/mnt/storage"),
+            source_probe(),
+            ReplaceTargetProbe::PresentNotLuks { by_id: TARGET },
+        )
+        .unwrap_err();
+
         assert!(
             err.contains("failed to read raw size"),
             "unexpected error: {err}"

@@ -5,9 +5,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::alert::{self, AlertCause, AlertSeverity};
 use crate::capacity;
-use crate::cmd::{CmdError, CmdRequest, CommandRunner, LsblkFieldKind};
+use crate::cmd::{CmdError, CmdRequest, CommandRunner};
 use crate::config::{Config, mapper_name};
-use crate::confirm::get_lsblk_field;
+use crate::confirm::query_disk_hw_info;
 use crate::journal;
 use crate::luks::{self, BackingPathResolver};
 use crate::membership::{self, PoolMembership};
@@ -1149,8 +1149,7 @@ fn build_disk_views<R: CommandRunner>(
 
         // Present-device hardware comes from the live backing path; persisted
         // by-id paths are setup/repair handles and can drift.
-        let model = get_lsblk_field(runner, &pd.underlying, LsblkFieldKind::Model);
-        let serial = get_lsblk_field(runner, &pd.underlying, LsblkFieldKind::Serial);
+        let hw = query_disk_hw_info(runner, &pd.underlying);
 
         // Error stats. Pair by the btrfs-native devid row key -- the stats
         // row's path can differ from the mapper path without changing which
@@ -1217,8 +1216,8 @@ fn build_disk_views<R: CommandRunner>(
             luks_uuid: pd.luks_uuid.as_str().to_owned(),
             devid: Some(pd.devid),
             status: DiskStatus::Present,
-            model,
-            serial,
+            model: hw.model,
+            serial: hw.serial,
             errors,
             smart: Some(smart),
         });
@@ -1808,9 +1807,9 @@ mod tests {
         status_btrfs_usage_raw, status_cfg_absent, status_cfg_present_not_luks, status_config,
         status_cryptsetup_status_active, status_cryptsetup_uuid_ok, status_disk_report_missing,
         status_disk_report_named, status_fs_ext4, status_fs_mounted, status_fs_not_mounted,
-        status_fs_one_disk, status_fs_three_disk, status_is_luks_raw, status_lsblk_field_ok,
-        status_membership_1disk, status_membership_3disk, status_mp, status_pool_empty,
-        status_report_with_alerts, status_report_with_scrub, status_runner_healthy_3disk_base,
+        status_fs_one_disk, status_fs_three_disk, status_is_luks_raw, status_membership_1disk,
+        status_membership_3disk, status_mp, status_pool_empty, status_report_with_alerts,
+        status_report_with_scrub, status_runner_healthy_3disk_base,
         status_runner_healthy_3disk_verbose,
     };
 
@@ -6034,35 +6033,19 @@ mod tests {
             fsid: None,
             null_underlying: vec![],
         };
-        let runner = MockRunner::default()
-            .with_output(
-                CmdRequest::LsblkField {
-                    device: "/dev/disk/by-id/disk1".to_owned(),
-                    field: LsblkFieldKind::Model,
-                },
-                status_lsblk_field_ok("lsblk", "WRONG MODEL"),
-            )
-            .with_output(
-                CmdRequest::LsblkField {
-                    device: "/dev/disk/by-id/disk1".to_owned(),
-                    field: LsblkFieldKind::Serial,
-                },
-                status_lsblk_field_ok("lsblk", "WRONG-SERIAL"),
-            )
-            .with_output(
-                CmdRequest::LsblkField {
-                    device: "/dev/vda".to_owned(),
-                    field: LsblkFieldKind::Model,
-                },
-                status_lsblk_field_ok("lsblk", "LIVE MODEL"),
-            )
-            .with_output(
-                CmdRequest::LsblkField {
-                    device: "/dev/vda".to_owned(),
-                    field: LsblkFieldKind::Serial,
-                },
-                status_lsblk_field_ok("lsblk", "LIVE-SERIAL"),
-            );
+        let runner = crate::test_fixtures::with_lsblk_hw_info(
+            crate::test_fixtures::with_lsblk_hw_info(
+                MockRunner::default(),
+                "/dev/disk/by-id/disk1",
+                "WRONG MODEL",
+                "WRONG-SERIAL",
+                0,
+            ),
+            "/dev/vda",
+            "LIVE MODEL",
+            "LIVE-SERIAL",
+            0,
+        );
         let membership = status_membership_1disk();
         let config_disks: Vec<ConfigDisk> = vec![];
         let stats = BtrfsDeviceStatsOutput { devices: vec![] };
@@ -6077,6 +6060,26 @@ mod tests {
         assert_eq!(disk.model.as_deref(), Some("LIVE MODEL"));
         assert_eq!(disk.serial.as_deref(), Some("LIVE-SERIAL"));
         assert_eq!(disk.by_id, "/dev/disk/by-id/disk1");
+        assert_eq!(
+            runner
+                .requests()
+                .iter()
+                .filter(|request| matches!(
+                    request,
+                    CmdRequest::LsblkDeviceJson { device } if device == "/dev/vda"
+                ))
+                .count(),
+            1,
+            "present-disk hardware must use one structured query"
+        );
+        assert!(
+            !runner.requests().iter().any(|request| matches!(
+                request,
+                CmdRequest::LsblkDeviceJson { device }
+                    if device == "/dev/disk/by-id/disk1"
+            )),
+            "present-disk hardware must not query the persisted by-id path"
+        );
     }
 
     // Intent: present verbose rows are ordered by resolved `DiskName`, not by

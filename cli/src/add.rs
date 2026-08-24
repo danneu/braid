@@ -4354,7 +4354,7 @@ mod tests {
         /// added. This models a plan-healthy pool that degrades in the window
         /// before the authoritative post-add balance gate.
         degrade_after_add: bool,
-        /// When set, answer `LsblkField` for the disk2 by-id target with the
+        /// When set, answer `LsblkDeviceJson` for the disk2 by-id target with the
         /// canonical `HW_*` model/serial/size so the confirm-prompt routing
         /// test can pin that hw is probed via the by-id handle (decision 024).
         /// Default off so the shared `::new()`/`::degraded()` callers keep the
@@ -4364,7 +4364,7 @@ mod tests {
 
     impl RecoverableAddRunner {
         /// Canonical hardware the by-id probe reports when `report_hw` is set.
-        /// Shared between the gated `LsblkField` arm and the confirm-routing
+        /// Shared between the gated `LsblkDeviceJson` arm and the confirm-routing
         /// test's `expected`, so the two cannot drift apart.
         const HW_MODEL: &'static str = "Samsung SSD 870 QVO";
         const HW_SERIAL: &'static str = "ADD2SERIAL";
@@ -4394,7 +4394,7 @@ mod tests {
             }
         }
 
-        /// Like `new()`, but answers the disk2 by-id `LsblkField` probe so the
+        /// Like `new()`, but answers the disk2 by-id `LsblkDeviceJson` probe so the
         /// confirm prompt's hw line resolves. Isolated behind its own
         /// constructor so the many `::new()` callers keep blank-hw prompts.
         fn with_hw_info() -> Self {
@@ -4506,15 +4506,14 @@ mod tests {
                     "btrfs balance status",
                     "No balance found on '/mnt/storage'\n",
                 )),
-                CmdRequest::LsblkField { device, field }
+                CmdRequest::LsblkDeviceJson { device }
                     if self.report_hw && device == "/dev/disk/by-id/virtio-disk2" =>
                 {
-                    let value = match field {
-                        crate::cmd::LsblkFieldKind::Model => Self::HW_MODEL.to_owned(),
-                        crate::cmd::LsblkFieldKind::Serial => Self::HW_SERIAL.to_owned(),
-                        crate::cmd::LsblkFieldKind::Size => Self::HW_SIZE.to_string(),
-                    };
-                    Ok(mock_ok("lsblk", &value))
+                    Ok(crate::test_fixtures::lsblk_device_json_output(
+                        Some(Self::HW_MODEL),
+                        Some(Self::HW_SERIAL),
+                        Some(Self::HW_SIZE),
+                    ))
                 }
                 _ => Err(CmdError::MissingMock),
             }
@@ -5203,7 +5202,7 @@ mod tests {
     //   its trailing newline exactly once for the planned fresh target. Until
     //   this used `with_hw_info()`, the prompt was built from
     //   `DiskHwInfo::default()` against a runner that returns `MissingMock`
-    //   for `LsblkField`, so `get_lsblk_field`'s `.ok()?` swallow blanked the
+    //   for `LsblkDeviceJson`, so best-effort discovery blanked the
     //   hw line no matter which device was queried -- the routing was unpinned.
     //   The populated `DiskHwInfo` now matches only if the probe hit the by-id
     //   path; a regression to any other path leaves the line blank and fails.

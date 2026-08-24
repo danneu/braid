@@ -13,16 +13,15 @@ pub struct RawCommandOutput {
     pub exit_status: i32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LsblkFieldKind {
-    Model,
-    Serial,
-    Size,
-}
+/// Explicit columns shared by every structured lsblk query.
+const LSBLK_JSON_COLUMNS: &str = "NAME,TYPE,SIZE,MODEL,SERIAL,UUID,ROTA,TRAN";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CmdRequest {
     LsblkJson,
+    LsblkDeviceJson {
+        device: String,
+    },
     BtrfsFilesystemDfJson {
         mount_point: MountPoint,
     },
@@ -64,10 +63,6 @@ pub enum CmdRequest {
     },
     BtrfsDeviceStatsJson {
         mount_point: MountPoint,
-    },
-    LsblkField {
-        device: String,
-        field: LsblkFieldKind,
     },
     // Mutation commands for apply
     CryptsetupLuksOpen {
@@ -529,7 +524,18 @@ impl CmdRequest {
                     "--json".into(),
                     "--bytes".into(),
                     "--output".into(),
-                    "NAME,TYPE,SIZE,MODEL,SERIAL,UUID,ROTA,TRAN".into(),
+                    LSBLK_JSON_COLUMNS.into(),
+                ],
+            },
+            CmdRequest::LsblkDeviceJson { device } => CmdArgs {
+                program: "lsblk".to_owned(),
+                args: vec![
+                    "--json".into(),
+                    "--bytes".into(),
+                    "--nodeps".into(),
+                    "--output".into(),
+                    LSBLK_JSON_COLUMNS.into(),
+                    device.clone(),
                 ],
             },
             CmdRequest::BtrfsFilesystemShow { mount_point } => CmdArgs {
@@ -651,24 +657,6 @@ impl CmdRequest {
                     mount_point.as_str().to_owned(),
                 ],
             },
-            CmdRequest::LsblkField { device, field } => {
-                let field_name = match field {
-                    LsblkFieldKind::Model => "MODEL",
-                    LsblkFieldKind::Serial => "SERIAL",
-                    LsblkFieldKind::Size => "SIZE",
-                };
-                CmdArgs {
-                    program: "lsblk".to_owned(),
-                    args: vec![
-                        "-n".into(), // no header
-                        "-d".into(), // device only (no partitions)
-                        "-b".into(), // sizes in bytes (no-op for string fields)
-                        "-o".into(), // output column
-                        field_name.into(),
-                        device.clone(),
-                    ],
-                }
-            }
             CmdRequest::CryptsetupLuksOpen { device, mapper } => CmdArgs {
                 program: "cryptsetup".to_owned(),
                 args: vec![
@@ -1844,6 +1832,39 @@ mod tests {
 
         let out = mock.run(&req).expect("mock should have output");
         assert_eq!(out.exit_status, 0);
+    }
+
+    // Intent: whole-system and device-scoped lsblk requests share one
+    //   explicit structured-output contract.
+    // Why it exists: the device query replaces scalar field probes without
+    //   creating a second unpinned util-linux parser surface.
+    // Scenario: TUI discovery scans all devices while hardware lookup targets
+    //   one disk and excludes dependency children.
+    #[test]
+    fn lsblk_json_argvs_share_the_structured_column_contract() {
+        let all = CmdRequest::LsblkJson.to_argv();
+        let device = CmdRequest::LsblkDeviceJson {
+            device: "/dev/disk/by-id/disk1".into(),
+        }
+        .to_argv();
+
+        assert_eq!(all.program, "lsblk");
+        assert_eq!(
+            all.args,
+            vec!["--json", "--bytes", "--output", LSBLK_JSON_COLUMNS,]
+        );
+        assert_eq!(device.program, "lsblk");
+        assert_eq!(
+            device.args,
+            vec![
+                "--json",
+                "--bytes",
+                "--nodeps",
+                "--output",
+                LSBLK_JSON_COLUMNS,
+                "/dev/disk/by-id/disk1",
+            ]
+        );
     }
 
     #[test]

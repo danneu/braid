@@ -13,9 +13,10 @@
 
 use super::shared::{
     DeviceUsageSpec, device_usage_raw_body, disk_member, disk_member_with, mock_ok,
+    with_lsblk_hw_info,
 };
 use crate::alert::AlertCause;
-use crate::cmd::{CmdRequest, LsblkFieldKind, MockRunner, RawCommandOutput};
+use crate::cmd::{CmdRequest, MockRunner, RawCommandOutput};
 use crate::config::{Config, mapper_name};
 use crate::membership::PoolMembership;
 use crate::probe::Filesystem;
@@ -466,15 +467,6 @@ pub(crate) fn status_is_luks_raw(device: &str, exit: i32, stderr: &str) -> RawCo
 }
 
 // ---------------------------------------------------------------------------
-// lsblk output factory
-// ---------------------------------------------------------------------------
-
-/// Single-field `lsblk` success output with the trailing newline parsers expect.
-pub(crate) fn status_lsblk_field_ok(cmd: &str, value: &str) -> RawCommandOutput {
-    mock_ok(cmd, &format!("{value}\n"))
-}
-
-// ---------------------------------------------------------------------------
 // Composite runners
 // ---------------------------------------------------------------------------
 
@@ -561,7 +553,7 @@ pub(crate) fn status_runner_healthy_3disk_base() -> MockRunner {
 
 /// Adds verbose-mode per-config-disk probes to a base healthy three-disk runner.
 pub(crate) fn status_runner_healthy_3disk_verbose(runner: MockRunner) -> MockRunner {
-    runner
+    let runner = runner
         .with_output(
             CmdRequest::CryptsetupLuksUuid {
                 device: "/dev/disk/by-id/disk1".into(),
@@ -594,49 +586,10 @@ pub(crate) fn status_runner_healthy_3disk_verbose(runner: MockRunner) -> MockRun
                 mount_point: status_mp(),
             },
             status_btrfs_device_stats_3disk(),
-        )
-        .with_output(
-            CmdRequest::LsblkField {
-                device: "/dev/vda".into(),
-                field: LsblkFieldKind::Model,
-            },
-            status_lsblk_field_ok("lsblk", "VBOX HARDDISK"),
-        )
-        .with_output(
-            CmdRequest::LsblkField {
-                device: "/dev/vda".into(),
-                field: LsblkFieldKind::Serial,
-            },
-            status_lsblk_field_ok("lsblk", "disk1"),
-        )
-        .with_output(
-            CmdRequest::LsblkField {
-                device: "/dev/vdb".into(),
-                field: LsblkFieldKind::Model,
-            },
-            status_lsblk_field_ok("lsblk", "VBOX HARDDISK"),
-        )
-        .with_output(
-            CmdRequest::LsblkField {
-                device: "/dev/vdb".into(),
-                field: LsblkFieldKind::Serial,
-            },
-            status_lsblk_field_ok("lsblk", "disk2"),
-        )
-        .with_output(
-            CmdRequest::LsblkField {
-                device: "/dev/vdc".into(),
-                field: LsblkFieldKind::Model,
-            },
-            status_lsblk_field_ok("lsblk", "VBOX HARDDISK"),
-        )
-        .with_output(
-            CmdRequest::LsblkField {
-                device: "/dev/vdc".into(),
-                field: LsblkFieldKind::Serial,
-            },
-            status_lsblk_field_ok("lsblk", "disk3"),
-        )
+        );
+    let runner = with_lsblk_hw_info(runner, "/dev/vda", "VBOX HARDDISK", "disk1", 0);
+    let runner = with_lsblk_hw_info(runner, "/dev/vdb", "VBOX HARDDISK", "disk2", 0);
+    with_lsblk_hw_info(runner, "/dev/vdc", "VBOX HARDDISK", "disk3", 0)
 }
 
 // ---------------------------------------------------------------------------
