@@ -31,8 +31,15 @@ Any change to behavior or an invariant must update them. Code that contradicts a
 principle is wrong -- fix the code, or change the principle with rationale. Every
 ADR carries a status: `Draft`, `Active`, `Superseded`, or `Deprecated`.
 
-Always reach for the ideal, robust, simple, most correct solution -- regardless of
-scope, refactor, or backwards-compatibility cost.
+## Design bar
+
+Before weighing any fix, work out the ideal one: the simplest structure in
+which the problem can't happen. Scope, churn, refactor cost, and backwards
+compatibility don't constrain it. Recommend something else only by faulting
+the ideal itself -- a constraint it breaks, a behavior it loses, a risk it
+can't remove -- and then present the cheap fix as an explicit trade-off, with
+the ideal written into the plan or commit so the user can make the call.
+Worked example: [granularity-mismatch.md](docs/dev/granularity-mismatch.md).
 
 ## Read before you touch
 

@@ -102,5 +102,6 @@
 - [TUI snapshots](dev/tui-snapshots.md)
 - [Planning and review hygiene](dev/planning-hygiene.md)
 - [Mutation safety heuristics](dev/safety-heuristics.md)
+- [Granularity mismatch](dev/granularity-mismatch.md)
 - [Doc and ADR file references](dev/doc-citations.md)
 - [Rust doc comments](dev/doc-comments.md)
