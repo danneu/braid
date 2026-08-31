@@ -133,14 +133,20 @@ with subtest("a deferral at pool-online re-pokes the scrub service"):
     busy.succeed("systemctl stop {}".format(SERVICE))
     busy.succeed("touch {}".format(DEFERRED_FLAG))
     # The previous subtest already left ExecMainStatus=0, so pin the *new* run
-    # by its invocation id rather than its exit code.
+    # by its invocation id rather than its exit code. InvocationID is set when
+    # the unit *starts*, though, and ExecMainStatus still holds the stale 0
+    # from the previous run at that moment -- so also require the unit to be
+    # back at rest (Type=simple, so a successful run ends inactive). Without
+    # that conjunct the wait returns while braid is still starting up and races
+    # the clear_deferral below.
     previous_invocation = show(busy, SERVICE, "InvocationID")
     busy.succeed("braid lock")
     busy.succeed("printf '%s\\n' {} | braid unlock --passphrase-stdin".format(pq))
     busy.wait_until_succeeds(
         'test "$(systemctl show {} -p InvocationID --value)" != {} && '
+        'test "$(systemctl show {} -p ActiveState --value)" = inactive && '
         'test "$(systemctl show {} -p ExecMainStatus --value)" = 0'.format(
-            SERVICE, shlex.quote(previous_invocation), SERVICE
+            SERVICE, shlex.quote(previous_invocation), SERVICE, SERVICE
         ),
         timeout=120,
     )
