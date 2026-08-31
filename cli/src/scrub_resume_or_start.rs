@@ -68,9 +68,15 @@ pub fn cmd_scrub_resume_or_start<R: CommandRunner>(
     // teardown is in flight for *this* run.
     clear_stale_cancel_marker(paths)?;
 
-    let resume_raw = runner.run(&CmdRequest::BtrfsScrubResume {
-        mount_point: mount_point.clone(),
-    })?;
+    // Spawned rather than `run`, so starting the scrub and reaping its
+    // authoritative exit code are separate points: `btrfs scrub` is outside the
+    // kernel's exclusive-operation set, so a caller that must know the scrub is
+    // actually registered has to look between the two.
+    let resume_raw = runner
+        .spawn(&CmdRequest::BtrfsScrubResume {
+            mount_point: mount_point.clone(),
+        })?
+        .wait()?;
 
     match resume_raw.exit_status {
         0 => Ok(ScrubResumeOrStartResult::Resumed {
@@ -94,9 +100,11 @@ fn start_scrub<R: CommandRunner>(
     mount_point: &MountPoint,
     paths: &StatePaths,
 ) -> Result<ScrubResumeOrStartResult, ScrubResumeOrStartError> {
-    let start_raw = runner.run(&CmdRequest::BtrfsScrubStart {
-        mount_point: mount_point.clone(),
-    })?;
+    let start_raw = runner
+        .spawn(&CmdRequest::BtrfsScrubStart {
+            mount_point: mount_point.clone(),
+        })?
+        .wait()?;
 
     match start_raw.exit_status {
         0 => Ok(ScrubResumeOrStartResult::Started {

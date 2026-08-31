@@ -45,7 +45,8 @@ Every child process spawned by the Rust CLI gets the same explicit environment:
 The only configuration point is `cli/src/cmd.rs#apply_child_env`. Every
 production Rust CLI spawn site must call that helper before spawning:
 
-- `cli/src/cmd.rs#RealRunner::exec`;
+- `cli/src/cmd.rs#RealRunner::spawn_exec` (the process creation behind both
+  `RealRunner::run` and the deferred-wait `RealRunner::spawn`);
 - `cli/src/cmd.rs#RealRunner::exec_with_stdin`;
 - `cli/src/ack.rs#stop_beeper_program`;
 - `cli/src/inhibit.rs#SleepInhibitor::acquire_with`.
@@ -63,10 +64,11 @@ PATH plus `LC_ALL=C` to its own children.
 Unit tests exercise each production spawn boundary by running a real stand-in
 child and inspecting the environment that child actually receives. The
 `RealRunner` and ack paths execute `env` directly and assert the complete key set
-is exactly `PATH` and `LC_ALL=C`. The inhibitor path uses the existing READY
-handshake with a shell stand-in, then asserts PATH and `LC_ALL=C` survive while a
-parent-only `CARGO_*` variable is absent despite the shell adding its own local
-variables.
+is exactly `PATH` and `LC_ALL=C`; the blocking, stdin-bearing, and deferred-wait
+spawn paths each get their own such assertion. The inhibitor path uses the
+existing READY handshake with a shell stand-in, then asserts PATH and `LC_ALL=C`
+survive while a parent-only `CARGO_*` variable is absent despite the shell adding
+its own local variables.
 
 The VM suite remains the end-to-end compatibility check that the allowlist is
 sufficient for cryptsetup, btrfs, mount, systemd, NUT, smartmontools, and

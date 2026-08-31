@@ -1340,6 +1340,57 @@ pub trait CommandRunner: Sync {
         request: &CmdRequest,
         stdin: &[u8],
     ) -> Result<RawCommandOutput, CmdError>;
+
+    /// Start `request` and hand back a handle to reap later, so a caller can do
+    /// work *while the child runs* instead of blocking in `run`.
+    ///
+    /// Only callers that must observe the world between "the tool was started"
+    /// and "the tool finished" need this; everything else keeps using `run`.
+    /// The scheduled scrub is the motivating case: `btrfs scrub` is outside the
+    /// kernel's exclusive-operation set, so the window between `fork` and the
+    /// scrub ioctl is unbounded, and the pool lock has to stay held across it.
+    ///
+    /// The default implementation runs the request to completion up front and
+    /// replays the result from `wait`, which keeps every test double correct
+    /// without implementing a second execution path. It deliberately keeps the
+    /// request-issued moment at `spawn`, matching the real seam, so
+    /// "no command was issued" assertions still hold.
+    ///
+    /// Caveat inherent to the split: the child's stdout and stderr are pipes
+    /// nobody drains until `wait`, so a child that outruns the pipe buffer
+    /// blocks until then. Only use this for tools whose pre-completion output is
+    /// small (btrfs scrub prints a summary at the end), and keep the work
+    /// between `spawn` and `wait` bounded.
+    fn spawn(&self, request: &CmdRequest) -> Result<Box<dyn PendingCommand>, CmdError> {
+        Ok(Box::new(CompletedCommand {
+            result: self.run(request),
+        }))
+    }
+}
+
+/// A started command whose completion is awaited separately from its start.
+///
+/// Exists so the spawn/wait split is a value the caller holds -- the borrow
+/// checker then makes "reap the child you started" the only expressible
+/// shape, and a lock guard can be dropped on a terminal outcome without
+/// losing the handle.
+pub trait PendingCommand {
+    /// Block until the child exits and yield its authoritative outcome.
+    ///
+    /// Consumes the handle: a child may only be reaped once.
+    fn wait(self: Box<Self>) -> Result<RawCommandOutput, CmdError>;
+}
+
+/// `PendingCommand` for runners that have no real child to wait on -- it holds
+/// an outcome already produced at `spawn` and replays it from `wait`.
+struct CompletedCommand {
+    result: Result<RawCommandOutput, CmdError>,
+}
+
+impl PendingCommand for CompletedCommand {
+    fn wait(self: Box<Self>) -> Result<RawCommandOutput, CmdError> {
+        self.result
+    }
 }
 
 fn signal_name(sig: i32) -> &'static str {
@@ -1422,17 +1473,68 @@ fn output_to_raw(
 
 pub struct RealRunner;
 
+/// A live child process plus the command string its diagnostics are reported
+/// under, reaped by `wait`.
+struct RealPendingCommand {
+    cmd_str: String,
+    child: std::process::Child,
+}
+
+impl PendingCommand for RealPendingCommand {
+    fn wait(self: Box<Self>) -> Result<RawCommandOutput, CmdError> {
+        let cmd_str = self.cmd_str;
+        let output = self
+            .child
+            .wait_with_output()
+            .map_err(|e| CmdError::Failed(format!("{cmd_str}: {e}")))?;
+
+        output_to_raw(cmd_str, output)
+    }
+}
+
 impl RealRunner {
-    fn exec(cmd: &CmdArgs) -> Result<RawCommandOutput, CmdError> {
+    /// Start `cmd` with the piped/null stdio `Command::output` would have used
+    /// and return before it exits. `exec` is this plus an immediate `wait`, so
+    /// the blocking and deferred paths cannot drift in stdio or child-env
+    /// handling.
+    fn spawn_exec(cmd: &CmdArgs) -> Result<Box<RealPendingCommand>, CmdError> {
+        use std::process::Stdio;
+
         let cmd_str = format!("{} {}", cmd.program, cmd.args.join(" "));
         let mut command = std::process::Command::new(&cmd.program);
         command.args(&cmd.args);
         apply_child_env(&mut command);
-        let output = command
-            .output()
+        let child = command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
             .map_err(|e| CmdError::Failed(format!("{cmd_str}: {e}")))?;
 
-        output_to_raw(cmd_str, output)
+        Ok(Box::new(RealPendingCommand { cmd_str, child }))
+    }
+
+    fn exec(cmd: &CmdArgs) -> Result<RawCommandOutput, CmdError> {
+        RealRunner::spawn_exec(cmd)?.wait()
+    }
+
+    /// Refuse the two request shapes that must never reach a no-stdin process
+    /// creation: a preview twin (which would run the real, destructive command
+    /// under an empty passphrase) and a secret-bearing request routed away from
+    /// `run_with_stdin`. Shared by `run` and `spawn` so a second process-
+    /// creation entry point cannot bypass either guard.
+    fn guard_no_stdin(request: &CmdRequest) -> Result<(), CmdError> {
+        if request.is_preview_only() {
+            return Err(CmdError::Failed(format!(
+                "{request:?} is preview-only and must never be executed"
+            )));
+        }
+        if request.requires_stdin() {
+            return Err(CmdError::Failed(format!(
+                "{request:?} must use run_with_stdin"
+            )));
+        }
+        Ok(())
     }
 
     fn exec_with_stdin(cmd: &CmdArgs, stdin_bytes: &[u8]) -> Result<RawCommandOutput, CmdError> {
@@ -1466,17 +1568,13 @@ impl RealRunner {
 
 impl CommandRunner for RealRunner {
     fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
-        if request.is_preview_only() {
-            return Err(CmdError::Failed(format!(
-                "{request:?} is preview-only and must never be executed"
-            )));
-        }
-        if request.requires_stdin() {
-            return Err(CmdError::Failed(format!(
-                "{request:?} must use run_with_stdin"
-            )));
-        }
+        RealRunner::guard_no_stdin(request)?;
         RealRunner::exec(&request.to_argv())
+    }
+
+    fn spawn(&self, request: &CmdRequest) -> Result<Box<dyn PendingCommand>, CmdError> {
+        RealRunner::guard_no_stdin(request)?;
+        Ok(RealRunner::spawn_exec(&request.to_argv())?)
     }
 
     fn run_with_stdin(
@@ -1815,6 +1913,85 @@ mod tests {
 
         assert_eq!(output.exit_status, 0);
         assert_exact_child_env_dump(&output.stdout);
+    }
+
+    // Intent: RealRunner::spawn_exec hands back a handle while the child is
+    // still running, and `wait` reports that same child's stdout and exit code.
+    // Why it exists: the scheduled-scrub gate must hold the pool lock across
+    // the spawn and a confirm poll, then classify from the authoritative exit
+    // code of the child it spawned. A seam that blocked until exit would make
+    // the confirm poll dead code; one that returned a different child's status
+    // would break the exit-code contract.
+    // Scenario: `btrfs scrub start -B` is spawned, the gate does its
+    // lock-held work while btrfs is registering the scrub with the kernel, and
+    // only later reaps the exit code that decides alert-or-clean.
+    #[test]
+    fn real_runner_spawn_returns_before_child_completes() {
+        let started = std::time::Instant::now();
+        let pending = RealRunner::spawn_exec(&CmdArgs {
+            program: "sh".to_owned(),
+            args: vec!["-c".to_owned(), "sleep 0.5; printf hi; exit 3".to_owned()],
+        })
+        .expect("sh should spawn through PATH");
+        let spawn_elapsed = started.elapsed();
+
+        assert!(
+            spawn_elapsed < std::time::Duration::from_millis(300),
+            "spawn must return while the child still runs, took {spawn_elapsed:?}"
+        );
+
+        let output = pending.wait().expect("child should be reaped");
+        assert_eq!(output.exit_status, 3);
+        assert_eq!(output.stdout, "hi");
+        assert!(
+            started.elapsed() >= std::time::Duration::from_millis(400),
+            "wait must block until the same child exits"
+        );
+    }
+
+    // Intent: the spawn/wait path applies the same explicit child-environment
+    // allowlist as the blocking execution paths.
+    // Why it exists: ADR 034's env discipline is per-spawn, so a second spawn
+    // boundary is a second place PATH/LC_ALL forwarding can silently regress --
+    // and the scrub runs through this one.
+    // Scenario: a command spawned through the deferred-wait seam prints the
+    // exact environment the child received.
+    #[test]
+    fn real_runner_spawn_child_env_is_allowlisted() {
+        let output = RealRunner::spawn_exec(&CmdArgs {
+            program: "env".to_owned(),
+            args: Vec::new(),
+        })
+        .expect("env should spawn through PATH")
+        .wait()
+        .expect("env should be reaped");
+
+        assert_eq!(output.exit_status, 0);
+        assert_exact_child_env_dump(&output.stdout);
+    }
+
+    // Intent: the default `CommandRunner::spawn` logs the request at spawn time
+    // and yields the seeded output only from `wait`.
+    // Why it exists: test doubles must model the real seam's two phases, or a
+    // gate that asserts "the child is in flight" would be exercised against a
+    // runner that had already finished, and "zero requests issued" assertions
+    // on a skip path would stop meaning anything.
+    // Scenario: a unit test stands in for `btrfs scrub start -B` while the gate
+    // holds the pool lock between the spawn and the confirm poll.
+    #[test]
+    fn mock_runner_spawn_logs_at_spawn_and_yields_output_at_wait() {
+        let (req, out) = crate::test_fixtures::scrub_start_output(3);
+        let mock = MockRunner::default().with_output(req.clone(), out);
+
+        let pending = mock.spawn(&req).expect("mock spawn");
+        assert_eq!(
+            mock.requests(),
+            vec![req],
+            "the request must be logged when the command is spawned"
+        );
+
+        let output = pending.wait().expect("mock wait");
+        assert_eq!(output.exit_status, 3);
     }
 
     #[test]
@@ -3713,8 +3890,9 @@ mod tests {
     }
 
     #[test]
-    // Intent: RealRunner rejects a CryptsetupLuksFormatPreview on BOTH run() and
-    //   run_with_stdin() with a "preview-only" error, before any spawn.
+    // Intent: RealRunner rejects a CryptsetupLuksFormatPreview on run(),
+    //   run_with_stdin() AND spawn() with a "preview-only" error, before any
+    //   process is created.
     // Why: the preview variant is not a stdin request, so without the
     //   is_preview_only guard run() would fall through to RealRunner::exec and
     //   spawn `cryptsetup luksFormat --batch-mode --key-file=-` with closed
@@ -3744,6 +3922,12 @@ mod tests {
         assert!(
             matches!(stdin_err, CmdError::Failed(ref msg) if msg.contains("preview-only")),
             "run_with_stdin() must reject the preview-only request, got: {stdin_err:?}"
+        );
+
+        let spawn_err = runner.spawn(&req).err().expect("spawn must reject");
+        assert!(
+            matches!(spawn_err, CmdError::Failed(ref msg) if msg.contains("preview-only")),
+            "spawn() must reject the preview-only request, got: {spawn_err:?}"
         );
     }
 }
