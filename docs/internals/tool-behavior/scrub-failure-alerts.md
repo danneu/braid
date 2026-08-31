@@ -42,23 +42,31 @@ Three of these are deliberately *not* execution failures:
   redundant ([ADR 014](../../design/decisions/014-alerts.md#two-detection-sources-one-alert-model)).
   The scrub unit declares `SuccessExitStatus = [ 3 4 ]` so this never reaches
   `onFailure`.
-- **Exit 4 (busy skip).** braid's gate refused to start a scrub onto a pool it
-  was already working on: another braid process holds `/run/braid-pool.lock`, a
-  btrfs exclusive operation is in flight (running *or* paused), or
-  `pending-op.json` exists. No scrub started and nothing was touched, so there
-  is nothing to alert on -- but the run is still owed, so
+- **Exit 4 (busy skip).** braid's gate refused to start a scrub onto a pool that
+  is already being worked on: another braid process holds `/run/braid-pool.lock`,
+  a btrfs exclusive operation is in flight (running *or* paused),
+  `pending-op.json` exists, or a scrub is already running. No scrub started and
+  nothing was touched, so there is nothing to alert on -- but the run is still
+  owed, so
   `RestartForceExitStatus=4` + `RestartSec=braid.autoScrub.retryInterval`
   retries it and a durable `/var/lib/braid/scrub-deferred` flag carries the
   retry across a reboot. This also fixed the spurious alert a scheduled scrub
   raised when it fired during a `btrfs replace`: the kernel rejects that scrub,
-  btrfs exits 1, and the old unit read it as a genuine failure.
+  btrfs exits 1, and the old unit read it as a genuine failure. The
+  already-running condition closes the same shape for a hand-run `btrfs scrub`:
+  it takes no pool lock and scrub is not a btrfs exclusive operation, so the
+  other three conditions cannot see it, and `btrfs scrub resume` refuses with
+  exit 1 (`scrub.c`'s `is_scrub_running_on_fs` guard, which the resume path
+  shares with start) -- alerting because the pool is being scrubbed right now.
+  It is checked last because it is the only condition that costs a subprocess.
 - **Exit 1 (ambiguous).** btrfs returns 1 for a genuine fatal scrub error
   **and** for a deliberately cancelled scrub -- see below.
 
 The gate's classification is asymmetric on purpose: a *busy* pool skips, but a
 gate that cannot be read -- unreadable or unrecognized sysfs exclusive-op state,
-or a deferred flag that cannot be written, cleared, or inspected -- is exit 1
-and alerts. Mapping probe breakage to "busy, retry later" would starve scrubs
+a `btrfs scrub status` that cannot be reduced to "is a scrub running", or a
+deferred flag that cannot be written, cleared, or inspected -- is exit 1 and
+alerts. Mapping probe breakage to "busy, retry later" would starve scrubs
 forever with no operator signal.
 
 ## Why exit 1 cannot be read directly
