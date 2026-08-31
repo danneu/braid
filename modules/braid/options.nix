@@ -85,6 +85,18 @@ in
         default = "monthly";
         description = "systemd calendar expression for periodic scrub scheduling.";
       };
+
+      retryInterval = lib.mkOption {
+        type = lib.types.str;
+        default = "1h";
+        description = ''
+          systemd time span to wait before retrying a scrub that was skipped
+          because braid was busy with the pool (a balance, an add/remove/replace,
+          or an interrupted operation awaiting `braid recover`). A skipped scrub
+          is not a failure and raises no alert; it retries on this interval until
+          the pool is clear. Keep it well below the scrub `interval`.
+        '';
+      };
     };
   };
 

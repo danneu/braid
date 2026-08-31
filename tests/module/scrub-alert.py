@@ -6,7 +6,8 @@
 #   at Critical -> braid ack clears everything), while the silent paths stay
 #   silent: btrfs exit 3 (corruption found, scrub completed) is a service
 #   success that routes to the device-stats poll, exit 0 (clean scrub) never
-#   beeps, and a deliberate lock-time cancel of a REAL scrub resolves to
+#   beeps, exit 4 (the busy gate skipped this run) is a retryable success rather
+#   than a failure, and a deliberate lock-time cancel of a REAL scrub resolves to
 #   Result=success without firing onFailure.
 #
 # Why it exists: braid-scrub.service previously had no failure alerting. Wiring
@@ -17,7 +18,7 @@
 #
 # Scenario: Two nodes, each a 2-disk RAID1 pool with monitor enabled.
 #   fail:   exit-code-parameterized scrub. Exit 1 -> alert raised + cleared;
-#           exit 3 and exit 0 -> silent.
+#           exit 3, exit 0 and exit 4 -> silent.
 #   cancel: dm-delay-backed REAL scrub cancelled by `braid lock` -> silent,
 #           Result=success. A real scrub is mandatory: the fake `sleep 300`
 #           scrub is SIGTERM-clean and would not exercise the real
@@ -191,6 +192,26 @@ with subtest("fail: exit 0 (clean scrub) stays silent -- the headline promise"):
     fail.fail("test -f {}".format(SCRUB_FAILED_FLAG))
     fail.fail("systemctl is-active braid-alert.service")
     fail.fail("test -f {}".format(ALERT_FIRED))
+
+with subtest("fail: exit 4 (busy skip) is a success, no alert"):
+    # The gate's skip code. SuccessExitStatus covers it, so onFailure cannot
+    # fire -- but RestartForceExitStatus schedules a retry, so this subtest runs
+    # last on this node and stops the unit rather than leaving it in
+    # auto-restart under the other subtests.
+    fail.succeed("echo 4 > {}".format(SCRUB_EXIT_FILE))
+    fail.succeed("rm -f {} {}".format(SCRUB_FAILED_FLAG, ALERT_FIRED))
+    fail.execute("systemctl start {}".format(SERVICE))
+    fail.wait_until_succeeds(
+        'test "$(systemctl show {} -p ExecMainStatus --value)" = 4'.format(SERVICE),
+        timeout=30,
+    )
+    assert show(fail, SERVICE, "Result") == "success", (
+        "a busy skip must be a service success"
+    )
+    fail.fail("test -f {}".format(SCRUB_FAILED_FLAG))
+    fail.fail("systemctl is-active braid-alert.service")
+    fail.fail("test -f {}".format(ALERT_FIRED))
+    fail.succeed("systemctl stop {}".format(SERVICE))
 
 fail.shutdown()
 

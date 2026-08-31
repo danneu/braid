@@ -137,8 +137,12 @@ impl fmt::Display for ExclusiveOp {
     }
 }
 
+/// `pub` rather than `pub(crate)` because it is carried by
+/// `ScrubResumeOrStartError::ExclusiveOpUnknown`, part of a command's public
+/// error surface -- the gate's fail-closed classification is not an internal
+/// detail. Matches the already-`pub` `ExclusiveOp` it wraps.
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum ExclusiveOpError {
+pub enum ExclusiveOpError {
     #[error("an exclusive operation is already running: {0}")]
     Busy(ExclusiveOp),
     #[error("cannot read exclusive operation status: {0}")]

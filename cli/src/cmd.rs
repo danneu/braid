@@ -1379,6 +1379,21 @@ pub trait PendingCommand {
     ///
     /// Consumes the handle: a child may only be reaped once.
     fn wait(self: Box<Self>) -> Result<RawCommandOutput, CmdError>;
+
+    /// Non-blocking "is this child done?", so a caller polling the world
+    /// between `spawn` and `wait` can stop polling once there is nothing left
+    /// to observe.
+    ///
+    /// The scrub gate needs this: a `btrfs scrub resume -B` with nothing to
+    /// resume exits within milliseconds and never registers with the kernel, so
+    /// a poll that only watched for "scrub running" would spin to its deadline
+    /// and drop the pool lock before the fallback `start` was even issued.
+    ///
+    /// Deliberately reports `true` when the child's state cannot be determined:
+    /// the caller's response is to stop polling and go reap the child, where
+    /// the underlying error surfaces authoritatively instead of being
+    /// swallowed here.
+    fn has_exited(&mut self) -> bool;
 }
 
 /// `PendingCommand` for runners that have no real child to wait on -- it holds
@@ -1390,6 +1405,11 @@ struct CompletedCommand {
 impl PendingCommand for CompletedCommand {
     fn wait(self: Box<Self>) -> Result<RawCommandOutput, CmdError> {
         self.result
+    }
+
+    /// Already finished at `spawn` time, by construction.
+    fn has_exited(&mut self) -> bool {
+        true
     }
 }
 
@@ -1489,6 +1509,12 @@ impl PendingCommand for RealPendingCommand {
             .map_err(|e| CmdError::Failed(format!("{cmd_str}: {e}")))?;
 
         output_to_raw(cmd_str, output)
+    }
+
+    fn has_exited(&mut self) -> bool {
+        // `Err` here means the wait syscall itself failed, which `wait` will
+        // report properly; treat it as "stop polling" rather than looping.
+        self.child.try_wait().map(|s| s.is_some()).unwrap_or(true)
     }
 }
 

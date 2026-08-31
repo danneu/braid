@@ -2,15 +2,18 @@
 #
 # Intent: Verify that braid.autoScrub generates braid-owned scrub systemd
 #   units with correct lifecycle binding to braid-online.service, that
-#   disabling removes the units, and that a custom interval passes through.
+#   disabling removes the units, that a custom interval passes through, and
+#   that the busy-skip retry directives (SuccessExitStatus 3+4,
+#   RestartForceExitStatus=4, RestartSec=retryInterval,
+#   StartLimitIntervalSec=0) are wired.
 #
 # Why it exists: braid owns the scrub timer to bind its lifecycle to the
 #   pool's online state. The config test validates all unit properties —
 #   lifecycle directives, scheduling priority, mount-point targeting, and
 #   absence of the old nixpkgs timer.
 #
-# Scenario: Three nodes — defaults (enabled, monthly, /mnt/storage),
-#   disabled (no scrub units), and weekly (custom interval).
+# Scenario: Three nodes — defaults (enabled, monthly, /mnt/storage, 1h retry),
+#   disabled (no scrub units), and weekly (custom interval and retry interval).
 
 import shlex
 
@@ -133,6 +136,36 @@ with subtest("defaults: scrub service is bound to braid-online"):
         "Expected braid-online.service in After, got: " + after
     )
 
+with subtest("defaults: busy skips are a success that systemd retries"):
+    # A scrub skipped because braid was already working on the pool exits 4.
+    # SuccessExitStatus keeps it off onFailure (no beep, no scrub-failed flag)
+    # and RestartForceExitStatus schedules the retry anyway, despite Restart=no
+    # keeping genuine failures fail-once. Without StartLimitIntervalSec=0 a
+    # balance running for days would exhaust the start limit and give up
+    # silently.
+    # Read the unit file rather than `systemctl show`: the exit-status list
+    # properties render in a systemd-internal shape, while the directives
+    # themselves are the contract.
+    svc_content = unit_content(defaults, SERVICE)
+    assert "SuccessExitStatus=3" in svc_content, (
+        "Expected SuccessExitStatus=3 in service unit, got:\n" + svc_content
+    )
+    assert "SuccessExitStatus=4" in svc_content, (
+        "Expected SuccessExitStatus=4 in service unit, got:\n" + svc_content
+    )
+    assert "RestartForceExitStatus=4" in svc_content, (
+        "Expected RestartForceExitStatus=4 in service unit, got:\n" + svc_content
+    )
+    assert "RestartSec=1h" in svc_content, (
+        "Expected the default retryInterval in RestartSec, got:\n" + svc_content
+    )
+    assert "StartLimitIntervalSec=0" in svc_content, (
+        "Expected StartLimitIntervalSec=0 in service unit, got:\n" + svc_content
+    )
+    # A skip must never be treated as a failure by the alert path.
+    restart = show(defaults, SERVICE, "Restart")
+    assert restart == "no", "Expected Restart=no, got: " + restart
+
 with subtest("defaults: old long-running resume service does not exist"):
     defaults.fail("systemctl cat braid-scrub-resume.service")
 
@@ -202,6 +235,13 @@ with subtest("disabled: braid-scrub-resume-trigger.service does not exist"):
     disabled.fail("systemctl cat {}".format(TRIGGER_SERVICE))
 
 # === weekly node ===
+
+with subtest("weekly: retryInterval passes through to RestartSec"):
+    weekly.wait_for_unit("multi-user.target")
+    svc_content = unit_content(weekly, SERVICE)
+    assert "RestartSec=10m" in svc_content, (
+        "Expected the configured retryInterval in RestartSec, got:\n" + svc_content
+    )
 
 with subtest("weekly: timer fires weekly"):
     weekly.wait_for_unit("multi-user.target")

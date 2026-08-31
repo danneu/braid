@@ -878,7 +878,11 @@ fn main() {
         }
         Commands::ScrubNeedsResume(args) => {
             let runner = RealRunner;
-            match braid_cli::scrub_needs_resume::cmd_scrub_needs_resume(&runner, &args.mount) {
+            match braid_cli::scrub_needs_resume::cmd_scrub_needs_resume(
+                &runner,
+                &args.mount,
+                &paths,
+            ) {
                 Ok(braid_cli::scrub_needs_resume::ScrubNeedsResumeResult::Yes) => {
                     std::process::exit(0)
                 }
@@ -893,17 +897,38 @@ fn main() {
         }
         Commands::ScrubResumeOrStart(args) => {
             let runner = RealRunner;
-            match braid_cli::scrub_resume_or_start::cmd_scrub_resume_or_start(
-                &runner,
-                &args.mount,
-                &paths,
-            ) {
+            let fs = RealFilesystem;
+            // The command owns a scoped pool-lock acquire rather than taking
+            // LockPolicy::None's whole-command guard: the gate must release the
+            // lock once the scrub is registered, not hold it for the scrub's
+            // multi-hour run. See ADR 018.
+            let pool_lock = braid_cli::pool_lock::RealPoolLock::production();
+            let params = braid_cli::scrub_resume_or_start::ScrubRunParams {
+                runner: &runner,
+                fs: &fs,
+                mount_point: &args.mount,
+                paths: &paths,
+                pool_lock: &pool_lock,
+                confirm: braid_cli::scrub_resume_or_start::ConfirmPoll::default(),
+            };
+            match braid_cli::scrub_resume_or_start::cmd_scrub_resume_or_start(&params) {
                 Ok(braid_cli::scrub_resume_or_start::ScrubResumeOrStartResult::Resumed {
                     uncorrectable_errors: false,
                 })
                 | Ok(braid_cli::scrub_resume_or_start::ScrubResumeOrStartResult::Started {
                     uncorrectable_errors: false,
                 }) => std::process::exit(0),
+                Ok(braid_cli::scrub_resume_or_start::ScrubResumeOrStartResult::Skipped {
+                    reason,
+                }) => {
+                    // Not a failure: the pool is busy with braid's own work, so
+                    // no scrub was started and nothing was touched. Exit 4 is
+                    // the service's retry signal (SuccessExitStatus +
+                    // RestartForceExitStatus), and the deferred flag already on
+                    // disk carries the retry across a reboot.
+                    println!("scrub skipped: {reason}");
+                    std::process::exit(4)
+                }
                 Ok(braid_cli::scrub_resume_or_start::ScrubResumeOrStartResult::Cancelled) => {
                     // A deliberate teardown (lock/suspend/shutdown) cancelled
                     // the scrub. btrfs exits 1, but the cancel-request marker

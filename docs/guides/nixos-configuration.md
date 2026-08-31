@@ -115,6 +115,7 @@ Override these only if you need a specific version for compatibility testing. Th
 | --- | --- | --- | --- |
 | `braid.autoScrub.enable` | bool | `true` | Enable periodic btrfs scrub |
 | `braid.autoScrub.interval` | string | `"monthly"` | systemd calendar expression |
+| `braid.autoScrub.retryInterval` | string | `"1h"` | How long to wait before retrying a scrub that was skipped because braid was busy with the pool |
 
 The scrub timer is lifecycle-aware: it starts when the pool comes online and stops when the pool goes offline. `Persistent = true` ensures a missed scrub runs on next unlock (e.g. the pool was locked over a monthly boundary).
 
@@ -238,8 +239,9 @@ braid = {
   # packages.ethtool = pkgs.ethtool;
 
   autoScrub = {
-    enable = true;       # default
+    enable = true;        # default
     interval = "monthly"; # default; any systemd calendar expression
+    retryInterval = "1h"; # default; wait this long before retrying a skipped scrub
   };
 
   monitor = {

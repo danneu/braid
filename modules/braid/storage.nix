@@ -100,7 +100,13 @@ in
       # SuccessExitStatus=3 keeps scrub-found corruption off this path, so
       # onFailure fires only on a real failed-to-run/complete scrub. See ADR 018.
       onFailure = lib.mkIf cfg.monitor.enable [ "braid-scrub-failed.service" ];
-      unitConfig.ConditionPathIsMountPoint = cfg.mountPoint;
+      unitConfig = {
+        ConditionPathIsMountPoint = cfg.mountPoint;
+        # The busy-skip retry below is an unbounded loop by design: a balance
+        # can legitimately run for days, and start-rate limiting would turn
+        # "retry until the pool is clear" into "give up silently".
+        StartLimitIntervalSec = 0;
+      };
       serviceConfig = {
         # simple (not oneshot) so ExecStop is invoked on stop.
         Type = "simple";
@@ -109,9 +115,20 @@ in
         # btrfs exit 3 = uncorrectable errors found, scrub COMPLETED. Declare it
         # a service success so corruption never reaches onFailure -- it alerts
         # via the monitor's device-stats poll (ADR 014), and this also fixes a
-        # latent bug where such a scrub silently left the unit `failed`. Only
-        # exit 3 is whitelisted; genuine failures (exit 1) still fail the unit.
-        SuccessExitStatus = [ 3 ];
+        # latent bug where such a scrub silently left the unit `failed`.
+        #
+        # braid exit 4 = the busy gate skipped this run: braid was already
+        # working on the pool, so no scrub started and nothing was touched. A
+        # skip is not a failure, so it must stay off onFailure (no beep, no
+        # scrub-failed flag) -- but it still owes a run, so
+        # RestartForceExitStatus schedules one regardless of Restart=no.
+        # Genuine failures (exit 1) keep fail-once/alert-once semantics.
+        SuccessExitStatus = [
+          3
+          4
+        ];
+        RestartForceExitStatus = [ 4 ];
+        RestartSec = cfg.autoScrub.retryInterval;
         # Scheduled/manual scrub: resume saved progress first; start fresh
         # only when btrfs reports nothing resumable.
         ExecStart = "${braidWrapped}/bin/braid scrub-resume-or-start --mount ${cfg.mountPoint}";

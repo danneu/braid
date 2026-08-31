@@ -1,13 +1,14 @@
 ---
-intent: Document how a failed scheduled scrub becomes a braid alert, and why a deliberate cancel and a corruption-found scrub do not. Read before changing the scrub unit's onFailure/SuccessExitStatus in modules/braid/storage.nix, the cancel-request marker in modules/braid/storage.nix#scrubCancelScript / cli/src/scrub_resume_or_start.rs, or the ScrubFailed alert source in cli/src/alert.rs.
+intent: Document how a failed scheduled scrub becomes a braid alert, and why a deliberate cancel, a corruption-found scrub, and a busy skip do not. Read before changing the scrub unit's onFailure/SuccessExitStatus in modules/braid/storage.nix, the cancel-request marker in modules/braid/storage.nix#scrubCancelScript / cli/src/scrub_resume_or_start.rs, or the ScrubFailed alert source in cli/src/alert.rs.
 status: Active
 ---
 
 # Scrub-failure alerts
 
 Reference for the `ScrubFailed` alert source: how `braid-scrub.service`
-failures reach the operator, and why the two look-alike non-failures (a
-deliberate cancel and a corruption-found scrub) stay silent. The lifecycle
+failures reach the operator, and why the three look-alike non-failures (a
+deliberate cancel, a corruption-found scrub, and a scrub skipped because braid
+was busy with the pool) stay silent. The lifecycle
 authority is [ADR 018](../../design/decisions/018-systemd-lifecycle.md#braid-scrubtimer--scrub-service--resume-trigger----lifecycle-bound-scrub);
 the alert-model authority is [ADR 014](../../design/decisions/014-alerts.md#two-detection-sources-one-alert-model).
 
@@ -23,17 +24,42 @@ a fallback). The exit codes that matter:
 | 3 | scrub completed, uncorrectable errors found | service success (`SuccessExitStatus=3`) |
 | other (1) | scrub failed to run/complete **OR** was cancelled | success iff a cancel was requested, else failure |
 
-Two of these are deliberately *not* execution failures:
+braid's own `scrub-resume-or-start` exit codes, as the unit sees them:
+
+| braid exit | Meaning | service outcome |
+|---|---|---|
+| 0 | scrub completed cleanly, or was deliberately cancelled | success |
+| 3 | scrub completed with uncorrectable errors | success (`SuccessExitStatus=3`) |
+| 4 | busy gate skipped the run; no scrub started | success (`SuccessExitStatus=4`), retried via `RestartForceExitStatus=4` |
+| 1 | genuine failure, including an unreadable gate or deferred flag | failure -> `onFailure` -> alert |
+
+Three of these are deliberately *not* execution failures:
 
 - **Exit 3 (corruption found).** The scrub ran to completion; it simply found
   uncorrectable errors, which btrfs has already written into the per-device
   error counters. Those reach the operator through the monitor's
   `BtrfsDeviceErrors` device-stats poll, so a scrub-status probe would be
   redundant ([ADR 014](../../design/decisions/014-alerts.md#two-detection-sources-one-alert-model)).
-  The scrub unit declares `SuccessExitStatus = [ 3 ]` so this never reaches
+  The scrub unit declares `SuccessExitStatus = [ 3 4 ]` so this never reaches
   `onFailure`.
+- **Exit 4 (busy skip).** braid's gate refused to start a scrub onto a pool it
+  was already working on: another braid process holds `/run/braid-pool.lock`, a
+  btrfs exclusive operation is in flight (running *or* paused), or
+  `pending-op.json` exists. No scrub started and nothing was touched, so there
+  is nothing to alert on -- but the run is still owed, so
+  `RestartForceExitStatus=4` + `RestartSec=braid.autoScrub.retryInterval`
+  retries it and a durable `/var/lib/braid/scrub-deferred` flag carries the
+  retry across a reboot. This also fixed the spurious alert a scheduled scrub
+  raised when it fired during a `btrfs replace`: the kernel rejects that scrub,
+  btrfs exits 1, and the old unit read it as a genuine failure.
 - **Exit 1 (ambiguous).** btrfs returns 1 for a genuine fatal scrub error
   **and** for a deliberately cancelled scrub -- see below.
+
+The gate's classification is asymmetric on purpose: a *busy* pool skips, but a
+gate that cannot be read -- unreadable or unrecognized sysfs exclusive-op state,
+or a deferred flag that cannot be written, cleared, or inspected -- is exit 1
+and alerts. Mapping probe breakage to "busy, retry later" would starve scrubs
+forever with no operator signal.
 
 ## Why exit 1 cannot be read directly
 

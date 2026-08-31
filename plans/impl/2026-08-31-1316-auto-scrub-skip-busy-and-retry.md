@@ -227,7 +227,7 @@ nix flake check
 ## Commit progress
 
 - [x] 1. refactor(cli): split scrub process spawning from completion
-- [ ] 2. feat(scrub): defer busy scheduled scrubs and retry
+- [x] 2. feat(scrub): defer busy scheduled scrubs and retry
 
 ## Implementation notes
 
@@ -253,3 +253,44 @@ nix flake check
   btrfs prints its summary at completion and the confirm poll is bounded.
 - ADR 034's spawn-site inventory named `RealRunner::exec`, which is no longer
   where `apply_child_env` is called; updated it to `RealRunner::spawn_exec`.
+
+- The confirm poll needs to know the child has exited, not just whether a scrub
+  is registered: `btrfs scrub resume -B` with nothing to resume exits in
+  milliseconds and never reaches the ioctl, so a poll that only watched for
+  `Running` would spin to its deadline and release the pool lock *before* the
+  fallback `start` was issued -- leaving the scrub that actually happens
+  ungated. `PendingCommand` therefore gained a non-blocking `has_exited`
+  alongside commit 1's `wait`. The loop tests status first and exit second, so
+  a confirmed-running scrub still releases early while an exited child keeps the
+  guard for the fallback. `has_exited` reports `true` when the child's state
+  cannot be determined: the response is to stop polling and reap, where the real
+  error surfaces.
+- Confirm-poll defaults (plan discretion): 250ms cadence, 60s deadline. Bounded
+  by two sides -- comfortably above scrub startup, and far below the 1h default
+  retry interval. The residual it buys is that AR2's worst case now holds the
+  pool lock for up to 60s, so a concurrent fail-fast `braid lock` could be
+  refused in that window; that is strictly better than the alternative of
+  holding it for the scrub's multi-hour run.
+- The deferred flag's write/clear/inspect go through `std::fs` + `StatePaths`
+  rather than the `Filesystem` seam, matching `clear_stale_cancel_marker`'s
+  existing precedent in this file. The seam's `exists()` returns `bool` and
+  coerces I/O errors to `false`, which is exactly the "cannot tell" -> "nothing
+  pending" collapse I3 forbids; the tests drive the error paths through
+  `StatePaths::custom` under a temp dir instead.
+- `preflight::ExclusiveOpError` widened from `pub(crate)` to `pub` because it is
+  now carried by `ScrubResumeOrStartError::ExclusiveOpUnknown`, part of a
+  command's public error surface. It already wrapped the `pub` `ExclusiveOp`.
+- The pool-lock lifetime is observed in unit tests by a `MockRunner` handler
+  that tries to take the same lock from a second handle at btrfs-spawn time.
+  flock is per-open-file-description, so a second handle in the test process
+  sees exactly what a peer braid process would -- this is what makes "held
+  across the resume-exit-2 fallback" and "released once confirmed running"
+  distinguishable rather than untestable.
+- `tests/module/scrub-skip-retry.py` masks `braid-scrub.timer` before the pool
+  ever comes online. With `Persistent=true` and no prior stamp the monthly timer
+  can fire on activation, which would make a timer-driven run indistinguishable
+  from the exit-4 retry and the pool-online resume the test is there to pin.
+- The new PO6 directives are asserted from the unit file text rather than
+  `systemctl show`: the exit-status list properties render in a
+  systemd-internal shape, while the directives themselves are the contract.
+

@@ -1120,6 +1120,11 @@
               braid = linuxCrane.braid-cli-unwrapped;
             }
           );
+          scrub-skip-retry = pkgs.testers.nixosTest (
+            import ./tests/module/scrub-skip-retry.nix {
+              braid = linuxCrane.braid-cli-unwrapped;
+            }
+          );
           lock-stops-bound-consumers = pkgs.testers.nixosTest (
             import ./tests/module/lock-stops-bound-consumers.nix {
               braid = linuxCrane.braid-cli-unwrapped;

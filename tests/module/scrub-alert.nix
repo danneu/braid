@@ -8,14 +8,15 @@
 # Why: braid-scrub.service had no failure alerting -- a scrub that failed to
 # run or complete left the unit `failed` with no operator signal. onFailure now
 # wires it to braid-alert, but btrfs exits 1 for BOTH a real cancel and a
-# genuine failure, and exits 3 for scrub-found corruption (which alerts via the
-# device-stats poll, not here). Only a behavioral test proves the cancel marker
-# and SuccessExitStatus=3 keep onFailure scoped to real execution failure.
+# genuine failure, exits 3 for scrub-found corruption (which alerts via the
+# device-stats poll, not here), and braid exits 4 when the busy gate skipped the
+# run. Only a behavioral test proves the cancel marker and SuccessExitStatus
+# keep onFailure scoped to real execution failure.
 #
 # Scenario: Two nodes, each with a 2-disk RAID1 pool and monitor enabled.
 #   fail:   exit-code-parameterized scrub (mkForce ExecStart reads the code from
-#           a file). Exit 1 raises and clears the alert end-to-end; exit 3 and
-#           exit 0 stay silent.
+#           a file). Exit 1 raises and clears the alert end-to-end; exit 3,
+#           exit 0 and exit 4 (busy skip) stay silent.
 #   cancel: dm-delay-backed REAL scrub, cancelled mid-run by `braid lock`. The
 #           real btrfs-exit-1-on-cancel + cancel-request marker path must resolve
 #           to Result=success and raise no alert (the fake `sleep 300` scrub used
