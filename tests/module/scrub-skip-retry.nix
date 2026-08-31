@@ -20,12 +20,12 @@
 # gone -- and after a stop-and-reboot-shaped interruption the pool-online
 # trigger still owes it.
 { braid }:
-{ pkgs, ... }:
+{ ... }:
 {
   name = "scrub-skip-retry";
 
   nodes.busy =
-    { ... }:
+    { pkgs, ... }:
     {
       imports = [ ../../modules/braid ];
 
