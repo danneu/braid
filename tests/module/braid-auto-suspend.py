@@ -1,7 +1,7 @@
 # Test: braid-sleep module configuration
 #
 # Intent: Verify that braid.autoSuspend produces the correct autosuspend config
-#   with BraidPool, BraidWol, SSH, Smb checks and BtrfsScrub wakeup.
+#   with BraidPool, BraidWol, SSH, Smb checks and no wakeups of any class.
 #
 # Why it exists: The autosuspend integration is the wiring between braid's
 #   idle/WoL checks and the system suspend daemon. If a check command is wrong
@@ -104,9 +104,26 @@ with subtest("SSH check exists (always on)"):
 with subtest("Smb check exists (auto-detected from samba)"):
     assert "[check.Smb]" in config, "Missing [check.Smb] in config"
 
-with subtest("BtrfsScrub wakeup exists"):
-    assert "[wakeup.BtrfsScrub]" in config, "Missing [wakeup.BtrfsScrub] in config"
-    assert "braid-scrub" in config, "Missing braid-scrub match pattern in config"
+with subtest("no autosuspend wakeup of any class"):
+    # Intent: Pin that braid registers no autosuspend wakeup -- not the scrub
+    #   timer, not anything else -- so a suspended NAS is never woken by an
+    #   RTC alarm braid armed.
+    # Why it exists: braid used to register the scrub timer as a
+    #   [wakeup.BtrfsScrub] SystemdTimer wakeup, which woke a sleeping NAS to
+    #   scrub. That is now explicitly rejected (ADR 016): background
+    #   maintenance runs opportunistically while the machine is awake. A
+    #   name-only check on BtrfsScrub would pass again the moment someone
+    #   added a differently named wakeup, so assert on the section class.
+    # Scenario: NixOS renders services.autosuspend for a host with
+    #   braid.autoSuspend.enable = true.
+    wakeup_sections = [
+        line.strip()
+        for line in config.splitlines()
+        if line.strip().startswith("[wakeup.")
+    ]
+    assert wakeup_sections == [], (
+        "braid must register no autosuspend wakeups, found: " + repr(wakeup_sections)
+    )
 
 with subtest("General settings"):
     assert "idle_time=900" in config, "Missing idle_time=900 in config"

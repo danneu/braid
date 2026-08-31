@@ -267,7 +267,7 @@ Deleted outright:
 ## Commit progress
 
 - [x] 1. fix(scrub): treat invocation collisions as already running
-- [ ] 2. fix(auto-suspend): stop waking for scrub timers
+- [x] 2. fix(auto-suspend): stop waking for scrub timers
 - [ ] 3. feat(scrub): schedule scrubs by recorded freshness
 
 ## Implementation notes
@@ -299,6 +299,21 @@ Deleted outright:
   on 4096 MiB disks, ~7-15 second window). Recorded because "LUKS is scenery
   for a btrfs-progs wording lock" is the obvious simplification and it is
   wrong.
+
+### Commit 2 (no autosuspend wakeups)
+
+- **The VM assert is class-agnostic, not name-based.** The plan's row reads "no
+  `[wakeup.BtrfsScrub]` section exists", but invariant 7 is broader ("no
+  autosuspend wakeup of any class"), and a name-only assert passes again the
+  moment someone adds a differently named wakeup. The test collects every
+  `[wakeup.*]` section from the rendered config and asserts the list is empty,
+  which pins the invariant as written.
+- **ADR 016 carries the full no-wakeup rationale in this slice**, rather than a
+  pointer to ADR 035, which does not exist until commit 3 (a forward link would
+  fail `mdbook-linkcheck2`). Commit 3 adds the freshness-scheduling half of the
+  story and can cross-link then. Guide wording likewise stays scoped to "braid
+  wakes nothing on a schedule" and does not yet describe freshness scheduling,
+  since the timer is still `OnCalendar=monthly` at this commit.
 
 ## Follow Up
 

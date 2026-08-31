@@ -19,7 +19,7 @@ NAS idle behavior; it does not preclude a future opt-in per-drive
 
 ### Whole-system suspend-to-RAM
 
-The entire NixOS machine suspends when idle. This preserves LUKS keys and the mounted btrfs pool in RAM — no re-unlock ceremony on wake. Drives stop, CPU stops, fans stop. Wake via Wake-on-LAN or RTC alarm.
+The entire NixOS machine suspends when idle. This preserves LUKS keys and the mounted btrfs pool in RAM — no re-unlock ceremony on wake. Drives stop, CPU stops, fans stop. Wake is on demand: a Wake-on-LAN magic packet, or the power button. braid arms no RTC alarm of its own (see [braid schedules no wakeups](#braid-schedules-no-wakeups)).
 
 ### autosuspend as the daemon
 
@@ -104,9 +104,27 @@ coverage braid does not own.
 
 SSH check is unconditional — braid requires SSH for unlock, and an active SSH session means someone is working. SMB and NFS checks are auto-detected from `config.services.samba.enable` and `config.services.nfs.server.enable` to avoid false positives on systems that don't run those services.
 
+### braid schedules no wakeups
+
+braid registers no `services.autosuspend.wakeups` entry, of any class. A
+suspended NAS is never woken by an alarm braid armed; it wakes on demand (WoL,
+power button) and its background maintenance runs while it is awake.
+
+braid did register the scrub timer as a `SystemdTimer` wakeup, so a sleeping
+NAS woke via RTC alarm to run the monthly scrub. That is now rejected. Waking
+a machine nobody is using, to spin every drive up for hours, is the opposite
+of what auto-suspend is for, and the wakeup was the only reason braid ever
+scheduled the machine's clock. Scrubs are maintenance, not a deadline: running
+one whenever the NAS happens to be awake keeps the pool checked without
+overriding the operator's decision to let it sleep.
+
+Nothing about the suspend gate changes: a scrub already in flight still blocks
+suspend through the `braid idle` check, so a scrub that starts while the
+machine is awake runs to completion rather than being suspended out from under.
+
 ### smartd and braid-monitor run opportunistically
 
-Neither smartd nor braid-monitor should wake the system or prevent suspend. They run naturally during wake windows (user access, scrub wakeup). SMART counters accumulate in drive firmware regardless of polling. The only scheduled wakeup is for the monthly btrfs scrub timer.
+Neither smartd nor braid-monitor should wake the system or prevent suspend. They run naturally during wake windows (user access, other activity). SMART counters accumulate in drive firmware regardless of polling.
 
 ### Paused balance = busy
 

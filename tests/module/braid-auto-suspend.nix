@@ -2,7 +2,7 @@
 #
 # What: Validates that enabling braid.autoSuspend produces the correct autosuspend
 # configuration with the BraidPool check, BraidWol check, SSH check, Smb
-# auto-detection, and scrub wakeup.
+# auto-detection, and no wakeups of any class.
 #
 # Why: The autosuspend integration is the wiring between braid's idle check
 # and the system suspend daemon. If a check command is wrong or the service

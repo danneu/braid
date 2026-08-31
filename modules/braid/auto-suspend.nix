@@ -1,4 +1,4 @@
-# Auto-suspend: suspends the NAS when idle, wakes for scrub and on-demand via WoL.
+# Auto-suspend: suspends the NAS when idle, wakes on demand via WoL.
 #
 # Uses autosuspend (Python daemon from nixpkgs) for the idle countdown and
 # suspend/wake lifecycle. braid provides `braid idle` as an ExternalCommand
@@ -130,12 +130,11 @@ in
         })
       ];
 
-      wakeups = {
-        BtrfsScrub = {
-          class = "SystemdTimer";
-          match = "braid-scrub";
-        };
-      };
+      # No wakeups. braid never arms an RTC alarm to wake a suspended NAS --
+      # not for scrub, not for anything else. Background maintenance runs
+      # opportunistically while the machine is awake, and a scrub already in
+      # flight keeps it awake through the BraidPool check. See
+      # docs/design/decisions/016-auto-suspend.md.
     };
   };
 }

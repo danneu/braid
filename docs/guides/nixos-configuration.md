@@ -178,7 +178,7 @@ Activity checks that block suspend:
 - SMB connections (auto-detected if `services.samba` is enabled)
 - NFS connections (auto-detected if `services.nfs.server` is enabled)
 
-The scrub timer is registered as a wakeup source so the NAS wakes for scheduled scrubs.
+braid never wakes a suspended NAS on a schedule -- not for scrubs, not for anything else. Scrubs run while the machine is awake.
 
 See [Power management](power-management.md) for the full workflow.
 

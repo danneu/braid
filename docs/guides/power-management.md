@@ -29,9 +29,11 @@ If all checks pass (everything idle) for the configured idle time (default 15 mi
 
 The WoL check gates braid's auto-suspend path only. Manual `sudo systemctl suspend` remains available for maintenance and testing, but it bypasses braid's pre-suspend WoL check.
 
-### Scrub wakeups
+### Nothing wakes the NAS on a schedule
 
-The monthly btrfs scrub timer is registered as an autosuspend wakeup source. If the NAS is asleep when a scrub is due, it wakes via RTC alarm, runs the scrub, and suspends again when idle.
+braid never wakes a sleeping NAS. There is no RTC alarm for scrubs or for anything else -- the machine wakes only when you ask it to (Wake-on-LAN magic packet, power button). Scrubs and other background maintenance run while the NAS is awake, and a scrub already running keeps it awake until it finishes.
+
+If your NAS sleeps for most of the month, expect scrubs to run later than the schedule suggests. That is the trade-off for a NAS that stays asleep.
 
 ## Configuration
 
