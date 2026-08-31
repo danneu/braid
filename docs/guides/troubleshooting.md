@@ -189,13 +189,30 @@ ps aux | grep braid
 # If nothing is running, the lock was released — retry your command
 ```
 
-## Scrub won't start
+## My scrub didn't run
 
-**Symptom:** `systemctl status braid-scrub.timer` shows the timer is inactive.
+**Symptom:** the pool has not been scrubbed and you expected it to be.
 
-The scrub timer is lifecycle-bound to `braid-online.service`. It only runs while the pool is unlocked and mounted.
-If a scrub was cancelled by lock or shutdown, braid resumes the partial scrub
-the next time the pool comes online.
+Most of the time this is not a problem: braid's timer polls hourly, and a poll
+finds the pool already fresh. The journal says so outright.
+
+```sh
+sudo journalctl -u braid-scrub.service | tail
+```
+
+- `scrub not due: last scrub started/resumed <ts> (N days ago); next due in M days`
+  -- working as intended. braid measures from the last scrub **btrfs** recorded,
+  including one you ran by hand, so a recent manual scrub pushes the automatic
+  one out. Raise or lower the window with `braid.autoScrub.intervalDays`; force
+  one now with `sudo btrfs scrub start /mnt/storage`.
+- `scrub not started: a btrfs scrub is already running` -- a scrub is in flight
+  right now. `braid status` shows its progress.
+- `scrub skipped: <reason>` -- braid was busy with the pool (a balance, an
+  add/remove/replace, or an interrupted operation awaiting `braid recover`).
+  Nothing failed; the next hourly poll retries once the pool is clear.
+- Nothing at all -- the timer is probably not running. It is lifecycle-bound to
+  `braid-online.service`, so it only runs while the pool is unlocked and
+  mounted.
 
 ```sh
 # Check pool state
@@ -205,6 +222,11 @@ sudo braid unlock
 # Timer should now be active
 systemctl status braid-scrub.timer
 ```
+
+A scrub cancelled by lock or shutdown is resumed by the next poll -- within
+about 30 seconds of the next unlock, and hourly after that. To stop that from
+happening, `sudo systemctl stop braid-scrub.timer` after cancelling; the timer
+returns on the next unlock or boot.
 
 ## Scrub reported errors
 

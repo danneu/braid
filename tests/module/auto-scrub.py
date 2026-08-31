@@ -2,18 +2,21 @@
 #
 # Intent: Verify that braid.autoScrub generates braid-owned scrub systemd
 #   units with correct lifecycle binding to braid-online.service, that
-#   disabling removes the units, that a custom interval passes through, and
-#   that the busy-skip retry directives (SuccessExitStatus 3+4,
-#   RestartForceExitStatus=4, RestartSec=retryInterval,
-#   StartLimitIntervalSec=0) are wired.
+#   disabling removes the units, that autoScrub.intervalDays reaches the CLI
+#   as --fresh-for-secs, that the timer is a poll (OnActiveSec + hourly, no
+#   Persistent, no WakeSystem) rather than a schedule, and that a busy skip
+#   (exit 4) is a unit success carrying no retry apparatus of its own.
 #
 # Why it exists: braid owns the scrub timer to bind its lifecycle to the
 #   pool's online state. The config test validates all unit properties —
 #   lifecycle directives, scheduling priority, mount-point targeting, and
-#   absence of the old nixpkgs timer.
+#   absence of the old nixpkgs timer. The negative asserts are the load-bearing
+#   half: Persistent=, OnCalendar=monthly, WakeSystem=, RestartForceExitStatus=
+#   and the deleted resume-trigger unit each reintroduce a schedule record or a
+#   wakeup that ADR 035 deleted, and each would be invisible in normal use.
 #
-# Scenario: Three nodes — defaults (enabled, monthly, /mnt/storage, 1h retry),
-#   disabled (no scrub units), and weekly (custom interval and retry interval).
+# Scenario: Three nodes — defaults (enabled, 30-day window, /mnt/storage),
+#   disabled (no scrub units), and weekly (intervalDays = 7).
 
 import shlex
 
@@ -21,7 +24,6 @@ start_all()
 
 TIMER = "braid-scrub.timer"
 SERVICE = "braid-scrub.service"
-TRIGGER_SERVICE = "braid-scrub-resume-trigger.service"
 
 
 def show(node, unit, prop):
@@ -68,15 +70,35 @@ with subtest("defaults: timer is bound to braid-online.service"):
         "Expected braid-online.service in After, got: " + after
     )
 
-with subtest("defaults: timer fires monthly with Persistent=true"):
-    # Timer-section properties (OnCalendar, Persistent) are not exposed
-    # by systemctl show. Read the unit file content instead.
+with subtest("defaults: the timer is an hourly poll with a prompt post-unlock poke"):
+    # Timer-section properties (OnCalendar, OnActiveSec, Persistent) are not
+    # exposed by systemctl show. Read the unit file content instead.
     timer_content = unit_content(defaults, TIMER)
-    assert "OnCalendar=monthly" in timer_content, (
-        "Expected OnCalendar=monthly in timer unit, got:\n" + timer_content
+    assert "OnCalendar=hourly" in timer_content, (
+        "Expected OnCalendar=hourly in timer unit, got:\n" + timer_content
     )
-    assert "Persistent=true" in timer_content, (
-        "Expected Persistent=true in timer unit, got:\n" + timer_content
+    assert "OnActiveSec=30s" in timer_content, (
+        "Expected OnActiveSec=30s in timer unit, got:\n" + timer_content
+    )
+    assert "AccuracySec=1min" in timer_content, (
+        "Expected AccuracySec=1min in timer unit, got:\n" + timer_content
+    )
+
+with subtest("defaults: the timer keeps no schedule record and wakes nothing"):
+    # Persistent= maintains a stamp file that is a second "when did we last
+    # scrub" record; btrfs's own record is the single anchor now. WakeSystem=
+    # would wake a suspended NAS, which braid never does (ADR 016). A calendar
+    # cadence would make the timer the schedule again rather than a poll.
+    timer_content = unit_content(defaults, TIMER)
+    assert "Persistent=" not in timer_content, (
+        "The timer must keep no stamp-file schedule record, got:\n" + timer_content
+    )
+    assert "WakeSystem=" not in timer_content, (
+        "braid must schedule no wakeups, got:\n" + timer_content
+    )
+    assert "OnCalendar=monthly" not in timer_content, (
+        "The scrub cadence is the freshness window, not the timer, got:\n"
+        + timer_content
     )
 
 with subtest("defaults: scrub service targets pool mount point"):
@@ -136,13 +158,13 @@ with subtest("defaults: scrub service is bound to braid-online"):
         "Expected braid-online.service in After, got: " + after
     )
 
-with subtest("defaults: busy skips are a success that systemd retries"):
+with subtest("defaults: a busy skip is a success with no retry apparatus"):
     # A scrub skipped because braid was already working on the pool exits 4.
-    # SuccessExitStatus keeps it off onFailure (no beep, no scrub-failed flag)
-    # and RestartForceExitStatus schedules the retry anyway, despite Restart=no
-    # keeping genuine failures fail-once. Without StartLimitIntervalSec=0 a
-    # balance running for days would exhaust the start limit and give up
-    # silently.
+    # SuccessExitStatus keeps it off onFailure (no beep, no scrub-failed flag).
+    # The retry is the next hourly poll, so RestartForceExitStatus/RestartSec
+    # must be gone -- a unit-level restart would be a second scheduler racing
+    # the timer. StartLimitIntervalSec=0 keeps hourly polls during a days-long
+    # balance from exhausting the start limit and giving up silently.
     # Read the unit file rather than `systemctl show`: the exit-status list
     # properties render in a systemd-internal shape, while the directives
     # themselves are the contract.
@@ -153,11 +175,11 @@ with subtest("defaults: busy skips are a success that systemd retries"):
     assert "SuccessExitStatus=4" in svc_content, (
         "Expected SuccessExitStatus=4 in service unit, got:\n" + svc_content
     )
-    assert "RestartForceExitStatus=4" in svc_content, (
-        "Expected RestartForceExitStatus=4 in service unit, got:\n" + svc_content
+    assert "RestartForceExitStatus=" not in svc_content, (
+        "The poll is the retry; no restart apparatus may remain, got:\n" + svc_content
     )
-    assert "RestartSec=1h" in svc_content, (
-        "Expected the default retryInterval in RestartSec, got:\n" + svc_content
+    assert "RestartSec=" not in svc_content, (
+        "The poll is the retry; no restart interval may remain, got:\n" + svc_content
     )
     assert "StartLimitIntervalSec=0" in svc_content, (
         "Expected StartLimitIntervalSec=0 in service unit, got:\n" + svc_content
@@ -166,58 +188,25 @@ with subtest("defaults: busy skips are a success that systemd retries"):
     restart = show(defaults, SERVICE, "Restart")
     assert restart == "no", "Expected Restart=no, got: " + restart
 
+with subtest("defaults: the freshness window reaches the CLI as --fresh-for-secs"):
+    # The window is passed on the command line, never read from a config file:
+    # the scrub units stay config-file-free (ADR 018). 30 days = 2592000s.
+    exec_start = show(defaults, SERVICE, "ExecStart")
+    assert "--fresh-for-secs 2592000" in exec_start, (
+        "Expected the default 30-day window as --fresh-for-secs, got: " + exec_start
+    )
+
 with subtest("defaults: old long-running resume service does not exist"):
     defaults.fail("systemctl cat braid-scrub-resume.service")
 
-with subtest("defaults: scrub resume trigger is loaded and lifecycle-bound"):
-    trigger_content = unit_content(defaults, TRIGGER_SERVICE)
-    trigger_type = show(defaults, TRIGGER_SERVICE, "Type")
-    assert trigger_type == "oneshot", (
-        "Expected Type=oneshot for resume trigger, got: " + trigger_type
-    )
-    exec_start = exec_script_content(defaults, TRIGGER_SERVICE, "ExecStart")
-    assert "scrub-needs-resume --mount /mnt/storage" in exec_start, (
-        "Expected scrub-needs-resume predicate in ExecStart script, got: " + exec_start
-    )
-    assert "systemctl start --no-block braid-scrub.service" in exec_start, (
-        "Expected no-block scrub service start in ExecStart script, got: " + exec_start
-    )
-    binds_to = show(defaults, TRIGGER_SERVICE, "BindsTo")
-    assert "braid-online.service" in binds_to, (
-        "Expected braid-online.service in BindsTo, got: " + binds_to
-    )
-    after = show(defaults, TRIGGER_SERVICE, "After")
-    assert "braid-online.service" in after, (
-        "Expected braid-online.service in After, got: " + after
-    )
-    assert "WantedBy=braid-online.service" in trigger_content, (
-        "Expected WantedBy=braid-online.service in trigger unit, got:\n"
-        + trigger_content
-    )
-    assert "ConditionPathIsMountPoint=/mnt/storage" in trigger_content, (
-        "Expected ConditionPathIsMountPoint=/mnt/storage in trigger unit, got:\n"
-        + trigger_content
-    )
-    assert "ProtectSystem=strict" in trigger_content, (
-        "Expected ProtectSystem=strict in trigger unit, got:\n"
-        + trigger_content
-    )
-    assert "CapabilityBoundingSet=" in trigger_content, (
-        "Expected empty CapabilityBoundingSet in trigger unit, got:\n"
-        + trigger_content
-    )
-    assert "RestrictAddressFamilies=AF_UNIX" in trigger_content, (
-        "Expected AF_UNIX-only address families in trigger unit, got:\n"
-        + trigger_content
-    )
-    conflicts = show(defaults, TRIGGER_SERVICE, "Conflicts")
-    assert "sleep.target" in conflicts, (
-        "Expected sleep.target in Conflicts, got: " + conflicts
-    )
-    before = show(defaults, TRIGGER_SERVICE, "Before")
-    assert "sleep.target" in before, (
-        "Expected sleep.target in Before, got: " + before
-    )
+with subtest("defaults: the pool-online resume trigger is gone"):
+    # The scrub service self-gates now, and the timer's OnActiveSec poke
+    # resumes an aborted scrub within ~30s of unlock, so the trigger unit and
+    # its scrub-needs-resume predicate were deleted rather than kept in sync.
+    # A dead-name guard: a stale unit left behind would start scrubs on every
+    # pool-online, outside the freshness window entirely.
+    defaults.fail("systemctl cat braid-scrub-resume-trigger.service")
+    defaults.fail("braid scrub-needs-resume --mount /mnt/storage")
 
 with subtest("defaults: nixpkgs scrub timer does not exist"):
     defaults.fail("systemctl cat btrfs-scrub-mnt-storage.timer")
@@ -232,23 +221,22 @@ with subtest("disabled: braid-scrub-resume.service does not exist"):
     disabled.fail("systemctl cat braid-scrub-resume.service")
 
 with subtest("disabled: braid-scrub-resume-trigger.service does not exist"):
-    disabled.fail("systemctl cat {}".format(TRIGGER_SERVICE))
+    disabled.fail("systemctl cat braid-scrub-resume-trigger.service")
 
 # === weekly node ===
 
-with subtest("weekly: retryInterval passes through to RestartSec"):
+with subtest("weekly: intervalDays passes through as a smaller freshness window"):
     weekly.wait_for_unit("multi-user.target")
-    svc_content = unit_content(weekly, SERVICE)
-    assert "RestartSec=10m" in svc_content, (
-        "Expected the configured retryInterval in RestartSec, got:\n" + svc_content
+    exec_start = show(weekly, SERVICE, "ExecStart")
+    assert "--fresh-for-secs 604800" in exec_start, (
+        "Expected intervalDays=7 as 604800s in --fresh-for-secs, got: " + exec_start
     )
 
-with subtest("weekly: timer fires weekly"):
-    weekly.wait_for_unit("multi-user.target")
-    weekly.succeed("systemctl cat {}".format(TIMER))
+with subtest("weekly: the poll cadence does not follow the freshness window"):
+    # The window is the schedule; the timer stays an hourly poll regardless.
     timer_content = unit_content(weekly, TIMER)
-    assert "OnCalendar=weekly" in timer_content, (
-        "Expected OnCalendar=weekly in timer unit, got:\n" + timer_content
+    assert "OnCalendar=hourly" in timer_content, (
+        "Expected OnCalendar=hourly in timer unit, got:\n" + timer_content
     )
 
 defaults.shutdown()

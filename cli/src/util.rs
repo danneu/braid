@@ -23,6 +23,36 @@ pub fn now_iso() -> String {
         .expect("formatting UTC as ISO8601 should never fail")
 }
 
+/// The naive-local wall clock a UTC instant projects onto, for every surface
+/// that compares against a btrfs timestamp.
+///
+/// btrfs renders scrub ctime as naive local wall-clock (`parse_ctime` yields a
+/// `PrimitiveDateTime` with no offset), so a UTC-basis `now` would skew every
+/// comparison by the host offset. Both inputs are parameters rather than clock
+/// reads so the projection stays unit-testable off the host timezone, and so
+/// the actual clock read stays in `main.rs` (the `_at` convention). One
+/// function, shared by the TUI's per-frame `now` and the scrub scheduler's
+/// freshness `now`, because two projections that disagree would put the
+/// operator's "Last scrub" reading and the scheduler's arithmetic on different
+/// clocks.
+pub fn local_now(utc: time::OffsetDateTime, offset: time::UtcOffset) -> time::PrimitiveDateTime {
+    let local = utc.to_offset(offset);
+    time::PrimitiveDateTime::new(local.date(), local.time())
+}
+
+/// Render a btrfs scrub timestamp in btrfs's own ctime shape.
+///
+/// Shared by `braid status`'s "Last scrub" row and the scrub scheduler's
+/// not-due journal line so an operator comparing the two is reading one
+/// timestamp in one format, not two renderings that might disagree.
+pub(crate) fn format_scrub_timestamp(ts: &crate::parse::types::ScrubTimestamp) -> String {
+    use time::macros::format_description;
+    let fmt = format_description!(
+        "[weekday repr:short] [month repr:short] [day padding:space] [hour]:[minute]:[second] [year]"
+    );
+    ts.0.format(&fmt).unwrap_or_else(|_| "unknown".to_owned())
+}
+
 /// Format an instant as seconds-only UTC RFC3339 (`2023-11-14T22:13:20Z`).
 ///
 /// Shared by the membership corrupt-state sidecar filename and the alert latch
@@ -123,10 +153,34 @@ pub(crate) fn ensure_mount_point_dir<F: Filesystem + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::{
-        detail_suffix, format_duration_secs, format_rfc3339_utc_seconds, humanize_ago,
+        detail_suffix, format_duration_secs, format_rfc3339_utc_seconds, humanize_ago, local_now,
         parse_rfc3339_utc, require_tty_inner,
     };
     use std::time::{Duration, SystemTime};
+
+    // Intent: local_now projects a UTC instant into naive local wall-clock time.
+    // Why it exists: a UTC-basis `now` or an offset sign error would skew both
+    //   the TUI's scrub relative-time text and the scrub scheduler's freshness
+    //   arithmetic against btrfs's naive-local scrub timestamps.
+    // Scenario: the projection runs on hosts in UTC, a negative-offset zone,
+    //   and a fractional-offset zone.
+    #[test]
+    fn local_now_projects_to_host_wall_clock() {
+        let utc = time::macros::datetime!(2026-02-24 12:00:00 UTC);
+
+        assert_eq!(
+            local_now(utc, time::macros::offset!(-06:00)),
+            time::macros::datetime!(2026-02-24 06:00:00)
+        );
+        assert_eq!(
+            local_now(utc, time::macros::offset!(+05:30)),
+            time::macros::datetime!(2026-02-24 17:30:00)
+        );
+        assert_eq!(
+            local_now(utc, time::UtcOffset::UTC),
+            time::macros::datetime!(2026-02-24 12:00:00)
+        );
+    }
 
     // Intent: require_tty_inner returns Ok only when both stdin and stdout
     // are terminals.

@@ -2,17 +2,22 @@
 #
 # What: Verifies that braid.autoScrub maps to braid-owned scrub systemd units
 # with correct lifecycle binding to braid-online.service, that disabling removes
-# the units, that a custom interval is passed through, and that a busy-skipped
-# scrub (exit 4) is a unit success systemd retries rather than an alert.
+# the units, that autoScrub.intervalDays reaches the CLI as --fresh-for-secs,
+# that the timer is the cheap poll ADR 035 describes (hourly + OnActiveSec, no
+# Persistent, no WakeSystem), and that a busy skip (exit 4) is a unit success
+# with no retry apparatus of its own.
 #
 # Why: braid owns the scrub timer to bind its lifecycle to the pool's online
 # state. A broken mapping could create units without lifecycle binding
 # (degrading to the nixpkgs always-on behavior), miss the pool mount point,
-# or leave stale units when disabled.
+# or leave stale units when disabled. The negative asserts matter as much as
+# the positive ones: a re-introduced Persistent= or OnCalendar=monthly would
+# restore the second schedule record this design deleted, silently and
+# invisibly.
 #
-# Scenario: Three nodes — default config (enabled, monthly, 1h retry), disabled
-# (no units), and weekly (custom interval and retry interval). Verify unit
-# properties via systemctl show.
+# Scenario: Three nodes — default config (enabled, 30-day window), disabled
+# (no units), and weekly (custom intervalDays). Verify unit properties via
+# systemctl show.
 { braid }:
 { ... }:
 {
@@ -66,8 +71,7 @@
       braid = {
         enable = true;
         package = braid;
-        autoScrub.interval = "weekly";
-        autoScrub.retryInterval = "10m";
+        autoScrub.intervalDays = 7;
       };
       virtualisation.emptyDiskImages = [
         {

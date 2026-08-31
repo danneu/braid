@@ -192,6 +192,11 @@ Last scrub: never
 Last scrub: running (45%)
 ```
 
+The timestamp is btrfs's own record of the last scrub start-or-resume, and it
+is the same number the scheduler measures freshness from -- `status` shows what
+was scrubbed and when, not when the next scrub is due
+([ADR 035](../design/decisions/035-scrub-scheduling-by-freshness.md)).
+
 A nonzero error count replaces `(no errors)` with `(N errors)` on a
 finished scrub, and prefixes the `cancelled (will resume)` and
 `interrupted` lines when a partial scrub recorded errors. When the count

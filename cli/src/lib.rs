@@ -52,7 +52,6 @@ pub mod remove_missing;
 pub(crate) mod repair_hint;
 pub mod replace;
 pub mod scrub_cancel;
-pub mod scrub_needs_resume;
 pub mod scrub_resume_or_start;
 /// In-memory secret types (currently `Passphrase`) that scrub on drop and
 /// gate plaintext egress through `expose_secret()`. Sibling to `credential`

@@ -10,6 +10,26 @@ let
   grammar = import ./grammar.nix { inherit lib; };
 in
 {
+  # Traps, not silent removals: both options named a systemd time span, and a
+  # config that still sets one is asking for a schedule braid no longer has.
+  # Evaluating on with the setting quietly ignored would leave an operator
+  # believing they had retimed their scrubs.
+  imports = [
+    (lib.mkRemovedOptionModule [ "braid" "autoScrub" "interval" ] ''
+      braid.autoScrub.interval is gone: scrubs are no longer scheduled on a
+      calendar. Set braid.autoScrub.intervalDays instead -- an integer number
+      of days measured from the last scrub btrfs recorded, hand-run scrubs
+      included. A time-of-day expression has no replacement: the scrub already
+      runs at Nice=19 with idle I/O scheduling, which is what an off-peak
+      window was buying you.
+    '')
+    (lib.mkRemovedOptionModule [ "braid" "autoScrub" "retryInterval" ] ''
+      braid.autoScrub.retryInterval is gone: a scrub skipped because braid was
+      busy with the pool is retried by the next hourly poll, so there is no
+      retry interval to configure.
+    '')
+  ];
+
   options.braid = {
     enable = lib.mkEnableOption "braid encrypted storage";
 
@@ -80,21 +100,17 @@ in
         default = true;
       };
 
-      interval = lib.mkOption {
-        type = lib.types.str;
-        default = "monthly";
-        description = "systemd calendar expression for periodic scrub scheduling.";
-      };
-
-      retryInterval = lib.mkOption {
-        type = lib.types.str;
-        default = "1h";
+      intervalDays = lib.mkOption {
+        type = lib.types.ints.positive;
+        default = 30;
         description = ''
-          systemd time span to wait before retrying a scrub that was skipped
-          because braid was busy with the pool (a balance, an add/remove/replace,
-          or an interrupted operation awaiting `braid recover`). A skipped scrub
-          is not a failure and raises no alert; it retries on this interval until
-          the pool is clear. Keep it well below the scrub `interval`.
+          How many days a recorded scrub keeps the pool fresh.
+
+          This is a freshness window, not a calendar schedule: it is measured
+          from the last scrub btrfs itself recorded, so a scrub you ran by hand
+          counts and pushes the next automatic scrub out by this many days. The
+          timer only polls; a poll on a pool scrubbed inside the window exits
+          without touching anything.
         '';
       };
     };
@@ -134,11 +150,25 @@ in
     # monitor off there is no braid-scrub-failed.service and no device-stats
     # poll, so neither a failed scrub nor scrub-discovered corruption raises any
     # alert.
-    warnings = lib.optional (cfg.autoScrub.enable && !cfg.monitor.enable) ''
-      braid: autoScrub is enabled but monitor is disabled -- scrub failures and
-      scrub-discovered corruption will not raise any alert (no beep, no `braid status`
-      cause). Enable braid.monitor to alert on scrub problems.
-    '';
+    warnings =
+      lib.optional (cfg.autoScrub.enable && !cfg.monitor.enable) ''
+        braid: autoScrub is enabled but monitor is disabled -- scrub failures and
+        scrub-discovered corruption will not raise any alert (no beep, no `braid status`
+        cause). Enable braid.monitor to alert on scrub problems.
+      ''
+      # Warnings, not assertions: both ends are legitimate for someone (a tiny
+      # SSD pool, an archive that is powered on twice a year), but both are far
+      # more often a typo, so they must be visible without being fatal.
+      ++ lib.optional (cfg.autoScrub.enable && cfg.autoScrub.intervalDays < 7) ''
+        braid: autoScrub.intervalDays = ${toString cfg.autoScrub.intervalDays} re-scrubs the
+        pool more than weekly. A scrub reads every allocated block, so on spinning disks
+        this is real wear and hours of contention for little extra protection (ADR 015).
+      ''
+      ++ lib.optional (cfg.autoScrub.enable && cfg.autoScrub.intervalDays > 180) ''
+        braid: autoScrub.intervalDays = ${toString cfg.autoScrub.intervalDays} leaves more
+        than half a year between scrubs. Silent bit rot is only found by scrubbing, and
+        the second copy has to survive until then for RAID1 to repair it (ADR 005).
+      '';
 
     users.groups = lib.mkIf (cfg.poolAccessGroup != null) {
       ${cfg.poolAccessGroup} = { };

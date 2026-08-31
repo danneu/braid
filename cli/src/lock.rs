@@ -1221,11 +1221,7 @@ fn run_lock_pre_steps(cfg: &Config, online_ops: &dyn OnlineStateOps, out: &mut d
         return;
     }
 
-    for unit in [
-        "braid-scrub.timer",
-        "braid-scrub-resume-trigger.service",
-        "braid-scrub.service",
-    ] {
+    for unit in ["braid-scrub.timer", "braid-scrub.service"] {
         stop_unit_silent(online_ops, unit);
     }
 
@@ -1233,10 +1229,7 @@ fn run_lock_pre_steps(cfg: &Config, online_ops: &dyn OnlineStateOps, out: &mut d
         return;
     };
     for unit in bound_by {
-        if matches!(
-            unit.as_str(),
-            "braid-scrub.timer" | "braid-scrub.service" | "braid-scrub-resume-trigger.service"
-        ) {
+        if matches!(unit.as_str(), "braid-scrub.timer" | "braid-scrub.service") {
             continue;
         }
         stop_unit_warn_on_error(online_ops, out, &unit);
@@ -1581,9 +1574,7 @@ mod tests {
             !requests.iter().any(|request| matches!(
                 request,
                 CmdRequest::SystemctlStop { unit, .. }
-                    if unit == "braid-scrub.timer"
-                        || unit == "braid-scrub-resume-trigger.service"
-                        || unit == "braid-scrub.service"
+                    if unit == "braid-scrub.timer" || unit == "braid-scrub.service"
             )),
             "unexpected scrub stop request: {requests:?}"
         );
@@ -1613,13 +1604,6 @@ mod tests {
             )
             .with_output(
                 CmdRequest::SystemctlStop {
-                    unit: "braid-scrub-resume-trigger.service".into(),
-                    no_block: false,
-                },
-                lock_ok_raw("systemctl stop braid-scrub-resume-trigger.service"),
-            )
-            .with_output(
-                CmdRequest::SystemctlStop {
                     unit: "braid-scrub.service".into(),
                     no_block: false,
                 },
@@ -1645,11 +1629,7 @@ mod tests {
             .expect("lock should succeed");
 
         let requests = runner.requests();
-        for unit in [
-            "braid-scrub.timer",
-            "braid-scrub-resume-trigger.service",
-            "braid-scrub.service",
-        ] {
+        for unit in ["braid-scrub.timer", "braid-scrub.service"] {
             assert!(
                 requests.iter().any(|request| matches!(
                     request,
@@ -1674,13 +1654,12 @@ mod tests {
     // Scenario: braid-online.service has scrub units plus SMB/NFS consumers
     // bound to it while lock prepares to unmount the pool.
     #[test]
-    fn bound_by_pre_step_skips_three_scrub_units() {
+    fn bound_by_pre_step_skips_the_scrub_units() {
         let config = lifecycle_config();
         let ops = RecordingOnlineStateOps::new();
         ops.set_bound_by_ok(vec![
             "braid-scrub.timer".into(),
             "braid-scrub.service".into(),
-            "braid-scrub-resume-trigger.service".into(),
             "smbd.service".into(),
             "nfs-server.service".into(),
         ]);
@@ -1692,7 +1671,6 @@ mod tests {
             ops.calls(),
             vec![
                 "stop braid-scrub.timer no_block=false",
-                "stop braid-scrub-resume-trigger.service no_block=false",
                 "stop braid-scrub.service no_block=false",
                 "list_bound_by braid-online.service",
                 "stop smbd.service no_block=false",
@@ -1733,7 +1711,6 @@ mod tests {
             ops.calls(),
             vec![
                 "stop braid-scrub.timer no_block=false",
-                "stop braid-scrub-resume-trigger.service no_block=false",
                 "stop braid-scrub.service no_block=false",
                 "list_bound_by braid-online.service",
                 "stop smbd.service no_block=false",
@@ -1792,7 +1769,6 @@ mod tests {
             ops.calls(),
             vec![
                 "stop braid-scrub.timer no_block=false",
-                "stop braid-scrub-resume-trigger.service no_block=false",
                 "stop braid-scrub.service no_block=false",
                 "list_bound_by braid-online.service",
                 "stop smbd.service no_block=false",
@@ -1822,7 +1798,6 @@ mod tests {
             ops.calls(),
             vec![
                 "stop braid-scrub.timer no_block=false",
-                "stop braid-scrub-resume-trigger.service no_block=false",
                 "stop braid-scrub.service no_block=false",
                 "list_bound_by braid-online.service",
             ]
@@ -1847,7 +1822,6 @@ mod tests {
             ops.calls(),
             vec![
                 "stop braid-scrub.timer no_block=false",
-                "stop braid-scrub-resume-trigger.service no_block=false",
                 "stop braid-scrub.service no_block=false",
                 "list_bound_by braid-online.service",
             ]
@@ -1882,7 +1856,6 @@ mod tests {
             ops.calls(),
             vec![
                 "stop braid-scrub.timer no_block=false",
-                "stop braid-scrub-resume-trigger.service no_block=false",
                 "stop braid-scrub.service no_block=false",
                 "list_bound_by braid-online.service",
                 "stop smbd.service no_block=false",

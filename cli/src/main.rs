@@ -67,14 +67,12 @@ enum Commands {
     /// propagate. Hidden from `braid --help`.
     #[command(hide = true)]
     ScrubCancel(ScrubCancelArgs),
-    /// Internal: invoked by `braid-scrub-resume-trigger.service` to decide
-    /// whether pool-online activation should start the shared scrub service.
+    /// Internal: invoked by `braid-scrub.service` on each poll. Reads btrfs's
+    /// own scrub record and exits 0 without touching the pool when the last
+    /// scrub is still inside --fresh-for-secs; otherwise resumes saved work or
+    /// starts a fresh scrub.
     #[command(hide = true)]
-    ScrubNeedsResume(ScrubMountArgs),
-    /// Internal: invoked by `braid-scrub.service` for timer/manual scrubs to
-    /// resume saved work or start a fresh scrub when nothing is resumable.
-    #[command(hide = true)]
-    ScrubResumeOrStart(ScrubMountArgs),
+    ScrubResumeOrStart(ScrubResumeOrStartArgs),
     /// Check disk health: exit 0 = ok/offline/lock-contended, exit 1 = Critical alert (incl. probe/compute failure latched as ComputationError), exit 2 = setup error (e.g. pool-lock I/O, config load), exit 3 = Warning-only alert (ENOSPC risk; no beep)
     Monitor,
     /// Acknowledge current alerts and silence notifications: exit 0 = acknowledged or nothing to ack, exit 1 = lock contention or ack failure, exit 2 = setup error (config load, pool-lock I/O)
@@ -195,7 +193,6 @@ fn lock_policy(command: &Commands) -> LockPolicy {
         | Idle
         | WolReady
         | ScrubCancel(_)
-        | ScrubNeedsResume(_)
         | ScrubResumeOrStart(_)
         | Tui(_)
         | Ups(_)
@@ -464,10 +461,28 @@ struct ScrubCancelArgs {
 }
 
 #[derive(Debug, Args)]
-struct ScrubMountArgs {
+struct ScrubResumeOrStartArgs {
     /// Mount point of the braid pool to scrub
     #[arg(long, value_parser = MountPoint::parse)]
     mount: MountPoint,
+
+    /// How recently the pool must already have been scrubbed for this poll to
+    /// be a no-op, in seconds.
+    // Required, with no default: a bare `braid scrub-resume-or-start` must be a
+    // usage error rather than an unwindowed scrub, because a defaulted-away
+    // window would silently mean "scrub on every poll". Seconds granularity
+    // (the NixOS module computes it from `autoScrub.intervalDays`) exists so a
+    // VM test can override the unit with a small window; forcing a scrub early
+    // is `btrfs scrub start`, not a zero here.
+    // i64 rather than u64 so the value is representable as a `time::Duration`
+    // without a cast: a u64 above i64::MAX would wrap to a negative window and
+    // make every poll read as fresh -- silently stopping all scrubbing.
+    #[arg(
+        long = "fresh-for-secs",
+        value_name = "SECS",
+        value_parser = clap::value_parser!(i64).range(1..)
+    )]
+    fresh_for_secs: i64,
 }
 
 /// Renders help for a nested command path without reintroducing Clap's
@@ -876,25 +891,6 @@ fn main() {
                 }
             }
         }
-        Commands::ScrubNeedsResume(args) => {
-            let runner = RealRunner;
-            match braid_cli::scrub_needs_resume::cmd_scrub_needs_resume(
-                &runner,
-                &args.mount,
-                &paths,
-            ) {
-                Ok(braid_cli::scrub_needs_resume::ScrubNeedsResumeResult::Yes) => {
-                    std::process::exit(0)
-                }
-                Ok(braid_cli::scrub_needs_resume::ScrubNeedsResumeResult::No) => {
-                    std::process::exit(1)
-                }
-                Err(e) => {
-                    print_cli_error(&e.to_string());
-                    std::process::exit(2);
-                }
-            }
-        }
         Commands::ScrubResumeOrStart(args) => {
             let runner = RealRunner;
             let fs = RealFilesystem;
@@ -903,6 +899,11 @@ fn main() {
             // lock once the scrub is registered, not hold it for the scrub's
             // multi-hour run. See ADR 018.
             let pool_lock = braid_cli::pool_lock::RealPoolLock::production();
+            // The only clock read on the scrub-scheduling path: `now` is
+            // injected so every decision below is a pure function of the probe
+            // and this instant (ADR 035, invariant 5).
+            let offset = time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC);
+            let now = braid_cli::util::local_now(time::OffsetDateTime::now_utc(), offset);
             let params = braid_cli::scrub_resume_or_start::ScrubRunParams {
                 runner: &runner,
                 fs: &fs,
@@ -910,6 +911,8 @@ fn main() {
                 paths: &paths,
                 pool_lock: &pool_lock,
                 confirm: braid_cli::scrub_resume_or_start::ConfirmPoll::default(),
+                now,
+                fresh_for: time::Duration::seconds(args.fresh_for_secs),
             };
             match braid_cli::scrub_resume_or_start::cmd_scrub_resume_or_start(&params) {
                 Ok(braid_cli::scrub_resume_or_start::ScrubResumeOrStartResult::Resumed {
@@ -918,15 +921,34 @@ fn main() {
                 | Ok(braid_cli::scrub_resume_or_start::ScrubResumeOrStartResult::Started {
                     uncorrectable_errors: false,
                 }) => std::process::exit(0),
+                Ok(braid_cli::scrub_resume_or_start::ScrubResumeOrStartResult::NotDue {
+                    detail,
+                }) => {
+                    // The outcome of almost every poll: btrfs's own record says
+                    // the pool was scrubbed inside the window, so nothing is
+                    // owed and nothing was touched. Exit 0 -- a scrub that is
+                    // not due is not a skipped scrub.
+                    println!("scrub not due: {detail}");
+                    std::process::exit(0)
+                }
+                Ok(braid_cli::scrub_resume_or_start::ScrubResumeOrStartResult::AlreadyRunning) => {
+                    // Seen at the entry probe, or a moment later in btrfs's own
+                    // refusal. Either way the pool is being scrubbed right now,
+                    // so nothing is owed: exit 0, not the exit 4 that means
+                    // "owed but blocked".
+                    println!(
+                        "scrub not started: {}",
+                        braid_cli::scrub_resume_or_start::SCRUB_ALREADY_RUNNING
+                    );
+                    std::process::exit(0)
+                }
                 Ok(braid_cli::scrub_resume_or_start::ScrubResumeOrStartResult::Skipped {
                     reason,
                 }) => {
-                    // Not a failure: the pool is busy -- with braid's own work,
-                    // or with a scrub someone else is already running -- so no
-                    // scrub was started and nothing was touched. Exit 4 is
-                    // the service's retry signal (SuccessExitStatus +
-                    // RestartForceExitStatus), and the deferred flag already on
-                    // disk carries the retry across a reboot.
+                    // Not a failure: braid is already working on this pool, so
+                    // no scrub was started and nothing was touched. Exit 4 says
+                    // "due but blocked" and is purely informational -- the next
+                    // hourly poll is the retry.
                     println!("scrub skipped: {reason}");
                     std::process::exit(4)
                 }
@@ -1490,7 +1512,7 @@ mod tests {
         let cli = Cli::try_parse_from(argv.iter().copied()).expect("mount should parse");
         let mount = match cli.command {
             Commands::ScrubCancel(args) => args.mount,
-            Commands::ScrubNeedsResume(args) | Commands::ScrubResumeOrStart(args) => args.mount,
+            Commands::ScrubResumeOrStart(args) => args.mount,
             other => panic!("unexpected command: {other:?}"),
         };
         assert_eq!(mount, MountPoint::parse(expected).unwrap());
@@ -1522,20 +1544,6 @@ mod tests {
         );
     }
 
-    // Intent: scrub-needs-resume validates --mount through MountPoint at clap
-    //   parse time.
-    // Why it exists: the resume trigger is a hidden systemd boundary and must
-    //   fail as a usage error for malformed mount text.
-    // Scenario: a bad unit argument tries to pass an option-like mount path.
-    #[test]
-    fn scrub_needs_resume_rejects_invalid_mount_arg() {
-        assert_scrub_mount_rejects(&["braid", "scrub-needs-resume", "--mount=-o"]);
-        assert_scrub_mount_parses(
-            &["braid", "scrub-needs-resume", "--mount=/mnt/storage"],
-            "/mnt/storage",
-        );
-    }
-
     // Intent: scrub-resume-or-start validates --mount through MountPoint at
     //   clap parse time.
     // Why it exists: the scrub runner must reject malformed mount text before
@@ -1544,11 +1552,44 @@ mod tests {
     //   mount path.
     #[test]
     fn scrub_resume_or_start_rejects_invalid_mount_arg() {
-        assert_scrub_mount_rejects(&["braid", "scrub-resume-or-start", "--mount=-o"]);
+        assert_scrub_mount_rejects(&[
+            "braid",
+            "scrub-resume-or-start",
+            "--mount=-o",
+            "--fresh-for-secs=2592000",
+        ]);
         assert_scrub_mount_parses(
-            &["braid", "scrub-resume-or-start", "--mount=/mnt/storage"],
+            &[
+                "braid",
+                "scrub-resume-or-start",
+                "--mount=/mnt/storage",
+                "--fresh-for-secs=2592000",
+            ],
             "/mnt/storage",
         );
+    }
+
+    // Intent: --fresh-for-secs is required, and rejects a zero window.
+    // Why it exists: a defaulted-away or zero freshness window would silently
+    //   turn every hourly poll into a scrub -- the failure mode the flag exists
+    //   to make unrepresentable. Forcing a scrub early is `btrfs scrub start`.
+    // Scenario: a hand-edited unit drops the flag, or passes 0 hoping to mean
+    //   "always scrub".
+    #[test]
+    fn scrub_resume_or_start_requires_a_positive_freshness_window() {
+        let missing =
+            Cli::try_parse_from(["braid", "scrub-resume-or-start", "--mount=/mnt/storage"])
+                .expect_err("a bare scrub-resume-or-start must be a usage error");
+        assert_eq!(missing.kind(), ErrorKind::MissingRequiredArgument);
+
+        let zero = Cli::try_parse_from([
+            "braid",
+            "scrub-resume-or-start",
+            "--mount=/mnt/storage",
+            "--fresh-for-secs=0",
+        ])
+        .expect_err("a zero window must be a usage error");
+        assert_eq!(zero.kind(), ErrorKind::ValueValidation);
     }
 
     fn parsed_lock_policy(argv: &[&str]) -> LockPolicy {
@@ -1637,11 +1678,14 @@ mod tests {
                 None,
             ),
             (
-                vec!["braid", "scrub-needs-resume", "--mount", "/mnt/storage"],
-                None,
-            ),
-            (
-                vec!["braid", "scrub-resume-or-start", "--mount", "/mnt/storage"],
+                vec![
+                    "braid",
+                    "scrub-resume-or-start",
+                    "--mount",
+                    "/mnt/storage",
+                    "--fresh-for-secs",
+                    "2592000",
+                ],
                 None,
             ),
             (vec!["braid", "tui"], None),

@@ -74,9 +74,8 @@
 //!   * `idle` -- flat idle helpers with a strict mountinfo/sysfs filesystem
 //!     mock and scrub output factories. It deliberately avoids a broad runner
 //!     because missing mocks and missing sysfs seeds are load-bearing.
-//!   * `scrub` -- flat scrub-shaped helpers for `cmd_scrub_cancel`,
-//!     `cmd_scrub_needs_resume`, and `cmd_scrub_resume_or_start`. Ships
-//!     exit-code-shaped factories for cancel and resume/start, plus
+//!   * `scrub` -- flat scrub-shaped helpers for `cmd_scrub_cancel` and
+//!     `cmd_scrub_resume_or_start`. Ships exit-code-shaped factories for cancel and resume/start, plus
 //!     per-state scrub-status factories. Names document kernel state, not
 //!     stderr text, so the numeric-exit-code dispatch contract for
 //!     `scrub cancel` stays visible. No broad scrub runner: cross-command
@@ -196,8 +195,8 @@ pub(crate) use replace::{ReplacementPool, replace_dev_info_sufficient};
 pub(crate) use scrub::{
     scrub_already_running_rejection, scrub_cancel_not_running, scrub_cancel_ok,
     scrub_cancel_real_failure, scrub_mp, scrub_resume_output, scrub_start_output,
-    scrub_status_aborted, scrub_status_finished, scrub_status_interrupted, scrub_status_never,
-    scrub_status_running, scrub_status_unknown,
+    scrub_status_aborted, scrub_status_finished, scrub_status_finished_at,
+    scrub_status_interrupted, scrub_status_never, scrub_status_running, scrub_status_unknown,
 };
 pub(crate) use shared::{
     DeviceUsageSpec, MockBackingPathResolver, MockFs, PoolFixture, RecordingSleeper,

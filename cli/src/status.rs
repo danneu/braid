@@ -981,13 +981,7 @@ fn format_scrub_journal_command(journal_since: &str) -> String {
     format!("sudo journalctl -k --since '{journal_since}' --grep '{SCRUB_JOURNAL_GREP}'")
 }
 
-fn format_scrub_timestamp(ts: &crate::parse::types::ScrubTimestamp) -> String {
-    use time::macros::format_description;
-    let fmt = format_description!(
-        "[weekday repr:short] [month repr:short] [day padding:space] [hour]:[minute]:[second] [year]"
-    );
-    ts.0.format(&fmt).unwrap_or_else(|_| "unknown".to_owned())
-}
+use crate::util::format_scrub_timestamp;
 
 pub(crate) fn get_balance_report<R: CommandRunner>(
     runner: &R,

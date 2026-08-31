@@ -67,19 +67,31 @@ in
 
     # --- Scrub scheduling ---
     # braid-owned scrub timer + service, replacing services.btrfs.autoScrub.
-    # Timer lifecycle is tied to braid-online.service: starts when pool comes
-    # online, stops when pool goes offline. Persistent=true handles catch-up
-    # for overdue scrubs on activation (e.g., pool was locked past a monthly
-    # boundary, then unlocked days later).
+    # Timer lifecycle is tied to braid-online.service: starts when the pool
+    # comes online, stops when it goes offline.
+    #
+    # The timer is a cheap poll, not a schedule: braid-scrub.service reads
+    # btrfs's own scrub record at entry and exits 0 when the last scrub is
+    # still fresh, so the only question this timer answers is "how often do we
+    # look?" (ADR 035). Hence:
+    #   * OnActiveSec=30s pokes shortly after unlock/boot, so an aborted scrub
+    #     resumes promptly. Not 0: that would race the tail of `braid unlock`,
+    #     which still holds the pool lock.
+    #   * No Persistent. The stamp file it maintains is a second "when did we
+    #     last scrub" record, and disagreeing records are what this design
+    #     deletes; catch-up is OnActiveSec plus the freshness predicate.
+    #   * Never WakeSystem. braid schedules no wakeups (ADR 016); a realtime
+    #     hourly elapse that passed during suspend fires promptly on resume, so
+    #     a woken machine gets a prompt poll anyway.
     systemd.timers.braid-scrub = lib.mkIf cfg.autoScrub.enable {
-      description = "Periodic btrfs scrub for braid pool";
+      description = "Freshness poll for the braid pool btrfs scrub";
       wantedBy = [ "braid-online.service" ];
       bindsTo = [ "braid-online.service" ];
       after = [ "braid-online.service" ];
       timerConfig = {
-        OnCalendar = cfg.autoScrub.interval;
-        AccuracySec = "1d";
-        Persistent = true;
+        OnActiveSec = "30s";
+        OnCalendar = "hourly";
+        AccuracySec = "1min";
       };
     };
 
@@ -102,9 +114,10 @@ in
       onFailure = lib.mkIf cfg.monitor.enable [ "braid-scrub-failed.service" ];
       unitConfig = {
         ConditionPathIsMountPoint = cfg.mountPoint;
-        # The busy-skip retry below is an unbounded loop by design: a balance
-        # can legitimately run for days, and start-rate limiting would turn
-        # "retry until the pool is clear" into "give up silently".
+        # The timer polls hourly and every poll starts this unit, so start-rate
+        # limiting would eventually turn "poll until the pool is clear" into
+        # "give up silently" -- on a pool held by a balance that legitimately
+        # runs for days.
         StartLimitIntervalSec = 0;
       };
       serviceConfig = {
@@ -120,50 +133,28 @@ in
         # braid exit 4 = the busy gate skipped this run: braid was already
         # working on the pool, so no scrub started and nothing was touched. A
         # skip is not a failure, so it must stay off onFailure (no beep, no
-        # scrub-failed flag) -- but it still owes a run, so
-        # RestartForceExitStatus schedules one regardless of Restart=no.
-        # Genuine failures (exit 1) keep fail-once/alert-once semantics.
+        # scrub-failed flag). It carries no retry apparatus either -- the next
+        # hourly poll IS the retry, which is why RestartForceExitStatus and
+        # RestartSec are gone. Genuine failures (exit 1) keep
+        # fail-once/alert-once semantics.
+        #
+        # Exit 0 now also covers "not due" and "a scrub is already running":
+        # both mean the pool owes no scrub, so they are successes, not skips.
         SuccessExitStatus = [
           3
           4
         ];
-        RestartForceExitStatus = [ 4 ];
-        RestartSec = cfg.autoScrub.retryInterval;
-        # Scheduled/manual scrub: resume saved progress first; start fresh
-        # only when btrfs reports nothing resumable.
-        ExecStart = "${braidWrapped}/bin/braid scrub-resume-or-start --mount ${cfg.mountPoint}";
+        # Poll entry point: exits 0 without touching the pool when btrfs's own
+        # record shows a scrub inside the freshness window; otherwise resumes
+        # saved progress, or starts fresh when nothing is resumable. The window
+        # is passed on the command line, never read from a config file, so the
+        # scrub units stay config-file-free (ADR 018 thin-systemd-layer).
+        ExecStart = "${braidWrapped}/bin/braid scrub-resume-or-start --mount ${cfg.mountPoint} --fresh-for-secs ${
+          toString (cfg.autoScrub.intervalDays * 86400)
+        }";
         # If the service is stopped before scrub finishes, cancel it.
         ExecStop = scrubCancelScript;
       };
-    };
-
-    systemd.services.braid-scrub-resume-trigger = lib.mkIf cfg.autoScrub.enable {
-      description = "Pool-online resume trigger for braid scrub";
-      documentation = [ "man:btrfs-scrub(8)" ];
-      wantedBy = [ "braid-online.service" ];
-      bindsTo = [ "braid-online.service" ];
-      after = [ "braid-online.service" ];
-      conflicts = [ "sleep.target" ];
-      before = [ "sleep.target" ];
-      unitConfig.ConditionPathIsMountPoint = cfg.mountPoint;
-      serviceConfig = base // {
-        Type = "oneshot";
-        CapabilityBoundingSet = "";
-        RestrictAddressFamilies = [ "AF_UNIX" ];
-      };
-      path = [
-        braidWrapped
-        pkgs.systemd
-      ];
-      script = ''
-        ret=0
-        braid scrub-needs-resume --mount ${cfg.mountPoint} || ret=$?
-        case "$ret" in
-          0) systemctl start --no-block braid-scrub.service ;;
-          1) ;;            # no resume needed -- clean no-op
-          *) exit "$ret" ;; # parser/command error -- surface as Result=failed
-        esac
-      '';
     };
 
     # Lifecycle owner: "pool is online."

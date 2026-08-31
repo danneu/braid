@@ -74,7 +74,7 @@ and [ADR 029](../design/decisions/029-release-process.md).
 
 When `braid.enable = true`, the module sets up:
 
-- **Monthly btrfs scrub** -- timer + service tied to pool lifecycle. Configurable via `braid.autoScrub`.
+- **Freshness-scheduled btrfs scrub** -- an hourly poll, tied to pool lifecycle, that scrubs when btrfs's own record says the last scrub is older than 30 days. Configurable via `braid.autoScrub`.
 - **Resilient boot** -- a dead drive never blocks boot. LUKS open and btrfs mount are deferred to `braid unlock`, not wired into `boot.initrd`.
 - **Pinned toolchain** -- btrfs-progs, cryptsetup, NUT, smartmontools, and ethtool are pinned to NixOS stable versions. util-linux and systemd are host-provided stable contracts. Override package-backed tools with `braid.packages.*` if needed.
 - **Shell completions** -- bash, zsh, and fish completions registered automatically via `clap_complete`.
@@ -114,10 +114,15 @@ Override these only if you need a specific version for compatibility testing. Th
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
 | `braid.autoScrub.enable` | bool | `true` | Enable periodic btrfs scrub |
-| `braid.autoScrub.interval` | string | `"monthly"` | systemd calendar expression |
-| `braid.autoScrub.retryInterval` | string | `"1h"` | How long to wait before retrying a scrub that was skipped because braid was busy with the pool |
+| `braid.autoScrub.intervalDays` | int | `30` | How many days a recorded scrub keeps the pool fresh |
 
-The scrub timer is lifecycle-aware: it starts when the pool comes online and stops when the pool goes offline. `Persistent = true` ensures a missed scrub runs on next unlock (e.g. the pool was locked over a monthly boundary).
+`intervalDays` is a freshness window, not a calendar schedule. braid measures it from the last scrub **btrfs itself recorded**, so a scrub you ran by hand counts and pushes the next automatic scrub out by that many days. Under the hood the timer just polls hourly; a poll on a pool scrubbed inside the window exits without touching anything and journals a `scrub not due` line ([ADR 035](../design/decisions/035-scrub-scheduling-by-freshness.md)).
+
+Values below 7 or above 180 still evaluate but emit a build-time warning -- weekly scrubbing is real wear on spinning disks, and half a year is a long time for bit rot to go unnoticed.
+
+The scrub timer is lifecycle-aware: it starts when the pool comes online and stops when the pool goes offline. It also pokes the scrub service ~30 seconds after unlock, so a pool that was locked past its window is scrubbed shortly after it comes back, and a cancelled scrub is resumed.
+
+**Migrating:** `braid.autoScrub.interval` and `braid.autoScrub.retryInterval` were removed and now fail evaluation with migration text. Replace `interval` with `intervalDays`. A time-of-day expression (`"Sun *-*-* 02:00:00"`) has no replacement: the scrub already runs at `Nice=19` with idle I/O scheduling, which is what an off-peak window was buying you. `retryInterval` has no replacement either -- a scrub skipped because braid was busy with the pool is retried by the next hourly poll.
 
 braid's scrub conflicts with the NixOS built-in `services.btrfs.autoScrub`. If both are enabled, evaluation fails with a clear error. Disable one or the other.
 
@@ -239,9 +244,8 @@ braid = {
   # packages.ethtool = pkgs.ethtool;
 
   autoScrub = {
-    enable = true;        # default
-    interval = "monthly"; # default; any systemd calendar expression
-    retryInterval = "1h"; # default; wait this long before retrying a skipped scrub
+    enable = true;     # default
+    intervalDays = 30; # default; days since the last scrub btrfs recorded
   };
 
   monitor = {

@@ -1,24 +1,28 @@
 # Test: scrub-lifecycle
 #
-# What: Verifies lifecycle-bound scrub catch-up, lock-time cancellation,
-# pool-online resume, and coalescing when an overdue timer fire and resumable
-# pool-online state both target braid-scrub.service.
+# What: Verifies freshness-driven scrub scheduling end to end -- a never-scrubbed
+# pool gets scrubbed by the timer's post-unlock poke, a pool scrubbed inside the
+# freshness window does not, a pool outside it does, lock-time cancellation
+# works while a scrub holds the mount busy, an aborted scrub is resumed by the
+# next poke, and a poke landing on a running scrub starts no second scrub and
+# raises no alert.
 #
-# Why: Config tests verify unit properties (BindsTo, Persistent, etc.) but only
-# a behavioral test proves the catch-up actually fires, the cancellation path
-# works end-to-end, the resume trigger engages, and the single-runner topology
-# prevents duplicate btrfs scrub processes.
+# Why: Config tests verify unit properties (BindsTo, OnActiveSec, etc.) but only
+# a behavioral test proves that btrfs's own scrub record actually drives the
+# decision -- that a hand scrub or a just-finished scheduled scrub really does
+# suppress the next one, which is the whole point of ADR 035 -- and that the
+# cancellation and resume paths still work without the deleted resume trigger.
 #
 # Scenario: Four nodes with 2-disk RAID1 pools.
-#   catchup:     real scrub service, seeded overdue stamp -> Persistent triggers
-#                immediate scrub on unlock.
+#   freshness:   real scrub service; unlock scrubs a never-scrubbed pool, the
+#                next unlock does not re-scrub it, and a shrunken freshness
+#                window makes the same record stale so it scrubs again.
 #   cancel:      fake long-running scrub (holds mount busy via open FD), lock
 #                while scrub runs -> Rust dispatch stops timer+service, CLI unmounts.
 #   resume:      real scrub service on dm-delay-backed disks, cancel mid-scrub,
-#                unlock with trigger masked, then resume via the pool-online trigger.
-#   concurrency: dm-delay-backed pool with saved scrub progress + overdue timer
-#                stamp; on unlock, both activation paths target braid-scrub.service.
-#                Proves systemd coalesces the starts into one resumed scrub run.
+#                then resume via the timer's post-unlock poke.
+#   concurrency: dm-delay-backed pool with a real scrub in flight; a poke during
+#                that scrub must start no second scrub and raise no alert.
 { braid }:
 { pkgs, lib, ... }:
 let
@@ -28,7 +32,7 @@ let
     "disk2"
   ];
 
-  # Shared node config for both catchup and cancel nodes.
+  # Shared node config for both freshness and cancel nodes.
   commonNode =
     { pkgs, lib, ... }:
     {
@@ -113,7 +117,7 @@ in
 {
   name = "scrub-lifecycle";
 
-  nodes.catchup = commonNode;
+  nodes.freshness = commonNode;
 
   nodes.cancel =
     { pkgs, lib, ... }:
@@ -137,7 +141,7 @@ in
   nodes.resume = resumeNode;
 
   # Same dm-delay-backed setup as `resume`; the concurrency subtest needs slow
-  # I/O so any accidental second scrub has time to become visible.
+  # I/O so a poke can land while a real scrub is still in flight.
   nodes.concurrency = resumeNode;
 
   testScript =

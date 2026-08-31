@@ -268,7 +268,7 @@ Deleted outright:
 
 - [x] 1. fix(scrub): treat invocation collisions as already running
 - [x] 2. fix(auto-suspend): stop waking for scrub timers
-- [ ] 3. feat(scrub): schedule scrubs by recorded freshness
+- [x] 3. feat(scrub): schedule scrubs by recorded freshness
 
 ## Implementation notes
 
@@ -315,6 +315,54 @@ Deleted outright:
   wakes nothing on a schedule" and does not yet describe freshness scheduling,
   since the timer is still `OnCalendar=monthly` at this commit.
 
+### Commit 3 (freshness scheduling)
+
+- **`format_scrub_timestamp` was promoted into `cli/src/util.rs`** alongside the
+  `local_now` projection the plan already called for. The not-due journal line
+  has to render the anchor in the same shape `braid status` shows it -- that
+  equivalence is the design's own argument for anchoring on start-or-resume --
+  and duplicating the `format_description!` would have made two renderings that
+  could drift apart. `status.rs` now delegates to the shared helper.
+- **The `--fresh-for-secs` flag is `i64`, not `u64`.** A `u64` above `i64::MAX`
+  would wrap when converted to `time::Duration` and yield a negative window,
+  which reads as fresh forever -- silently stopping all scrubbing. Parsing
+  directly as a range-checked `i64` removes the cast rather than guarding it.
+- **`ScrubFreshness::Due { clock_skew: bool }` carries the skew flag** instead of
+  a separate outcome. The plan asks for a journal line naming clock skew, but
+  skew is a *reason* for Due, not a fourth outcome: giving it its own variant
+  would have meant a second place the run path had to remember to treat as due.
+- **Entry-observed `Running` and an invocation-time collision share one result
+  variant** (`AlreadyRunning`) and one journal line. The plan says the collision
+  "behaves like Running at the boundary"; splitting them would have produced two
+  operator-visible phrasings for one fact, which is exactly what the shared
+  `SCRUB_ALREADY_RUNNING` constant exists to prevent. The distinction that does
+  matter -- one path issued a refused btrfs command and the other issued nothing
+  -- is asserted in the unit tests, not in the operator's journal.
+- **VM tests age records by overriding the unit's `--fresh-for-secs`, never the
+  guest clock.** `scrub-lifecycle`'s `set_fresh_for` writes a `/run` drop-in.
+  Moving the guest clock would desynchronize it from the naive-local ctime btrfs
+  writes, and rewriting `/var/lib/btrfs/scrub.status.<fsid>` would test a file
+  braid never writes -- both would test the harness rather than the scheduler.
+- **`tests/module/scrub-lifecycle.py`'s `catchup` node is now `freshness`**, and
+  its concurrency node tests a different thing than before. The old node proved
+  systemd coalesces a timer fire and a trigger fire into one run; with the
+  trigger deleted there is no second activation path to coalesce, so the node now
+  proves the case that replaced it: a poll landing on a running scrub starts no
+  second scrub and raises no alert.
+- **The concurrency VM assertion is btrfs's anchor, not a sampled `Status:
+  running`.** The first draft asserted the scrub was still running a few seconds
+  after the poke, and it failed: the scrub is allowed to complete at any moment,
+  so that sample races the thing under test. The invariant that actually matters
+  -- no second scrub was started -- is visible in the anchor, which a restart
+  would move and a coalesced poke cannot. A `running` check still runs
+  immediately *before* the poke, as the precondition that keeps the subtest from
+  passing vacuously against a scrub that already finished.
+- **ADR 033's `braid-scrub-resume-trigger.service` capability reasoning was kept
+  as a note rather than deleted.** The paragraph explains why `btrfs scrub
+  status` looks like it needs `CAP_SYS_ADMIN` and does not; that reasoning is
+  still the right answer for the next unit someone hardens, so it stays, rewritten
+  to say it currently gates no unit.
+
 ## Follow Up
 
 - `btrfs scrub start --limit <rate>` does not throttle the kernel scrub on the
@@ -330,3 +378,14 @@ Deleted outright:
   failure and alerts. The window is sub-second and the plan's design already
   accepts "every other exit-1 keeps its current classification", but it is the
   one shape the collision classifier does not cover.
+- `docs/design/decisions/018-systemd-lifecycle.md` still describes the scrub
+  service under a "Serialization via single runner" heading whose second
+  activation path no longer exists. The remaining claim (systemd coalesces
+  overlapping starts of one unit) is true and load-bearing for the hourly poll,
+  but the section reads as if it were still arbitrating between a timer and a
+  trigger. Worth a focused rewrite next time that ADR is opened.
+- `cli/src/tui/mod.rs` reads `UtcOffset::current_local_offset()` and
+  `OffsetDateTime::now_utc()` inside the render loop, below `main.rs`. It now
+  shares `util::local_now` with the scrub scheduler but not the injection
+  discipline, so the TUI's relative-time rendering is still untestable against a
+  fixed instant. Out of scope here; the `_at` convention would apply cleanly.

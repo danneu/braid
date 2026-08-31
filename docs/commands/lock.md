@@ -48,7 +48,7 @@ If the pool is already unmounted and all mappers are already closed, lock report
 
 When braid is installed via the NixOS module, `braid lock` also:
 
-- Stops `braid-scrub.timer`, `braid-scrub-resume-trigger.service`, and `braid-scrub.service` before unmount.
+- Stops `braid-scrub.timer` and `braid-scrub.service` before unmount.
 - Stops any consumer wired into the pool lifecycle via `braid.poolBoundServices` or a direct `BindsTo=braid-online.service` edge (lock walks its reverse, `BoundBy`; e.g. SMB or NFS -- see [Sharing and permissions](../guides/sharing-and-permissions.md)) before unmount.
 - Stops `braid-online.service` itself after a successful unmount.
 

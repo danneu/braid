@@ -728,6 +728,9 @@
           repro-btrfs-scrub-start-rejected-during-scrub = pkgs.testers.nixosTest (
             import ./tests/repro/btrfs-scrub-start-rejected-during-scrub.nix
           );
+          repro-btrfs-scrub-record-anchors-schedule = pkgs.testers.nixosTest (
+            import ./tests/repro/btrfs-scrub-record-anchors-schedule.nix
+          );
           repro-btrfs-replace-interrupted-mid-flight = pkgs.testers.nixosTest (
             import ./tests/repro/btrfs-replace-interrupted-mid-flight.nix {
               braid = linuxCrane.braid;
@@ -952,6 +955,22 @@
                   linuxSystem
                   ;
               };
+          eval-auto-scrub-removed-options = import ./tests/eval/auto-scrub-removed-options.nix {
+            inherit
+              pkgs
+              linuxPkgs
+              nixpkgs
+              linuxSystem
+              ;
+          };
+          eval-auto-scrub-interval-warnings = import ./tests/eval/auto-scrub-interval-warnings.nix {
+            inherit
+              pkgs
+              linuxPkgs
+              nixpkgs
+              linuxSystem
+              ;
+          };
           eval-grammar-parity = import ./tests/eval/grammar-parity.nix { inherit pkgs; };
           eval-nixos-module-default-supplies-package = import ./tests/eval/nixos-module-default-package.nix {
             inherit pkgs self nixpkgs;

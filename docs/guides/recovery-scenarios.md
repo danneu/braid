@@ -395,7 +395,6 @@ All state lives under `/var/lib/braid/`:
 | `pending-op.json` | UUID-keyed pending operation journal (present only during mutations) |
 | `acked-stats.json` | Acknowledged btrfs device stats baseline |
 | `smartd-alert` | Flag file set by smartd alert script |
-| `scrub-deferred` | Flag file marking a scheduled scrub that was skipped because braid was busy with the pool; cleared when a scrub actually runs |
 | `alert-latch.json` | Active alert state |
 | `luks-headers/` | LUKS header backups |
 

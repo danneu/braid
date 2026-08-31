@@ -55,7 +55,6 @@ bounding stays explicit per unit.
 | `braid-pcspkr-load.service` | base with `ProtectKernelModules=false`, `CapabilityBoundingSet=CAP_SYS_MODULE`, `PrivateNetwork=true`; no `RemainAfterExit` so alert starts can re-run it |
 | `hddfancontrol-braid.service` | base plus realtime scheduling and restart policy; no `PrivateDevices` |
 | `braid-fan-reload.service` | base, empty `CapabilityBoundingSet`, `RestrictAddressFamilies=AF_UNIX` |
-| `braid-scrub-resume-trigger.service` | base, empty `CapabilityBoundingSet`, `RestrictAddressFamilies=AF_UNIX` |
 
 `systemd.tmpfiles` pre-creates `/run/braid-pool.lock` with `0600 root root`.
 `ReadWritePaths=/run/braid-pool.lock` bind-mounts the same inode into the
@@ -79,15 +78,16 @@ without that capability. Its btrfs reads do not drive the cap: linux 6.18.33,
 the reset flag is requested, and the monitor does not reset device stats. The
 filesystem, device, and space-info paths are read-only query ioctls.
 
-`braid-scrub-resume-trigger.service` also uses an empty set. The deceptive
-detail is `btrfs scrub status`: linux 6.18.33,
-`fs/btrfs/ioctl.c` (`btrfs_ioctl_scrub_progress`) does require
-`CAP_SYS_ADMIN`, but btrfs-progs v6.19.1, `cmds/scrub.c`
+A note for anyone re-deriving these caps around `btrfs scrub status`, which is
+deceptive: linux 6.18.33, `fs/btrfs/ioctl.c` (`btrfs_ioctl_scrub_progress`)
+does require `CAP_SYS_ADMIN`, but btrfs-progs v6.19.1, `cmds/scrub.c`
 (`is_scrub_running_in_kernel` and `cmd_scrub_status`) treats a failed progress
 ioctl as "not running" and does not propagate that failure to the command exit.
-The resume decision comes from the persisted scrub status file and ungated
-filesystem/device/space-info queries, so granting `CAP_SYS_ADMIN` would add
-authority without improving the decision.
+A caller that reads only the persisted scrub status file therefore gains nothing
+from `CAP_SYS_ADMIN`. `braid-scrub.service` is in the unsandboxed exception set
+below for unrelated reasons (it mutates the pool), so this does not currently
+gate any unit -- it is recorded because the ioctl's cap requirement invites the
+wrong conclusion.
 
 `braid-scrub-failed.service` also uses an empty set. It writes the durable
 scrub-failed flag and hands off to PID1 over the local systemd socket; neither
@@ -158,11 +158,10 @@ need device-mapper, mount propagation, broad btrfs operation authority,
 lifecycle ownership, or intentionally unrestricted operator command execution
 that does not fit this base profile.
 
-`braid-fan-reload.service`, `braid-scrub-resume-trigger.service`, and
-`braid-scrub-failed.service` are not in that exception set. They are dispatch
-shells, but they do not mount, open device-mapper, or need broad btrfs mutation
-authority. They use the base with an empty capability set and AF_UNIX only for
-their `systemctl` handoff.
+`braid-fan-reload.service` and `braid-scrub-failed.service` are not in that
+exception set. They are dispatch shells, but they do not mount, open
+device-mapper, or need broad btrfs mutation authority. They use the base with an
+empty capability set and AF_UNIX only for their `systemctl` handoff.
 
 ## Test strategy
 

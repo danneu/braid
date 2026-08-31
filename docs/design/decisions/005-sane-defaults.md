@@ -33,21 +33,21 @@ Create a `braid.*` option when:
 - **The underlying tech could change** — the abstraction survives an implementation swap.
 - **The raw option requires braid-specific context** — e.g., the pool membership encodes LUKS + mapper naming conventions. Exposing the raw options would require the user to understand braid's internals.
 - **The mapping is non-obvious or must stay in sync** — e.g., if braid supported multiple pools, scrub `fileSystems` would need to track all mount points automatically.
-- **Braid needs lifecycle control** — the feature must be tied to the pool's online state, not the host system's always-on timers. Example: `braid.autoScrub` wraps a 1:1 mapping but needs the timer bound to `braid-online.service` so `Persistent=true` catches up missed scrubs after unlock.
+- **Braid needs lifecycle control** — the feature must be tied to the pool's online state, not the host system's always-on timers. Example: `braid.autoScrub` wraps a 1:1 mapping but needs the timer bound to `braid-online.service` so the post-unlock poke catches up a pool that was locked past its window.
 
 ## Defaults applied
 
 | Setting | Value | Rationale |
 |---------|-------|-----------|
 | `braid.autoScrub.enable` | `true` | Scrub detects bit rot before it compounds. Every NAS should do this. Wrapped in a braid option for lifecycle binding to `braid-online.service`. |
-| `braid.autoScrub.interval` | `"monthly"` | Btrfs community consensus. Weekly is aggressive for spinning disks; quarterly risks undetected corruption on a small RAID1. TrueNAS defaults to weekly (ZFS); Synology doesn't enable it by default. Monthly is the sweet spot. |
+| `braid.autoScrub.intervalDays` | `30` | Btrfs community consensus, unchanged as a cadence. Weekly is aggressive for spinning disks; quarterly risks undetected corruption on a small RAID1. TrueNAS defaults to weekly (ZFS); Synology doesn't enable it by default. Monthly is the sweet spot. What changed is the anchor, not the number: this is 30 days since btrfs last recorded a scrub -- a hand scrub counts -- not a calendar boundary ([ADR 035](035-scrub-scheduling-by-freshness.md)). |
 | `braid.poolAccessGroup` | `"storage"` | Mount root set to `root:storage 2770`. Users in the group can read/write the mount root. Setgid ensures new entries inherit the group. Same pattern as TrueNAS/OMV. Does not override per-file umask. |
 
 ## Alternatives considered
 
 ### Wrap scrub in braid.autoScrub
 
-Accepted (reversed). Initially rejected because wrapping a 1:1 mapping seemed like unnecessary indirection. Reversed because braid needs lifecycle control over the scrub timer: the timer must be bound to `braid-online.service` so it only runs while the pool is online, and `Persistent=true` can catch up missed scrubs on unlock. The nixpkgs `services.btrfs.autoScrub` timer fires on calendar boundaries regardless of pool state, causing silent failures when the pool is locked.
+Accepted (reversed). Initially rejected because wrapping a 1:1 mapping seemed like unnecessary indirection. Reversed because braid needs lifecycle control over the scrub timer: the timer must be bound to `braid-online.service` so it only runs while the pool is online, and the post-unlock poke catches up a pool that was locked past its window. The nixpkgs `services.btrfs.autoScrub` timer fires on calendar boundaries regardless of pool state, causing silent failures when the pool is locked.
 
 ### Don't enable scrub by default
 
@@ -60,6 +60,7 @@ Rejected. TrueNAS runs ZFS on always-on servers. Braid targets home NAS with spi
 ## See
 
 - `modules/braid/options.nix` — declares the option defaults (`braid.autoScrub`, `braid.poolAccessGroup`)
-- `modules/braid/storage.nix` — realizes `braid.autoScrub` into the scrub lifecycle units (`braid-scrub` timer/service and `braid-scrub-resume-trigger`), all bound to `braid-online.service`
+- `modules/braid/storage.nix` — realizes `braid.autoScrub` into the scrub lifecycle units (`braid-scrub` timer and service), both bound to `braid-online.service`
 - `cli/src/online_state.rs` — `mark_online()` applies the mount-root permissions from `braid.poolAccessGroup` (`root:<group> 2770`)
+- [ADR 035: Scrub scheduling by freshness](035-scrub-scheduling-by-freshness.md) — what the 30-day cadence is measured from
 - [Resilient by default](003-resilient-boot.md) — related philosophy: protect by default, no toggles

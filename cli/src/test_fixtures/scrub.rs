@@ -94,6 +94,28 @@ pub(crate) fn scrub_status_finished() -> (CmdRequest, RawCommandOutput) {
     )
 }
 
+/// Finished scrub-status output whose `Scrub started:` line carries a
+/// caller-chosen ctime.
+///
+/// Freshness tests date the record relative to their own injected `now` instead
+/// of mutating the shared `scrub_status_finished` body, so the boundary cases
+/// (window-1s, exactly-window, future-dated) each state their own age and no
+/// test silently depends on another's fixture edit.
+pub(crate) fn scrub_status_finished_at(
+    started_at: time::PrimitiveDateTime,
+) -> (CmdRequest, RawCommandOutput) {
+    scrub_status_output(&format!(
+        "UUID:             12345678-1234-1234-1234-123456789abc\n\
+         Scrub started:    {}\n\
+         Status:           finished\n\
+         Duration:         0:00:01\n\
+         Total to scrub:   1073741824\n\
+         Rate:             1073741824/s\n\
+         Error summary:    no errors found\n",
+        crate::util::format_scrub_timestamp(&crate::parse::types::ScrubTimestamp(started_at))
+    ))
+}
+
 /// Aborted scrub-status output for resumable progress left by cancellation.
 pub(crate) fn scrub_status_aborted() -> (CmdRequest, RawCommandOutput) {
     scrub_status_output(

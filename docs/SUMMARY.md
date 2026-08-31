@@ -78,6 +78,7 @@
 - [032: Pool mount hardening](design/decisions/032-pool-mount-hardening.md)
 - [033: Systemd unit hardening](design/decisions/033-systemd-unit-hardening.md)
 - [034: Subprocess environment discipline](design/decisions/034-subprocess-environment-discipline.md)
+- [035: Scrub scheduling by freshness](design/decisions/035-scrub-scheduling-by-freshness.md)
 
 # Internals
 

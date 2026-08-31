@@ -5,10 +5,11 @@
 #   beeper + alertCommand -> braid status names the cause -> monitor latches it
 #   at Critical -> braid ack clears everything), while the silent paths stay
 #   silent: btrfs exit 3 (corruption found, scrub completed) is a service
-#   success that routes to the device-stats poll, exit 0 (clean scrub) never
-#   beeps, exit 4 (the busy gate skipped this run) is a retryable success rather
-#   than a failure, and a deliberate lock-time cancel of a REAL scrub resolves to
-#   Result=success without firing onFailure.
+#   success that routes to the device-stats poll, exit 0 never beeps -- it now
+#   covers a clean scrub, a poll that found the pool fresh, and a poll that
+#   found a scrub already running -- exit 4 (the busy gate skipped this run) is
+#   a success rather than a failure, and a deliberate lock-time cancel of a REAL
+#   scrub resolves to Result=success without firing onFailure.
 #
 # Why it exists: braid-scrub.service previously had no failure alerting. Wiring
 #   onFailure is only safe because (1) a deliberate cancel writes a

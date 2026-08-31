@@ -61,7 +61,7 @@ Runtime tools fall into three categories. Fragile parser/safety tools (btrfs-pro
 
 ## 11. HDD defaults
 
-Mount options, LUKS flags, and scrub scheduling are chosen for HDD NAS deployments. [Why →](decisions/015-hdd-defaults.md)
+Mount options, LUKS flags, and the scrub freshness window are chosen for HDD NAS deployments. [Why →](decisions/015-hdd-defaults.md)
 
 ## 12. One pool operation at a time
 

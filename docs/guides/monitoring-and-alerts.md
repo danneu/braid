@@ -104,7 +104,7 @@ The output shows a banner when alerts are active and lists the causes:
 - **BtrfsDeviceErrors** -- a specific drive has non-zero error counters. Could be a bad cable, a dying drive, or a transient issue.
 - **MissingDevice** -- a drive is missing from the pool. Check if a cable came loose or if the drive failed.
 - **SmartdAlert** -- SMART reports a health warning. The drive may be failing.
-- **ScrubFailed** -- the scheduled scrub failed to run or complete. Check `journalctl -u braid-scrub.service` for the cause (a btrfs internal error, a device error that aborted the scrub, or metadata ENOSPC).
+- **ScrubFailed** -- the scheduled scrub failed to run or complete. Check `journalctl -u braid-scrub.service` for the cause (a btrfs internal error, a device error that aborted the scrub, or metadata ENOSPC). Note that most entries in that journal are *not* failures: the scrub timer polls hourly, and a poll that finds the pool already fresh, finds a scrub already running, or skips because braid is busy with the pool all exit cleanly and raise nothing. See [Troubleshooting](troubleshooting.md#my-scrub-didnt-run) for how each reads.
 
 ### 2. Investigate
 

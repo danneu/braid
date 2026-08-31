@@ -118,6 +118,15 @@ scheduled the machine's clock. Scrubs are maintenance, not a deadline: running
 one whenever the NAS happens to be awake keeps the pool checked without
 overriding the operator's decision to let it sleep.
 
+Scrubs are opportunistic in the literal sense. The scrub timer is an hourly
+poll that runs a scrub only when btrfs's own record shows the last one is
+stale ([ADR 035](035-scrub-scheduling-by-freshness.md)), and a realtime timer
+elapse that passed during suspend fires promptly on resume -- so a NAS that
+wakes for any reason gets a prompt poll. A mostly-suspended NAS therefore
+scrubs late, bounded by its usage rather than by the wall clock. That is the
+accepted trade; the computed-wake design that would close it is recorded and
+rejected in ADR 035.
+
 Nothing about the suspend gate changes: a scrub already in flight still blocks
 suspend through the `braid idle` check, so a scrub that starts while the
 machine is awake runs to completion rather than being suspended out from under.

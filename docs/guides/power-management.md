@@ -33,7 +33,7 @@ The WoL check gates braid's auto-suspend path only. Manual `sudo systemctl suspe
 
 braid never wakes a sleeping NAS. There is no RTC alarm for scrubs or for anything else -- the machine wakes only when you ask it to (Wake-on-LAN magic packet, power button). Scrubs and other background maintenance run while the NAS is awake, and a scrub already running keeps it awake until it finishes.
 
-If your NAS sleeps for most of the month, expect scrubs to run later than the schedule suggests. That is the trade-off for a NAS that stays asleep.
+If your NAS sleeps for most of the month, expect scrubs to run late. braid checks whether a scrub is owed roughly hourly *while awake*, so a machine that is awake for an hour a week gets an hour a week of chances. That is the trade-off for a NAS that stays asleep.
 
 ## Configuration
 

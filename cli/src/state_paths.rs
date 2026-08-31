@@ -63,20 +63,6 @@ impl StatePaths {
         self.root.join("scrub-failed")
     }
 
-    /// Durable "a scheduled scrub was skipped and still owes a run" flag,
-    /// written by the scrub gate on a skip and cleared when a real scrub run
-    /// begins. Durable rather than in `/run` on purpose: the retry that
-    /// `RestartForceExitStatus` schedules does not survive a reboot, so without
-    /// an on-disk record a scrub skipped at 00:00 and rebooted at 00:30 would
-    /// wait for the next calendar firing. `braid scrub-needs-resume` reports
-    /// `Yes` on its presence, which makes the existing pool-online resume
-    /// trigger re-poke the gated service after boot/unlock.
-    ///
-    /// Existence is the whole signal -- the contents are never read.
-    pub fn scrub_deferred(&self) -> PathBuf {
-        self.root.join("scrub-deferred")
-    }
-
     pub fn alert_latch_json(&self) -> PathBuf {
         self.root.join("alert-latch.json")
     }
@@ -124,10 +110,6 @@ mod tests {
             PathBuf::from("/var/lib/braid/scrub-failed")
         );
         assert_eq!(
-            p.scrub_deferred(),
-            PathBuf::from("/var/lib/braid/scrub-deferred")
-        );
-        assert_eq!(
             p.alert_latch_json(),
             PathBuf::from("/var/lib/braid/alert-latch.json")
         );
@@ -156,10 +138,6 @@ mod tests {
         assert_eq!(
             p.scrub_failed(),
             PathBuf::from("/tmp/test-braid/scrub-failed")
-        );
-        assert_eq!(
-            p.scrub_deferred(),
-            PathBuf::from("/tmp/test-braid/scrub-deferred")
         );
         assert_eq!(
             p.enospc_ack_json(),
