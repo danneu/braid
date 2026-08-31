@@ -163,6 +163,33 @@ pub(crate) fn scrub_start_output(exit_status: i32) -> (CmdRequest, RawCommandOut
     )
 }
 
+/// btrfs's verbatim already-running refusal, as `scrub_start` emits it when
+/// `is_scrub_running_on_fs` finds another scrub on the pool
+/// (`reference/btrfs-progs/cmds/scrub.c`; `error()` prefixes `ERROR: `).
+///
+/// The resume path shares that guard, so the same three lines come back for
+/// either request -- hence the request is a parameter. Kept verbatim rather
+/// than trimmed to the classifier's substring so a wording drift shows up here
+/// as the real output, next to the live-tool lock in
+/// `tests/repro/btrfs-scrub-start-rejected-during-scrub.py`.
+pub(crate) fn scrub_already_running_rejection(
+    request: CmdRequest,
+    cmd: &str,
+) -> (CmdRequest, RawCommandOutput) {
+    (
+        request,
+        RawCommandOutput {
+            cmd: cmd.to_owned(),
+            stdout: String::new(),
+            stderr: "ERROR: Scrub is already running.\n\
+                     To cancel use 'btrfs scrub cancel /mnt/storage'.\n\
+                     To see the status use 'btrfs scrub status [-d] /mnt/storage'\n"
+                .into(),
+            exit_status: 1,
+        },
+    )
+}
+
 fn scrub_status_output(stdout: &str) -> (CmdRequest, RawCommandOutput) {
     (
         CmdRequest::BtrfsScrubStatus {

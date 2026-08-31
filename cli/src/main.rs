@@ -921,8 +921,9 @@ fn main() {
                 Ok(braid_cli::scrub_resume_or_start::ScrubResumeOrStartResult::Skipped {
                     reason,
                 }) => {
-                    // Not a failure: the pool is busy with braid's own work, so
-                    // no scrub was started and nothing was touched. Exit 4 is
+                    // Not a failure: the pool is busy -- with braid's own work,
+                    // or with a scrub someone else is already running -- so no
+                    // scrub was started and nothing was touched. Exit 4 is
                     // the service's retry signal (SuccessExitStatus +
                     // RestartForceExitStatus), and the deferred flag already on
                     // disk carries the retry across a reboot.

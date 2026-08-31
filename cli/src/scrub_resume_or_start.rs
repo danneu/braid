@@ -60,14 +60,37 @@ pub enum ScrubResumeOrStartResult {
     /// intentional" signal, so this maps to a clean service exit 0 and never
     /// fires `onFailure`.
     Cancelled,
-    /// The pool was busy with braid's own work, so no scrub was started and
-    /// nothing else was touched. Distinct from every failure variant: a skip is
-    /// not a problem to alert on, it is a scrub that still owes a run, recorded
-    /// durably by the deferred flag before this is returned.
+    /// The pool was busy -- with braid's own work, or with a scrub someone else
+    /// is already running -- so no scrub was started and nothing else was
+    /// touched. Distinct from every failure variant: a skip is not a problem to
+    /// alert on, it is a scrub that still owes a run, recorded durably by the
+    /// deferred flag before this is returned.
     Skipped {
         reason: String,
     },
 }
+
+/// The one skip reason for "someone else is scrubbing this pool", shared by the
+/// gate's entry probe and the invocation-time collision below.
+///
+/// Both are the same fact observed at different moments -- the probe sees it
+/// before the spawn, the collision sees it in btrfs's own refusal a moment
+/// later -- so they must produce the same outcome. One constant keeps them from
+/// drifting into two operator-visible meanings.
+const SCRUB_ALREADY_RUNNING: &str = "a btrfs scrub is already running";
+
+/// btrfs's refusal to start or resume over a scrub that is already running,
+/// pinned to `scrub_start`'s `is_scrub_running_on_fs` wording in
+/// `reference/btrfs-progs/cmds/scrub.c` (the resume path shares that guard).
+///
+/// This substring is the *sole* discriminator for a collision. A post-failure
+/// `btrfs scrub status` re-probe would be racy in both directions: an external
+/// scrub that finished first would turn a real collision into a false failure,
+/// and one that started after a genuine braid failure would suppress an alert
+/// braid must raise. Behavior-locked live by
+/// `tests/repro/btrfs-scrub-start-rejected-during-scrub.py`
+/// ([live-tool behavior locks](../../docs/dev/testing.md#live-tool-behavior-locks)).
+const ALREADY_RUNNING_REJECTION: &str = "Scrub is already running.";
 
 #[derive(Debug, thiserror::Error)]
 pub enum ScrubResumeOrStartError {
@@ -143,8 +166,13 @@ pub enum ScrubResumeOrStartError {
 /// teardown intent: the ExecStop script touches a cancel-request marker, so
 /// the runner removes any stale marker at entry (fail-closed -- a surviving
 /// marker would later mask a real failure) and, on an ambiguous exit, returns
-/// `Cancelled` iff the marker is present and the failure otherwise. The marker
-/// is the sole discriminator; scrub status is never consulted.
+/// `Cancelled` iff the marker is present. The marker is the sole discriminator
+/// for a cancel; scrub status is never consulted.
+///
+/// One other exit 1 is not a failure: btrfs refusing to resume or start over a
+/// scrub that began after the gate's probe cleared. That refusal is recognized
+/// from its own stderr and skips exactly as the gate would have -- see
+/// [`classify_btrfs_failure`]. Everything else is the failure.
 pub fn cmd_scrub_resume_or_start<R: CommandRunner, F: Filesystem + ?Sized>(
     p: &ScrubRunParams<'_, R, F>,
 ) -> Result<ScrubResumeOrStartResult, ScrubResumeOrStartError> {
@@ -189,12 +217,9 @@ pub fn cmd_scrub_resume_or_start<R: CommandRunner, F: Filesystem + ?Sized>(
         // guard is carried through rather than released and re-taken, which
         // would leave the fallback start ungated.
         2 => start_scrub(p, guard),
-        _ => classify_btrfs_failure(
-            p.paths,
-            ScrubResumeOrStartError::ResumeFailed {
-                stderr: resume_raw.stderr,
-            },
-        ),
+        _ => classify_btrfs_failure(p.paths, resume_raw.stderr, |stderr| {
+            ScrubResumeOrStartError::ResumeFailed { stderr }
+        }),
     }
 }
 
@@ -218,7 +243,10 @@ enum GateOutcome {
 /// The fourth is "someone else is already scrubbing", which the other three
 /// cannot see: a hand-run `btrfs scrub` takes no pool lock and scrub is not a
 /// btrfs exclusive operation. It is checked last because it is the only
-/// condition that costs a subprocess.
+/// condition that costs a subprocess. It cannot close the window on its own --
+/// an external scrub may start between this probe and braid's own spawn -- so
+/// [`classify_btrfs_failure`] catches the same fact in btrfs's refusal and maps
+/// it to the same skip.
 ///
 /// Classification is asymmetric on purpose (ADR 018): busy is a skip, but an
 /// unreadable gate is a hard error.
@@ -264,9 +292,7 @@ fn gate<R: CommandRunner, F: Filesystem + ?Sized>(
     match observe_scrub_running(p) {
         Ok(false) => {}
         Ok(true) => {
-            return Ok(GateOutcome::Busy(
-                "a btrfs scrub is already running".to_owned(),
-            ));
+            return Ok(GateOutcome::Busy(SCRUB_ALREADY_RUNNING.to_owned()));
         }
         Err(reason) => return Err(ScrubResumeOrStartError::ScrubStatusUnreadable { reason }),
     }
@@ -293,12 +319,9 @@ fn start_scrub<R: CommandRunner, F: Filesystem + ?Sized>(
         3 => Ok(ScrubResumeOrStartResult::Started {
             uncorrectable_errors: true,
         }),
-        _ => classify_btrfs_failure(
-            p.paths,
-            ScrubResumeOrStartError::StartFailed {
-                stderr: start_raw.stderr,
-            },
-        ),
+        _ => classify_btrfs_failure(p.paths, start_raw.stderr, |stderr| {
+            ScrubResumeOrStartError::StartFailed { stderr }
+        }),
     }
 }
 
@@ -454,22 +477,42 @@ fn clear_stale_cancel_marker(paths: &StatePaths) -> Result<(), ScrubResumeOrStar
     }
 }
 
-/// Classify an ambiguous btrfs exit (outside `{0,2,3}`) into a clean cancel or
-/// a genuine failure, keyed solely on the cancel-request marker.
+/// Classify an ambiguous btrfs exit (outside `{0,2,3}`) into a clean cancel, an
+/// invocation-time collision with someone else's scrub, or a genuine failure.
 ///
+/// Cancel is decided first and solely on the cancel-request marker:
 /// `Path::exists()` coerces any I/O error to `false`, so the only route to
 /// `Cancelled` is an unambiguously present marker; absence *or* any read
-/// ambiguity falls through to the failure error -> alert (fail-closed here
-/// too). Shared by the resume and start arms so both classify identically.
+/// ambiguity falls through (fail-closed here too).
+///
+/// A collision is decided solely on this invocation's own stderr carrying
+/// [`ALREADY_RUNNING_REJECTION`] -- btrfs refused before touching the pool
+/// because an external scrub started after the gate's probe cleared. That is
+/// the gate's already-running condition arriving a moment late, so it produces
+/// the same `Skipped`, deferral and all, rather than the alert the shape used
+/// to raise. Every other stderr keeps its failure classification.
+///
+/// Takes the stderr and a constructor rather than a built error so the
+/// collision test can read the same string the failure would have carried.
+/// Shared by the resume and start arms so both classify identically.
 fn classify_btrfs_failure(
     paths: &StatePaths,
-    failure: ScrubResumeOrStartError,
+    stderr: String,
+    failure: fn(String) -> ScrubResumeOrStartError,
 ) -> Result<ScrubResumeOrStartResult, ScrubResumeOrStartError> {
     if paths.scrub_cancel_requested().exists() {
-        Ok(ScrubResumeOrStartResult::Cancelled)
-    } else {
-        Err(failure)
+        return Ok(ScrubResumeOrStartResult::Cancelled);
     }
+    if stderr.contains(ALREADY_RUNNING_REJECTION) {
+        // Same fail-closed ordering as the gate's skip: the deferral is durable
+        // before the skip is reported, so an unwritable state dir alerts
+        // instead of silently losing the run this collision still owes.
+        record_deferral(paths)?;
+        return Ok(ScrubResumeOrStartResult::Skipped {
+            reason: SCRUB_ALREADY_RUNNING.to_owned(),
+        });
+    }
+    Err(failure(stderr))
 }
 
 #[cfg(test)]
@@ -477,8 +520,9 @@ mod tests {
     use super::*;
     use crate::cmd::{CmdRequest, MockRunner, RawCommandOutput};
     use crate::test_fixtures::{
-        IdleMockFs, isolated_paths, scrub_mp, scrub_resume_output, scrub_start_output,
-        scrub_status_finished, scrub_status_never, scrub_status_running, scrub_status_unknown,
+        IdleMockFs, isolated_paths, scrub_already_running_rejection, scrub_mp, scrub_resume_output,
+        scrub_start_output, scrub_status_finished, scrub_status_never, scrub_status_running,
+        scrub_status_unknown,
     };
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
@@ -694,19 +738,15 @@ mod tests {
         // is_scrub_running_on_fs guard, so it refuses with exit 1 before
         // touching the pool. Mocked so this test fails the way production
         // did -- a scrub-failed alert -- not on a missing mock.
+        let (reject_req, reject_out) = scrub_already_running_rejection(
+            CmdRequest::BtrfsScrubResume {
+                mount_point: scrub_mp(),
+            },
+            "btrfs scrub resume -B /mnt/storage",
+        );
         let runner = MockRunner::default()
             .with_output(status_req, status_out)
-            .with_output(
-                CmdRequest::BtrfsScrubResume {
-                    mount_point: scrub_mp(),
-                },
-                RawCommandOutput {
-                    cmd: "btrfs scrub resume /mnt/storage".into(),
-                    stdout: String::new(),
-                    stderr: "ERROR: Scrub is already running.\n".into(),
-                    exit_status: 1,
-                },
-            );
+            .with_output(reject_req, reject_out);
 
         let result = rig.run(&runner).unwrap();
         assert!(
@@ -1057,18 +1097,18 @@ mod tests {
     }
 
     #[test]
-    // Intent: a scrub that appears *after* the gate cleared releases the lock
-    //   early, and the child's own non-zero exit still classifies as a failure.
+    // Intent: a scrub visible to the confirm poll releases the lock early, and
+    //   a non-collision exit 1 from braid's own child still classifies as a
+    //   failure.
     // Why it exists: the confirm poll cannot tell "my scrub registered" from "a
     //   scrub was already running". Releasing early is correct either way -- a
     //   scrub is in flight, which is exactly the state the lock is released for
     //   -- but the release must not soften the exit-code classification (I5).
-    //   The gate now rejects a scrub that is already running at gate time, so
-    //   the surviving window is the race: gate probe says clear, then a scrub
-    //   starts before this child's own start does. Narrow, but the confirm
-    //   poll's ambiguity is real and must not be resolved by guessing.
-    // Scenario: the timer fires, the gate sees an idle pool, and an operator
-    //   runs `btrfs scrub start` by hand in the moment before braid's own.
+    //   Only btrfs's own already-running refusal downgrades an exit 1 to a
+    //   skip; a scrub merely being visible must not, or the release would start
+    //   swallowing real failures.
+    // Scenario: the pool is being scrubbed when braid's `btrfs scrub start`
+    //   fails for an unrelated reason (an I/O error reading the saved state).
     fn scrub_appearing_after_the_gate_releases_lock_but_exit_still_classifies() {
         let rig = Rig::new();
         let observed = Arc::new(Mutex::new(Vec::new()));
@@ -1330,6 +1370,150 @@ mod tests {
         assert!(
             matches!(result, Err(ScrubResumeOrStartError::ResumeFailed { .. })),
             "marker-absent exit 1 must be a genuine failure, got {result:?}"
+        );
+    }
+
+    #[test]
+    // Intent: btrfs refusing the resume with its already-running rejection is a
+    //   skip -- exit 4, deferral recorded -- not a failure, even though the
+    //   gate's own probe had cleared.
+    // Why it exists: the gate probe closes the window it can see, but an
+    //   external scrub can still start between that probe and braid's spawn.
+    //   That lost race used to reach ResumeFailed and beep the operator awake
+    //   for a pool that was being scrubbed correctly at that very moment --
+    //   exactly the false alarm the gate was added to stop, arriving through
+    //   the one door the gate cannot hold shut.
+    // Scenario: the timer fires on an idle pool; an operator runs `btrfs scrub
+    //   start /mnt/storage` by hand in the second before braid's own resume.
+    fn resume_collision_with_an_external_scrub_skips() {
+        let rig = Rig::new();
+        let (reject_req, reject_out) = scrub_already_running_rejection(
+            CmdRequest::BtrfsScrubResume {
+                mount_point: scrub_mp(),
+            },
+            "btrfs scrub resume -B /mnt/storage",
+        );
+        let runner = runner_with_status_running().with_output(reject_req, reject_out);
+
+        let result = rig.run(&runner).unwrap();
+        assert_eq!(
+            result,
+            ScrubResumeOrStartResult::Skipped {
+                reason: SCRUB_ALREADY_RUNNING.to_owned()
+            },
+            "a lost race must skip with the gate's own reason"
+        );
+        assert!(
+            scrub_deferral_pending(&rig.paths).unwrap(),
+            "a collision still owes a scrub, so the deferral must be durable"
+        );
+        assert!(rig.lock_is_free(), "the run must release the pool lock");
+    }
+
+    #[test]
+    // Intent: the same rejection on the start-after-fallback arm skips too.
+    // Why it exists: resume exit 2 hands off to `start`, so the collision can
+    //   just as easily land on the second invocation. Classifying only the
+    //   resume arm would leave the never-scrubbed-pool path still alerting.
+    // Scenario: nothing to resume, so braid falls back to a fresh start -- and
+    //   a hand-run scrub has claimed the pool in the meantime.
+    fn start_collision_with_an_external_scrub_skips() {
+        let rig = Rig::new();
+        let (resume_req, resume_out) = scrub_resume_output(2);
+        let (reject_req, reject_out) = scrub_already_running_rejection(
+            CmdRequest::BtrfsScrubStart {
+                mount_point: scrub_mp(),
+            },
+            "btrfs scrub start -B /mnt/storage",
+        );
+        let runner = runner_with_status_running()
+            .with_output(resume_req, resume_out)
+            .with_output(reject_req, reject_out);
+
+        let result = rig.run(&runner).unwrap();
+        assert_eq!(
+            result,
+            ScrubResumeOrStartResult::Skipped {
+                reason: SCRUB_ALREADY_RUNNING.to_owned()
+            },
+            "a lost race on the fallback start must skip too"
+        );
+        assert!(scrub_deferral_pending(&rig.paths).unwrap());
+    }
+
+    #[test]
+    // Intent: a deliberate teardown still wins over the collision shape -- the
+    //   marker is checked first.
+    // Why it exists: both outcomes keep the unit off onFailure, so a mix-up is
+    //   invisible in the exit code but not in the journal: reporting a
+    //   lock/suspend as "someone else is scrubbing" would send the operator
+    //   hunting a hand-run scrub that never existed.
+    // Scenario: `braid lock` runs while an external scrub holds the pool, so
+    //   the marker is written and btrfs refuses with the already-running text.
+    fn cancel_marker_outranks_the_collision_shape() {
+        let rig = Rig::new();
+        let marker = rig.paths.scrub_cancel_requested();
+        let (_reject_req, reject_out) = scrub_already_running_rejection(
+            CmdRequest::BtrfsScrubResume {
+                mount_point: scrub_mp(),
+            },
+            "btrfs scrub resume -B /mnt/storage",
+        );
+        let runner = runner_with_status_running().with_handler(move |req: &CmdRequest| {
+            if matches!(req, CmdRequest::BtrfsScrubResume { .. }) {
+                std::fs::write(&marker, b"").unwrap();
+                Some(Ok(reject_out.clone()))
+            } else {
+                None
+            }
+        });
+
+        let result = rig.run(&runner).unwrap();
+        assert_eq!(result, ScrubResumeOrStartResult::Cancelled);
+        assert!(
+            !scrub_deferral_pending(&rig.paths).unwrap(),
+            "a cancel is not a deferral"
+        );
+    }
+
+    #[test]
+    // Intent: an unwritable deferral turns a collision into a hard error, just
+    //   as it does for a gate skip.
+    // Why it exists: exit 4 promises the run will be retried. A collision that
+    //   reported the skip without the durable record would strand the scrub
+    //   across a reboot -- the same hole the gate's fail-closed ordering
+    //   already covers, and the reason the collision reuses it.
+    // Scenario: a directory occupies the flag path by the time the race is
+    //   lost, so only the collision's own record hits it -- the entry clear ran
+    //   before it appeared.
+    fn collision_deferral_write_failure_is_error_not_skip() {
+        let rig = Rig::new();
+        let flag = rig.paths.scrub_deferred();
+        let (_reject_req, reject_out) = scrub_already_running_rejection(
+            CmdRequest::BtrfsScrubResume {
+                mount_point: scrub_mp(),
+            },
+            "btrfs scrub resume -B /mnt/storage",
+        );
+        let runner = runner_with_status_running().with_handler(move |req: &CmdRequest| {
+            if matches!(req, CmdRequest::BtrfsScrubResume { .. }) {
+                std::fs::create_dir(&flag).unwrap();
+                Some(Ok(reject_out.clone()))
+            } else {
+                None
+            }
+        });
+
+        let result = rig.run(&runner);
+        assert!(
+            matches!(
+                result,
+                Err(ScrubResumeOrStartError::DeferredFlag {
+                    action: "record",
+                    ..
+                })
+            ),
+            "an unwritable deferral must fail closed on the collision path too, got {result:?}"
         );
     }
 

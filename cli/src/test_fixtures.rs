@@ -194,9 +194,10 @@ pub(crate) use remove::{
 pub(crate) use remove_missing::RemoveMissingPool;
 pub(crate) use replace::{ReplacementPool, replace_dev_info_sufficient};
 pub(crate) use scrub::{
-    scrub_cancel_not_running, scrub_cancel_ok, scrub_cancel_real_failure, scrub_mp,
-    scrub_resume_output, scrub_start_output, scrub_status_aborted, scrub_status_finished,
-    scrub_status_interrupted, scrub_status_never, scrub_status_running, scrub_status_unknown,
+    scrub_already_running_rejection, scrub_cancel_not_running, scrub_cancel_ok,
+    scrub_cancel_real_failure, scrub_mp, scrub_resume_output, scrub_start_output,
+    scrub_status_aborted, scrub_status_finished, scrub_status_interrupted, scrub_status_never,
+    scrub_status_running, scrub_status_unknown,
 };
 pub(crate) use shared::{
     DeviceUsageSpec, MockBackingPathResolver, MockFs, PoolFixture, RecordingSleeper,

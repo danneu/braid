@@ -59,6 +59,13 @@ Three of these are deliberately *not* execution failures:
   exit 1 (`scrub.c`'s `is_scrub_running_on_fs` guard, which the resume path
   shares with start) -- alerting because the pool is being scrubbed right now.
   It is checked last because it is the only condition that costs a subprocess.
+  The probe cannot close that window alone: an external scrub can start between
+  it and braid's own spawn. So the same refusal arriving from braid's *own*
+  `resume`/`start` -- recognized solely by the literal `Scrub is already
+  running.` in that invocation's stderr, never by a re-probe, which would be
+  racy in both directions -- is classified as the same skip, with the same
+  reason and the same deferral. The wording is behavior-locked by
+  [`tests/repro/btrfs-scrub-start-rejected-during-scrub.py`](../../dev/testing.md#live-tool-behavior-locks).
 - **Exit 1 (ambiguous).** btrfs returns 1 for a genuine fatal scrub error
   **and** for a deliberately cancelled scrub -- see below.
 
@@ -94,8 +101,14 @@ teardown intent, so the teardown records it:
    marker is present on every deliberate stop, including the mount-gone race.
 2. `cmd_scrub_resume_or_start` (`cli/src/scrub_resume_or_start.rs`) **removes**
    any stale marker at entry, then on an ambiguous btrfs exit checks it:
-   marker present -> `Cancelled` (service exits 0); marker absent -> a genuine
+   marker present -> `Cancelled` (service exits 0); marker absent -> the
+   already-running refusal above -> a busy skip (exit 4); otherwise a genuine
    failure (service exits non-zero -> `onFailure`).
+
+The marker is checked first, so a deliberate stop is never reported as someone
+else's scrub. Both keep the unit off `onFailure`, so the difference is
+invisible in the exit code but not in the journal, and only one of them sends
+the operator hunting a hand-run scrub.
 
 Ordering is race-free: the entry-remove runs when the scrub first starts (long
 before any stop), and `ExecStop` writes the marker *before* issuing the cancel
