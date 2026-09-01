@@ -106,6 +106,12 @@ Before inventing VM setup for missing disks, degraded mounts, ENOSPC, hotplug,
 or similar storage state, search `tests/cli/`, `tests/repro/`, and `tests/hw/`
 for an existing pattern and reuse it where it fits.
 
+When a repro test needs a scrub to stay running for a window of seconds, use
+the shared helper `tests/repro/scrub_throttle_helpers.py` (deterministic
+window = payload / rate via the kernel's per-device `scrub_speed_max` knob)
+instead of reinventing a payload-size or block-stack throttle. Module tests
+that unmount mid-window stay on dm-delay -- the knob's value dies on unmount.
+
 Before proposing a VM test for a mutating command, search the same area for
 existing notes that say a shape is infeasible, and read sibling tests to learn
 which seams already exist.
