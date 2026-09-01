@@ -8,11 +8,11 @@
 # this test loudly before the unit-level classifier silently turns every lost
 # race back into a spurious 3am alert.
 #
-# Two 4096 MiB disks form the LUKS + btrfs RAID1 pool, sized exactly like
-# `btrfs-replace-rejected-during-scrub` so a 3000 MiB payload keeps the scrub
-# live for ~7-15 seconds at linux-builder's observed ~400 MiB/s rate. LUKS is
-# the throttle, not scenery: unencrypted, the same payload scrubs in ~1.5
-# seconds, which is not a window the refusals can land in.
+# Two 1024 MiB disks form an unencrypted btrfs RAID1 pool. The live-scrub
+# window is deterministic: the shared throttle helper caps each device at
+# 20 MiB/s via the scrub_speed_max knob, so a 400 MiB payload scrubs for ~20
+# seconds (see `tests/repro/btrfs-scrub-limit-bounds-rate.nix` for the
+# behavior lock the throttle rests on).
 {
   name = "repro-btrfs-scrub-start-rejected-during-scrub";
 
@@ -21,20 +21,20 @@
     {
       virtualisation.emptyDiskImages = [
         {
-          size = 4096;
+          size = 1024;
           driveConfig.deviceExtraOpts.serial = "disk1";
         }
         {
-          size = 4096;
+          size = 1024;
           driveConfig.deviceExtraOpts.serial = "disk2";
         }
       ];
 
-      environment.systemPackages = [
-        pkgs.cryptsetup
-        pkgs.btrfs-progs
-      ];
+      environment.systemPackages = [ pkgs.btrfs-progs ];
     };
 
-  testScript = builtins.readFile ./btrfs-scrub-start-rejected-during-scrub.py;
+  testScript =
+    builtins.readFile ./scrub_throttle_helpers.py
+    + "\n\n"
+    + builtins.readFile ./btrfs-scrub-start-rejected-during-scrub.py;
 }

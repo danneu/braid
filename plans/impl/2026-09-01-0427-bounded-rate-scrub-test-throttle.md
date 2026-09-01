@@ -206,7 +206,7 @@ per-device rate knob and drop the incidental throttles. Concretely:
 ## Commit progress
 
 - [x] 1. test: lock bounded-rate scrub launch behavior
-- [ ] 2. test: use bounded-rate windows in scrub refusal repros
+- [x] 2. test: use bounded-rate windows in scrub refusal repros
 
 ## Implementation notes
 
@@ -225,3 +225,16 @@ per-device rate knob and drop the incidental throttles. Concretely:
 - Sizes chosen under Implementation discretion: 2x1024 MiB disks, 400 MiB
   payload at `20m` per device -- a ~20s deterministic window with a 10s
   wall-time floor.
+- The helper is `tests/repro/scrub_throttle_helpers.py`, concatenated into
+  `testScript` per the `dm_delay_helpers.py` pattern. It lives in
+  `tests/repro/` because both callers are repros; the behavior lock does not
+  use it (it launches by hand on purpose -- that launch shape is the property
+  it locks). The converted repros reuse the lock's sizing: 1024 MiB disks,
+  400 MiB payload at 20 MiB/s per device (~20s window).
+- With LUKS gone, `btrfs fi show` prints kernel device paths instead of
+  `/dev/mapper/*`, so the replace repro parses disk2's devid by matching the
+  `readlink -f` target of the by-id symlink.
+- PO3 verified and not committed: pointing the helper's readback at
+  `scrub_speed_max_bogus` failed the converted scrub-start repro at helper
+  setup (`must succeed: cat .../scrub_speed_max_bogus` exit 1), before any
+  scrub launched.

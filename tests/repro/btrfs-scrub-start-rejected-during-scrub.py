@@ -21,14 +21,16 @@
 # documented in `docs/dev/testing.md#live-tool-behavior-locks`.
 #
 # Scenario: an operator kicked off a hand scrub; braid's timer fires seconds
-# later and its own resume/start is refused. Sizing is copied from the sibling
-# `tests/repro/btrfs-replace-rejected-during-scrub.py`: 2-of-2 LUKS + btrfs
-# RAID1 on 4096 MiB disks with a 3000 MiB urandom payload, which at
-# linux-builder's observed ~400 MiB/s scrub rate keeps the scrub live for
-# ~7-15 seconds. The LUKS layer is not scenery here -- it is the throttle. An
-# unencrypted pool on this builder scrubs the same payload in ~1.5 seconds,
-# which is not a window this test can land in. `btrfs scrub start --limit` was
-# tried instead and did not slow the kernel scrub at all.
+# later and its own resume/start is refused. The live-scrub window comes from
+# the kernel's per-device scrub_speed_max knob via the shared throttle helper
+# (`tests/repro/scrub_throttle_helpers.py`): a 400 MiB payload on a 2-drive
+# btrfs RAID1 at 20 MiB/s per device is a deterministic ~20 second window
+# (payload / rate), comfortably larger than the refusal assertions need. The
+# tool properties the throttle rests on are locked by
+# `tests/repro/btrfs-scrub-limit-bounds-rate.py`. The pool is unencrypted:
+# the refusal wording comes from btrfs-progs' status-file check and never
+# reads the block stack beneath btrfs, and the braid-stack-under-LUKS path
+# has its own module-test coverage.
 #
 # The refusals themselves are the precondition check: if the scrub finished
 # early, `btrfs scrub resume -B` returns "nothing to resume" and `start -B`
@@ -40,32 +42,20 @@ import re
 start_all()
 machine.wait_for_unit("multi-user.target")
 
-passphrase = "testpassphrase"
-luks_format = "--batch-mode --key-file=- --pbkdf pbkdf2 --pbkdf-force-iterations 1000"
+# --- Phase 1: Setup -- btrfs RAID1 with a payload to scrub ---
 
-# --- Phase 1: Setup -- LUKS + btrfs RAID1 with a payload big enough to scrub ---
-
-with subtest("Setup: create a 2-drive LUKS + btrfs RAID1 pool"):
-    for name in ["disk1", "disk2"]:
-        dev = f"/dev/disk/by-id/virtio-{name}"
-        machine.succeed(f"echo -n '{passphrase}' | cryptsetup luksFormat {luks_format} {dev}")
-        machine.succeed(f"echo -n '{passphrase}' | cryptsetup luksOpen --key-file=- {dev} {name}")
-
-    machine.succeed("mkfs.btrfs -f -d raid1 -m raid1 /dev/mapper/disk1 /dev/mapper/disk2")
+with subtest("Setup: create a 2-drive btrfs RAID1 pool"):
+    d1 = "/dev/disk/by-id/virtio-disk1"
+    d2 = "/dev/disk/by-id/virtio-disk2"
+    machine.succeed(f"mkfs.btrfs -f -d raid1 -m raid1 {d1} {d2}")
     machine.succeed("mkdir -p /mnt/storage")
-    machine.succeed("mount /dev/mapper/disk1 /mnt/storage")
+    machine.succeed(f"mount {d1} /mnt/storage")
     machine.succeed(
-        "dd if=/dev/urandom of=/mnt/storage/payload bs=1M count=3000 status=none"
+        "dd if=/dev/urandom of=/mnt/storage/payload bs=1M count=400 status=none"
     )
     machine.succeed("sync")
 
-# --- Phase 2: Start a scrub in the background, as a hand-run scrub would ---
-#
-# `btrfs scrub start` (no -B) forks a daemon child that holds the inherited
-# stdout open until scrub completes. The NixOS test driver waits for stdout to
-# close on every `machine.execute` call, so without redirecting we would block
-# here for the full scrub. Redirecting to /dev/null lets `machine.succeed`
-# return as soon as the parent fork-and-exits; the kernel scrub keeps running.
+# --- Phase 2: Start a throttled scrub in the background, as a hand-run scrub would ---
 #
 # The parent writes the all-zero progress record to
 # `/var/lib/btrfs/scrub.status.<fsid>` *before* it forks, so the record
@@ -75,8 +65,8 @@ with subtest("Setup: create a 2-drive LUKS + btrfs RAID1 pool"):
 # point -- the child has not yet stamped `t_start` -- so the printed status is
 # NOT a usable precondition probe; the refusals below are.
 
-with subtest("Start a scrub in the background"):
-    machine.succeed("btrfs scrub start /mnt/storage > /dev/null 2>&1")
+with subtest("Start a throttled scrub in the background"):
+    scrub_throttle_start(machine, "/mnt/storage", rate_mib=20)
     machine.sleep(1)
     print("=== btrfs scrub status after 1s warm-up ===")
     print(machine.succeed("btrfs scrub status /mnt/storage"))

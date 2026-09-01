@@ -18,98 +18,75 @@
 # `tests/repro/cryptsetup-close-mounted.py` documented in
 # `docs/dev/testing.md#live-tool-behavior-locks`.
 #
-# Scenario: 2-of-3 LUKS+btrfs RAID1 (disk1+disk2 pool, disk3 standby) on
-# 4096 MiB disks, with a 3000 MiB urandom payload. Scrub runs unthrottled
-# (the per-device sysfs `scrub_speed_max` knob would race with the daemon
-# child's restore-old-limit loop in cmds/scrub.c:1600 and only throttles
-# the first device), so we rely on payload size: at linux-builder's
-# observed ~400 MiB/s scrub rate, ~3 GiB of scrub work per disk keeps
-# `dev->scrub_ctx` live for ~7-15 seconds in parallel on both devices.
-# That window is comfortably large for the replace ioctl to land while
-# scrub is in progress. Stdio for `btrfs scrub start` is redirected to
-# `/dev/null` so the parent's return is not held back by the child holding
-# the inherited stdout open (the NixOS test driver waits for stdout to
-# close on every machine.execute call).
+# Scenario: 2-of-3 btrfs RAID1 (disk1+disk2 pool, disk3 standby) on 1024 MiB
+# disks. The live-scrub window comes from the kernel's per-device
+# scrub_speed_max knob via the shared throttle helper
+# (`tests/repro/scrub_throttle_helpers.py`): a 400 MiB payload at 20 MiB/s
+# per device keeps each device's `dev->scrub_ctx` -- the bit
+# `btrfs_dev_replace_start` -> `btrfs_scrub_dev` checks to return
+# -EINPROGRESS / SCRUB_INPROGRESS -- live for a deterministic ~20 seconds
+# (payload / rate), a comfortable window for the replace ioctl to land while
+# scrub is in progress. The tool properties the throttle rests on are locked
+# by `tests/repro/btrfs-scrub-limit-bounds-rate.py`. The pool is unencrypted:
+# the rejection is a kernel ioctl result that never reads the block stack
+# beneath btrfs, and the braid-stack-under-LUKS path has its own module-test
+# coverage.
+#
+# The rejection itself is the precondition check: if the scrub finished
+# early, the replace would start and the assertions below fail loudly. This
+# test cannot go vacuously green.
 
 import re
 
 start_all()
 machine.wait_for_unit("multi-user.target")
 
-passphrase = "testpassphrase"
-luks_format = "--batch-mode --key-file=- --pbkdf pbkdf2 --pbkdf-force-iterations 1000"
+# --- Phase 1: Setup -- create RAID1 pool on disk1 + disk2 ---
 
-# --- Phase 1: Setup -- LUKS format + open disk1 and disk2, create RAID1 pool ---
-
-with subtest("Setup: create 2-drive LUKS + btrfs RAID1 pool"):
-    for name in ["disk1", "disk2"]:
-        dev = f"/dev/disk/by-id/virtio-{name}"
-        machine.succeed(f"echo -n '{passphrase}' | cryptsetup luksFormat {luks_format} {dev}")
-        machine.succeed(f"echo -n '{passphrase}' | cryptsetup luksOpen --key-file=- {dev} {name}")
-
-    machine.succeed(
-        "mkfs.btrfs -f -d raid1 -m raid1"
-        " /dev/mapper/disk1"
-        " /dev/mapper/disk2"
-    )
+with subtest("Setup: create 2-drive btrfs RAID1 pool"):
+    d1 = "/dev/disk/by-id/virtio-disk1"
+    d2 = "/dev/disk/by-id/virtio-disk2"
+    machine.succeed(f"mkfs.btrfs -f -d raid1 -m raid1 {d1} {d2}")
     machine.succeed("mkdir -p /mnt/storage")
-    machine.succeed("mount /dev/mapper/disk1 /mnt/storage")
+    machine.succeed(f"mount {d1} /mnt/storage")
 
-    # 3 GiB payload across 2 RAID1 mirrors -- ~3 GiB of scrub work per
-    # disk. At linux-builder's observed ~400 MiB/s unthrottled scrub rate,
-    # that keeps each device's `dev->scrub_ctx` live for ~7-8 seconds.
     machine.succeed(
-        "dd if=/dev/urandom of=/mnt/storage/payload bs=1M count=3000 status=none"
+        "dd if=/dev/urandom of=/mnt/storage/payload bs=1M count=400 status=none"
     )
     machine.succeed("sync")
 
     fi_show = machine.succeed("btrfs fi show /mnt/storage")
     print("Baseline btrfs fi show:\n" + fi_show)
 
-    # Parse disk2's devid -- the device we'll attempt to replace.
+    # Parse disk2's devid -- the device we'll attempt to replace. fi show
+    # prints kernel device paths, so match on the by-id symlink's target.
+    disk2_real = machine.succeed(f"readlink -f {d2}").strip()
     disk2_devid = None
     for line in fi_show.splitlines():
-        if "/dev/mapper/disk2" in line:
+        if disk2_real in line:
             m = re.search(r"devid\s+(\d+)", line)
             assert m, "Could not parse devid from line: " + line
             disk2_devid = m.group(1)
             break
-    assert disk2_devid is not None, "disk2 not found in btrfs fi show:\n" + fi_show
+    assert disk2_devid is not None, (
+        f"{disk2_real} not found in btrfs fi show:\n" + fi_show
+    )
     print("disk2 devid: " + disk2_devid)
 
-# --- Phase 2: LUKS prep disk3 (the standby replacement target) ---
-
-with subtest("LUKS prep disk3 (standby replacement target)"):
-    dev3 = "/dev/disk/by-id/virtio-disk3"
-    machine.succeed(f"echo -n '{passphrase}' | cryptsetup luksFormat {luks_format} {dev3}")
-    machine.succeed(f"echo -n '{passphrase}' | cryptsetup luksOpen --key-file=- {dev3} disk3")
-
-# --- Phase 3: Start scrub in background ---
-#
-# `btrfs scrub start` (no -B) forks a daemon child that holds the inherited
-# stdout open until scrub completes. The NixOS test driver waits for stdout
-# to close on every `machine.execute` call (see machine/__init__.py docstring
-# for `execute`), so without redirecting we'd block here for the full scrub
-# duration. Redirecting to /dev/null detaches the child from the driver's
-# stdout pipe and lets `machine.succeed` return as soon as the parent
-# fork-and-exits, which is essentially instant. The kernel scrub continues
-# running on both devices in parallel.
+# --- Phase 2: Start a throttled scrub in the background ---
 #
 # After parent return, sleep briefly so the daemon child has a chance to
-# issue BTRFS_IOC_SCRUB and the kernel allocates `dev->scrub_ctx` -- the
-# bit `btrfs_dev_replace_start` -> `btrfs_scrub_dev` checks at
-# reference/linux/fs/btrfs/scrub.c:3003 to decide whether to return
-# -EINPROGRESS / SCRUB_INPROGRESS. With ~3 GiB of work per disk at ~400
-# MiB/s, scrub_ctx stays set for many seconds, well past our half-second
-# wait.
+# issue BTRFS_IOC_SCRUB and the kernel allocates `dev->scrub_ctx` (checked
+# at reference/linux/fs/btrfs/scrub.c#btrfs_scrub_dev). The throttled ~20s
+# window keeps it set well past our one-second wait.
 
-with subtest("Start scrub in background"):
-    machine.succeed("btrfs scrub start /mnt/storage > /dev/null 2>&1")
+with subtest("Start throttled scrub in background"):
+    scrub_throttle_start(machine, "/mnt/storage", rate_mib=20)
     machine.sleep(1)
     print("=== btrfs scrub status after 1s warm-up ===")
     print(machine.succeed("btrfs scrub status /mnt/storage"))
 
-# --- Phase 4: Fire braid-shape btrfs replace start, expect rejection ---
+# --- Phase 3: Fire braid-shape btrfs replace start, expect rejection ---
 #
 # Use the exact argv shape braid emits via `CmdRequest::BtrfsReplaceStart`:
 #   btrfs replace start --enqueue -r -f -B <devid> <target> <mount_point>
@@ -123,7 +100,7 @@ with subtest("Attempt braid-shape btrfs replace -- expect scrub rejection"):
     stderr_path = "/tmp/btrfs-replace-during-scrub.err"
     cmd = (
         "btrfs replace start --enqueue -r -f -B "
-        f"{disk2_devid} /dev/mapper/disk3 /mnt/storage "
+        f"{disk2_devid} /dev/disk/by-id/virtio-disk3 /mnt/storage "
         f">{stdout_path} 2>{stderr_path}"
     )
     print("invoking: " + cmd)
@@ -148,7 +125,7 @@ with subtest("Attempt braid-shape btrfs replace -- expect scrub rejection"):
         "substring intact"
     )
 
-# --- Phase 5: Cancel scrub before shutdown so the VM teardown is clean ---
+# --- Phase 4: Cancel scrub before shutdown so the VM teardown is clean ---
 
 with subtest("Cancel scrub"):
     machine.succeed("btrfs scrub cancel /mnt/storage")

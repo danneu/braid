@@ -9,12 +9,12 @@
 # wording shift fails this test loudly before the unit-level classifier
 # can silently misclassify in production.
 #
-# Three 4096 MiB disks: disk1 + disk2 form the RAID1 pool, disk3 is the
-# standby replacement target. Disks are oversized vs. the existing
-# `btrfs-replace-rejects-smaller-target` template so a 3000 MiB payload
-# keeps the kernel's `dev->scrub_ctx` live for ~7-15 seconds even at
-# linux-builder's unthrottled ~400 MiB/s scrub rate -- a comfortable
-# window for the replace ioctl to land while scrub is in progress.
+# Three 1024 MiB disks: disk1 + disk2 form an unencrypted RAID1 pool, disk3
+# is the standby replacement target. The live-scrub window is deterministic:
+# the shared throttle helper caps each device at 20 MiB/s via the
+# scrub_speed_max knob, so a 400 MiB payload scrubs for ~20 seconds (see
+# `tests/repro/btrfs-scrub-limit-bounds-rate.nix` for the behavior lock the
+# throttle rests on).
 {
   name = "repro-btrfs-replace-rejected-during-scrub";
 
@@ -23,24 +23,24 @@
     {
       virtualisation.emptyDiskImages = [
         {
-          size = 4096;
+          size = 1024;
           driveConfig.deviceExtraOpts.serial = "disk1";
         }
         {
-          size = 4096;
+          size = 1024;
           driveConfig.deviceExtraOpts.serial = "disk2";
         }
         {
-          size = 4096;
+          size = 1024;
           driveConfig.deviceExtraOpts.serial = "disk3";
         }
       ];
 
-      environment.systemPackages = [
-        pkgs.cryptsetup
-        pkgs.btrfs-progs
-      ];
+      environment.systemPackages = [ pkgs.btrfs-progs ];
     };
 
-  testScript = builtins.readFile ./btrfs-replace-rejected-during-scrub.py;
+  testScript =
+    builtins.readFile ./scrub_throttle_helpers.py
+    + "\n\n"
+    + builtins.readFile ./btrfs-replace-rejected-during-scrub.py;
 }
