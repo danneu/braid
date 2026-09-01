@@ -731,6 +731,9 @@
           repro-btrfs-scrub-record-anchors-schedule = pkgs.testers.nixosTest (
             import ./tests/repro/btrfs-scrub-record-anchors-schedule.nix
           );
+          repro-btrfs-scrub-limit-bounds-rate = pkgs.testers.nixosTest (
+            import ./tests/repro/btrfs-scrub-limit-bounds-rate.nix
+          );
           repro-btrfs-replace-interrupted-mid-flight = pkgs.testers.nixosTest (
             import ./tests/repro/btrfs-replace-interrupted-mid-flight.nix {
               braid = linuxCrane.braid;

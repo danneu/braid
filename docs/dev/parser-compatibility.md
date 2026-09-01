@@ -46,6 +46,7 @@ When parser-critical tool versions change, run:
 1. `just capture-all-fixtures`
 2. `just test-rust`
 3. `just test-parsers`
+4. On any bump that moves btrfs-progs or the kernel (any `nixpkgs` node change moves both): `just test-repro repro-btrfs-scrub-limit-bounds-rate` -- the live-tool behavior lock for the bounded-rate scrub throttle the scrub-window repro tests rest on. This step is manual and required: `repro-*` checks are excluded from `.#checks`, so no CI workflow runs it.
 
 ## Unstable lane (tracked forecast)
 
