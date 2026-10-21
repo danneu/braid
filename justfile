@@ -121,6 +121,10 @@ test-rust:
     cargo test
     just test-state-modes
 
+# Run the review-pipeline finding store tests (scripts/findings/findings.py)
+test-findings:
+    python3 -m unittest discover -s scripts/findings
+
 # Run state-mode tests that mutate process-wide umask; keep them serial and
 # outside the default parallel Rust lane.
 test-state-modes:

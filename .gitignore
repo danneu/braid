@@ -21,3 +21,5 @@ plans/wip/
 package-changes
 /plans/review
 /plans/todo
+# Review-pipeline finding store (scripts/findings/findings.py)
+/findings/
