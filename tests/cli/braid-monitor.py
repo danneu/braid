@@ -418,14 +418,13 @@ with subtest("Offline ack refused on mixed BtrfsDeviceErrors + MissingDevice lat
 
 # Intent: A corrupt latch must be ack-able even with the pool offline.
 # Why it exists: If `latch_count = 0` is set on parse failure (the naive
-#   fix) and smartd is inactive, ack_offline gates on
-#   `has_alert = latch_count > 0 || smartd_active` and returns
-#   PoolNotMounted, leaving the corrupt file on disk forever. The user
-#   would have no way to clear it without remounting.
+#   fix) and smartd is inactive, the ack gate sees no alert signal and
+#   takes the `no active alerts` no-op, leaving the corrupt file on disk
+#   forever. The user would have no way to clear it without remounting.
 # Scenario: pool is offline (already the case at this point in the
 #   script), and the latch on disk is unparseable. `braid ack` must
 #   succeed and remove both the live latch and the .corrupt sidecar.
-with subtest("Corrupt latch (offline): ack clears it without PoolNotMounted"):
+with subtest("Corrupt latch (offline): ack clears it"):
     # Pool is currently offline (cryptsetup close was called above).
     # Both alert-latch.json and alert-latch.json.corrupt should be absent
     # at this point; create just the live (corrupt) file.

@@ -101,7 +101,13 @@ with subtest("Pool offline with smartd alert: ack succeeds"):
     machine.succeed("braid ack")
     machine.fail("test -f /var/lib/braid/smartd-alert")
 
-with subtest("Pool offline with no alert: ack fails"):
-    machine.fail("braid ack")
+# Nothing to acknowledge is one no-op whether or not the pool is mounted: an
+# offline ack with no alert signal must exit 0 with the same line as the
+# mounted no-op, not refuse, so scripts can run `braid ack` after locking.
+with subtest("Pool offline with no alert: ack is a no-op"):
+    output = machine.succeed("braid ack")
+    assert "no active alerts" in output, (
+        f"expected the offline no-op line, got: {output!r}"
+    )
 
 machine.shutdown()

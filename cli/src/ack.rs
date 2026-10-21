@@ -76,13 +76,11 @@ pub(crate) fn cmd_ack_impl<R: CommandRunner, F: Filesystem + ?Sized>(
     let remove_smartd = smartd_active || latch_had_smartd;
     let latch_had_scrub_failed = causes.iter().any(|c| matches!(c, AlertCause::ScrubFailed));
     let remove_scrub_failed = scrub_failed_active || latch_had_scrub_failed;
+    // The one alert-signal gate. The cleanup-pending sentinel is left out on
+    // purpose: alone, it drives the cleanup-only retry below.
+    let has_alert = !causes.is_empty() || smartd_active || scrub_failed_active || latch_corrupt;
 
-    if cleanup_pending
-        && causes.is_empty()
-        && !smartd_active
-        && !scrub_failed_active
-        && !latch_corrupt
-    {
+    if cleanup_pending && !has_alert {
         if let Err(e) = cleanup_alert_files_and_beeper(paths, stop_beeper, false, false) {
             return Err(AckError::CleanupFailed(e));
         }
@@ -90,28 +88,29 @@ pub(crate) fn cmd_ack_impl<R: CommandRunner, F: Filesystem + ?Sized>(
         return Ok(());
     }
 
-    // 2. Check if pool is mounted
+    // 2. Check if pool is mounted. The probe runs before the no-signal no-op
+    //    so a foreign fstype or a mountinfo fault still fails ack (ADR 014
+    //    Offline ack policy) instead of hiding behind `no active alerts`.
     let pool = match probe_pool_alerts(runner, fs, mount_point) {
         Ok(p) => p,
         Err(e) => return Err(AckError::Probe(e)),
     };
 
+    // Nothing to acknowledge is one no-op, decided from the entry snapshot
+    // alone: mount state never changes its outcome.
+    if !has_alert {
+        println!("no active alerts");
+        return Ok(());
+    }
+
     if !pool.mounted {
         return ack_offline(
             &causes,
-            latch_corrupt,
-            smartd_active,
-            scrub_failed_active,
             remove_smartd,
             remove_scrub_failed,
             paths,
             stop_beeper,
         );
-    }
-
-    if causes.is_empty() && !smartd_active && !scrub_failed_active && !latch_corrupt {
-        println!("no active alerts");
-        return Ok(());
     }
 
     // 3. Run btrfs device stats
@@ -170,22 +169,18 @@ fn format_ack_confirmation(latched_count: usize) -> String {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Acknowledges a present alert signal on a genuinely unmounted pool, where
+/// no live `btrfs device stats` exists to re-baseline error counters.
+///
+/// Holds no has-alert gate: `cmd_ack_impl` takes the no-signal no-op before
+/// the mounted/offline split, so that outcome cannot depend on mount state.
 fn ack_offline(
     causes: &[AlertCause],
-    latch_corrupt: bool,
-    smartd_active: bool,
-    scrub_failed_active: bool,
     remove_smartd: bool,
     remove_scrub_failed: bool,
     paths: &StatePaths,
     stop_beeper: &dyn Fn(),
 ) -> Result<(), AckError> {
-    let has_alert = !causes.is_empty() || smartd_active || scrub_failed_active || latch_corrupt;
-    if !has_alert {
-        return Err(AckError::PoolNotMounted);
-    }
-
     // Refuse if the latch contains any BtrfsDeviceErrors cause: the counter
     // baseline that suppresses re-firing requires live `btrfs device stats`
     // output, which we cannot produce with the pool offline. Refusing the
@@ -406,8 +401,6 @@ fn format_systemctl_stop_failure(unit: &str, output: &std::process::Output) -> O
 
 #[derive(Debug, thiserror::Error)]
 pub enum AckError {
-    #[error("pool is not mounted -- nothing to acknowledge")]
-    PoolNotMounted,
     #[error("cannot ack btrfs device errors while pool is offline -- unlock the pool first")]
     OfflineBtrfsErrorsRefused,
     #[error("probe error: {0}")]
@@ -538,6 +531,48 @@ mod tests {
             "no-op ack must not query btrfs device stats"
         );
         assert!(!paths.acked_stats_json().exists());
+    }
+
+    // Intent: Offline ack with no alert signal is the same no-op as mounted
+    //   ack: it returns Ok, never calls the beeper hook, and creates no state
+    //   file.
+    // Why it exists: Offline ack used to refuse this case with exit 1
+    //   (`pool is not mounted -- nothing to acknowledge`) while the mounted
+    //   no-op exited 0, though the docs and clap help promised exit 0 for
+    //   nothing to ack in both cases.
+    // Scenario: The pool is locked, nothing is latched or flagged, and a script
+    //   runs `braid ack` anyway.
+    #[test]
+    fn ack_offline_noop_when_no_alerts_creates_no_state() {
+        let (dir, paths) = isolated_paths();
+        let beeper_calls = std::cell::Cell::new(0u32);
+        let beeper = || beeper_calls.set(beeper_calls.get() + 1);
+
+        let result = cmd_ack_impl(
+            &AckPanicRunner,
+            &ack_fs_not_mounted(),
+            &ack_mp(),
+            &paths,
+            &beeper,
+        );
+
+        assert!(
+            result.is_ok(),
+            "offline no-op ack should succeed, got {result:?}"
+        );
+        assert_eq!(
+            beeper_calls.get(),
+            0,
+            "no-op ack must not stop the alert units"
+        );
+        let created: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert!(
+            created.is_empty(),
+            "no-op ack must create no state files, got {created:?}"
+        );
     }
 
     /*
@@ -792,18 +827,18 @@ mod tests {
 
     /*
      * Intent: Offline ack with a bare smartd-alert flag present at entry and
-     * no latch clears the flag and exits Ok, not PoolNotMounted.
-     * Why it exists: ack_offline's gate is
-     * `has_alert = !causes.is_empty() || smartd_active || latch_corrupt`. Every
-     * other offline smartd test either carries a SmartdAlert *cause* in the
-     * latch (gate satisfied by `causes`) or has the flag arrive mid-probe
-     * (asserting PoolNotMounted), so a regression dropping the `smartd_active`
-     * term would slip through. This pins that term directly.
+     * no latch clears the flag and exits Ok.
+     * Why it exists: cmd_ack_impl's no-signal gate must count `smartd_active`.
+     * Every other offline smartd test either carries a SmartdAlert *cause* in
+     * the latch (gate satisfied by `causes`) or has the flag arrive mid-probe
+     * (flag kept), so a regression dropping the `smartd_active` term would
+     * slip through: ack would take the `no active alerts` no-op and leave the
+     * flag. This pins that term directly.
      * Scenario: smartd wrote /var/lib/braid/smartd-alert; before monitor
      * latched it, the user locked the pool and runs `braid ack`.
      */
     #[test]
-    fn ack_offline_smartd_flag_no_latch_clears_flag_not_pool_not_mounted() {
+    fn ack_offline_smartd_flag_no_latch_clears_flag() {
         let (_dir, paths) = isolated_paths();
         std::fs::write(paths.smartd_alert(), b"").unwrap();
 
@@ -844,8 +879,8 @@ mod tests {
         let result = cmd_ack_impl(&AckPanicRunner, &fs, &ack_mp(), &paths, &ack_noop_beeper);
 
         assert!(
-            matches!(result, Err(AckError::PoolNotMounted)),
-            "empty offline snapshot must refuse, got {result:?}"
+            result.is_ok(),
+            "empty offline snapshot must take the no-op, got {result:?}"
         );
         assert!(
             paths.smartd_alert().exists(),
@@ -907,15 +942,16 @@ mod tests {
     }
 
     // Intent: Offline ack of a bare scrub-failed flag (no latch) clears the flag
-    //   and exits Ok, not PoolNotMounted, and writes no acked-stats.
-    // Why it exists: ack_offline's gate now includes `scrub_failed_active`; a
-    //   regression dropping that term would refuse a bare-flag offline ack with
-    //   PoolNotMounted. Mirrors the smartd bare-flag offline test, and pins that
-    //   ScrubFailed falls through the MissingDevice filter (no acked-stats).
+    //   and exits Ok, and writes no acked-stats.
+    // Why it exists: cmd_ack_impl's no-signal gate must count
+    //   `scrub_failed_active`; a regression dropping that term would take the
+    //   `no active alerts` no-op and leave the flag. Mirrors the smartd
+    //   bare-flag offline test, and pins that ScrubFailed falls through the
+    //   MissingDevice filter (no acked-stats).
     // Scenario: onFailure wrote scrub-failed; before monitor latched it, the
     //   operator locked the pool and runs `braid ack`.
     #[test]
-    fn ack_offline_scrub_failed_flag_no_latch_clears_flag_not_pool_not_mounted() {
+    fn ack_offline_scrub_failed_flag_no_latch_clears_flag() {
         let (_dir, paths) = isolated_paths();
         std::fs::write(paths.scrub_failed(), b"").unwrap();
 
@@ -957,8 +993,8 @@ mod tests {
         let result = cmd_ack_impl(&AckPanicRunner, &fs, &ack_mp(), &paths, &ack_noop_beeper);
 
         assert!(
-            matches!(result, Err(AckError::PoolNotMounted)),
-            "empty offline snapshot must refuse, got {result:?}"
+            result.is_ok(),
+            "empty offline snapshot must take the no-op, got {result:?}"
         );
         assert!(
             paths.scrub_failed().exists(),
@@ -1417,9 +1453,10 @@ mod tests {
     //   alert-cleanup-pending sentinel remains on disk and the latch has been
     //   removed. The retry takes the hoisted cleanup-only branch before
     //   probe_pool_alerts, re-invokes the stop hook, and completes cleanup.
-    // Why it exists: without the hoisted branch, this retry would land in
-    //   ack_offline's has_alert == false arm and return PoolNotMounted right
-    //   after the user followed the CleanupFailed recovery instruction.
+    // Why it exists: without the hoisted branch, this retry would see no other
+    //   signal and take the `no active alerts` no-op, leaving the sentinel and
+    //   unfinished cleanup right after the user followed the CleanupFailed
+    //   recovery instruction.
     // Scenario: pool offline, monitor latched MissingDevice{devid:1}. A
     //   directory sits at alert-latch.json.corrupt. Operator runs `braid ack`,
     //   gets CleanupFailed, removes the poison, and re-runs `braid ack`.
@@ -1829,12 +1866,14 @@ mod tests {
 
     /*
      * Intent: With no pre-existing alerts, NotBtrfs must surface the real
-     * condition rather than AckError::PoolNotMounted.
-     * Why it exists: Prior behavior returned "pool is not mounted -- nothing
-     * to acknowledge", a lie. Pins the no-alert branch so it cannot regress
-     * independently of the with-alerts branch.
+     * condition rather than the `no active alerts` no-op.
+     * Why it exists: The no-signal no-op runs after the probe on purpose. An
+     * older version claimed "pool is not mounted" here, and a no-op hoisted
+     * above the probe would exit 0 while a foreign filesystem shadows the
+     * pool path. Pins the no-alert branch so it cannot regress independently
+     * of the with-alerts branch.
      * Scenario: clean state directory, but the mount target holds ext4.
-     * `braid ack` must report the fstype, not claim the pool is unmounted,
+     * `braid ack` must report the fstype, not claim there is nothing to do,
      * and must not create any alert files.
      */
     #[test]
@@ -2084,9 +2123,9 @@ mod tests {
     //   when no causes can be parsed from it.
     // Why it exists: ADR 014's recovery contract depends on `cmd_ack_impl`
     //   mapping both Read and Parse latch load failures to `latch_corrupt =
-    //   true`. If a future refactor narrows that gate to Parse only, the
-    //   offline branch returns PoolNotMounted before cleanup and leaves the
-    //   user unable to clear the broken latch while the pool is locked.
+    //   true`. If a future refactor narrows that gate to Parse only, ack takes
+    //   the `no active alerts` no-op before cleanup and leaves the user unable
+    //   to clear the broken latch while the pool is locked.
     // Scenario: pool is offline, and filesystem damage or external tampering
     //   leaves a directory where alert-latch.json should be.
     #[test]
