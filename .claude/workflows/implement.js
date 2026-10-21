@@ -137,8 +137,8 @@ const VET = {
   required: ['tree', 'approved', 'problems', 'message'],
 }
 
-// A command returns when it exits; polling its output can stop early or hang.
-const RUN_RULE = 'Run each command in the foreground and let it return when it exits; use the longest Bash timeout for slow ones. Never poll for completion with until, grep, tail, or sleep.'
+// A command returns when it exits; polling for its exit can stop early or hang.
+const RUN_RULE = 'Run each command in the foreground with the longest Bash timeout and let it return when it exits. If it may outlast that timeout (VM tests can), start it with run_in_background instead and wait for the automatic notification that it exited. Never wait by checking on a process or its output: no pgrep, ps, tail, grep, until or while loops, or sleep.'
 
 // Runs ask instead of guessing (plan/2026-10-21-1424/D6): the implementer
 // records the ask itself, so its text reaches the store without a relay.
