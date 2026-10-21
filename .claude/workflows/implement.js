@@ -38,27 +38,58 @@ async function sh(label, command, phaseName) {
   if (!r) throw new Error(`${label}: runner failed`)
   return r
 }
-async function store(label, command, phaseName) {
+// The store returns only short control fields (plan/2026-10-21-1424/D1), and
+// each result is checked against its expected shape before use, so a relay
+// that drops or garbles a field stops the run instead of steering it.
+const TYPES = {
+  string: v => typeof v === 'string',
+  integer: v => Number.isInteger(v),
+  boolean: v => typeof v === 'boolean',
+  'string?': v => v === null || typeof v === 'string',
+  'string[]': v => Array.isArray(v) && v.every(x => typeof x === 'string'),
+}
+function expect(label, value, shape) {
+  const bad = Object.entries(shape).filter(([k, t]) => !(value && TYPES[t](value[k])))
+  if (bad.length) throw new Error(`${label}: malformed store result (${bad.map(([k, t]) => `${k}: ${t}`).join(', ')}): ${JSON.stringify(value)}`)
+  return value
+}
+async function store(label, command, phaseName, shapeOf) {
   const r = await sh(label, command, phaseName)
   if (r.exit_code !== 0) throw new Error(`${label}: ${r.stdout}`)
-  return JSON.parse(r.stdout)
+  let value
+  try { value = JSON.parse(r.stdout) } catch (e) { throw new Error(`${label}: store result is not JSON: ${r.stdout}`) }
+  return expect(label, value, shapeOf(value))
+}
+
+// The extra fields each `land` status carries.
+const LAND = {
+  merged: {},
+  wait: { reason: 'string' },
+  regate: { tree: 'string' },
+  conflict: { files: 'string[]' },
 }
 
 phase('Launch')
-const plan = await store('launch', `${F} launch ${id}`, 'Launch')
+const plan = await store('launch', `${F} launch ${id}`, 'Launch', v =>
+  v && v.action === 'stop'
+    ? { id: 'string', action: 'string', reason: 'string' }
+    : { id: 'string', action: 'string', branch: 'string', decision: 'integer', candidate: 'string?', proof: 'string', acceptance: 'string[]' })
+if (plan.id !== id || !['stop', 'start', 'resume'].includes(plan.action)) throw new Error(`launch: unexpected result ${JSON.stringify(plan)}`)
 if (plan.action === 'stop') {
   log(`${id}: ${plan.reason}; nothing to do`)
   return { id, status: 'stopped', reason: plan.reason }
 }
-const wt = await store('worktree', `${F} worktree ${id}`, 'Launch')
+const wt = await store('worktree', `${F} worktree ${id}`, 'Launch',
+  () => ({ id: 'string', branch: 'string', path: 'string', created: 'boolean' }))
+if (wt.branch !== plan.branch) throw new Error(`worktree: branch ${wt.branch} is not ${plan.branch}`)
 log(`${id}: ${plan.action} on ${wt.branch} in ${wt.path}`)
 
-const regression = plan.finding.proof.kind === 'regression'
-const chosen = plan.candidate
-  ? `Candidate \`${plan.candidate.key}\`: ${plan.candidate.title}\n${plan.candidate.summary}\nTrade-offs the user accepted: ${plan.candidate.tradeoffs}`
-  : '(no candidate; the note below is the whole direction)'
-const decision = `${chosen}${plan.decision.note ? `\n\nUser's note (part of the decision): ${plan.decision.note}` : ''}`
-const acceptance = plan.finding.acceptance.map(r => `just ${r}`)
+const regression = plan.proof === 'regression'
+// Agents read the decision's text from the store themselves (plan/2026-10-21-1424/I10).
+const decision = `Decision ${plan.decision} in \`${F} show ${id}\`: ${plan.candidate
+  ? `candidate \`${plan.candidate}\` from the pitch, with the trade-offs it lists as accepted, plus the decision's note if it has one`
+  : 'no candidate; the decision\'s note is the whole direction'}.`
+const acceptance = plan.acceptance.map(r => `just ${r}`)
 
 const IMPL = {
   type: 'object',
@@ -92,17 +123,16 @@ const VET = {
 
 const implPrompt = (feedback, prior) => `You implement braid review finding ${id}. Work only inside the worktree \`${wt.path}\` (branch \`${wt.branch}\`): use absolute paths under it and run every command from it.
 
-Read the finding with \`${F} show ${id}\` (run that from \`${wt.path}\`).
+Read the finding, its pitch, and the user's decision with \`${F} show ${id}\` (run that from \`${wt.path}\`).
 
-The user chose this solution:
-${decision}
+The user chose this solution: ${decision}
 
 Rules:
 - Apply exactly this solution. If it proves wrong or impossible, do not swap in another one: return status \`blocked\` with the reason, and leave the branch as it is.
 - Follow AGENTS.md: principles, ADRs, doc comments, docs in sync, test preambles.
 ${regression
-    ? `- Proof (regression): ${plan.finding.proof.check}\n  First commit only the test, and confirm it fails for the right reason. Give that commit a \`Proof: red\` trailer. Then commit the fix and confirm the test passes. Keep exactly one \`Proof: red\` commit on the branch.`
-    : `- Proof (${plan.finding.proof.kind}): ${plan.finding.proof.check}`}
+    ? `- Proof (regression): the finding's Proof section says what the test must show.\n  First commit only the test, and confirm it fails for the right reason. Give that commit a \`Proof: red\` trailer. Then commit the fix and confirm the test passes. Keep exactly one \`Proof: red\` commit on the branch.`
+    : `- Proof (${plan.proof}): the finding's Proof section says what must hold.`}
 - Make every listed acceptance recipe pass: ${acceptance.join(', ')}. VM recipes take a host-wide gate and may wait; run long commands in the background and wait for them.
 - Commit all work on the branch (stage files by name; never --amend, never --no-verify, never push, never touch master). Leave the worktree clean.
 ${prior ? `\nThe branch already has work from an earlier round or run. Inspect it (\`git log master..HEAD\`, \`git diff master...HEAD\`) and continue from it.` : ''}${feedback ? `\n\nFix these problems from the gates or the vetter, then commit:\n${feedback}` : ''}
@@ -115,8 +145,8 @@ const gatePrompt = impl => `You are the gate for braid review finding ${id}. Che
 2. Run each acceptance recipe from \`${wt.path}\`: ${acceptance.join(', ')}. Long ones (VM tests) may wait on a host-wide gate; run them in the background and wait for them to exit.
 ${regression
     ? `3. Red/green: find the red commit with \`git log master..HEAD --grep='^Proof: red' --format=%H\` (exactly one). Check it out in a temporary detached worktree (\`git worktree add --detach <path next to ${wt.path}> <sha>\`), run \`${impl.proof_command}\` there, and confirm it FAILS for the reason the finding describes (an assertion, not a build error). Remove the temporary worktree. Then run it in \`${wt.path}\` and confirm it passes.`
-    : plan.finding.proof.kind === 'benchmark'
-      ? `3. Benchmark: run \`${impl.proof_command}\` on master (in a temporary detached worktree) and on the branch, and report both numbers. Pass only if the branch is better by the claim in the finding: ${plan.finding.proof.check}`
+    : plan.proof === 'benchmark'
+      ? `3. Benchmark: run \`${impl.proof_command}\` on master (in a temporary detached worktree) and on the branch, and report both numbers. Pass only if the branch is better by the claim in the finding's Proof section (\`${F} show ${id}\`).`
       : `3. Preservation: run \`${impl.proof_command}\` and confirm it passes.`}
 4. Confirm the tree is still the one you recorded and the worktree is clean.
 
@@ -124,8 +154,7 @@ Pass only if every step holds. Return the tree, the verdict, and a report with t
 
 const vetPrompt = gate => `You vet braid review finding ${id} before it lands on master unattended. You are independent: you have not seen the implementer's reasoning, and you change nothing.
 
-Read the finding with \`${F} show ${id}\`. The user chose:
-${decision}
+Read the finding, its pitch, and the user's decision with \`${F} show ${id}\`. The user chose: ${decision}
 
 Review \`git -C ${wt.path} diff master...HEAD\` and \`git -C ${wt.path} log master..HEAD\` against the decision, \`docs/design/principles.md\`, the ADRs the change touches, and AGENTS.md. Reject if:
 - it applies anything other than the chosen solution, or more than it;
@@ -145,7 +174,8 @@ let rebaseRepairs = 0
 let impl = null
 
 async function block(reason) {
-  await store('block', `${F} block ${id} --reason "$(cat <<'EOF'\n${reason}\nEOF\n)"`, 'Implement')
+  await store('block', `${F} block ${id} --reason "$(cat <<'EOF'\n${reason}\nEOF\n)"`, 'Implement',
+    () => ({ id: 'string', status: 'string' }))
   log(`${id}: blocked: ${reason}`)
   return { id, status: 'blocked', reason }
 }
@@ -183,7 +213,8 @@ while (true) {
   let next = null
   for (let waits = 0; next === null; ) {
     const message = `${impl.subject}\n\n${impl.body}`
-    const res = await store('land', `${F} land ${id} --tree ${gate.tree} --wait 540 --message - <<'EOF'\n${message}\nEOF`, 'Land')
+    const res = await store('land', `${F} land ${id} --tree ${gate.tree} --wait 540 --message - <<'EOF'\n${message}\nEOF`, 'Land',
+      v => ({ id: 'string', status: 'string', ...LAND[v && v.status] }))
     if (res.status === 'merged') {
       log(`${id}: merged as ${res.commit || 'an earlier run'}`)
       return { id, status: 'merged', commit: res.commit || null }

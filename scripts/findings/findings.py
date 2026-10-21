@@ -524,7 +524,12 @@ def cmd_block(store: Store, fid: str, reason: str) -> dict:
 
 
 def cmd_launch(store: Store, fid: str) -> dict:
-    """What an implement run may do, decided before any side effect (plan/2026-10-21-1047/D12)."""
+    """What an implement run may do, decided before any side effect (plan/2026-10-21-1047/D12).
+
+    Only control fields (plan/2026-10-21-1424/D1): a workflow relays this
+    through an agent, and text can be abridged on the way. Agents read the
+    finding and the decision themselves with `show`.
+    """
     f = store.load(fid)
     if store.state(f) == "merged":
         return {"id": fid, "action": "stop", "reason": "merged"}
@@ -532,15 +537,14 @@ def cmd_launch(store: Store, fid: str) -> dict:
         return {"id": fid, "action": "stop", "reason": f"status is {f['status']}, not decided"}
     decision = f["decisions"][-1]
     branch = branch_name(fid, decision["number"])
-    chosen = next((c for c in f["pitch"]["candidates"] if c["key"] == decision["candidate"]), None)
     return {
         "id": fid,
         "action": "resume" if store.git.branch_exists(branch) else "start",
         "branch": branch,
-        "trailer": f"{TRAILER}: {fid}",
-        "decision": decision,
-        "candidate": chosen,
-        "finding": {k: f[k] for k in ("title", "category", "claim", "locations", "proof", "acceptance")},
+        "decision": decision["number"],
+        "candidate": decision["candidate"],
+        "proof": f["proof"]["kind"],
+        "acceptance": f["acceptance"],
     }
 
 
@@ -629,7 +633,7 @@ def cmd_land(store: Store, repo: Path, fid: str, tree: str, message: str, wait: 
         if tip_tree != tree:
             return {"id": fid, "status": "regate", "tree": tip_tree}
         commit = _git(repo, "commit-tree", tree, "-p", base, "-m",
-                      f"{message.rstrip()}\n\n{plan['trailer']}\n").stdout.strip()
+                      f"{message.rstrip()}\n\n{TRAILER}: {fid}\n").stdout.strip()
         head = _git(repo, "symbolic-ref", "--quiet", "HEAD", check=False).stdout.strip()
         if head == f"refs/heads/{MAIN_BRANCH}":
             if _git(repo, "merge", "--ff-only", "--quiet", commit, check=False).returncode != 0:

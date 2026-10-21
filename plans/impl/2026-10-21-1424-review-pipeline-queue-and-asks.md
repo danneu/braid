@@ -246,7 +246,7 @@ decision so it resumes its approved branch, and start one `drain`.
 ## Commit progress
 
 - [x] C1. fix(findings): decide "already merged" under the merge-queue lock
-- [ ] C2. fix(review): workflows parse only validated control fields from the store
+- [x] C2. fix(review): workflows parse only validated control fields from the store
 - [ ] C3. feat(review): gate and vet a snapshot of the candidate and the message that lands
 - [ ] C4. feat(review): runs stop with an ask, and an answer resumes the same branch
 - [ ] C5. feat(review): drain the decided queue; /pick-fix only decides

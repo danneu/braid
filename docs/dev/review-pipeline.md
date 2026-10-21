@@ -49,6 +49,13 @@ built for an earlier choice.
 Rank is computed from severity, confidence, and effort
 (`scripts/findings/findings.py#score`); agents never assign it.
 
+A workflow script cannot run processes, so it reaches the store through
+a small runner agent that relays stdout. The commands a workflow parses
+(`launch`, `worktree`, `block`, `land`) return only short control
+fields, and the workflow checks each result's shape and stops on a
+mismatch. Agents that need a finding's text, pitch, or decision read it
+themselves with `findings.py show`, never through a relay.
+
 ## What lands, and when
 
 An implement run lands a change only when, for the exact tree being

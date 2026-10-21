@@ -223,16 +223,17 @@ class PipelineTest(StoreTest):
         self.cli("decide", fid, "--candidate", "local-fix", "--note", "keep the old flag")
         first = self.cli("launch", fid)
         self.assertEqual(
-            (first["action"], first["branch"], first["candidate"]["key"], first["decision"]["note"]),
-            ("start", f"review/{fid}/1", "local-fix", "keep the old flag"),
+            (first["action"], first["branch"], first["decision"], first["candidate"]),
+            ("start", f"review/{fid}/1", 1, "local-fix"),
         )
+        self.assertEqual(self.cli("show", fid)["decisions"][-1]["note"], "keep the old flag")
         self.git("branch", first["branch"])
         self.assertEqual(self.cli("launch", fid)["action"], "resume")
         self.cli("block", fid, "--reason", "the flag cannot stay")
         self.assertEqual(self.cli("launch", fid)["action"], "stop", "a blocked branch is never resumed")
         self.cli("decide", fid, "--candidate", "ideal-fix")
         second = self.cli("launch", fid)
-        self.assertEqual((second["action"], second["branch"], second["candidate"]["key"]),
+        self.assertEqual((second["action"], second["branch"], second["candidate"]),
                          ("start", f"review/{fid}/2", "ideal-fix"))
         self.land(fid)
         self.assertEqual(self.cli("launch", fid), {"id": fid, "action": "stop", "reason": "merged"})
@@ -323,6 +324,52 @@ class QueueTest(StoreTest):
         before = self.master()
         self.assertEqual(self.land(fid, approved)["status"], "regate")
         self.assertEqual(self.master(), before)
+
+    def assert_control(self, result: dict, keys: set[str]) -> None:
+        """Short one-line values only, so an agent relay cannot abridge them (plan/2026-10-21-1424/I10)."""
+        self.assertEqual(set(result), keys, result)
+
+        def short(v) -> bool:
+            if isinstance(v, str):
+                return "\n" not in v and len(v) <= 200
+            if isinstance(v, list):
+                return all(short(x) for x in v)
+            return v is None or isinstance(v, (bool, int))
+
+        for k, v in result.items():
+            self.assertTrue(short(v), f"{k} is not a short control value: {v!r}")
+
+    def test_workflow_facing_commands_return_only_control_fields(self):
+        # plan/2026-10-21-1424/PO1: launch, worktree, block, and land are what
+        # implement.js parses; the claim, pitch, and note never reach it.
+        long_note = "keep the old flag\n" * 20
+        (pitched,) = self.to_pitched(finding(claim="c" * 500))
+        self.assert_control(self.cli("launch", pitched), {"id", "action", "reason"})
+        self.cli("decide", pitched, "--candidate", "ideal-fix", "--note", long_note)
+        launch = {"id", "action", "branch", "decision", "candidate", "proof", "acceptance"}
+        self.assert_control(self.cli("launch", pitched), launch)
+        self.assert_control(self.cli("worktree", pitched), {"id", "branch", "path", "created"})
+        self.assert_control(self.cli("launch", pitched), launch)
+        self.assert_control(self.cli("block", pitched, "--reason", "r"), {"id", "status"})
+
+        first, wt1 = self.decided()
+        second, wt2 = self.decided()
+        tree1 = self.commit_in(wt1, "x.txt", "one\n")
+        tree2 = self.commit_in(wt2, "x.txt", "two\n")
+        (self.repo / "dirt.txt").write_text("d\n")
+        self.git("add", "dirt.txt")
+        self.assert_control(self.land(first, tree1), {"id", "status", "reason"})
+        self.git("rm", "-q", "--cached", "dirt.txt")
+        (self.repo / "dirt.txt").unlink()
+        self.assert_control(self.land(first, tree1), {"id", "status", "commit"})
+        self.assert_control(self.land(first, tree1), {"id", "status", "already"})
+        self.assert_control(self.land(second, tree2), {"id", "status", "files"})
+        third, wt3 = self.decided()
+        tree3 = self.commit_in(wt3, "y.txt", "three\n")
+        (self.repo / "z.txt").write_text("z\n")
+        self.git("add", "z.txt")
+        self.git("commit", "-q", "-m", "master moves")
+        self.assert_control(self.land(third, tree3), {"id", "status", "tree"})
 
     def test_two_concurrent_landings_of_one_finding_land_it_once(self):
         # plan/2026-10-21-1424/PO10: two runs of one finding both hold the
