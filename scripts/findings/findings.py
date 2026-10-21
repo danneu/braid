@@ -591,22 +591,29 @@ def cmd_land(store: Store, repo: Path, fid: str, tree: str, message: str, wait: 
     Only the exact tree the gates approved lands. A rebase onto a moved
     master changes the tree, so it returns `regate` and the gates run again.
     master moves only by fast-forward while the main checkout is clean.
+
+    The merged check, the rebase, and the commit share one hold of the queue
+    lock (plan/2026-10-21-1424/D11), so of two runs landing one finding, the
+    second sees the first's trailer and stops. The queue lock is taken before
+    the store lock, never the other way round.
     """
-    with store.locked():
-        f = store.load(fid)
-        if store.state(f) == "merged":
-            wt = _worktree_of(repo, branch_name(fid, len(f["decisions"])))
-            if wt:
-                _git(repo, "worktree", "remove", "--force", str(wt))
-            return {"id": fid, "status": "merged", "already": True}
-        plan = _authorized(store, fid)
     _require(message.strip() != "", f"{fid}: a landing needs a commit message")
-    wt = _worktree_of(repo, plan["branch"])
-    _require(wt is not None, f"{fid}: no worktree for {plan['branch']}")
-    _require(not _git(wt, "status", "--porcelain").stdout, f"{fid}: worktree {wt} has uncommitted changes")
     store.root.mkdir(parents=True, exist_ok=True)
     with open(store.root / ".queue.lock", "w") as queue:
         fcntl.flock(queue, fcntl.LOCK_EX)
+        with store.locked():
+            # Nothing before the queue lock may read git's merged set: it is
+            # cached per process, and only a read under the lock is current.
+            f = store.load(fid)
+            if store.state(f) == "merged":
+                wt = _worktree_of(repo, branch_name(fid, len(f["decisions"])))
+                if wt:
+                    _git(repo, "worktree", "remove", "--force", str(wt))
+                return {"id": fid, "status": "merged", "already": True}
+            plan = _authorized(store, fid)
+        wt = _worktree_of(repo, plan["branch"])
+        _require(wt is not None, f"{fid}: no worktree for {plan['branch']}")
+        _require(not _git(wt, "status", "--porcelain").stdout, f"{fid}: worktree {wt} has uncommitted changes")
         deadline = time.monotonic() + wait
         while _dirty(repo):
             if time.monotonic() >= deadline:
@@ -629,7 +636,9 @@ def cmd_land(store: Store, repo: Path, fid: str, tree: str, message: str, wait: 
                 return {"id": fid, "status": "wait", "reason": "fast-forward refused; the main checkout changed"}
         else:
             _git(repo, "update-ref", f"refs/heads/{MAIN_BRANCH}", commit, base)
-    _git(repo, "worktree", "remove", str(wt))
+        # Under the lock, so a concurrent run of this finding finds it merged
+        # with nothing left to clean up.
+        _git(repo, "worktree", "remove", str(wt))
     return {"id": fid, "status": "merged", "commit": commit}
 
 
@@ -727,7 +736,8 @@ def main(argv: list[str]) -> int:
         store = Store(args.store or repo / "findings", repo)
         if args.cmd == "land":
             # cmd_land takes the store lock only to read state, so a long wait
-            # for a clean checkout never blocks other store commands.
+            # for a clean checkout never blocks other store commands. It holds
+            # the queue lock throughout.
             text = sys.stdin.read() if args.message == "-" else Path(args.message).read_text()
             result = cmd_land(store, repo, args.id, args.tree, text, args.wait)
         else:

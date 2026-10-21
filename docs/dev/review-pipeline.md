@@ -6,7 +6,8 @@ intent: How the agent review pipeline finds, verifies, pitches, implements, and 
 
 An agent pipeline that reviews braid, lets you choose a fix per finding,
 and lands each choice on `master` unattended. Design and invariants:
-`plan/2026-10-21-1047` (`plans/impl/2026-10-21-1047-review-pipeline-overhaul.md`).
+`plan/2026-10-21-1047` (`plans/impl/2026-10-21-1047-review-pipeline-overhaul.md`),
+revised by `plan/2026-10-21-1424` (`plans/impl/2026-10-21-1424-review-pipeline-queue-and-asks.md`).
 
 | Step | Who | What |
 |---|---|---|
@@ -62,7 +63,9 @@ merged:
 The merge queue (`findings.py land`) then squashes the branch into one
 commit on `master`. If `master` moved, it rebases and sends the new tree
 back through every gate. It waits while the main checkout has
-uncommitted changes, and nothing is pushed. A failed gate or vetter gets
+uncommitted changes, and nothing is pushed. It checks for an earlier
+`Finding:` commit under its own lock, so two runs of one finding land it
+once. A failed gate or vetter gets
 a bounded number of repair rounds; after that, or when the chosen fix
 proves impossible, the finding goes to `blocked` with a reason and waits
 for your next `/pick-fix`. Relaunching any finding is safe: the run

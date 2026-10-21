@@ -6,12 +6,14 @@ Run: python3 -m unittest discover -s scripts/findings
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import io
 import json
 import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -321,6 +323,32 @@ class QueueTest(StoreTest):
         before = self.master()
         self.assertEqual(self.land(fid, approved)["status"], "regate")
         self.assertEqual(self.master(), before)
+
+    def test_two_concurrent_landings_of_one_finding_land_it_once(self):
+        # plan/2026-10-21-1424/PO10: two runs of one finding both hold the
+        # approved tree. Each must wait on the queue lock while the other holds
+        # it, so the test holds the lock until both processes are queued.
+        fid, wt = self.decided()
+        tree = self.commit_in(wt, "a.txt", "fix\n")
+        cmd = [sys.executable, str(Path(findings.__file__)), "--store", str(self.store), "--repo",
+               str(self.repo), "land", fid, "--tree", tree, "--message", "-"]
+        self.store.mkdir(parents=True, exist_ok=True)
+        with open(self.store / ".queue.lock", "w") as queue:
+            fcntl.flock(queue, fcntl.LOCK_EX)
+            procs = [subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                      text=True) for _ in range(2)]
+            for p in procs:
+                p.stdin.write("fix: the thing\n")
+                p.stdin.close()
+            time.sleep(1)  # let both processes reach the lock
+        results = []
+        for p in procs:
+            out, err = p.communicate(timeout=60)
+            self.assertEqual(p.returncode, 0, err)
+            results.append(json.loads(out))
+        self.assertEqual(sorted(r["status"] for r in results), ["merged", "merged"])
+        self.assertEqual(sorted(bool(r.get("already")) for r in results), [False, True])
+        self.assertEqual(self.git("rev-list", "--count", "--grep", f"Finding: {fid}", "master").strip(), "1")
 
     def test_a_blocked_finding_gets_no_worktree_and_cannot_land(self):
         fid, wt = self.decided()
