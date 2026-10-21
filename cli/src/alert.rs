@@ -1,8 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::parse::types::{BtrfsDeviceStatsOutput, BtrfsDeviceUsageEntry, DeviceErrorStats};
@@ -252,6 +253,97 @@ impl From<&DeviceErrorStats> for DeviceErrorCounters {
 // Load / save
 // ---------------------------------------------------------------------------
 
+/// Failure on one alert-side state file. Every fallible state-file load,
+/// save, and remove in this module returns it, built from the same path the
+/// failing call touched, so no caller can print a pathless or mislabeled
+/// alert-state error. `Parse` stays apart from `Read` so a corrupt file is
+/// not reported as an I/O fault
+/// (`docs/design/decisions/014-alerts.md#corrupt-latch-recovery`).
+#[derive(Debug, thiserror::Error)]
+pub enum AlertStateError {
+    #[error("failed to read {}: {source}", path.display())]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to parse {}: {source}", path.display())]
+    Parse {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("failed to write {}: {source}", path.display())]
+    Write {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to remove {}: {source}", path.display())]
+    Remove {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to link {} to {}: {source}", path.display(), sidecar.display())]
+    Link {
+        path: PathBuf,
+        sidecar: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("{} is not a regular file", path.display())]
+    NotRegularFile { path: PathBuf },
+}
+
+/// Shared JSON loader so every state file reads the same way: absent is
+/// `Ok(None)`, and bytes (not a `String`) go to serde so invalid UTF-8 is a
+/// `Parse` error about the content, not a `Read` error about the filesystem.
+fn read_json_if_present<T: DeserializeOwned>(path: &Path) -> Result<Option<T>, AlertStateError> {
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => {
+            return Err(AlertStateError::Read {
+                path: path.to_owned(),
+                source,
+            });
+        }
+    };
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(|source| AlertStateError::Parse {
+            path: path.to_owned(),
+            source,
+        })
+}
+
+/// Shared JSON writer so every state file goes through `atomic_write`. A
+/// serialization failure is reported as `Write`: braid could not produce the
+/// file's new contents.
+fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), AlertStateError> {
+    let write_err = |source| AlertStateError::Write {
+        path: path.to_owned(),
+        source,
+    };
+    let json =
+        serde_json::to_string_pretty(value).map_err(|e| write_err(std::io::Error::other(e)))?;
+    atomic_write(path, json.as_bytes()).map_err(write_err)
+}
+
+/// Shared NotFound-tolerant removal: absence is already the cleared state, so
+/// ack cleanup and ghost-state drops stay idempotent on retry.
+fn remove_if_present(path: &Path) -> Result<(), AlertStateError> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(AlertStateError::Remove {
+            path: path.to_owned(),
+            source,
+        }),
+    }
+}
+
 /// Lossy loader: swallows both `NotFound` and parse errors into
 /// `AckedStats::default()`. Use only for test reload assertions or
 /// strictly read-only inspection. Production mutation paths must use
@@ -265,20 +357,18 @@ pub fn load_acked_stats(paths: &StatePaths) -> AckedStats {
 /// Path-based form of the lossy loader; keep production mutation paths on
 /// `load_acked_stats_fallible` so corrupt state cannot be treated as empty.
 pub fn load_acked_stats_at(path: &Path) -> AckedStats {
-    let contents = match std::fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(_) => return AckedStats::default(),
-    };
-    serde_json::from_str(&contents).unwrap_or_default()
+    read_json_if_present(path)
+        .ok()
+        .flatten()
+        .unwrap_or_default()
 }
 
-pub fn save_acked_stats(stats: &AckedStats, paths: &StatePaths) -> Result<(), std::io::Error> {
+pub fn save_acked_stats(stats: &AckedStats, paths: &StatePaths) -> Result<(), AlertStateError> {
     save_acked_stats_at(&paths.acked_stats_json(), stats)
 }
 
-pub fn save_acked_stats_at(path: &Path, stats: &AckedStats) -> Result<(), std::io::Error> {
-    let json = serde_json::to_string_pretty(stats).map_err(std::io::Error::other)?;
-    atomic_write(path, json.as_bytes())
+pub fn save_acked_stats_at(path: &Path, stats: &AckedStats) -> Result<(), AlertStateError> {
+    write_json(path, stats)
 }
 
 // ---------------------------------------------------------------------------
@@ -433,16 +523,8 @@ pub fn drop_acked_devid(acked: &mut AckedStats, devid: Devid) -> bool {
     acked.0.remove(&devid.to_string()).is_some()
 }
 
-pub fn load_acked_stats_fallible(paths: &StatePaths) -> Result<AckedStats, std::io::Error> {
-    let path = paths.acked_stats_json();
-    let contents = match std::fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(AckedStats::default());
-        }
-        Err(e) => return Err(e),
-    };
-    serde_json::from_str(&contents).map_err(std::io::Error::other)
+pub fn load_acked_stats_fallible(paths: &StatePaths) -> Result<AckedStats, AlertStateError> {
+    Ok(read_json_if_present(&paths.acked_stats_json())?.unwrap_or_default())
 }
 
 /// Ack's loader for its read-modify-write of acked-stats. An unparseable file
@@ -457,18 +539,11 @@ pub fn load_acked_stats_fallible(paths: &StatePaths) -> Result<AckedStats, std::
 /// ack cannot tell what the file holds.
 pub fn load_acked_stats_or_quarantine(
     paths: &StatePaths,
-) -> Result<(AckedStats, Option<String>), std::io::Error> {
+) -> Result<(AckedStats, Option<String>), AlertStateError> {
     let path = paths.acked_stats_json();
-    let bytes = match std::fs::read(&path) {
-        Ok(b) => b,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok((AckedStats::default(), None));
-        }
-        Err(e) => return Err(e),
-    };
-    match serde_json::from_slice(&bytes) {
-        Ok(acked) => Ok((acked, None)),
-        Err(e) => {
+    match read_json_if_present(&path) {
+        Ok(acked) => Ok((acked.unwrap_or_default(), None)),
+        Err(e @ AlertStateError::Parse { .. }) => {
             let sidecar = paths.acked_stats_corrupt();
             let detail = match quarantine_corrupt_file(&path, &sidecar, "acked-stats") {
                 Some(quarantine_detail) => format!("{e}; {quarantine_detail}"),
@@ -476,6 +551,7 @@ pub fn load_acked_stats_or_quarantine(
             };
             Ok((AckedStats::default(), Some(detail)))
         }
+        Err(e) => Err(e),
     }
 }
 
@@ -490,7 +566,7 @@ pub fn load_acked_stats_or_quarantine(
 pub fn drop_ghost_alert_state_for_devids(
     paths: &StatePaths,
     devids: &[Devid],
-) -> Result<bool, std::io::Error> {
+) -> Result<bool, AlertStateError> {
     if devids.is_empty() {
         return Ok(false);
     }
@@ -510,12 +586,8 @@ pub fn drop_ghost_alert_state_for_devids(
 /// Forget every disk's alert state for a fresh pool identity (bootstrap):
 /// delete acked-stats and strip all latched evidence. Absent files are
 /// already the empty state.
-pub fn drop_all_ghost_alert_state(paths: &StatePaths) -> Result<(), std::io::Error> {
-    match std::fs::remove_file(paths.acked_stats_json()) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e),
-    }
+pub fn drop_all_ghost_alert_state(paths: &StatePaths) -> Result<(), AlertStateError> {
+    remove_if_present(&paths.acked_stats_json())?;
     strip_latched_evidence(paths, |_| true)?;
     Ok(())
 }
@@ -531,13 +603,11 @@ pub fn drop_all_ghost_alert_state(paths: &StatePaths) -> Result<(), std::io::Err
 fn strip_latched_evidence(
     paths: &StatePaths,
     stale: impl Fn(Devid) -> bool,
-) -> Result<bool, std::io::Error> {
-    let latch_context =
-        |e: std::io::Error| std::io::Error::new(e.kind(), format!("alert latch: {e}"));
+) -> Result<bool, AlertStateError> {
     let mut state = match load_alert_latch(paths) {
         Ok(Some(state)) => state,
-        Ok(None) | Err(LatchLoadError::Parse(_)) => return Ok(false),
-        Err(LatchLoadError::Read(e)) => return Err(latch_context(e)),
+        Ok(None) | Err(AlertStateError::Parse { .. }) => return Ok(false),
+        Err(e) => return Err(e),
     };
     let mut changed = false;
     for latched in &mut state.causes {
@@ -555,7 +625,7 @@ fn strip_latched_evidence(
         }
     }
     if changed {
-        save_alert_latch(&state, paths).map_err(latch_context)?;
+        save_alert_latch(&state, paths)?;
     }
     Ok(changed)
 }
@@ -620,12 +690,8 @@ pub fn smartd_alert_active(paths: &StatePaths) -> bool {
 }
 
 /// Remove the smartd alert flag file. Returns Ok(()) even if it didn't exist.
-pub fn remove_smartd_alert_flag(paths: &StatePaths) -> Result<(), std::io::Error> {
-    match std::fs::remove_file(paths.smartd_alert()) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e),
-    }
+pub fn remove_smartd_alert_flag(paths: &StatePaths) -> Result<(), AlertStateError> {
+    remove_if_present(&paths.smartd_alert())
 }
 
 /// Check if the scrub-failed flag file exists (mirror of `smartd_alert_active`).
@@ -642,41 +708,20 @@ pub fn scrub_failed_active(paths: &StatePaths) -> bool {
 }
 
 /// Remove the scrub-failed flag file. Returns Ok(()) even if it didn't exist.
-pub fn remove_scrub_failed_flag(paths: &StatePaths) -> Result<(), std::io::Error> {
-    match std::fs::remove_file(paths.scrub_failed()) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e),
-    }
+pub fn remove_scrub_failed_flag(paths: &StatePaths) -> Result<(), AlertStateError> {
+    remove_if_present(&paths.scrub_failed())
 }
 
 // ---------------------------------------------------------------------------
 // Alert latch file
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, thiserror::Error)]
-pub enum LatchLoadError {
-    #[error("read alert latch: {0}")]
-    Read(#[from] std::io::Error),
-    #[error("parse alert latch: {0}")]
-    Parse(#[from] serde_json::Error),
-}
-
-pub fn load_alert_latch(paths: &StatePaths) -> Result<Option<AlertState>, LatchLoadError> {
+pub fn load_alert_latch(paths: &StatePaths) -> Result<Option<AlertState>, AlertStateError> {
     load_alert_latch_at(&paths.alert_latch_json())
 }
 
-pub fn load_alert_latch_at(path: &Path) -> Result<Option<AlertState>, LatchLoadError> {
-    // Read bytes (not String) so invalid UTF-8 surfaces as a Parse error via
-    // serde_json, not as an io::Error::InvalidData wrapped in Read. Read/Parse
-    // splits "filesystem failed" from "on-disk content is wrong"; non-UTF-8
-    // bytes are the latter.
-    let bytes = match std::fs::read(path) {
-        Ok(b) => b,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(LatchLoadError::Read(e)),
-    };
-    Ok(Some(serde_json::from_slice(&bytes)?))
+pub fn load_alert_latch_at(path: &Path) -> Result<Option<AlertState>, AlertStateError> {
+    read_json_if_present(path)
 }
 
 /// Mutation-path variant: on read/parse failure, move the bad file aside to
@@ -711,7 +756,8 @@ fn quarantine_corrupt_latch(paths: &StatePaths) -> Option<String> {
 
 /// Move an unreadable state file to its sidecar without clobbering an earlier
 /// sidecar's bytes; `None` means the move succeeded, and `Some` describes what
-/// went wrong for the caller's warning or `ComputationError` detail.
+/// went wrong for the caller's warning or `ComputationError` detail. Its
+/// failures are `AlertStateError`s, so the detail names the file that failed.
 ///
 /// The hard-link step is the atomic no-clobber primitive: it fails with
 /// AlreadyExists if the sidecar path is already occupied, avoiding an
@@ -720,37 +766,39 @@ fn quarantine_corrupt_file(src: &Path, dst: &Path, what: &str) -> Option<String>
     match std::fs::hard_link(src, dst) {
         Ok(()) => match std::fs::remove_file(src) {
             Ok(()) => None,
-            Err(e) => Some(format!(
-                "quarantined corrupt {what} but failed to remove source: {e}"
-            )),
+            Err(source) => {
+                let e = AlertStateError::Remove {
+                    path: src.to_owned(),
+                    source,
+                };
+                Some(format!("quarantined corrupt {what} but {e}"))
+            }
         },
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Some(format!(
             "prior {} sidecar exists -- new corrupt bytes were not separately preserved",
             dst.file_name().unwrap_or_default().to_string_lossy()
         )),
-        Err(e) => Some(format!("failed to quarantine corrupt {what}: {e}")),
+        Err(source) => {
+            let e = AlertStateError::Link {
+                path: src.to_owned(),
+                sidecar: dst.to_owned(),
+                source,
+            };
+            Some(format!("failed to quarantine corrupt {what}: {e}"))
+        }
     }
 }
 
-pub fn save_alert_latch(state: &AlertState, paths: &StatePaths) -> Result<(), std::io::Error> {
-    let json = serde_json::to_string_pretty(state).map_err(std::io::Error::other)?;
-    atomic_write(&paths.alert_latch_json(), json.as_bytes())
+pub fn save_alert_latch(state: &AlertState, paths: &StatePaths) -> Result<(), AlertStateError> {
+    write_json(&paths.alert_latch_json(), state)
 }
 
-pub fn remove_alert_latch(paths: &StatePaths) -> Result<(), std::io::Error> {
-    match std::fs::remove_file(paths.alert_latch_json()) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e),
-    }
+pub fn remove_alert_latch(paths: &StatePaths) -> Result<(), AlertStateError> {
+    remove_if_present(&paths.alert_latch_json())
 }
 
-pub fn remove_alert_latch_corrupt(paths: &StatePaths) -> Result<(), std::io::Error> {
-    match std::fs::remove_file(paths.alert_latch_corrupt()) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e),
-    }
+pub fn remove_alert_latch_corrupt(paths: &StatePaths) -> Result<(), AlertStateError> {
+    remove_if_present(&paths.alert_latch_corrupt())
 }
 
 /// Check if ack left a regular cleanup-pending sentinel on disk.
@@ -769,39 +817,30 @@ pub fn alert_cleanup_pending(paths: &StatePaths) -> bool {
 ///
 /// Existing regular sentinels are accepted without reopening for write so a
 /// marker that already drives retry is not re-wedged by later permission drift.
-pub fn mark_alert_cleanup_pending(paths: &StatePaths) -> Result<(), std::io::Error> {
+pub fn mark_alert_cleanup_pending(paths: &StatePaths) -> Result<(), AlertStateError> {
     let path = paths.alert_cleanup_pending();
     if path.is_file() {
         return Ok(());
     }
     match path.symlink_metadata() {
-        Ok(_) => {
-            return Err(std::io::Error::other(format!(
-                "alert cleanup pending path is not a regular file: {}",
-                path.display()
-            )));
-        }
+        Ok(_) => return Err(AlertStateError::NotRegularFile { path }),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e),
+        Err(source) => return Err(AlertStateError::Read { path, source }),
     }
 
-    let f = std::fs::OpenOptions::new()
+    std::fs::OpenOptions::new()
         .create(true)
         .write(true)
         .truncate(false)
         .mode(0o600)
-        .open(path)?;
-    f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-    Ok(())
+        .open(&path)
+        .and_then(|f| f.set_permissions(std::fs::Permissions::from_mode(0o600)))
+        .map_err(|source| AlertStateError::Write { path, source })
 }
 
 /// Clear the cleanup-pending sentinel. Absence already means no pending work.
-pub fn clear_alert_cleanup_pending(paths: &StatePaths) -> Result<(), std::io::Error> {
-    match std::fs::remove_file(paths.alert_cleanup_pending()) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e),
-    }
+pub fn clear_alert_cleanup_pending(paths: &StatePaths) -> Result<(), AlertStateError> {
+    remove_if_present(&paths.alert_cleanup_pending())
 }
 
 // ---------------------------------------------------------------------------
@@ -915,33 +954,22 @@ pub fn live_pool_key(fsid: Option<&Fsid>, devices: &[BtrfsDeviceUsageEntry]) -> 
 /// to do with each case -- fire armed and remove a positively-invalid baseline
 /// (corrupt or confirmed-different key), but leave the file in place on a mere
 /// identity gap. Keeping that policy at the one call site, not in the loader,
-/// is why this returns the raw tri-state. Reuses `LatchLoadError` for the same
-/// read-vs-parse split the latch loader needs.
-pub fn load_enospc_ack(paths: &StatePaths) -> Result<Option<EnospcAck>, LatchLoadError> {
-    let bytes = match std::fs::read(paths.enospc_ack_json()) {
-        Ok(b) => b,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(LatchLoadError::Read(e)),
-    };
-    Ok(Some(serde_json::from_slice(&bytes)?))
+/// is why this returns the raw tri-state.
+pub fn load_enospc_ack(paths: &StatePaths) -> Result<Option<EnospcAck>, AlertStateError> {
+    read_json_if_present(&paths.enospc_ack_json())
 }
 
 /// Persist the ENOSPC snooze marker. Written only by `braid ack`, and only while
 /// the fresh `btrfs device usage --raw` probe still sees the pool at risk: the
 /// live `pool_key` plus the reminder deadline one `ENOSPC_REMINDER_INTERVAL` out.
-pub fn save_enospc_ack(ack: &EnospcAck, paths: &StatePaths) -> Result<(), std::io::Error> {
-    let json = serde_json::to_string_pretty(ack).map_err(std::io::Error::other)?;
-    atomic_write(&paths.enospc_ack_json(), json.as_bytes())
+pub fn save_enospc_ack(ack: &EnospcAck, paths: &StatePaths) -> Result<(), AlertStateError> {
+    write_json(&paths.enospc_ack_json(), ack)
 }
 
 /// Delete the ENOSPC baseline (NotFound tolerant). Removed only by the monitor:
 /// on re-arm (risk cleared), confirmed key mismatch, or corruption.
-pub fn remove_enospc_ack(paths: &StatePaths) -> Result<(), std::io::Error> {
-    match std::fs::remove_file(paths.enospc_ack_json()) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e),
-    }
+pub fn remove_enospc_ack(paths: &StatePaths) -> Result<(), AlertStateError> {
+    remove_if_present(&paths.enospc_ack_json())
 }
 
 // ---------------------------------------------------------------------------
@@ -1236,7 +1264,7 @@ mod tests {
     }
 
     /*
-     * Intent: load_alert_latch returns Err(LatchLoadError::Parse) when the
+     * Intent: load_alert_latch returns Err(AlertStateError::Parse) when the
      * latch file exists but does not contain valid AlertState JSON.
      *
      * Why it exists: this is the regression gate for the silent-drop bug.
@@ -1259,12 +1287,12 @@ mod tests {
         std::fs::write(&path, b"not json").unwrap();
         let result = load_alert_latch_at(&path);
         assert!(
-            matches!(result, Err(LatchLoadError::Parse(_))),
+            matches!(result, Err(AlertStateError::Parse { .. })),
             "got {result:?}"
         );
     }
 
-    // Intent: load_alert_latch returns Err(LatchLoadError::Read) when the
+    // Intent: load_alert_latch returns Err(AlertStateError::Read) when the
     //   latch path exists but cannot be read as a regular file.
     // Why it exists: ADR 014 requires callers to distinguish absent latch,
     //   filesystem read failure, and parse failure. A directory at the latch
@@ -1282,7 +1310,7 @@ mod tests {
         let result = load_alert_latch_at(&path);
 
         assert!(
-            matches!(result, Err(LatchLoadError::Read(_))),
+            matches!(result, Err(AlertStateError::Read { .. })),
             "got {result:?}"
         );
     }
@@ -1405,7 +1433,7 @@ mod tests {
 
     /*
      * Intent: a latch whose cause object is missing detected_at fails to parse
-     * (LatchLoadError::Parse), rather than silently loading a timeless cause.
+     * (AlertStateError::Parse), rather than silently loading a timeless cause.
      *
      * Why it exists: detected_at is a required field -- there are no
      * pre-timestamp latches in the wild, and braid's fail-loud latch philosophy
@@ -1427,7 +1455,7 @@ mod tests {
 
         let result = load_alert_latch_at(&path);
         assert!(
-            matches!(result, Err(LatchLoadError::Parse(_))),
+            matches!(result, Err(AlertStateError::Parse { .. })),
             "a cause missing detected_at must be a parse error; got {result:?}"
         );
     }
@@ -1540,9 +1568,10 @@ mod tests {
 
         assert!(state.is_none());
         let detail = detail.expect("first quarantine reports parse detail");
+        let parse_failure = format!("failed to parse {}", paths.alert_latch_json().display());
         assert!(
-            detail.contains("parse alert latch"),
-            "first detail should name parse failure, got {detail:?}"
+            detail.contains(&parse_failure),
+            "first detail should name parse failure and the latch path, got {detail:?}"
         );
         assert!(
             !detail.contains("; "),
@@ -1564,8 +1593,8 @@ mod tests {
         assert!(state.is_none());
         let detail = detail.expect("second quarantine reports parse and sidecar detail");
         assert!(
-            detail.contains("parse alert latch"),
-            "second detail should name parse failure, got {detail:?}"
+            detail.contains(&parse_failure),
+            "second detail should name parse failure and the latch path, got {detail:?}"
         );
         assert!(
             detail.contains("prior alert-latch.json.corrupt sidecar exists"),
@@ -1775,7 +1804,8 @@ mod tests {
     }
 
     // Intent: A hard_link I/O failure during quarantine is folded into the
-    // returned detail instead of being silently dropped.
+    // returned detail, naming the sidecar it could not create, instead of
+    // being silently dropped.
     // Why it exists: If quarantine cannot create the sidecar, the caller's
     // next save_alert_latch overwrites the bad bytes at alert-latch.json, so
     // the operator needs a visible lost-evidence signal.
@@ -1812,6 +1842,10 @@ mod tests {
         assert!(
             detail.contains("failed to quarantine corrupt latch"),
             "detail should name quarantine failure, got {detail:?}"
+        );
+        assert!(
+            detail.contains(&paths.alert_latch_corrupt().display().to_string()),
+            "detail should name the sidecar path, got {detail:?}"
         );
         let live = std::fs::read(paths.alert_latch_json())
             .expect("hard_link failure must leave corrupt latch in place");
@@ -2723,8 +2757,8 @@ mod tests {
         let err = drop_ghost_alert_state_for_devids(&paths, &[Devid::new(2)]).unwrap_err();
 
         assert!(
-            err.to_string().starts_with("alert latch:"),
-            "the error must name the latch, got {err}"
+            matches!(&err, AlertStateError::Read { path, .. } if *path == paths.alert_latch_json()),
+            "the error must be a read error on the latch, got {err:?}"
         );
     }
 
@@ -2842,7 +2876,10 @@ mod tests {
 
         let err = drop_ghost_alert_state_for_devids(&paths, &[Devid::new(2)]).unwrap_err();
 
-        assert_eq!(err.kind(), std::io::ErrorKind::Other);
+        assert!(
+            matches!(&err, AlertStateError::Parse { path, .. } if *path == paths.acked_stats_json()),
+            "corrupt acked-stats must be a parse error on that file, got {err:?}"
+        );
     }
 
     /*
@@ -2906,9 +2943,9 @@ mod tests {
     // Intent: ack's acked-stats loader moves an unparseable file to the
     //   sidecar and returns an empty baseline plus a detail to warn with.
     // Why it exists: ack's read-modify-write cannot keep entries it cannot
-    //   parse. Failing would wedge recovery from the monitor's "acked-stats
-    //   unreadable" ComputationError; an empty baseline fires again instead
-    //   of burying, and the sidecar keeps the bytes for forensics.
+    //   parse. Failing would wedge recovery from the monitor's ComputationError
+    //   for the unparseable file; an empty baseline fires again instead of
+    //   burying, and the sidecar keeps the bytes for forensics.
     // Scenario: acked-stats.json holds garbage when the operator runs ack.
     #[test]
     fn load_acked_stats_or_quarantine_moves_corrupt_file_aside() {

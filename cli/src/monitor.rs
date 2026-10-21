@@ -118,8 +118,7 @@ pub fn cmd_monitor_at<R: CommandRunner, F: Filesystem + ?Sized>(
         // unparseable: an empty fallback would silently re-fire every acked
         // cause as a BtrfsDeviceErrors / MissingDevice cause against a zero
         // baseline.
-        let mut acked = alert::load_acked_stats_fallible(paths)
-            .map_err(|e| format!("acked-stats unreadable -- {e}"))?;
+        let mut acked = alert::load_acked_stats_fallible(paths).map_err(|e| e.to_string())?;
 
         // 4. Compute alert-local membership views.
         let devids = pool.alert_devids();
@@ -134,8 +133,7 @@ pub fn cmd_monitor_at<R: CommandRunner, F: Filesystem + ?Sized>(
         let ack_changed =
             alert::reconcile_acked_stats(&mut acked, &devids.recognized, &present_devids);
         if ack_changed {
-            save_acked_stats(&acked, paths)
-                .map_err(|e| format!("acked-stats unwritable -- {e}"))?;
+            save_acked_stats(&acked, paths).map_err(|e| e.to_string())?;
         }
 
         // 7. Compute live alert state. Identity is the devid carried on each
@@ -589,8 +587,11 @@ mod tests {
             "detail should name acked-stats failure, got {detail}"
         );
         assert!(
-            detail.contains("unwritable"),
-            "detail should name unwritable acked-stats, got {detail}"
+            detail.contains(&format!(
+                "failed to write {}",
+                paths.acked_stats_json().display()
+            )),
+            "detail should name the acked-stats write failure and path, got {detail}"
         );
     }
 
@@ -634,7 +635,7 @@ mod tests {
         // Fold half: exactly one ComputationError, and the latch is its SOLE source.
         // The positive check alone is not enough -- folded_computation_error_detail
         // concatenates a failure detail and the latch detail in the (Some, Some) case,
-        // so a co-folded "acked-stats unwritable" save failure would still contain the
+        // so a co-folded acked-stats save failure would still contain the
         // latch substring. The negative check pins that no acked-stats failure was
         // folded, i.e. the reconcile save succeeded.
         let detail = assert_monitor_single_computation_error(&result);

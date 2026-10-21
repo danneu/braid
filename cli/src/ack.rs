@@ -1,8 +1,8 @@
 use std::time::SystemTime;
 
 use crate::alert::{
-    self, AlertCause, EnospcAck, UnbackedCause, commit_latched_evidence, live_pool_key,
-    load_acked_stats_or_quarantine, save_acked_stats, save_enospc_ack,
+    self, AlertCause, AlertStateError, EnospcAck, UnbackedCause, commit_latched_evidence,
+    live_pool_key, load_acked_stats_or_quarantine, save_acked_stats, save_enospc_ack,
 };
 use crate::capacity::evaluate_enospc_risk;
 use crate::cmd::{CmdRequest, CommandRunner, apply_child_env};
@@ -268,7 +268,8 @@ fn format_ack_confirmation(latched_count: usize) -> String {
 ///
 /// Each `remove_*` call is NotFound-tolerant, so a missing file is not an
 /// error. A real I/O error on any `remove_*` short-circuits the remaining
-/// removals via `?` and propagates the error. Cleanup does not stop the alert
+/// removals via `?` and propagates the error, which names the file that
+/// failed. Cleanup does not stop the alert
 /// units: `cmd_ack_impl` does that after cleanup returns, whether it succeeded
 /// or failed.
 ///
@@ -285,7 +286,7 @@ fn format_ack_confirmation(latched_count: usize) -> String {
 /// fails, no destructive removal has run and the original entry signals still
 /// drive retry; if a later step fails, the marker remains to drive the
 /// cleanup-only retry branch in `ack_alert_records`.
-fn cleanup_alert_files(paths: &StatePaths, plan: &CleanupPlan) -> Result<(), std::io::Error> {
+fn cleanup_alert_files(paths: &StatePaths, plan: &CleanupPlan) -> Result<(), AlertStateError> {
     alert::mark_alert_cleanup_pending(paths)?;
     if plan.smartd {
         alert::remove_smartd_alert_flag(paths)?;
@@ -424,12 +425,13 @@ fn format_systemctl_stop_failure(unit: &str, output: &std::process::Output) -> O
 pub enum AckError {
     #[error("probe error: {0}")]
     Probe(#[from] ProbeError),
-    /// Pre-cleanup state-load/save I/O failure. `#[from]` is deliberately
-    /// omitted so `AckError`-returning code must use `map_err(AckError::Io)`
-    /// or wrap as `CleanupFailed`; a new `?` propagating an `io::Error` into
-    /// `AckError` cannot silently bypass the partial-state recovery message.
-    #[error("I/O error: {0}")]
-    Io(#[source] std::io::Error),
+    /// Pre-cleanup failure to load or save acked-stats; the inner error names
+    /// the file. `#[from]` is deliberately omitted so `AckError`-returning code
+    /// must use `map_err(AckError::Io)` or wrap as `CleanupFailed`; a new `?`
+    /// propagating an `AlertStateError` into `AckError` cannot silently bypass
+    /// the partial-state recovery message.
+    #[error("alert state error: {0}")]
+    Io(#[source] AlertStateError),
     /// Cleanup of latch + smartd-alert + corrupt-latch files failed after ack
     /// had already started persisting state: after the latched evidence was
     /// committed to acked-stats, or after one cleanup file was already
@@ -441,12 +443,13 @@ pub enum AckError {
     /// drives the hoisted cleanup-only retry before probing or committing a
     /// baseline.
     /// Re-running `braid ack` after fixing the I/O issue is idempotent because
-    /// every cleanup removal is NotFound-tolerant.
+    /// every cleanup removal is NotFound-tolerant. The inner error names the
+    /// file that blocked cleanup.
     #[error(
         "alert state cleanup failed -- some files may be in a partial state; \
          fix the I/O error and re-run `braid ack`: {0}"
     )]
-    CleanupFailed(#[source] std::io::Error),
+    CleanupFailed(#[source] AlertStateError),
 }
 
 impl AckError {
@@ -1617,14 +1620,15 @@ mod tests {
     /*
      * Intent: When mounted ack succeeds at save_acked_stats but the third
      * cleanup file removal fails, the user-visible error names the partial
-     * state and points at the recovery path. The new baseline is durable,
-     * the latch is removed, the corrupt sidecar remains, and the beeper-stop
-     * hook still fires after the failed removal.
+     * state, the file that failed, and the recovery path. The new baseline
+     * is durable, the latch is removed, the corrupt sidecar remains, and the
+     * beeper-stop hook still fires after the failed removal.
      * Why it exists: Without the dedicated variant, a cleanup-phase I/O
      * error surfaces as "I/O error: <kind>" with no hint that re-running ack
-     * will eventually clear the latch. The cleanup-pending sentinel preserves
-     * the retry signal after the latch is gone, and a failed removal must not
-     * skip the stop.
+     * will eventually clear the latch. Without the file name, the operator
+     * is told to fix an I/O error but not which of the cleanup files caused
+     * it. The cleanup-pending sentinel preserves the retry signal after the
+     * latch is gone, and a failed removal must not skip the stop.
      * Scenario: a directory sits at the corrupt-latch sidecar path (manual
      * tampering, leftover from a previous bug, or permission drift), so
      * remove_file fails with EISDIR/EPERM. The latch carried
@@ -1655,6 +1659,10 @@ mod tests {
         assert!(
             msg.contains("partial state") && msg.contains("re-run `braid ack`"),
             "message must name partial state and recovery path, got: {msg}"
+        );
+        assert!(
+            msg.contains("alert-latch.json.corrupt"),
+            "message must name the file whose removal failed, got: {msg}"
         );
 
         // Witnesses for why CleanupFailed is distinct from AckError::Io.
@@ -2714,6 +2722,68 @@ mod tests {
         );
         assert!(acked.0["1"].missing_acked);
         assert!(!paths.alert_latch_json().exists(), "ack clears the latch");
+    }
+
+    /*
+     * Intent: When acked-stats.json cannot be read (as opposed to parsed),
+     * ack refuses with AckError::Io, and the message names acked-stats.json.
+     * The refusal moves nothing aside, keeps the latch, and leaves the alert
+     * units running.
+     *
+     * Why it exists: ADR 014 has the operator fix or remove an unreadable
+     * acked-stats.json by hand, since ack cannot tell what it holds. The
+     * refusal used to print only `I/O error: Is a directory (os error 21)`,
+     * which did not say which state file to fix.
+     *
+     * Scenario: a directory sits at acked-stats.json (manual tampering or
+     * filesystem damage). The latch holds MissingDevice{devid:1}. The user
+     * runs `braid ack` with the pool offline.
+     */
+    #[test]
+    fn ack_refuses_unreadable_acked_stats_and_names_the_file() {
+        let (_dir, paths) = isolated_paths();
+        std::fs::create_dir(paths.acked_stats_json()).unwrap();
+        ack_write_latch(
+            &paths,
+            vec![AlertCause::MissingDevice {
+                devid: Devid::new(1),
+                still_missing: true,
+            }],
+        );
+        let beeper_calls = std::cell::Cell::new(0u32);
+        let beeper = || beeper_calls.set(beeper_calls.get() + 1);
+
+        let err = cmd_ack_impl(
+            &AckPanicRunner,
+            &ack_fs_not_mounted(),
+            &ack_mp(),
+            &paths,
+            &beeper,
+        )
+        .expect_err("an unreadable acked-stats.json must fail the ack");
+
+        assert!(
+            matches!(err, AckError::Io(_)),
+            "expected AckError::Io, got {err:?}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("acked-stats.json"),
+            "message must name the unreadable file, got: {msg}"
+        );
+        assert!(
+            !paths.acked_stats_corrupt().exists(),
+            "a read error is not quarantined"
+        );
+        assert!(
+            paths.alert_latch_json().exists(),
+            "a refused ack keeps the latch"
+        );
+        assert_eq!(
+            beeper_calls.get(),
+            0,
+            "a refused ack leaves the alert units running"
+        );
     }
 
     /*
