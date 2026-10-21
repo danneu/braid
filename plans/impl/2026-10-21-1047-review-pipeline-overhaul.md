@@ -254,7 +254,7 @@ choosing a solution for each finding:
 - [x] C1. feat(findings): add the script-owned finding store with git-derived status
 - [x] C2. feat(just): serialize VM-booting recipe invocations through a host-wide gate
 - [x] C3. feat(review): add the review workflow and unified reviewer agent
-- [ ] C4. feat(review): add the implement workflow with vetting and the local merge queue
+- [x] C4. feat(review): add the implement workflow with vetting and the local merge queue
 - [ ] C5. feat(review): add /pick-fix to decide pitches and launch implement runs
 - [ ] C6. chore(review): retire the prompt-driven fan-out and document the pipeline
 
@@ -298,3 +298,32 @@ choosing a solution for each finding:
   unchanged. It exposed one bug, now fixed: when `new-run` refused a
   second run in the same minute, the discover agent reused the existing
   run. It now returns no run and the workflow stops.
+- C4: the merge queue is `findings.py land`, so its decisions are
+  deterministic and unit-tested (PO4, and PO8's restart points). It
+  lands the approved tree as one squashed commit carrying the `Finding:`
+  trailer. The implementer's red test commit therefore never reaches
+  `master` alone, and bisect stays clean. A rebase returns `regate` with
+  the new tree, and the workflow re-runs the gate and the vetter before
+  calling `land` again.
+- C4: the red commit is found by a `Proof: red` trailer rather than by
+  hash, because a rebase rewrites hashes.
+- C4: the workflow reaches the script through a small runner agent
+  (`implement.js#sh`), since workflow scripts cannot run processes.
+  `args.findings` overrides the script command so a scratch repository
+  can stand in for braid.
+- C4: PO3 ran live on a scratch repo, with all three runs launched at
+  once. The planted bug merged with its red test committed first. The
+  finding whose proof could not go red ended `blocked` with that reason.
+  The simplification merged on preservation checks and vetter approval.
+  Because the simplification landed first, the bug fix's `land` returned
+  `regate`; its rebased tree passed the gate and vetter again, then
+  merged. PO4's vetter-rejects-a-repaired-candidate case and PO8's live
+  interrupts were not run against agents. The script tests cover their
+  restart and refusal paths, and the workflow lands only after approval
+  of the same tree.
+
+## Follow Up
+
+- [ ] FU1. A blocked finding keeps its worktree under `.claude/worktrees/`;
+  only `land` removes worktrees. `scripts/findings/findings.py#cmd_block`
+  could remove a clean one so blocked runs do not pile up.

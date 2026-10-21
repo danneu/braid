@@ -25,6 +25,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -543,6 +544,95 @@ def cmd_launch(store: Store, fid: str) -> dict:
     }
 
 
+def _git(cwd: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
+    out = subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True)
+    _require(not check or out.returncode == 0, f"git {' '.join(args)} failed: {out.stderr.strip()}")
+    return out
+
+
+def _worktree_of(repo: Path, branch: str) -> Path | None:
+    path = None
+    for line in _git(repo, "worktree", "list", "--porcelain").stdout.splitlines():
+        if line.startswith("worktree "):
+            path = Path(line[len("worktree "):])
+        elif line == f"branch refs/heads/{branch}":
+            return path
+    return None
+
+
+def _authorized(store: Store, fid: str) -> dict:
+    plan = cmd_launch(store, fid)
+    _require(plan["action"] != "stop", f"{fid}: {plan.get('reason')}")
+    return plan
+
+
+def cmd_worktree(store: Store, repo: Path, fid: str) -> dict:
+    """The worktree for the current decision's branch: reused if present, else cut from master."""
+    plan = _authorized(store, fid)
+    branch = plan["branch"]
+    existing = _worktree_of(repo, branch)
+    if existing:
+        return {"id": fid, "branch": branch, "path": str(existing.resolve()), "created": False}
+    path = repo / ".claude" / "worktrees" / branch.replace("/", "-")
+    if plan["action"] == "resume":
+        _git(repo, "worktree", "add", str(path), branch)
+    else:
+        _git(repo, "worktree", "add", "-b", branch, str(path), MAIN_BRANCH)
+    return {"id": fid, "branch": branch, "path": str(path.resolve()), "created": True}
+
+
+def _dirty(path: Path) -> list[str]:
+    return _git(path, "status", "--porcelain", "--untracked-files=no").stdout.splitlines()
+
+
+def cmd_land(store: Store, repo: Path, fid: str, tree: str, message: str, wait: float) -> dict:
+    """The merge queue (plan/2026-10-21-1047/D9): lands the approved tree as one commit on master.
+
+    Only the exact tree the gates approved lands. A rebase onto a moved
+    master changes the tree, so it returns `regate` and the gates run again.
+    master moves only by fast-forward while the main checkout is clean.
+    """
+    with store.locked():
+        f = store.load(fid)
+        if store.state(f) == "merged":
+            wt = _worktree_of(repo, branch_name(fid, len(f["decisions"])))
+            if wt:
+                _git(repo, "worktree", "remove", "--force", str(wt))
+            return {"id": fid, "status": "merged", "already": True}
+        plan = _authorized(store, fid)
+    _require(message.strip() != "", f"{fid}: a landing needs a commit message")
+    wt = _worktree_of(repo, plan["branch"])
+    _require(wt is not None, f"{fid}: no worktree for {plan['branch']}")
+    _require(not _git(wt, "status", "--porcelain").stdout, f"{fid}: worktree {wt} has uncommitted changes")
+    store.root.mkdir(parents=True, exist_ok=True)
+    with open(store.root / ".queue.lock", "w") as queue:
+        fcntl.flock(queue, fcntl.LOCK_EX)
+        deadline = time.monotonic() + wait
+        while _dirty(repo):
+            if time.monotonic() >= deadline:
+                return {"id": fid, "status": "wait", "reason": f"main checkout {repo} has uncommitted changes"}
+            time.sleep(min(15, max(0.1, deadline - time.monotonic())))
+        base = _git(repo, "rev-parse", f"refs/heads/{MAIN_BRANCH}").stdout.strip()
+        if _git(repo, "merge-base", "--is-ancestor", base, plan["branch"], check=False).returncode != 0:
+            if _git(wt, "rebase", base, check=False).returncode != 0:
+                conflicts = _git(wt, "diff", "--name-only", "--diff-filter=U").stdout.split()
+                _git(wt, "rebase", "--abort")
+                return {"id": fid, "status": "conflict", "files": conflicts}
+        tip_tree = _git(wt, "rev-parse", "HEAD^{tree}").stdout.strip()
+        if tip_tree != tree:
+            return {"id": fid, "status": "regate", "tree": tip_tree}
+        commit = _git(repo, "commit-tree", tree, "-p", base, "-m",
+                      f"{message.rstrip()}\n\n{plan['trailer']}\n").stdout.strip()
+        head = _git(repo, "symbolic-ref", "--quiet", "HEAD", check=False).stdout.strip()
+        if head == f"refs/heads/{MAIN_BRANCH}":
+            if _git(repo, "merge", "--ff-only", "--quiet", commit, check=False).returncode != 0:
+                return {"id": fid, "status": "wait", "reason": "fast-forward refused; the main checkout changed"}
+        else:
+            _git(repo, "update-ref", f"refs/heads/{MAIN_BRANCH}", commit, base)
+    _git(repo, "worktree", "remove", str(wt))
+    return {"id": fid, "status": "merged", "commit": commit}
+
+
 def _main_checkout() -> Path:
     """The main worktree, so linked worktrees share one store."""
     out = subprocess.run(
@@ -590,7 +680,44 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("run")
     s.add_argument("--state", action="append", help="keep only these derived states (repeatable)")
     sub.add_parser("index", help="regenerate a run's index.md").add_argument("run")
+    sub.add_parser("worktree", help="create or reuse the worktree for the current decision").add_argument("id")
+    s = sub.add_parser("land", help="merge queue: land the approved tree on master as one commit")
+    s.add_argument("id")
+    s.add_argument("--tree", required=True, help="the tree the gates and the vetter approved")
+    s.add_argument("--message", required=True, help="commit message file, or - for stdin")
+    s.add_argument("--wait", type=float, default=0, help="seconds to wait for a clean main checkout")
     return p
+
+
+def _dispatch(store: Store, repo: Path, args) -> object:
+    if args.cmd == "new-run":
+        return cmd_new_run(store, args.id)
+    if args.cmd == "ingest":
+        return cmd_ingest(store, args.run, _read_payload(args.input))
+    if args.cmd == "verify":
+        return cmd_verify(store, _read_payload(args.input))
+    if args.cmd == "merge":
+        return cmd_merge(store, _read_payload(args.input))
+    if args.cmd == "pitch":
+        return cmd_pitch(store, _read_payload(args.input))
+    if args.cmd == "decide":
+        return cmd_decide(store, args.id, args.candidate, args.note)
+    if args.cmd in ("defer", "drop"):
+        return cmd_close(store, args.id, {"defer": "deferred", "drop": "dropped"}[args.cmd], args.note)
+    if args.cmd == "block":
+        return cmd_block(store, args.id, args.reason)
+    if args.cmd == "launch":
+        return cmd_launch(store, args.id)
+    if args.cmd == "worktree":
+        return cmd_worktree(store, repo, args.id)
+    if args.cmd == "show":
+        f = store.load(args.id)
+        return {**f, "state": store.state(f), "score": round(score(f), 3)}
+    if args.cmd == "list":
+        rows = sorted(store.findings(args.run), key=lambda f: (-score(f), f["id"]))
+        result = [store.summary(f) for f in rows]
+        return [r for r in result if r["state"] in args.state] if args.state else result
+    return {"index": str(store.write_index(args.run))}
 
 
 def main(argv: list[str]) -> int:
@@ -598,35 +725,14 @@ def main(argv: list[str]) -> int:
     try:
         repo = args.repo or _main_checkout()
         store = Store(args.store or repo / "findings", repo)
-        with store.locked():
-            if args.cmd == "new-run":
-                result = cmd_new_run(store, args.id)
-            elif args.cmd == "ingest":
-                result = cmd_ingest(store, args.run, _read_payload(args.input))
-            elif args.cmd == "verify":
-                result = cmd_verify(store, _read_payload(args.input))
-            elif args.cmd == "merge":
-                result = cmd_merge(store, _read_payload(args.input))
-            elif args.cmd == "pitch":
-                result = cmd_pitch(store, _read_payload(args.input))
-            elif args.cmd == "decide":
-                result = cmd_decide(store, args.id, args.candidate, args.note)
-            elif args.cmd in ("defer", "drop"):
-                result = cmd_close(store, args.id, {"defer": "deferred", "drop": "dropped"}[args.cmd], args.note)
-            elif args.cmd == "block":
-                result = cmd_block(store, args.id, args.reason)
-            elif args.cmd == "launch":
-                result = cmd_launch(store, args.id)
-            elif args.cmd == "show":
-                f = store.load(args.id)
-                result = {**f, "state": store.state(f), "score": round(score(f), 3)}
-            elif args.cmd == "list":
-                rows = sorted(store.findings(args.run), key=lambda f: (-score(f), f["id"]))
-                result = [store.summary(f) for f in rows]
-                if args.state:
-                    result = [r for r in result if r["state"] in args.state]
-            else:
-                result = {"index": str(store.write_index(args.run))}
+        if args.cmd == "land":
+            # cmd_land takes the store lock only to read state, so a long wait
+            # for a clean checkout never blocks other store commands.
+            text = sys.stdin.read() if args.message == "-" else Path(args.message).read_text()
+            result = cmd_land(store, repo, args.id, args.tree, text, args.wait)
+        else:
+            with store.locked():
+                result = _dispatch(store, repo, args)
     except StoreError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1

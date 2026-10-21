@@ -76,16 +76,16 @@ class StoreTest(unittest.TestCase):
         return subprocess.run(["git", "-C", str(self.repo), *args], check=True, capture_output=True,
                               text=True).stdout
 
-    def run_cli(self, *args: str, payload=None) -> tuple[int, str, str]:
+    def run_cli(self, *args: str, payload=None, text: str = "") -> tuple[int, str, str]:
         out, err = io.StringIO(), io.StringIO()
-        stdin = io.StringIO(json.dumps(payload)) if payload is not None else io.StringIO("")
+        stdin = io.StringIO(json.dumps(payload) if payload is not None else text)
         with mock.patch.object(sys, "stdin", stdin), contextlib.redirect_stdout(out), \
                 contextlib.redirect_stderr(err):
             rc = findings.main(["--store", str(self.store), "--repo", str(self.repo), *args])
         return rc, out.getvalue(), err.getvalue()
 
-    def cli(self, *args: str, payload=None):
-        rc, out, err = self.run_cli(*args, payload=payload)
+    def cli(self, *args: str, payload=None, text: str = ""):
+        rc, out, err = self.run_cli(*args, payload=payload, text=text)
         self.assertEqual(rc, 0, err)
         return json.loads(out)
 
@@ -234,6 +234,115 @@ class PipelineTest(StoreTest):
                          ("start", f"review/{fid}/2", "ideal-fix"))
         self.land(fid)
         self.assertEqual(self.cli("launch", fid), {"id": fid, "action": "stop", "reason": "merged"})
+
+
+class QueueTest(StoreTest):
+    """The merge queue (plan/2026-10-21-1047/PO4) and restart safety (plan/2026-10-21-1047/PO8)."""
+
+    def decided(self) -> tuple[str, Path]:
+        (fid,) = self.to_pitched(finding())
+        self.cli("decide", fid, "--candidate", "ideal-fix")
+        return fid, Path(self.cli("worktree", fid)["path"])
+
+    def commit_in(self, wt: Path, name: str, content: str) -> str:
+        (wt / name).write_text(content)
+        subprocess.run(["git", "-C", str(wt), "add", name], check=True)
+        subprocess.run(["git", "-C", str(wt), "commit", "-q", "-m", f"edit {name}"], check=True)
+        return subprocess.run(["git", "-C", str(wt), "rev-parse", "HEAD^{tree}"], check=True,
+                              capture_output=True, text=True).stdout.strip()
+
+    def land(self, fid: str, tree: str) -> dict:
+        return self.cli("land", fid, "--tree", tree, "--message", "-", text="fix: the thing\n\nWhy.\n")
+
+    def master(self) -> str:
+        return self.git("rev-parse", "master").strip()
+
+    def test_lands_the_approved_tree_as_one_trailer_commit(self):
+        fid, wt = self.decided()
+        self.assertEqual(self.state(fid), "implementing")
+        self.commit_in(wt, "a.txt", "red\n")
+        tree = self.commit_in(wt, "a.txt", "green\n")
+        before = self.master()
+        self.assertEqual(self.land(fid, tree)["status"], "merged")
+        self.assertEqual(self.git("rev-parse", "master^").strip(), before, "one commit on top of master")
+        self.assertEqual(self.git("rev-parse", "master^{tree}").strip(), tree)
+        self.assertIn(f"Finding: {fid}", self.git("log", "-1", "--format=%B", "master"))
+        self.assertEqual((self.repo / "a.txt").read_text(), "green\n", "the main checkout moved with master")
+        self.assertFalse(wt.exists())
+        self.assertEqual(self.state(fid), "merged")
+        # A restart after the fast-forward finds the finding merged and does nothing.
+        self.assertEqual(self.land(fid, tree), {"id": fid, "status": "merged", "already": True})
+        self.assertEqual(self.cli("launch", fid)["action"], "stop")
+        self.assertEqual(self.git("rev-list", "--count", "--grep", f"Finding: {fid}", "master").strip(), "1")
+
+    def test_waits_while_the_main_checkout_is_dirty(self):
+        (self.repo / "notes.txt").write_text("v1\n")
+        self.git("add", "notes.txt")
+        self.git("commit", "-q", "-m", "notes")
+        fid, wt = self.decided()
+        tree = self.commit_in(wt, "a.txt", "fix\n")
+        (self.repo / "notes.txt").write_text("user edit\n")
+        before = self.master()
+        self.assertEqual(self.land(fid, tree)["status"], "wait")
+        self.assertEqual(self.master(), before)
+        self.git("checkout", "notes.txt")
+        self.assertEqual(self.land(fid, tree)["status"], "merged")
+
+    def test_a_moved_master_sends_the_rebased_tree_back_through_the_gates(self):
+        first, wt1 = self.decided()
+        second, wt2 = self.decided()
+        tree1 = self.commit_in(wt1, "a.txt", "a\n")
+        tree2 = self.commit_in(wt2, "b.txt", "b\n")
+        self.assertEqual(self.land(first, tree1)["status"], "merged")
+        landed = self.master()
+        regate = self.land(second, tree2)
+        self.assertEqual(regate["status"], "regate")
+        self.assertNotEqual(regate["tree"], tree2)
+        self.assertEqual(self.master(), landed, "an unapproved tree never lands")
+        self.assertEqual(self.land(second, regate["tree"])["status"], "merged")
+        self.assertEqual(self.git("rev-parse", "master^").strip(), landed)
+
+    def test_a_conflicting_rebase_is_aborted_and_reported(self):
+        first, wt1 = self.decided()
+        second, wt2 = self.decided()
+        tree1 = self.commit_in(wt1, "x.txt", "one\n")
+        tree2 = self.commit_in(wt2, "x.txt", "two\n")
+        self.land(first, tree1)
+        tip = subprocess.run(["git", "-C", str(wt2), "rev-parse", "HEAD"], capture_output=True, text=True).stdout
+        self.assertEqual(self.land(second, tree2), {"id": second, "status": "conflict", "files": ["x.txt"]})
+        self.assertEqual(subprocess.run(["git", "-C", str(wt2), "rev-parse", "HEAD"], capture_output=True,
+                                        text=True).stdout, tip, "the branch is left as it was")
+        self.assertEqual(self.state(second), "implementing")
+
+    def test_a_tree_other_than_the_approved_one_never_lands(self):
+        fid, wt = self.decided()
+        approved = self.commit_in(wt, "a.txt", "approved\n")
+        self.commit_in(wt, "a.txt", "changed after review\n")
+        before = self.master()
+        self.assertEqual(self.land(fid, approved)["status"], "regate")
+        self.assertEqual(self.master(), before)
+
+    def test_a_blocked_finding_gets_no_worktree_and_cannot_land(self):
+        fid, wt = self.decided()
+        tree = self.commit_in(wt, "a.txt", "fix\n")
+        self.cli("block", fid, "--reason", "the chosen fix is impossible")
+        self.refused("worktree", fid)
+        self.refused("land", fid, "--tree", tree, "--message", "-")
+        self.assertNotIn(fid, self.git("log", "--format=%B", "master"))
+        self.cli("decide", fid, "--candidate", "local-fix")
+        fresh = self.cli("worktree", fid)
+        self.assertEqual((fresh["branch"], fresh["created"]), (f"review/{fid}/2", True))
+        self.assertFalse((Path(fresh["path"]) / "a.txt").exists(), "the new decision starts from master")
+
+    def test_worktree_is_reused_and_recreated_on_the_same_branch(self):
+        fid, wt = self.decided()
+        self.commit_in(wt, "a.txt", "work in progress\n")
+        self.assertEqual(self.cli("worktree", fid), {"id": fid, "branch": f"review/{fid}/1", "path": str(wt.resolve()),
+                                                     "created": False})
+        self.git("worktree", "remove", str(wt))
+        again = self.cli("worktree", fid)
+        self.assertTrue(again["created"])
+        self.assertEqual((Path(again["path"]) / "a.txt").read_text(), "work in progress\n")
 
 
 class PayloadTest(StoreTest):
