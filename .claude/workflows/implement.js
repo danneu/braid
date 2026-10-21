@@ -123,6 +123,9 @@ const VET = {
   required: ['tree', 'approved', 'problems', 'message'],
 }
 
+// A command returns when it exits; polling its output can stop early or hang.
+const RUN_RULE = 'Run each command in the foreground and let it return when it exits; use the longest Bash timeout for slow ones. Never poll for completion with until, grep, tail, or sleep.'
+
 // Runs ask instead of guessing (plan/2026-10-21-1424/D6): the implementer
 // records the ask itself, so its text reaches the store without a relay.
 const ASK_RULES = `Stop and ask the user when you learn something that would change their call:
@@ -148,7 +151,7 @@ Rules:
 ${regression
     ? `- Proof (regression): the finding's Proof section says what the test must show.\n  First commit only the test, and confirm it fails for the right reason. Give that commit a \`Proof: red\` trailer. Then commit the fix and confirm the test passes. Keep exactly one \`Proof: red\` commit on the branch.`
     : `- Proof (${plan.proof}): the finding's Proof section says what must hold.`}
-- Make every listed acceptance recipe pass: ${acceptance.join(', ')}. VM recipes take a host-wide gate and may wait; run long commands in the background and wait for them.
+- Make every listed acceptance recipe pass: ${acceptance.join(', ')}. VM recipes take a host-wide gate and may wait. ${RUN_RULE}
 - Commit all work on the branch (stage files by name; never --amend, never --no-verify, never push, never touch master). Leave the worktree clean. Branch commit messages never land; only the message you return does.
 ${prior ? `\nThe branch already has work from an earlier round or run. Inspect it (\`git log master..HEAD\`, \`git diff master...HEAD\`) and continue from it.` : ''}${feedback ? `\n\nFix these problems from the gates or the vetter, then commit:\n${feedback}` : ''}
 
@@ -173,7 +176,7 @@ ${ASK_RULES}` : workRules(feedback, prior)}`
 const gatePrompt = (impl, snap) => `You are the gate for braid review finding ${id}. Check candidate commit \`${snap.commit}\` in its snapshot checkout \`${snap.path}\`; run every command from there and change nothing. Never look at or run anything in \`${wt.path}\`.
 
 1. Confirm \`git rev-parse HEAD\` is \`${snap.commit}\` and \`git status --porcelain --untracked-files=no\` is empty.
-2. Run each acceptance recipe: ${acceptance.join(', ')}. Long ones (VM tests) may wait on a host-wide gate; run them in the background and wait for them to exit.
+2. Run each acceptance recipe: ${acceptance.join(', ')}. Long ones (VM tests) may wait on a host-wide gate. ${RUN_RULE}
 ${regression
     ? `3. Red/green: find the red commit with \`git log master..${snap.commit} --grep='^Proof: red' --format=%H\` (exactly one). Check it out in a temporary detached worktree (\`git worktree add --detach <path next to ${snap.path}> <sha>\`), run \`${impl.proof_command}\` there, and confirm it FAILS for the reason the finding describes (an assertion, not a build error). Remove the temporary worktree. Then run it in \`${snap.path}\` and confirm it passes.`
     : plan.proof === 'benchmark'
