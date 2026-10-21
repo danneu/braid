@@ -68,45 +68,18 @@ fn ack_alert_records<R: CommandRunner, F: Filesystem + ?Sized>(
     mount_point: &MountPoint,
     paths: &StatePaths,
 ) -> Result<String, AckError> {
-    // Snapshot the gating inputs (alert latch + smartd flag + cleanup-pending
-    // sentinel) before probing the pool. They feed the "is there an alert?"
-    // decision, the cleanup-only retry branch, and the snapshot-scoped cleanup
-    // decision. probe_pool_alerts still has per-disk shell-outs, so the
-    // asynchronous smartd hook can fire during it; reading smartd after the
-    // probe would let a hook firing during the probe either flip an
-    // empty-latch gate or get swallowed by cleanup. An unreadable latch counts
-    // as active for gating so the user can clear a corrupt file even with the
-    // pool offline; it carries no causes, so it commits no baseline.
-    // Strip the latch's first-detection stamps here: ack decides what to clear
-    // and which evidence to commit from the causes alone, never the
-    // timestamps, so the rest of this path keeps operating on a plain
-    // `Vec<AlertCause>`.
-    let (causes, latch_corrupt) = match alert::load_alert_latch(paths) {
-        Ok(Some(s)) => (
-            s.causes.into_iter().map(|c| c.cause).collect::<Vec<_>>(),
-            false,
-        ),
-        Ok(None) => (Vec::new(), false),
-        Err(e) => {
-            eprintln!("warning: alert latch unreadable -- treating as active for ack gating: {e}");
-            (Vec::new(), true)
+    // 1. Snapshot the entry state before probing (see `AckEntry::read`). A
+    //    sentinel-only snapshot finishes the interrupted cleanup here, before
+    //    the probe, so recovery does not depend on probe success and does not
+    //    rewrite the acknowledged baseline. `None` below is a `Quiet` snapshot.
+    let pending = match AckEntry::read(paths) {
+        AckEntry::CleanupOnly => {
+            cleanup_alert_files(paths, &CleanupPlan::default()).map_err(AckError::CleanupFailed)?;
+            return Ok(ACK_NO_COUNT_LINE.to_owned());
         }
+        AckEntry::Quiet => None,
+        AckEntry::Alert(pending) => Some(pending),
     };
-    let smartd_active = alert::smartd_alert_active(paths);
-    let scrub_failed_active = alert::scrub_failed_active(paths);
-    let cleanup_pending = alert::alert_cleanup_pending(paths);
-    let latch_had_smartd = causes.iter().any(|c| matches!(c, AlertCause::SmartdAlert));
-    let remove_smartd = smartd_active || latch_had_smartd;
-    let latch_had_scrub_failed = causes.iter().any(|c| matches!(c, AlertCause::ScrubFailed));
-    let remove_scrub_failed = scrub_failed_active || latch_had_scrub_failed;
-    // The one alert-signal gate. The cleanup-pending sentinel is left out on
-    // purpose: alone, it drives the cleanup-only retry below.
-    let has_alert = !causes.is_empty() || smartd_active || scrub_failed_active || latch_corrupt;
-
-    if cleanup_pending && !has_alert {
-        cleanup_alert_files(paths, false, false).map_err(AckError::CleanupFailed)?;
-        return Ok(ACK_NO_COUNT_LINE.to_owned());
-    }
 
     // 2. Classify the mount point: mounted btrfs, genuinely unmounted, or a
     //    foreign filesystem. The probe runs before the no-signal no-op so a
@@ -120,14 +93,14 @@ fn ack_alert_records<R: CommandRunner, F: Filesystem + ?Sized>(
     // Nothing to acknowledge is one no-op, decided from the entry snapshot
     // alone: mount state never changes its outcome. It changes no alert
     // file, but `cmd_ack_impl` still stops the alert units after it.
-    if !has_alert {
+    let Some(pending) = pending else {
         return Ok("no active alerts".to_owned());
-    }
+    };
 
     // 3. Commit what the latch says the operator is acknowledging, mounted or
     //    offline alike. Ack reads no live counters or membership, so nothing
     //    the monitor never latched can be acknowledged unseen.
-    commit_acked_baseline(&causes, paths)?;
+    commit_acked_baseline(&pending.causes, paths)?;
 
     // 4. ENOSPC snooze (mounted only: it needs a live usage probe). If the
     //    latch carries an EnospcRisk cause, snooze the reminder from one fresh
@@ -138,7 +111,8 @@ fn ack_alert_records<R: CommandRunner, F: Filesystem + ?Sized>(
     //    writes no marker (a later recurrence fires armed). Offline ack writes
     //    no marker either.
     if pool.mounted
-        && causes
+        && pending
+            .causes
             .iter()
             .any(|c| matches!(c, AlertCause::EnospcRisk { .. }))
     {
@@ -147,13 +121,102 @@ fn ack_alert_records<R: CommandRunner, F: Filesystem + ?Sized>(
         write_enospc_baseline(runner, mount_point, &pool, missing_count, paths, now);
     }
 
-    cleanup_alert_files(paths, remove_smartd, remove_scrub_failed)
-        .map_err(AckError::CleanupFailed)?;
+    cleanup_alert_files(paths, &pending.cleanup).map_err(AckError::CleanupFailed)?;
 
     // 5. Report a count for latched causes. Flag-only and corrupt-latch
     // acknowledgments still completed real cleanup, but have no latched cause
     // to count.
-    Ok(format_ack_confirmation(causes.len()))
+    Ok(format_ack_confirmation(pending.causes.len()))
+}
+
+/// Ack's entry snapshot, reduced to the states that gate its record work.
+///
+/// ADR 014 gates every record decision in one ack on a single snapshot taken
+/// before the probe. Only `AckEntry::read` sees the raw latch, flag, and
+/// sentinel inputs, so the has-alert test and the flag remove rule exist once
+/// and no later gate can re-spell them.
+enum AckEntry {
+    /// No alert signal and no interrupted cleanup.
+    Quiet,
+    /// Only the `alert-cleanup-pending` sentinel: an earlier ack failed partway
+    /// through cleanup and left nothing else to acknowledge.
+    CleanupOnly,
+    /// At least one alert signal: a latched cause, an unreadable latch, or a
+    /// flag file.
+    Alert(PendingAck),
+}
+
+/// The alert an `AckEntry::Alert` snapshot asks ack to clear.
+///
+/// Holds no unreadable-latch bit: that bit only decides whether an alert
+/// exists. A corrupt latch arrives here with no causes, so it commits no
+/// baseline, and cleanup removes the latch and its corrupt sidecar either way.
+struct PendingAck {
+    /// Latched causes with their first-detection stamps stripped: ack decides
+    /// what to clear and which evidence to commit from the causes alone, never
+    /// the timestamps.
+    causes: Vec<AlertCause>,
+    cleanup: CleanupPlan,
+}
+
+/// Which flag files this ack's cleanup may remove, fixed at entry.
+///
+/// A flag that a hook writes during the probe survives for the next monitor
+/// cycle unless the snapshot already covered its source. The default plan
+/// removes no flag, which is what sentinel-only recovery needs.
+#[derive(Default)]
+struct CleanupPlan {
+    smartd: bool,
+    scrub_failed: bool,
+}
+
+impl AckEntry {
+    /// Reads the latch, both flag files, and the cleanup-pending sentinel once,
+    /// before `probe_pool_alerts`.
+    ///
+    /// The smartd and scrub-failed hooks run without the pool lock and can
+    /// fire during the probe, so a flag read after it could flip the no-op
+    /// gate or be swallowed by cleanup. An unreadable latch counts as an alert
+    /// so the user can clear it even with the pool offline.
+    fn read(paths: &StatePaths) -> Self {
+        let (causes, latch_corrupt) = match alert::load_alert_latch(paths) {
+            Ok(Some(s)) => (
+                s.causes.into_iter().map(|c| c.cause).collect::<Vec<_>>(),
+                false,
+            ),
+            Ok(None) => (Vec::new(), false),
+            Err(e) => {
+                eprintln!(
+                    "warning: alert latch unreadable -- treating as active for ack gating: {e}"
+                );
+                (Vec::new(), true)
+            }
+        };
+        let smartd_active = alert::smartd_alert_active(paths);
+        let scrub_failed_active = alert::scrub_failed_active(paths);
+        let cleanup_pending = alert::alert_cleanup_pending(paths);
+
+        // The one alert-signal test. The cleanup-pending sentinel is left out
+        // on purpose: alone, it means `CleanupOnly`.
+        let has_alert = !causes.is_empty() || smartd_active || scrub_failed_active || latch_corrupt;
+        if !has_alert {
+            return if cleanup_pending {
+                Self::CleanupOnly
+            } else {
+                Self::Quiet
+            };
+        }
+
+        // ADR 014's two-arm rule: remove a flag when the snapshot saw it, or
+        // when the latch carries its cause (crash recovery, where the flag was
+        // already gone at entry).
+        let cleanup = CleanupPlan {
+            smartd: smartd_active || causes.iter().any(|c| matches!(c, AlertCause::SmartdAlert)),
+            scrub_failed: scrub_failed_active
+                || causes.iter().any(|c| matches!(c, AlertCause::ScrubFailed)),
+        };
+        Self::Alert(PendingAck { causes, cleanup })
+    }
 }
 
 /// Ack's single baseline path, shared by mounted and offline ack: load
@@ -209,12 +272,11 @@ fn format_ack_confirmation(latched_count: usize) -> String {
 /// units: `cmd_ack_impl` does that after cleanup returns, whether it succeeded
 /// or failed.
 ///
-/// `ack_alert_records` derives `remove_smartd` / `remove_scrub_failed` once from
-/// inputs snapshotted at entry. Cleanup deletes each flag only when the snapshot
-/// already represented an active source for it: the flag was present at entry,
-/// or the latch carried the matching `SmartdAlert` / `ScrubFailed` cause. A flag
-/// that arrives after a snapshot with neither condition is left for the next
-/// monitor cycle.
+/// `plan` is either the `CleanupPlan` of an `AckEntry::Alert` snapshot or the
+/// empty plan for `CleanupOnly` recovery, so cleanup deletes a flag only when
+/// the entry snapshot already covered its source (`AckEntry::read` owns that
+/// rule). A flag that arrives after a snapshot that did not cover it is left
+/// for the next monitor cycle.
 ///
 /// Cleanup marks `alert-cleanup-pending` before any destructive removal. The
 /// removals then run in smartd-flag, scrub-failed-flag, latch, corrupt-sidecar
@@ -223,16 +285,12 @@ fn format_ack_confirmation(latched_count: usize) -> String {
 /// fails, no destructive removal has run and the original entry signals still
 /// drive retry; if a later step fails, the marker remains to drive the
 /// cleanup-only retry branch in `ack_alert_records`.
-fn cleanup_alert_files(
-    paths: &StatePaths,
-    remove_smartd: bool,
-    remove_scrub_failed: bool,
-) -> Result<(), std::io::Error> {
+fn cleanup_alert_files(paths: &StatePaths, plan: &CleanupPlan) -> Result<(), std::io::Error> {
     alert::mark_alert_cleanup_pending(paths)?;
-    if remove_smartd {
+    if plan.smartd {
         alert::remove_smartd_alert_flag(paths)?;
     }
-    if remove_scrub_failed {
+    if plan.scrub_failed {
         alert::remove_scrub_failed_flag(paths)?;
     }
     alert::remove_alert_latch(paths)?;
@@ -582,11 +640,11 @@ mod tests {
      * Intent: Mounted ack still runs the full ack path when
      * alert-latch.json is corrupt, even though the parsed latch count is
      * zero. It commits no baseline: the corrupt bytes carry no evidence.
-     * Why it exists: A guard that checks only latch_count and smartd state
-     * would return early on corrupt latch bytes, leaving the corrupt file
-     * uncleared and violating the corrupt-latch recovery contract. Ack used
-     * to save a live-counter snapshot here, which buried any error the
-     * monitor had not latched.
+     * Why it exists: If `AckEntry::read` checked only latched causes and
+     * flag files, it would classify corrupt latch bytes as Quiet and ack
+     * would return early, leaving the corrupt file uncleared and violating
+     * the corrupt-latch recovery contract. Ack used to save a live-counter
+     * snapshot here, which buried any error the monitor had not latched.
      * Scenario: external tampering or filesystem damage leaves a corrupt
      * latch while the pool is mounted; `braid ack` must clear it.
      */
@@ -1150,12 +1208,12 @@ mod tests {
     /*
      * Intent: Offline ack with a bare smartd-alert flag present at entry and
      * no latch clears the flag and exits Ok.
-     * Why it exists: ack_alert_records's no-signal gate must count
-     * `smartd_active`. Every other offline smartd test either carries a
-     * SmartdAlert *cause* in the latch (gate satisfied by `causes`) or has
-     * the flag arrive mid-probe (flag kept), so a regression dropping the
-     * `smartd_active` term would slip through: ack would take the `no active
-     * alerts` no-op and leave the flag. This pins that term directly.
+     * Why it exists: `AckEntry::read` must classify a bare smartd flag as
+     * `Alert`. Every other offline smartd test either carries a SmartdAlert
+     * *cause* in the latch (alert by `causes`) or has the flag arrive
+     * mid-probe (flag kept), so a regression dropping the smartd flag from the
+     * has-alert test would slip through: ack would take the `no active alerts`
+     * no-op and leave the flag. This pins that term directly.
      * Scenario: smartd wrote /var/lib/braid/smartd-alert; before monitor
      * latched it, the user locked the pool and runs `braid ack`.
      */
@@ -1222,9 +1280,9 @@ mod tests {
     //   full ack path -- removes the flag, commits no baseline (the flag
     //   carries no device evidence), and fires the beeper-stop hook once.
     // Why it exists: braid-scrub-failed.service can fire between monitor cycles.
-    //   The mounted no-alert gate now reads `!scrub_failed_active`; a regression
-    //   dropping that term would no-op this ack and leave the flag + beeper.
-    //   Mirrors the smartd-flag-no-latch mounted test.
+    //   `AckEntry::read` must classify a bare scrub-failed flag as `Alert`; a
+    //   regression dropping that term would no-op this ack and leave the flag +
+    //   beeper. Mirrors the smartd-flag-no-latch mounted test.
     // Scenario: onFailure wrote /var/lib/braid/scrub-failed; before monitor
     //   latched it, the operator runs `braid ack` on a mounted pool.
     #[test]
@@ -1259,8 +1317,8 @@ mod tests {
 
     // Intent: Offline ack of a bare scrub-failed flag (no latch) clears the flag
     //   and exits Ok, and writes no acked-stats.
-    // Why it exists: ack_alert_records's no-signal gate must count
-    //   `scrub_failed_active`; a regression dropping that term would take the
+    // Why it exists: `AckEntry::read` must classify a bare scrub-failed flag as
+    //   `Alert`; a regression dropping that term would take the
     //   `no active alerts` no-op and leave the flag. Mirrors the smartd
     //   bare-flag offline test, and pins that a bare flag commits no baseline
     //   (no acked-stats).
@@ -1296,7 +1354,7 @@ mod tests {
     // Intent: Offline ack does not let a scrub-failed flag written during probing
     //   turn an empty entry snapshot into an acknowledged alert.
     // Why it exists: onFailure is not under the pool lock, so it can fire while
-    //   probe_pool_alerts reads mountinfo. ack snapshots scrub_failed_active at
+    //   probe_pool_alerts reads mountinfo. `AckEntry::read` reads the flag at
     //   entry (before the probe); a post-probe read would consume the late flag
     //   and hide it from the next monitor cycle. Mirrors the smartd snapshot-race.
     // Scenario: pool is offline with no alerts at ack entry, but onFailure writes
@@ -1329,9 +1387,9 @@ mod tests {
     // Intent: Offline cleanup removes a scrub-failed flag written during probing
     //   when the entry snapshot already had a latched ScrubFailed cause.
     // Why it exists: the crash-recovery arm treats a latched ScrubFailed as an
-    //   active source even if the flag was absent at entry, so `remove_scrub_failed`
-    //   must be driven by `latch_had_scrub_failed`, not by `scrub_failed_active`
-    //   alone. Mirrors the smartd second-arm exception.
+    //   active source even if the flag was absent at entry, so
+    //   `CleanupPlan::scrub_failed` must also be set by the latched cause, not
+    //   by the entry flag alone. Mirrors the smartd second-arm exception.
     // Scenario: a prior monitor cycle latched ScrubFailed, the flag is absent at
     //   ack entry, and onFailure writes it again during the offline probe.
     #[test]
@@ -1453,7 +1511,7 @@ mod tests {
     // when the entry snapshot already had a latched SmartdAlert.
     // Why it exists: The crash-recovery exception treats a latched
     // SmartdAlert as an active smartd source even if the flag was absent at
-    // entry, so this branch must not regress to `remove_smartd = smartd_active`.
+    // entry, so `CleanupPlan::smartd` must not regress to the entry flag alone.
     // Scenario: a prior monitor cycle latched SmartdAlert, the flag is absent
     // at ack entry, and the smartd hook writes it again during the offline
     // probe.
@@ -1479,8 +1537,8 @@ mod tests {
     // Intent: Mounted cleanup removes a smartd flag written during probing
     // when the entry snapshot already had a latched SmartdAlert.
     // Why it exists: The mounted branch must apply the shared entry-snapshotted
-    // SmartdAlert cleanup decision instead of regressing to `remove_smartd =
-    // smartd_active`.
+    // `CleanupPlan` instead of regressing to removing the smartd flag only when
+    // it was present at entry.
     // Scenario: a prior monitor cycle latched SmartdAlert, the flag is absent
     // at ack entry, and the smartd hook writes it again during the mounted
     // probe.
@@ -1512,10 +1570,10 @@ mod tests {
     // ComputationError runs the full ack path -- the latch is removed, no
     // baseline is committed (the cause carries no device evidence), and the
     // beeper hook fires exactly once.
-    // Why it exists: The mounted gate in ack_alert_records falls through on any
-    // non-empty `causes`. A future refactor that narrowed the gate to
-    // "actionable" causes, or that special-cased SmartdAlert without doing the
-    // same for ComputationError, would silently no-op this mounted ack and
+    // Why it exists: `AckEntry::read` classifies any non-empty `causes` as
+    // `Alert`. A future refactor that narrowed that test to "actionable"
+    // causes, or that special-cased SmartdAlert without doing the same for
+    // ComputationError, would silently no-op this mounted ack and
     // leave the latch on disk with the beeper still running. The beeper-call
     // assertion additionally pins the cleanup hook on the
     // mounted success path, which was previously only covered for NotBtrfs and
@@ -2004,7 +2062,7 @@ mod tests {
     //   corrupt bytes to alert-latch.json.corrupt because it rewrites the
     //   latch, while ack deletes the latch outright in cleanup.
     // Why it exists: a symmetry edit could swap load_alert_latch for
-    //   load_alert_latch_or_quarantine in ack_alert_records. On the success
+    //   load_alert_latch_or_quarantine in AckEntry::read. On the success
     //   path, the sidecar would be created by quarantine and then deleted by
     //   remove_alert_latch_corrupt during cleanup, so a sidecar-absence
     //   assertion at the end of a successful ack proves nothing. Forcing
@@ -2399,11 +2457,11 @@ mod tests {
 
     // Intent: Offline ack treats an unreadable alert latch as active even
     //   when no causes can be parsed from it.
-    // Why it exists: ADR 014's recovery contract depends on `ack_alert_records`
-    //   mapping both Read and Parse latch load failures to `latch_corrupt =
-    //   true`. If a future refactor narrows that gate to Parse only, ack takes
-    //   the `no active alerts` no-op before cleanup and leaves the user unable
-    //   to clear the broken latch while the pool is locked.
+    // Why it exists: ADR 014's recovery contract depends on `AckEntry::read`
+    //   treating both Read and Parse latch load failures as an alert. If a
+    //   future refactor narrows that test to Parse only, ack takes the
+    //   `no active alerts` no-op before cleanup and leaves the user unable to
+    //   clear the broken latch while the pool is locked.
     // Scenario: pool is offline, and filesystem damage or external tampering
     //   leaves a directory where alert-latch.json should be.
     #[test]

@@ -430,10 +430,11 @@ with subtest("Offline ack commits latched device-error counts and missing device
     machine.succeed("rm -f /var/lib/braid/acked-stats.json")
 
 # Intent: A corrupt latch must be ack-able even with the pool offline.
-# Why it exists: If `latch_count = 0` is set on parse failure (the naive
-#   fix) and smartd is inactive, the ack gate sees no alert signal and
-#   takes the `no active alerts` no-op, leaving the corrupt file on disk
-#   forever. The user would have no way to clear it without remounting.
+# Why it exists: If `AckEntry::read` treats a parse failure as an empty
+#   latch (the naive fix) and no flag file is set, it classifies the entry
+#   as Quiet, and ack takes the `no active alerts` no-op, leaving the
+#   corrupt file on disk forever. The user would have no way to clear it
+#   without remounting.
 # Scenario: pool is offline (already the case at this point in the
 #   script), and the latch on disk is unparseable. `braid ack` must
 #   succeed and remove both the live latch and the .corrupt sidecar.
