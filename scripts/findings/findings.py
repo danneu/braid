@@ -585,6 +585,41 @@ def cmd_worktree(store: Store, repo: Path, fid: str) -> dict:
     return {"id": fid, "branch": branch, "path": str(path.resolve()), "created": True}
 
 
+def _snapshots_of(repo: Path, fid: str) -> list[Path]:
+    parent = (repo / ".claude" / "worktrees").resolve()
+    paths = [Path(line[len("worktree "):]).resolve()
+             for line in _git(repo, "worktree", "list", "--porcelain").stdout.splitlines()
+             if line.startswith("worktree ")]
+    return [p for p in paths if p.parent == parent and p.name.startswith(f"snapshot-{fid}-")]
+
+
+def _remove_snapshots(repo: Path, fid: str, keep: Path | None = None) -> None:
+    for path in _snapshots_of(repo, fid):
+        if path != keep:
+            _git(repo, "worktree", "remove", "--force", str(path))
+
+
+def cmd_snapshot(store: Store, repo: Path, fid: str) -> dict:
+    """A detached checkout of the branch tip for the gates and the vetter (plan/2026-10-21-1424/D12).
+
+    No implementer works in it, so nothing done in the implementation
+    worktree, committed or not, can change what the gates see. One snapshot
+    per candidate commit: a reused one would let a duplicate run move it
+    under a gate that is still running.
+    """
+    plan = _authorized(store, fid)
+    commit = _git(repo, "rev-parse", f"refs/heads/{plan['branch']}^{{commit}}").stdout.strip()
+    path = (repo / ".claude" / "worktrees" / f"snapshot-{fid}-{commit[:12]}").resolve()
+    if path.exists() and (_git(path, "rev-parse", "HEAD", check=False).stdout.strip() != commit
+                          or _git(path, "status", "--porcelain", "--untracked-files=no").stdout):
+        _git(repo, "worktree", "remove", "--force", str(path))
+    if not path.exists():
+        _git(repo, "worktree", "add", "--detach", str(path), commit)
+    _remove_snapshots(repo, fid, keep=path)
+    tree = _git(repo, "rev-parse", f"{commit}^{{tree}}").stdout.strip()
+    return {"id": fid, "commit": commit, "tree": tree, "path": str(path)}
+
+
 def _dirty(path: Path) -> list[str]:
     return _git(path, "status", "--porcelain", "--untracked-files=no").stdout.splitlines()
 
@@ -613,6 +648,7 @@ def cmd_land(store: Store, repo: Path, fid: str, tree: str, message: str, wait: 
                 wt = _worktree_of(repo, branch_name(fid, len(f["decisions"])))
                 if wt:
                     _git(repo, "worktree", "remove", "--force", str(wt))
+                _remove_snapshots(repo, fid)
                 return {"id": fid, "status": "merged", "already": True}
             plan = _authorized(store, fid)
         wt = _worktree_of(repo, plan["branch"])
@@ -643,6 +679,7 @@ def cmd_land(store: Store, repo: Path, fid: str, tree: str, message: str, wait: 
         # Under the lock, so a concurrent run of this finding finds it merged
         # with nothing left to clean up.
         _git(repo, "worktree", "remove", str(wt))
+        _remove_snapshots(repo, fid)
     return {"id": fid, "status": "merged", "commit": commit}
 
 
@@ -694,6 +731,8 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--state", action="append", help="keep only these derived states (repeatable)")
     sub.add_parser("index", help="regenerate a run's index.md").add_argument("run")
     sub.add_parser("worktree", help="create or reuse the worktree for the current decision").add_argument("id")
+    sub.add_parser("snapshot", help="detached checkout of the branch tip for the gates and the vetter") \
+        .add_argument("id")
     s = sub.add_parser("land", help="merge queue: land the approved tree on master as one commit")
     s.add_argument("id")
     s.add_argument("--tree", required=True, help="the tree the gates and the vetter approved")
@@ -723,6 +762,8 @@ def _dispatch(store: Store, repo: Path, args) -> object:
         return cmd_launch(store, args.id)
     if args.cmd == "worktree":
         return cmd_worktree(store, repo, args.id)
+    if args.cmd == "snapshot":
+        return cmd_snapshot(store, repo, args.id)
     if args.cmd == "show":
         f = store.load(args.id)
         return {**f, "state": store.state(f), "score": round(score(f), 3)}

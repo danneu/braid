@@ -340,7 +340,7 @@ class QueueTest(StoreTest):
             self.assertTrue(short(v), f"{k} is not a short control value: {v!r}")
 
     def test_workflow_facing_commands_return_only_control_fields(self):
-        # plan/2026-10-21-1424/PO1: launch, worktree, block, and land are what
+        # plan/2026-10-21-1424/PO1: launch, worktree, snapshot, block, and land are what
         # implement.js parses; the claim, pitch, and note never reach it.
         long_note = "keep the old flag\n" * 20
         (pitched,) = self.to_pitched(finding(claim="c" * 500))
@@ -350,6 +350,7 @@ class QueueTest(StoreTest):
         self.assert_control(self.cli("launch", pitched), launch)
         self.assert_control(self.cli("worktree", pitched), {"id", "branch", "path", "created"})
         self.assert_control(self.cli("launch", pitched), launch)
+        self.assert_control(self.cli("snapshot", pitched), {"id", "commit", "tree", "path"})
         self.assert_control(self.cli("block", pitched, "--reason", "r"), {"id", "status"})
 
         first, wt1 = self.decided()
@@ -370,6 +371,37 @@ class QueueTest(StoreTest):
         self.git("add", "z.txt")
         self.git("commit", "-q", "-m", "master moves")
         self.assert_control(self.land(third, tree3), {"id", "status", "tree"})
+
+    def test_the_gate_snapshot_ignores_the_implementation_worktree(self):
+        # plan/2026-10-21-1424/PO11: the gates judge a detached snapshot of the
+        # candidate commit. Edits in the implementation worktree, committed or
+        # not, cannot make a failing candidate pass.
+        fid, wt = self.decided()
+        self.commit_in(wt, "check.sh", "exit 1\n")
+        snap = self.cli("snapshot", fid)
+        path = Path(snap["path"])
+        self.assertNotEqual(path, wt.resolve())
+        self.assertEqual(snap["commit"], self.git("rev-parse", f"review/{fid}/1").strip())
+
+        def check() -> int:
+            return subprocess.run(["sh", "check.sh"], cwd=path).returncode
+
+        self.assertEqual(check(), 1)
+        (wt / "check.sh").write_text("exit 0\n")
+        self.assertEqual(check(), 1, "an uncommitted edit leaks into the snapshot")
+        fixed_tree = self.commit_in(wt, "check.sh", "exit 0\n")
+        self.assertEqual(check(), 1, "a later commit leaks into the snapshot")
+        self.assertEqual(subprocess.run(["git", "-C", str(path), "rev-parse", "HEAD^{tree}"], capture_output=True,
+                                        text=True).stdout.strip(), snap["tree"])
+        # The next candidate gets its own snapshot; the old one is cleaned up,
+        # and landing removes the rest.
+        nxt = self.cli("snapshot", fid)
+        self.assertEqual(nxt["tree"], fixed_tree)
+        self.assertFalse(path.exists())
+        self.assertEqual(self.cli("snapshot", fid), nxt, "the same candidate reuses its snapshot")
+        self.land(fid, fixed_tree)
+        self.assertFalse(Path(nxt["path"]).exists())
+        self.refused("snapshot", fid)
 
     def test_two_concurrent_landings_of_one_finding_land_it_once(self):
         # plan/2026-10-21-1424/PO10: two runs of one finding both hold the

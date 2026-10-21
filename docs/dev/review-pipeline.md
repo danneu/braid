@@ -65,10 +65,18 @@ merged:
   after it (correctness, test-gap), a benchmark (performance), or the
   existing checks for behavior-preserving changes;
 - every acceptance recipe is green;
-- a fresh vetter, who never saw the implementer's reasoning, approved it.
+- a fresh vetter, who never saw the implementer's reasoning, approved it
+  together with the commit message that lands.
+
+The gates and the vetter judge a detached snapshot of the candidate
+commit (`findings.py snapshot`), never the implementation worktree, so
+nothing an implementer does there can change a verdict. The vetter
+reviews the change against `master` and the squash message, not the
+branch's own commits, which never land; when only the message is wrong,
+it rewrites the message instead of rejecting the change.
 
 The merge queue (`findings.py land`) then squashes the branch into one
-commit on `master`. If `master` moved, it rebases and sends the new tree
+commit on `master` with that message. If `master` moved, it rebases and sends the new tree
 back through every gate. It waits while the main checkout has
 uncommitted changes, and nothing is pushed. It checks for an earlier
 `Finding:` commit under its own lock, so two runs of one finding land it

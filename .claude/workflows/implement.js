@@ -5,8 +5,8 @@ export const meta = {
   phases: [
     { title: 'Launch', detail: 'read the decision; stop, resume, or start' },
     { title: 'Implement', detail: 'apply the chosen solution with its proof' },
-    { title: 'Gate', detail: 'acceptance recipes and the proof, on one exact tree' },
-    { title: 'Vet', detail: 'a fresh reviewer approves or rejects that tree' },
+    { title: 'Gate', detail: 'acceptance recipes and the proof, on a snapshot of the candidate' },
+    { title: 'Vet', detail: 'a fresh reviewer approves the tree and the message that land' },
     { title: 'Land', detail: 'merge queue: rebase, re-gate if changed, fast-forward' },
   ],
 }
@@ -117,8 +117,9 @@ const VET = {
     tree: { type: 'string' },
     approved: { type: 'boolean' },
     problems: { type: 'array', items: { type: 'string' } },
+    message: { type: 'string', description: 'the exact commit message to land: subject, blank line, body' },
   },
-  required: ['tree', 'approved', 'problems'],
+  required: ['tree', 'approved', 'problems', 'message'],
 }
 
 const implPrompt = (feedback, prior) => `You implement braid review finding ${id}. Work only inside the worktree \`${wt.path}\` (branch \`${wt.branch}\`): use absolute paths under it and run every command from it.
@@ -134,35 +135,47 @@ ${regression
     ? `- Proof (regression): the finding's Proof section says what the test must show.\n  First commit only the test, and confirm it fails for the right reason. Give that commit a \`Proof: red\` trailer. Then commit the fix and confirm the test passes. Keep exactly one \`Proof: red\` commit on the branch.`
     : `- Proof (${plan.proof}): the finding's Proof section says what must hold.`}
 - Make every listed acceptance recipe pass: ${acceptance.join(', ')}. VM recipes take a host-wide gate and may wait; run long commands in the background and wait for them.
-- Commit all work on the branch (stage files by name; never --amend, never --no-verify, never push, never touch master). Leave the worktree clean.
+- Commit all work on the branch (stage files by name; never --amend, never --no-verify, never push, never touch master). Leave the worktree clean. Branch commit messages never land; only the message you return does.
 ${prior ? `\nThe branch already has work from an earlier round or run. Inspect it (\`git log master..HEAD\`, \`git diff master...HEAD\`) and continue from it.` : ''}${feedback ? `\n\nFix these problems from the gates or the vetter, then commit:\n${feedback}` : ''}
 
-Return the proof command and a commit message for the landed change: a lowercase conventional-commit subject and a body explaining why. The merge queue squashes the branch into one commit with that message.`
+Return the proof command and a commit message for the landed change: a lowercase conventional-commit subject and a body explaining why. The merge queue squashes the branch into one commit with that message. The proof command runs from the repository root of another checkout, so it must not name \`${wt.path}\`.`
 
-const gatePrompt = impl => `You are the gate for braid review finding ${id}. Check the branch in \`${wt.path}\`; change nothing.
+// Gates and the vetter judge a detached snapshot of the candidate commit that
+// no implementer works in (plan/2026-10-21-1424/D12), so nothing done in the
+// implementation worktree can change a verdict.
+const gatePrompt = (impl, snap) => `You are the gate for braid review finding ${id}. Check candidate commit \`${snap.commit}\` in its snapshot checkout \`${snap.path}\`; run every command from there and change nothing. Never look at or run anything in \`${wt.path}\`.
 
-1. Confirm \`git status --porcelain\` is empty. Record the tree: \`git rev-parse HEAD^{tree}\`.
-2. Run each acceptance recipe from \`${wt.path}\`: ${acceptance.join(', ')}. Long ones (VM tests) may wait on a host-wide gate; run them in the background and wait for them to exit.
+1. Confirm \`git rev-parse HEAD\` is \`${snap.commit}\` and \`git status --porcelain --untracked-files=no\` is empty.
+2. Run each acceptance recipe: ${acceptance.join(', ')}. Long ones (VM tests) may wait on a host-wide gate; run them in the background and wait for them to exit.
 ${regression
-    ? `3. Red/green: find the red commit with \`git log master..HEAD --grep='^Proof: red' --format=%H\` (exactly one). Check it out in a temporary detached worktree (\`git worktree add --detach <path next to ${wt.path}> <sha>\`), run \`${impl.proof_command}\` there, and confirm it FAILS for the reason the finding describes (an assertion, not a build error). Remove the temporary worktree. Then run it in \`${wt.path}\` and confirm it passes.`
+    ? `3. Red/green: find the red commit with \`git log master..${snap.commit} --grep='^Proof: red' --format=%H\` (exactly one). Check it out in a temporary detached worktree (\`git worktree add --detach <path next to ${snap.path}> <sha>\`), run \`${impl.proof_command}\` there, and confirm it FAILS for the reason the finding describes (an assertion, not a build error). Remove the temporary worktree. Then run it in \`${snap.path}\` and confirm it passes.`
     : plan.proof === 'benchmark'
-      ? `3. Benchmark: run \`${impl.proof_command}\` on master (in a temporary detached worktree) and on the branch, and report both numbers. Pass only if the branch is better by the claim in the finding's Proof section (\`${F} show ${id}\`).`
+      ? `3. Benchmark: run \`${impl.proof_command}\` on master (in a temporary detached worktree) and in \`${snap.path}\`, and report both numbers. Pass only if the candidate is better by the claim in the finding's Proof section (\`${F} show ${id}\`).`
       : `3. Preservation: run \`${impl.proof_command}\` and confirm it passes.`}
-4. Confirm the tree is still the one you recorded and the worktree is clean.
+4. Confirm HEAD is still \`${snap.commit}\` and tracked files are unchanged.
 
-Pass only if every step holds. Return the tree, the verdict, and a report with the failing output.`
+Pass only if every step holds. Return tree \`${snap.tree}\`, the verdict, and a report with the failing output.`
 
-const vetPrompt = gate => `You vet braid review finding ${id} before it lands on master unattended. You are independent: you have not seen the implementer's reasoning, and you change nothing.
+// The vetter approves what lands: the candidate's tree and the squash message,
+// not the branch's intermediate commits (plan/2026-10-21-1424/D8).
+const vetPrompt = (snap, message) => `You vet braid review finding ${id} before it lands on master unattended. You are independent: you have not seen the implementer's reasoning, and you change nothing.
 
 Read the finding, its pitch, and the user's decision with \`${F} show ${id}\`. The user chose: ${decision}
 
-Review \`git -C ${wt.path} diff master...HEAD\` and \`git -C ${wt.path} log master..HEAD\` against the decision, \`docs/design/principles.md\`, the ADRs the change touches, and AGENTS.md. Reject if:
+What lands is one commit on master: the tree of candidate \`${snap.commit}\` with the message below. Review the change with \`git -C ${snap.path} diff master...${snap.commit}\` against the decision, \`docs/design/principles.md\`, the ADRs the change touches, and AGENTS.md. Branch commit messages never land; ignore them. Reject if:
 - it applies anything other than the chosen solution, or more than it;
 - it is wrong, unsafe, or breaks a principle or ADR;
 - the proof does not actually prove the claim (a test that would pass with the bug back);
 - docs, README, or doc comments are left out of sync.
 
-The gate passed tree \`${gate.tree}\`. Confirm \`git -C ${wt.path} rev-parse HEAD^{tree}\` matches and return that tree. List each problem concretely; an approval has none.`
+The proposed landing message:
+<<<
+${message}
+>>>
+
+Return in \`message\` the exact message to land. If the proposed one describes the change accurately and follows the repo's commit rules (lowercase Conventional Commits subject, a body saying why), return it unchanged. If only the message is wrong, rewrite it yourself and return the rewrite; a message problem alone is never a reason to reject.
+
+Return tree \`${snap.tree}\` after confirming \`git -C ${snap.path} rev-parse HEAD^{tree}\` matches it. List each problem with the change concretely; an approval has none.`
 
 let feedback = null
 // Every run starts with the implementer; on a resume it inspects the branch
@@ -189,15 +202,20 @@ while (true) {
     prior = true
   }
   phase('Gate')
-  const gate = await agent(gatePrompt(impl), { label: `gate:${id}`, phase: 'Gate', effort: 'medium', schema: GATE })
+  const snap = await store('snapshot', `${F} snapshot ${id}`, 'Gate',
+    () => ({ id: 'string', commit: 'string', tree: 'string', path: 'string' }))
+  const gate = await agent(gatePrompt(impl, snap), { label: `gate:${id}`, phase: 'Gate', effort: 'medium', schema: GATE })
   if (!gate) return { id, status: 'gap', reason: 'gate failed; relaunch resumes the branch' }
-  let problems = gate.passed ? null : `Gate report:\n${gate.report}`
+  let problems = gate.passed && gate.tree === snap.tree ? null : `Gate report:\n${gate.report}`
+  let landing = null
   if (!problems) {
     phase('Vet')
-    const vet = await agent(vetPrompt(gate), { label: `vet:${id}`, phase: 'Vet', effort: 'xhigh', schema: VET })
+    const vet = await agent(vetPrompt(snap, `${impl.subject}\n\n${impl.body}`), { label: `vet:${id}`, phase: 'Vet', effort: 'xhigh', schema: VET })
     if (!vet) return { id, status: 'gap', reason: 'vetter failed; relaunch resumes the branch' }
-    if (!vet.approved || vet.tree !== gate.tree) {
-      problems = `Vetter:\n${vet.problems.map(p => `- ${p}`).join('\n') || '- tree changed during review'}`
+    if (!vet.approved || vet.tree !== snap.tree || !vet.message.trim()) {
+      problems = `Vetter:\n${vet.problems.map(p => `- ${p}`).join('\n') || '- the vetter did not approve this tree with a message'}`
+    } else {
+      landing = { tree: snap.tree, message: vet.message }
     }
   }
   if (problems) {
@@ -212,8 +230,8 @@ while (true) {
   phase('Land')
   let next = null
   for (let waits = 0; next === null; ) {
-    const message = `${impl.subject}\n\n${impl.body}`
-    const res = await store('land', `${F} land ${id} --tree ${gate.tree} --wait 540 --message - <<'EOF'\n${message}\nEOF`, 'Land',
+    // Exactly the tree and message the vetter approved (plan/2026-10-21-1424/I14).
+    const res = await store('land', `${F} land ${id} --tree ${landing.tree} --wait 540 --message - <<'EOF'\n${landing.message}\nEOF`, 'Land',
       v => ({ id: 'string', status: 'string', ...LAND[v && v.status] }))
     if (res.status === 'merged') {
       log(`${id}: merged as ${res.commit || 'an earlier run'}`)

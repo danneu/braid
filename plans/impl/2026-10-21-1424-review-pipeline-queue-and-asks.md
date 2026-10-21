@@ -247,7 +247,36 @@ decision so it resumes its approved branch, and start one `drain`.
 
 - [x] C1. fix(findings): decide "already merged" under the merge-queue lock
 - [x] C2. fix(review): workflows parse only validated control fields from the store
-- [ ] C3. feat(review): gate and vet a snapshot of the candidate and the message that lands
+- [x] C3. feat(review): gate and vet a snapshot of the candidate and the message that lands
 - [ ] C4. feat(review): runs stop with an ask, and an answer resumes the same branch
 - [ ] C5. feat(review): drain the decided queue; /pick-fix only decides
 - [ ] C6. feat(review): critique every pitch and record dependencies it finds
+
+## Implementation notes
+
+- C1: the PO10 test runs two `land` subprocesses while the test holds
+  the queue lock, so both queue behind it. Against the old script, the
+  second run failed outright: it had passed the merged check, then
+  rebased in a worktree the first run had already removed. Worktree
+  cleanup now also happens under the queue lock.
+- C2: PO1's workflow half ran live. `implement` was fed a launch result
+  missing four fields through a stub store command, and it stopped with
+  a malformed-result error before creating anything.
+- C3: one snapshot per candidate commit
+  (`.claude/worktrees/snapshot-<id>-<commit>`), not one per finding moved
+  between candidates. A per-finding snapshot would let a duplicate run
+  (AR1) move it under a gate that is still running, which recreates the
+  gap D12 closes. A new candidate's snapshot removes the finding's older
+  ones, and landing removes the rest. The Rust build cache is lost per
+  candidate; Nix builds are cached in the store anyway.
+- C3: D8's message repair is done by the vetter. It returns the exact
+  message to land: the implementer's message when accurate, otherwise
+  its own rewrite. A message problem alone never rejects a candidate, so
+  it never costs a repair round, and the message that lands is the one
+  the vetter approved (I14).
+- C3: PO7 ran live on a scratch repo. The branch held the right fix
+  under a stale commit message ("rewrite the size parser"). The gate ran
+  in the snapshot, and the vetter approved and returned the implementer's
+  accurate message, which landed. Both worktrees were removed. The
+  implementer wrote a correct message, so the vetter's rewrite path did
+  not run live. It uses the same `message` field that landed here.
