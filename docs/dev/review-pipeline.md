@@ -1,5 +1,5 @@
 ---
-intent: How the agent review pipeline finds, verifies, pitches, implements, and lands improvements -- the finding store, the review and implement workflows, /pick-fix, and the merge queue.
+intent: How the agent review pipeline finds, verifies, pitches, implements, and lands improvements -- the finding store, the review, drain, and implement workflows, /pick-fix, asks, and the merge queue.
 ---
 
 # Review pipeline
@@ -15,7 +15,8 @@ revised by `plan/2026-10-21-1424` (`plans/impl/2026-10-21-1424-review-pipeline-q
 | Verify | `review` workflow | a skeptic tries to refute each finding |
 | Merge | `review` workflow | duplicates across slices collapse; dependencies recorded |
 | Pitch | `review` workflow | ideal fix, ranked candidates, rejected options, recommendation |
-| Pick | you, via `/pick-fix` | choose a candidate, defer, or drop |
+| Pick | you, via `/pick-fix` | choose a candidate, defer, or drop; answer asks |
+| Drain | `drain` workflow | start an `implement` run per runnable finding, a few at a time |
 | Implement | `implement` workflow | worktree, proof, fix, gates, vetter, merge queue |
 
 ## Running it
@@ -25,8 +26,18 @@ revised by `plan/2026-10-21-1424` (`plans/impl/2026-10-21-1424-review-pipeline-q
   Slice ids are `command:<name>`, `docs:<path under docs/>`, and
   `cross:<lens>`; a trailing `*` matches a prefix. The lenses are listed in
   `.claude/agents/reviewer.md`.
-- Choose fixes: `/pick-fix` (optionally a run id). Each decision starts an
-  `implement` run in the background; watch them in `/workflows`.
+- Choose fixes: `/pick-fix` (optionally a run id). It shows open asks
+  first, then blocked findings, then pitches by rank, and records each
+  decision without starting any work. Decide as many as you like in one
+  sitting.
+- Implement them: `/pick-fix` ends by offering a `drain` run, or start
+  one yourself (`args: {max: 3}`). It starts an `implement` run for each
+  runnable finding (decided, every dependency merged, not held by an
+  open ask), at most `max` at once, and starts the next as each ends. It
+  re-reads the store before every start, so decisions and answers you
+  record while it runs are picked up. It ends with a summary: merged,
+  asking, blocked, and still waiting. Run one drain at a time; watch it
+  in `/workflows`. `findings.py queue` shows the same lists.
 - Read results: `findings/<run>/index.md` ranks a run's findings; each
   finding is `findings/<run>/<id>.md`. A landed fix is one commit on
   `master` with a `Finding: <id>` trailer.
@@ -96,7 +107,9 @@ needs a choice the decision does not cover, or another queued finding
 is affected), it stops that finding with an **ask**: what it found,
 options with trade-offs, a recommendation, and the findings it affects
 (`findings.py ask`). The finding goes to `blocked` with its branch kept,
-and the findings the ask names do not start until it is answered.
+and the findings the ask names do not start until it is answered. You
+get a push notification naming the finding and the question, and the
+drain summary lists it too.
 Repairs that run out become an ask when a choice would resolve them;
 otherwise, and for failures that need no choice, the finding is
 `blocked` with a bare reason.

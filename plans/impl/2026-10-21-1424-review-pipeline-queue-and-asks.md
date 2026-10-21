@@ -249,7 +249,7 @@ decision so it resumes its approved branch, and start one `drain`.
 - [x] C2. fix(review): workflows parse only validated control fields from the store
 - [x] C3. feat(review): gate and vet a snapshot of the candidate and the message that lands
 - [x] C4. feat(review): runs stop with an ask, and an answer resumes the same branch
-- [ ] C5. feat(review): drain the decided queue; /pick-fix only decides
+- [x] C5. feat(review): drain the decided queue; /pick-fix only decides
 - [ ] C6. feat(review): critique every pitch and record dependencies it finds
 
 ## Implementation notes
@@ -295,3 +295,25 @@ decision so it resumes its approved branch, and start one `drain`.
   last rejection and may not change the branch. It records an ask if a
   choice by the user would resolve the rejection; otherwise the run
   blocks with the bare reason, as D6 allows.
+- C5: "runnable" is computed by a new store command, `findings.py
+  queue`, rather than in the drain script. It is deterministic and
+  unit-tested, and it returns ids only (D1). `drain` reads it before
+  every start. It runs each finding at most once per drain, so a run
+  that ends in a crash or a land wait does not loop.
+- C5: PO6 holds. A haiku workflow agent loaded `PushNotification`
+  through ToolSearch and sent one ("Terminal notification sent. Mobile
+  push requested."). `implement` sends one on every ask and block.
+  `args.notify: false` turns this off for scratch-repo runs, and the
+  drain summary carries the same news either way.
+- C5: PO4 and PO5 ran live as one scratch drain with `max: 2`, over
+  five decided findings. Concurrent `workflow()` calls worked: at most
+  two were in flight. The dependent finding started only after its
+  dependency merged, and the finding held by an open ask never started.
+  The rename finding saw a contract that landed after its decision and
+  asked with three options instead of renaming. The other three
+  findings still merged. After `answer` kept the decision, a second
+  drain launched it as `resume` on the same `review/<id>/1` branch and
+  merged it.
+- C5: PO9 is met by the skill's text, not a live session, because
+  `/pick-fix` needs the user to answer. The only Workflow call it
+  describes is the `drain` the user accepts at the end.

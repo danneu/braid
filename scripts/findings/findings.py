@@ -637,6 +637,29 @@ def cmd_launch(store: Store, fid: str, hold: bool = True) -> dict:
     }
 
 
+def cmd_queue(store: Store) -> dict:
+    """The decided queue across every run, for `drain` (plan/2026-10-21-1424/D5).
+
+    Runnable means decided, every dependency merged, and not named by an
+    open ask. Control fields only: ids, so a relay cannot garble them.
+    """
+    out = {"runnable": [], "waiting": [], "held": [], "asking": [], "blocked": []}
+    for run in store.runs():
+        for f in sorted(store.findings(run), key=lambda f: (-score(f), f["id"])):
+            state = store.state(f)
+            if state == "blocked":
+                out["asking" if f["decisions"][-1].get("ask") else "blocked"].append(f["id"])
+            elif state in ("decided", "implementing"):
+                deps = [store.load(d) for d in f["depends_on"]]
+                if any(store.state(d) != "merged" for d in deps):
+                    out["waiting"].append(f["id"])
+                elif store.held_by(f["id"]):
+                    out["held"].append(f["id"])
+                else:
+                    out["runnable"].append(f["id"])
+    return out
+
+
 def _git(cwd: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
     out = subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True)
     _require(not check or out.returncode == 0, f"git {' '.join(args)} failed: {out.stderr.strip()}")
@@ -820,6 +843,7 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("id")
     s.add_argument("--note", required=True)
     sub.add_parser("launch", help="what an implement run may do now").add_argument("id")
+    sub.add_parser("queue", help="the decided queue: runnable, waiting on dependencies, held, asking, blocked")
     sub.add_parser("show", help="print one finding with its derived state").add_argument("id")
     s = sub.add_parser("list", help="list a run's findings in rank order")
     s.add_argument("run")
@@ -859,6 +883,8 @@ def _dispatch(store: Store, repo: Path, args) -> object:
         return cmd_answer(store, args.id, args.note)
     if args.cmd == "launch":
         return cmd_launch(store, args.id)
+    if args.cmd == "queue":
+        return cmd_queue(store)
     if args.cmd == "worktree":
         return cmd_worktree(store, repo, args.id)
     if args.cmd == "snapshot":

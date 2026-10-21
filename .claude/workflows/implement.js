@@ -1,7 +1,7 @@
 export const meta = {
   name: 'implement',
   description: 'Implement one decided finding in its own worktree, gate and vet it, and land it on master',
-  whenToUse: 'Started by /pick-fix after a decision. args: {id: "YYMMDD-HHMM-NNN"}',
+  whenToUse: 'Started by the drain workflow, one per runnable finding. args: {id: "YYMMDD-HHMM-NNN"}',
   phases: [
     { title: 'Launch', detail: 'read the decision; stop, resume, or start' },
     { title: 'Implement', detail: 'apply the chosen solution with its proof' },
@@ -20,7 +20,8 @@ export const meta = {
 const opts = args || {}
 if (!opts.id) throw new Error('args.id is required')
 const id = opts.id
-// Overridable so a scratch repository can stand in for the real one in tests.
+// Overridable so a scratch repository can stand in for the real one in tests,
+// without notifying the user (`notify: false`).
 const F = opts.findings || 'python3 scripts/findings/findings.py'
 const MAX_REPAIRS = 2
 const MAX_LAND_WAITS = 12
@@ -212,10 +213,22 @@ let repairs = 0
 let rebaseRepairs = 0
 let impl = null
 
+// Tell the user a finding is waiting on them (plan/2026-10-21-1424/D10). Best
+// effort: the drain summary carries the same news if this fails.
+async function notify(text) {
+  if (opts.notify === false) return
+  const message = `braid ${id}: ${text}`.replace(/\s+/g, ' ').slice(0, 190)
+  await agent(
+    `Load the PushNotification tool with ToolSearch (query "select:PushNotification"), then call it once with status "proactive" and this exact message. Do nothing else.\n\n${message}`,
+    { label: `notify:${id}`, phase: 'Implement', model: 'haiku', effort: 'low' },
+  )
+}
+
 async function block(reason) {
   await store('block', `${F} block ${id} --reason "$(cat <<'EOF'\n${reason}\nEOF\n)"`, 'Implement',
     () => ({ id: 'string', status: 'string' }))
   log(`${id}: blocked: ${reason}`)
+  await notify(`blocked: ${reason}`)
   return { id, status: 'blocked', reason }
 }
 
@@ -227,6 +240,7 @@ async function asked(question) {
     throw new Error(`${id}: the implementer reported an ask, but the store says ${JSON.stringify(now)}`)
   }
   log(`${id}: asking: ${question}`)
+  await notify(`asks: ${question}`)
   return { id, status: 'asking', reason: question }
 }
 

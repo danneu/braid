@@ -517,6 +517,30 @@ class AskTest(StoreTest):
         self.cli("answer", asker, "--note", "go on")
         self.assertEqual(self.cli("launch", other)["action"], "resume")
 
+    def test_queue_sorts_decided_findings_by_what_they_wait_on(self):
+        # The store side of plan/2026-10-21-1424/PO4: drain starts only what
+        # queue lists as runnable.
+        ids = self.ingest(*[finding() for _ in range(6)])
+        self.cli("verify", "--input", "-", payload=[{"id": i, "verdict": "verified", "reason": "r"} for i in ids])
+        base, dependent, asker, held, blocked, pitched = ids
+        self.cli("merge", "--input", "-", payload={"depends_on": {dependent: [base]}})
+        self.cli("pitch", "--input", "-", payload=[pitch(i) for i in ids])
+        for i in (base, dependent, asker, held, blocked):
+            self.cli("decide", i, "--candidate", "ideal-fix")
+        self.cli("ask", asker, "--input", "-", payload=ask(affects=[held]))
+        self.cli("block", blocked, "--reason", "tooling broke")
+        self.assertEqual(self.cli("queue"), {"runnable": [base], "waiting": [dependent], "held": [held],
+                                             "asking": [asker], "blocked": [blocked]})
+        self.land(base)
+        self.cli("answer", asker, "--note", "go on")
+        self.assertEqual(self.cli("queue"), {"runnable": sorted([dependent, asker, held]), "waiting": [], "held": [],
+                                             "asking": [], "blocked": [blocked]})
+        self.assert_control_fields(self.cli("queue"))
+
+    def assert_control_fields(self, result: dict) -> None:
+        for k, v in result.items():
+            self.assertTrue(all(isinstance(x, str) and "\n" not in x for x in v), k)
+
     def test_refuses_malformed_asks(self):
         fid = self.decided()
         cases = {
