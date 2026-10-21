@@ -255,7 +255,7 @@ choosing a solution for each finding:
 - [x] C2. feat(just): serialize VM-booting recipe invocations through a host-wide gate
 - [x] C3. feat(review): add the review workflow and unified reviewer agent
 - [x] C4. feat(review): add the implement workflow with vetting and the local merge queue
-- [ ] C5. feat(review): add /pick-fix to decide pitches and launch implement runs
+- [x] C5. feat(review): add /pick-fix to decide pitches and launch implement runs
 - [ ] C6. chore(review): retire the prompt-driven fan-out and document the pipeline
 
 ## Implementation notes
@@ -321,6 +321,17 @@ choosing a solution for each finding:
   interrupts were not run against agents. The script tests cover their
   restart and refusal paths, and the workflow lands only after approval
   of the same tree.
+- C5: `AskUserQuestion` allows at most 4 options, so with 3 or more
+  candidates `/pick-fix` folds defer and drop into one option with a
+  follow-up question. Candidates past the fourth are chosen by typing
+  their key.
+- C5: a decision whose `depends_on` findings are not merged is recorded
+  but not launched. `/pick-fix` launches pending `decided` findings at
+  the start and end of each session, so they start once their
+  dependencies land.
+- C5: not exercised end to end, because the questions need the user. The
+  store calls it makes are covered by the script tests, and starting
+  `implement` by name was verified in C4.
 
 ## Follow Up
 
