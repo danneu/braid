@@ -59,7 +59,12 @@ Lifecycle work also lives under the Rust-held pool lock:
   `mark_online` short-circuits when the operation failed before mounting; the
   bootstrap-add and recover cases where the mount succeeded but a later step
   returned `Err` are exactly where this finalizer matters.
-- Plain `braid lock` calls `mark_offline` after successful unmount/close.
+- After every plain `braid lock` attempt, success or failure, dispatch runs
+  an offline finalizer (`cli/src/lock.rs#cmd_lock_orchestrate`). It probes
+  the mount once; only when the pool is unmounted does it write `done\n` and
+  run `mark_offline`. A mapper close that fails after a successful umount
+  therefore still stops `braid-online.service`; see
+  [Stop Coordinator + Done Protocol](#stop-coordinator--done-protocol).
 - The lock path stops lifecycle-bound scrub units and `BoundBy`
   `braid-online.service` consumers before unmounting.
 
@@ -132,16 +137,26 @@ neither reads nor needs that journal to perform safe shutdown cleanup.
 ## Stop Coordinator + Done Protocol
 
 Plain `braid lock` acquires `/run/braid-stop-coordinator.lock` before the pool
-lock. After `cmd_lock` finishes unmounting and closing LUKS, it writes
-`done\n` to that coordinator file and then synchronously stops
-`braid-online.service`.
+lock. After `cmd_lock` returns, success or failure, it checks `mountpoint -q`.
+If the pool is unmounted, it writes `done\n` to that coordinator file and then
+synchronously stops `braid-online.service`. If the pool is still mounted, it
+writes nothing and stops nothing. The order is probe, marker, stop, so `done\n`
+is only ever written over an observed unmount.
+
+`done\n` therefore means "plain lock has unmounted the pool and finished its
+attempt; the reentry must not repeat it", not "every mapper closed". Lock
+stops every bound consumer and the scrub timer before umount. If a later
+close failed and `braid-online.service` stayed active, the next `braid unlock`
+would see it active, skip the start, and leave those consumers off. Keying
+the finalizer on the observed mount instead of on `cmd_lock`'s result means
+no error after umount can leave the unit stale, including steps added later.
 
 The recursive `ExecStop` reentry runs
 `braid lock --systemd-stop --deadline-secs <n>`. If the stop coordinator is
 held, the reentry polls for either:
 
-- `done\n`, which means the plain lock already completed the disk cleanup and
-  the reentry can exit 0 immediately.
+- `done\n`, which means the plain lock already unmounted the pool and
+  finished its attempt, and the reentry can exit 0 immediately.
 - coordinator release without `done\n`, in which case it may proceed to acquire
   the pool lock and run the cleanup itself.
 - deadline expiry, in which case it exits 1 before systemd's
@@ -153,15 +168,27 @@ invocations should return only after `braid-online.service` is inactive, while
 recursive `ExecStop` has a deterministic poll-out path instead of queuing
 behind itself.
 
-Between writing `done\n` and stopping `braid-online.service`, `mark_offline`
-re-checks `mountpoint -q` and treats a check failure (e.g. `OnlineError::Spawn`
-mid-shutdown) as still-mounted: it warns and skips the stop, leaving
-`braid-online.service` active. The operator can re-run `braid lock` or
+The `mountpoint -q` check runs before the marker, and `mark_offline` takes
+its answer (`cli/src/online_state.rs#PoolUnmounted`) instead of probing again.
+A check failure (e.g. `OnlineError::Spawn` mid-shutdown) counts as
+still-mounted: plain lock warns, writes no `done\n`, and skips the stop,
+leaving `braid-online.service` active. The operator can re-run `braid lock` or
 `systemctl stop braid-online.service` to recover. This mirrors the
 "unknown snapshot results warn instead of starting" rule from the
 [Snapshot Rule On `systemctl start`](#snapshot-rule-on-systemctl-start)
 section: when state is unknown, the fail-safe direction is to leave the
-lifecycle owner active rather than deactivate over a possibly live pool.
+lifecycle owner active rather than deactivate over a possibly live pool. If
+writing `done\n` fails, plain lock also skips the stop, because a synchronous
+stop without the marker would leave the reentry polling the coordinator plain
+lock holds.
+
+Accepted trade-off: after a close failure, a leftover `braid-*` mapper stays
+open with no filesystem on it. A concurrent `ExecStop` reentry exits 0 on
+`done\n` instead of retrying that close, and later shutdowns do not run
+`braid lock` because `braid-online.service` is inactive. btrfs is already
+unmounted, so no data is at risk, and systemd-shutdown's final device-mapper
+detach closes leftover mappers after it kills their holders. The operator
+closes the mapper sooner by freeing its holder and re-running `braid lock`.
 
 ## Consequences
 
@@ -174,7 +201,10 @@ lifecycle owner active rather than deactivate over a possibly live pool.
 - `mark_online` must keep the start-side snapshot rule to avoid the
   `deactivating` deadlock.
 - `mark_offline` must keep the stop coordinator and `done\n` protocol because
-  it deliberately uses synchronous `systemctl stop` after cleanup.
+  it deliberately uses synchronous `systemctl stop` after unmount.
+- `braid-online.service` follows the observed mount on every plain-lock exit,
+  so a lock that fails after umount still deactivates it and the next
+  `braid unlock` restarts its consumers.
 - The pool lock is independent from the sleep inhibitor. The lock prevents
   stale concurrent state reads; the inhibitor still protects only the
   non-interruptible mutation window described in [ADR 019](019-inhibit-sleep.md).

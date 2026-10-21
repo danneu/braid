@@ -50,7 +50,7 @@ When braid is installed via the NixOS module, `braid lock` also:
 
 - Stops `braid-scrub.timer` and `braid-scrub.service` before unmount.
 - Stops any consumer wired into the pool lifecycle via `braid.poolBoundServices` or a direct `BindsTo=braid-online.service` edge (lock walks its reverse, `BoundBy`; e.g. SMB or NFS -- see [Sharing and permissions](../guides/sharing-and-permissions.md)) before unmount.
-- Stops `braid-online.service` itself after a successful unmount.
+- Stops `braid-online.service` itself whenever the pool ends unmounted, even if a mapper close then fails.
 
 `braid unlock` reverses the third step: it reactivates `braid-online.service` after mount, which restarts every consumer configured through `braid.poolBoundServices` or otherwise wired with `WantedBy=braid-online.service`. A consumer wired with only one of the two half-works -- `BindsTo` stops it before lock, `WantedBy` restarts it after unlock -- so use `braid.poolBoundServices` for long-running pool consumers; the sharing guide shows the full setup.
 
@@ -63,6 +63,7 @@ On module installs, lock stops the scrub units and consumers only after every ch
 - Refuses if another braid operation is in progress (pool lock `/run/braid-pool.lock` is held) -- retry once it finishes.
 - If unmount fails after exhausting its umount busy-retry budget (e.g. a process has files open on the mount), lock skips `btrfs device scan --forget` and still attempts to close the LUKS mappers, reporting the failure
 - If a mapper close fails with "device busy" after unmount also failed, the error is downgraded to a warning (the root cause is likely the stuck unmount)
+- If unmount succeeds but a mapper close then fails (e.g. a process still holds a `/dev/mapper/braid-*` device open), lock exits 1 with the pool unmounted and that mapper open. On module installs it still stops `braid-online.service`, so the next `braid unlock` restarts your shares and scrub. Free the holder and re-run `braid lock` to close the leftover mapper.
 - The hint `lsof <mount_point>` or `fuser -vm <mount_point>` is printed when unmount fails, to help identify the blocking process
 - If a scanned `braid-*` mapper's backing LUKS UUID cannot be verified (for example because its backing device is gone or its LUKS header is unreadable), lock prints a `[warn]`, leaves that mapper open instead of closing it, excludes it from both `btrfs device scan --forget` and the close step, and still exits cleanly. Re-run `braid lock` once the mapper's LUKS UUID is readable. The literal `cleanup incomplete` summary line appears only under `--dry-run`; a real run surfaces the per-mapper `[warn]` and does not print `pool already locked`. See [ADR-024](../design/decisions/024-luks-uuid-identity.md#runtime-handles-and-labels).
 

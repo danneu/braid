@@ -3,7 +3,9 @@
 # Intent: braid lock (user-initiated) and `systemctl stop braid-online.service`
 #   (shutdown / manual ExecStop) both stop bound pool consumers and unmount
 #   cleanly when a long-running consumer holds /mnt/storage busy, including a
-#   BindsTo-only consumer with no stop-ordering guarantee.
+#   BindsTo-only consumer with no stop-ordering guarantee. A braid lock that
+#   unmounts but then fails to close a mapper still stops
+#   braid-online.service, so the next unlock restarts the consumers.
 #
 # Why it exists: regression guard for the EBUSY-on-busy-mount class of bug
 #   (samba on caja, future nfs/syncthing). The user-initiated lock path
@@ -11,7 +13,10 @@
 #   OnlineStateOps::list_bound_by; the ExecStop path relies on systemd's
 #   BindsTo cascade stopping full-triad consumers before cmd_lock runs, and on
 #   cmd_lock's explicit BoundBy stop for BindsTo-only consumers that may still
-#   be active.
+#   be active. Cycle 4 guards a lifecycle hole: lock stopped
+#   braid-online only when the whole lock succeeded, so a failed close after
+#   unmount left it active, and the next unlock saw it active and started
+#   nothing, leaving shares and scrub off.
 #
 # Scenario: pool unlocked with a fake consumer service (dummy-pool-consumer)
 #   holding fd 3 on /mnt/storage/.consumer-lock. Cycle 1 runs `braid lock`,
@@ -19,7 +24,10 @@
 #   braid-online.service`, asserts teardown via ExecStop reentry. Cycle 3
 #   manually starts a SIGTERM-resistant BindsTo-only consumer holding
 #   /mnt/storage/.consumer-unordered-lock, then stops braid-online.service and
-#   asserts clean teardown.
+#   asserts clean teardown. Cycle 4 unlocks, holds /dev/mapper/braid-disk2
+#   open, and runs `braid lock`, which unmounts and then fails to close that
+#   mapper. braid-online must be inactive. After the holder exits, `braid
+#   unlock` must bring the consumer back.
 
 import shlex
 
@@ -144,5 +152,44 @@ with subtest("cycle 3: ExecStop stops unordered consumer before unmount"):
     machine.fail("mountpoint -q /mnt/storage")
     machine.fail("test -e /dev/mapper/braid-disk1")
     machine.fail("test -e /dev/mapper/braid-disk2")
+
+# === cycle 4: braid lock unmounts but cannot close a busy mapper ===
+
+with subtest("cycle 4: re-unlock and hold a member mapper open"):
+    unlock(machine)
+    machine.succeed("systemctl is-active braid-online.service")
+    machine.wait_until_succeeds(
+        "systemctl is-active {}".format(CONSUMER), timeout=30
+    )
+    assert_consumer_holds_mount(machine, CONSUMER)
+    # A process holding the mapper's block device open does not block the
+    # btrfs umount, but makes `cryptsetup close` fail with EBUSY. The
+    # readiness file appears only once fd 3 is open.
+    holder_pid = machine.succeed(
+        "rm -f /tmp/holder.ready; "
+        "nohup sh -c 'exec 3</dev/mapper/braid-disk2; "
+        "touch /tmp/holder.ready; exec sleep infinity' "
+        ">/dev/null 2>&1 & echo $!"
+    ).strip()
+    machine.wait_until_succeeds("test -e /tmp/holder.ready", timeout=10)
+
+with subtest("cycle 4: failed close after unmount still stops braid-online"):
+    machine.fail("braid lock")
+    machine.fail("mountpoint -q /mnt/storage")
+    machine.fail("test -e /dev/mapper/braid-disk1")
+    # The held mapper stays open, which proves lock failed on its close.
+    machine.succeed("test -e /dev/mapper/braid-disk2")
+    machine.fail("systemctl is-active {}".format(CONSUMER))
+    machine.fail("systemctl is-active braid-online.service")
+
+with subtest("cycle 4: unlock after freeing the mapper restarts the consumer"):
+    machine.succeed("kill {}".format(holder_pid))
+    machine.wait_until_fails("kill -0 {}".format(holder_pid), timeout=10)
+    unlock(machine)
+    machine.succeed("systemctl is-active braid-online.service")
+    machine.wait_until_succeeds(
+        "systemctl is-active {}".format(CONSUMER), timeout=30
+    )
+    assert_consumer_holds_mount(machine, CONSUMER)
 
 machine.shutdown()

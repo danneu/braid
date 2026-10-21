@@ -2,7 +2,9 @@
   Intent: braid lock (user-initiated) and `systemctl stop braid-online.service`
     (shutdown / manual ExecStop) both stop bound pool consumers and unmount
     cleanly when a long-running consumer holds /mnt/storage busy, including a
-    BindsTo-only consumer with no stop-ordering guarantee.
+    BindsTo-only consumer with no stop-ordering guarantee. A braid lock that
+    unmounts but then fails to close a mapper still stops
+    braid-online.service, so the next unlock restarts the consumers.
   Why it exists: regression guard for the EBUSY-on-busy-mount class of bug
     (samba on caja, future nfs/syncthing). The user-initiated lock path
     relies on cmd_lock iterating BoundBy braid-online.service through
@@ -10,14 +12,19 @@
     BindsTo cascade stopping full-triad consumers before
     `braid lock --systemd-stop` runs cmd_lock, and on cmd_lock's explicit
     BoundBy stop for BindsTo-only consumers that may still be active.
+    Cycle 4 guards a lifecycle hole: a failed close after unmount left
+    braid-online active, so the next unlock started nothing.
   Scenario: pool unlocked with a fake consumer service holding fd 3 on
     /mnt/storage/.consumer-lock (BindsTo+After+wantedBy braid-online.service,
     ConditionPathIsMountPoint=/mnt/storage). Cycle 1 runs `braid lock`; cycle
     2 unlocks again and runs `systemctl stop braid-online.service`. Cycle 3
     manually starts a SIGTERM-resistant BindsTo-only consumer holding
     /mnt/storage/.consumer-unordered-lock, then stops braid-online.service.
-    Each cycle asserts the consumer is stopped, the mount is gone, and LUKS
-    mappers are closed.
+    Each of these cycles asserts the consumer is stopped, the mount is gone,
+    and LUKS mappers are closed. Cycle 4 holds /dev/mapper/braid-disk2 open
+    during `braid lock`, asserts lock fails with the pool unmounted and
+    braid-online inactive, then frees the mapper and asserts unlock restarts
+    the consumer.
 */
 { braid }:
 { pkgs, lib, ... }:

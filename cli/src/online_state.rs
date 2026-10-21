@@ -365,33 +365,58 @@ fn run_with_online_marker_to<E>(
     result
 }
 
-/// Plain lock finalizer: stop does not use the online snapshot gate.
-/// It relies on `/run/braid-stop-coordinator.lock` and the `done\n` protocol from
-/// docs/design/decisions/026-pool-lock-rust-owned.md instead.
-/// An unknown mountpoint state is treated as still-mounted -- mirrors
-/// `mark_online`'s fail-safe and skips the synchronous stop.
-pub fn mark_offline(cfg: &Config, ops: &dyn OnlineStateOps) {
-    mark_offline_to(cfg, ops, &mut std::io::stderr());
+/// Proof that `mountpoint -q` observed the pool unmounted. Only
+/// `observe_unmounted` builds one and `mark_offline` requires one, so
+/// `braid-online.service` stops only over an observed unmount, never over a
+/// mounted or unknown mount state.
+#[derive(Debug)]
+pub struct PoolUnmounted(());
+
+/// Plain lock's offline gate, probed once after each lock attempt whether it
+/// succeeded or failed. An unknown mount state counts as still mounted --
+/// mirrors `mark_online`'s fail-safe -- so a probe error warns and returns
+/// no proof.
+pub fn observe_unmounted(cfg: &Config, ops: &dyn OnlineStateOps) -> Option<PoolUnmounted> {
+    observe_unmounted_to(cfg, ops, &mut std::io::stderr())
 }
 
-/// Implements the offline marker against an injected warning sink for the
-/// same testable warn-and-continue boundary as `mark_online_to`.
-fn mark_offline_to(cfg: &Config, ops: &dyn OnlineStateOps, out: &mut dyn Write) {
-    let path = Path::new(cfg.mount_point().as_str());
+/// Implements the offline gate against an injected warning sink for the same
+/// testable warn-and-continue boundary as `mark_online_to`.
+fn observe_unmounted_to(
+    cfg: &Config,
+    ops: &dyn OnlineStateOps,
+    out: &mut dyn Write,
+) -> Option<PoolUnmounted> {
     match ops.is_mountpoint(cfg.mount_point()) {
-        Ok(true) => return,
-        Ok(false) => {}
+        Ok(true) => None,
+        Ok(false) => Some(PoolUnmounted(())),
         Err(e) => {
             writeln!(
                 out,
                 "braid: WARNING: failed to check mountpoint {}: {e}",
-                path.display()
+                cfg.mount_point().as_str()
             )
             .ok();
-            return;
+            None
         }
     }
+}
 
+/// Plain lock's offline marker: stop does not use the online snapshot gate.
+/// It relies on `/run/braid-stop-coordinator.lock` and the `done\n` protocol from
+/// docs/design/decisions/026-pool-lock-rust-owned.md instead.
+pub fn mark_offline(unmounted: PoolUnmounted, cfg: &Config, ops: &dyn OnlineStateOps) {
+    mark_offline_to(unmounted, cfg, ops, &mut std::io::stderr());
+}
+
+/// Implements the offline marker against an injected warning sink for the
+/// same testable warn-and-continue boundary as `mark_online_to`.
+fn mark_offline_to(
+    _unmounted: PoolUnmounted,
+    cfg: &Config,
+    ops: &dyn OnlineStateOps,
+    out: &mut dyn Write,
+) {
     if cfg.systemd_lifecycle()
         && let Err(e) = ops.systemctl_stop(BRAID_ONLINE_UNIT, false)
     {
@@ -1004,9 +1029,8 @@ mod tests {
     fn mark_offline_skips_systemctl_when_lifecycle_disabled() {
         let cfg = cfg(r#"{"mount_point":"/mnt/storage"}"#);
         let ops = RecordingOnlineStateOps::new();
-        ops.set_mounted(false);
 
-        mark_offline(&cfg, &ops);
+        mark_offline(PoolUnmounted(()), &cfg, &ops);
 
         assert!(
             !ops.calls()
@@ -1018,37 +1042,37 @@ mod tests {
     fn mark_offline_stops_when_lifecycle_enabled() {
         let cfg = cfg(r#"{"mount_point":"/mnt/storage","systemd_lifecycle":true}"#);
         let ops = RecordingOnlineStateOps::new();
-        ops.set_mounted(false);
-        mark_offline(&cfg, &ops);
+        mark_offline(PoolUnmounted(()), &cfg, &ops);
         assert!(
             ops.calls()
                 .contains(&format!("stop {BRAID_ONLINE_UNIT} no_block=false"))
         );
     }
 
-    // Intent: mark_offline must not stop braid-online.service when the
-    // mountpoint check itself fails.
-    // Why it exists: cmd_lock_orchestrate writes `done\n` to the stop
-    // coordinator before mark_offline; ExecStop reentry would treat that
-    // marker as authoritative and exit 0, so a stop transition over an
-    // unknown mount state could leave the unit inactive over a live pool.
-    // Scenario: cmd_lock succeeded and the done marker is set, then the
-    // mountpoint check returns a Spawn error mid-shutdown.
+    // Intent: observe_unmounted gives no proof, and warns, when the
+    //   mountpoint check itself fails.
+    // Why it exists: without the proof, plain lock writes no `done\n` and
+    //   does not stop braid-online.service. A stop over an unknown mount
+    //   state could leave the unit inactive over a live pool, and the ExecStop
+    //   reentry would trust `done\n` and exit 0.
+    // Scenario: plain lock finishes, then the mountpoint check returns a
+    //   Spawn error mid-shutdown.
     #[test]
-    fn mark_offline_skips_systemctl_when_mountpoint_check_fails() {
+    fn observe_unmounted_treats_mountpoint_check_failure_as_mounted() {
         let cfg = cfg(r#"{"mount_point":"/mnt/storage","systemd_lifecycle":true}"#);
         let ops = RecordingOnlineStateOps::new();
         ops.set_mountpoint_err(StagedOnlineFailure::Spawn(
             "mountpoint spawn failure".into(),
         ));
+        let mut out = Vec::new();
 
-        mark_offline(&cfg, &ops);
+        let proof = observe_unmounted_to(&cfg, &ops, &mut out);
 
+        assert!(proof.is_none());
+        let out = String::from_utf8(out).unwrap();
         assert!(
-            !ops.calls()
-                .contains(&format!("stop {BRAID_ONLINE_UNIT} no_block=false")),
-            "expected no systemctl stop after mountpoint check failure, got {:?}",
-            ops.calls(),
+            out.contains("braid: WARNING: failed to check mountpoint /mnt/storage:"),
+            "expected a mountpoint warning, got {out:?}"
         );
     }
 }

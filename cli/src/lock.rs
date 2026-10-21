@@ -7,6 +7,7 @@ use crate::mapper_close::{
 use crate::membership::{MembershipError, PoolMembership};
 use crate::online_state::{
     BRAID_ONLINE_UNIT, OnlineError, OnlineStateOps, RealOnlineStateOps, mark_offline,
+    observe_unmounted,
 };
 use crate::parse::types::{BackingDevice, CryptsetupStatusOutput};
 use crate::parse::{parse_cryptsetup_luks_uuid, parse_cryptsetup_status};
@@ -1172,9 +1173,12 @@ pub fn cmd_lock_systemd_stop<R: CommandRunner, F: Filesystem + ?Sized>(
     )
 }
 
-/// Plain-lock ordering invariant: run `cmd_lock` first, write `done\n`
-/// second, and deactivate `braid-online.service` last so ExecStop reentry
-/// never observes completion before lock cleanup actually succeeded.
+/// Plain lock's offline finalizer, the mirror of
+/// `online_state::run_with_online_marker`: after every `cmd_lock` attempt,
+/// success or failure, probe the mount once. Only an observed unmount writes
+/// `done\n` and then stops `braid-online.service`, so no lock error after
+/// umount leaves the unit active over an unmounted pool, and the ExecStop
+/// reentry never reads `done\n` while the pool is still mounted.
 pub fn cmd_lock_orchestrate<R, F, O>(
     runner: &R,
     fs: &F,
@@ -1207,10 +1211,29 @@ where
     CL: FnOnce() -> Result<(), LockError>,
     MD: FnOnce() -> io::Result<()>,
 {
-    cmd_lock_fn().map_err(LockOrchestrateError::CmdLock)?;
-    mark_done_fn().map_err(LockOrchestrateError::MarkDone)?;
-    mark_offline(config, online_ops);
-    Ok(())
+    let lock_result = cmd_lock_fn().map_err(LockOrchestrateError::CmdLock);
+    let Some(unmounted) = observe_unmounted(config, online_ops) else {
+        return lock_result;
+    };
+    if let Err(e) = mark_done_fn() {
+        // Without `done\n`, a synchronous stop of braid-online would leave
+        // its ExecStop reentry polling the coordinator this process holds
+        // until its deadline, so skip the stop. A lock error stays the
+        // reported failure; warn so the marker error is not lost.
+        return match lock_result {
+            Ok(()) => Err(LockOrchestrateError::MarkDone(e)),
+            Err(lock_err) => {
+                writeln!(
+                    io::stderr(),
+                    "braid: WARNING: failed to mark lock cleanup done ({e}) -- braid-online.service stays active"
+                )
+                .ok();
+                Err(lock_err)
+            }
+        };
+    }
+    mark_offline(unmounted, config, online_ops);
+    lock_result
 }
 
 #[cfg(test)]
@@ -1540,31 +1563,99 @@ mod tests {
         format!("stop {BRAID_ONLINE_UNIT} no_block=false")
     }
 
-    // Intent: cmd_lock_orchestrate must not advance after cmd_lock fails.
-    // Why it exists: ExecStop reentry treats `done\n` as authoritative, so a
-    // failed lock must not write that marker or deactivate braid-online.service.
-    // Scenario: plain `braid lock` fails while the pool is still online and a
-    // concurrent ExecStop path is waiting on the coordinator file.
+    fn synthetic_lock_failure() -> Result<(), LockError> {
+        Err(LockError::DeviceBusy("synthetic close failure".into()))
+    }
+
+    // Intent: a lock that fails after the pool is unmounted still writes
+    //   `done\n` and then stops braid-online.service once, and returns the
+    //   lock error.
+    // Why it exists: lock stops every bound consumer and the scrub timer
+    //   before umount. If braid-online stayed active over the unmounted pool,
+    //   the next unlock would see it active and start nothing, leaving shares
+    //   and scrub off.
+    // Scenario: `braid lock` unmounts the pool, then a busy mapper makes
+    //   `cryptsetup close` fail.
     #[test]
-    fn cmd_lock_failure_does_not_write_done_or_stop_online() {
+    fn cmd_lock_failure_after_unmount_writes_done_then_stops_online() {
         let tmp = tempfile::tempdir().unwrap();
         let coord_path = tmp.path().join("coord");
         let coordinator = RealStopCoordinator::new(coord_path.clone());
-        let _coordinator_guard = coordinator.acquire().unwrap();
-        let ops = offline_lifecycle_ops();
+        let coordinator_guard = coordinator.acquire().unwrap();
+        let ops = RecordingOnlineStateOps::new().with_coord_file(coord_path.clone());
+        ops.set_mounted(false);
+        let config = lifecycle_config();
+
+        let result = cmd_lock_orchestrate_impl(&ops, &config, synthetic_lock_failure, || {
+            coordinator_guard.mark_done()
+        });
+
+        assert!(matches!(
+            result,
+            Err(LockOrchestrateError::CmdLock(LockError::DeviceBusy(_)))
+        ));
+        let calls = ops.calls();
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| *call == &stop_online_call())
+                .count(),
+            1,
+            "expected exactly one braid-online stop call, got {calls:?}"
+        );
+        assert_eq!(ops.coord_snapshots(), vec![b"done\n".to_vec()]);
+    }
+
+    // Intent: a lock that fails while the pool is still mounted writes no
+    //   `done\n` and does not stop braid-online.service.
+    // Why it exists: ExecStop reentry treats `done\n` as authoritative, so a
+    //   marker over a mounted pool would let shutdown exit 0 with LUKS open.
+    // Scenario: plain `braid lock` fails its umount while a concurrent
+    //   ExecStop path is waiting on the coordinator file.
+    #[test]
+    fn cmd_lock_failure_while_mounted_writes_no_done_and_keeps_online() {
+        let ops = RecordingOnlineStateOps::new();
+        ops.set_mounted(true);
         let config = lifecycle_config();
 
         let result = cmd_lock_orchestrate_impl(
             &ops,
             &config,
-            || Err(LockError::Failed("synthetic lock failure".into())),
-            || -> io::Result<()> { panic!("mark_done must not be called after cmd_lock fails") },
+            synthetic_lock_failure,
+            || -> io::Result<()> { panic!("mark_done must not run while the pool is mounted") },
         );
 
         assert!(matches!(result, Err(LockOrchestrateError::CmdLock(_))));
         assert!(!ops.calls().contains(&stop_online_call()));
-        assert!(ops.coord_snapshots().is_empty());
-        assert!(std::fs::read(coord_path).unwrap().is_empty());
+    }
+
+    // Intent: when the post-lock mountpoint check fails, plain lock writes no
+    //   `done\n` and does not stop braid-online.service, even after a lock
+    //   that succeeded.
+    // Why it exists: the probe runs before the marker, so `done\n` is only
+    //   ever written over an observed unmount. An unknown mount state counts
+    //   as still mounted.
+    // Scenario: plain `braid lock` finishes, then the mountpoint check
+    //   returns a Spawn error.
+    #[test]
+    fn mountpoint_check_failure_writes_no_done_and_keeps_online() {
+        let ops = RecordingOnlineStateOps::new();
+        ops.set_mountpoint_err(StagedOnlineFailure::Spawn(
+            "mountpoint spawn failure".into(),
+        ));
+        let config = lifecycle_config();
+
+        let result = cmd_lock_orchestrate_impl(
+            &ops,
+            &config,
+            || Ok(()),
+            || -> io::Result<()> {
+                panic!("mark_done must not run when the mount state is unknown")
+            },
+        );
+
+        assert!(result.is_ok());
+        assert!(!ops.calls().contains(&stop_online_call()));
     }
 
     // Intent: cmd_lock_orchestrate writes `done\n` before mark_offline runs.
@@ -1599,26 +1690,29 @@ mod tests {
         assert_eq!(std::fs::read(coord_path).unwrap(), b"done\n");
     }
 
-    // Intent: cmd_lock_orchestrate must not advance after mark_done fails.
-    // Why it exists: stopping braid-online.service without a completed marker
-    // can make systemd believe an online pool is inactive.
-    // Scenario: plain `braid lock` finishes lock cleanup but cannot write the
-    // stop-coordinator done marker due to an I/O error.
+    // Intent: cmd_lock_orchestrate must not stop braid-online.service after
+    //   mark_done fails. A lock error stays the reported failure; otherwise
+    //   the marker error is.
+    // Why it exists: a synchronous stop without `done\n` would leave the
+    //   ExecStop reentry polling a coordinator plain lock still holds.
+    // Scenario: plain `braid lock` unmounts the pool but cannot write the
+    //   stop-coordinator done marker due to an I/O error, once after a lock
+    //   that succeeded and once after one that failed a close.
     #[test]
     fn mark_done_failure_does_not_call_mark_offline() {
-        let ops = offline_lifecycle_ops();
         let config = lifecycle_config();
+        let mark_done_failure = || Err(io::Error::other("synthetic mark_done failure"));
 
-        let result = cmd_lock_orchestrate_impl(
-            &ops,
-            &config,
-            || Ok(()),
-            || Err(io::Error::other("synthetic mark_done failure")),
-        );
-
+        let ops = offline_lifecycle_ops();
+        let result = cmd_lock_orchestrate_impl(&ops, &config, || Ok(()), mark_done_failure);
         assert!(matches!(result, Err(LockOrchestrateError::MarkDone(_))));
         assert!(!ops.calls().contains(&stop_online_call()));
-        assert!(ops.coord_snapshots().is_empty());
+
+        let ops = offline_lifecycle_ops();
+        let result =
+            cmd_lock_orchestrate_impl(&ops, &config, synthetic_lock_failure, mark_done_failure);
+        assert!(matches!(result, Err(LockOrchestrateError::CmdLock(_))));
+        assert!(!ops.calls().contains(&stop_online_call()));
     }
 
     fn mounted_runner_with_btrfs_show(mapper_aaa: &str, mapper_bbb: &str) -> MockRunner {
