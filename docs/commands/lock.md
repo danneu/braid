@@ -11,7 +11,6 @@ Unmount the btrfs pool and close all LUKS mappers.
 
 - Before shutting down or rebooting (though systemd handles this automatically)
 - When you want to manually take the pool offline
-- Before physically removing a disk (after `braid remove`)
 
 ## Basic example
 
@@ -35,11 +34,11 @@ sudo braid lock --dry-run
 
 ## What happens under the hood
 
-1. Checks if the pool is mounted
+1. Checks if the pool is mounted, and that the filesystem at the mount point is btrfs
 2. Checks that no btrfs exclusive operation (balance, device remove, etc.) is running. Skipped when the pool is not mounted. A paused balance does not block lock: lock prints a `[warn]` note and unmounts, and the balance stays paused on disk. The next `braid unlock` and `braid doctor` report it.
-3. Unmounts the btrfs filesystem, retrying up to 3 times if the device is busy (covers the brief race after stopping SMB/NFS consumers, where the kernel has not yet released the last file descriptors). During systemd shutdown the `ExecStop` path retries far longer -- 60 attempts over roughly 30 seconds -- so a btrfs-progs process that still briefly holds the mount fd after its parent is killed does not strand the pool with LUKS open; see [ADR-018](../design/decisions/018-systemd-lifecycle.md#execstop-bounded-wait-pattern).
+3. Unmounts the btrfs filesystem, retrying briefly if the device is busy (covers the brief race after stopping SMB/NFS consumers, where the kernel has not yet released the last file descriptors). During shutdown it retries longer; see [ADR-018](../design/decisions/018-systemd-lifecycle.md#execstop-bounded-wait-pattern).
 4. After a successful unmount, runs `btrfs device scan --forget` for the planned close-set mappers (member-owned plus any orphaned `braid-*` mappers from a prior crash) that still exist on disk, clearing the kernel's device registry so stale references do not race with mapper close. Skipped when there is nothing left to forget.
-5. Classifies live mappers by LUKS UUID/devid ownership, then closes member-owned observed mapper names, retrying up to 3 times if the device is busy. Because classification is by backing UUID and not by mapper name, a member opened under a drifted name (for example, `braid-WRONG` backed by `disk1`) is still closed -- and its progress row reported -- as that member (`disk1`), not skipped or reconstructed as `braid-disk1`. See [ADR-024](../design/decisions/024-luks-uuid-identity.md#concrete-improvements).
+5. Closes each member's mapper, retrying briefly if the device is busy. Lock finds members by LUKS UUID, not by mapper name, so it closes a member's mapper even when it is open under another name; see [ADR-024](../design/decisions/024-luks-uuid-identity.md#concrete-improvements).
 6. Scans for orphaned `braid-*` mappers not owned by UUID-keyed membership (e.g. from a prior crash) and closes those too
 
 If the pool is already unmounted and all mappers are already closed, lock reports "pool already locked" and exits cleanly.
@@ -61,6 +60,8 @@ On module installs, lock stops the scrub units and consumers only after every ch
 ## Error handling
 
 - Refuses if another braid operation is in progress (pool lock `/run/braid-pool.lock` is held) -- retry once it finishes.
+- Refuses if a running balance or another btrfs exclusive operation is in progress -- wait for it to finish, then re-run `braid lock`. A paused balance does not block lock (step 2).
+- Refuses if the filesystem at the mount point is not btrfs. Lock then unmounts nothing and closes no mapper; check what is mounted there.
 - If unmount fails after exhausting its umount busy-retry budget (e.g. a process has files open on the mount), lock skips `btrfs device scan --forget` and still attempts to close the LUKS mappers, reporting the failure
 - If a mapper close fails with "device busy" after unmount also failed, the error is downgraded to a warning (the root cause is likely the stuck unmount)
 - If unmount succeeds but a mapper close then fails (e.g. a process still holds a `/dev/mapper/braid-*` device open), lock exits 1 with the pool unmounted and that mapper open. On module installs it still stops `braid-online.service`, so the next `braid unlock` restarts your shares and scrub. Free the holder and re-run `braid lock` to close the leftover mapper.
