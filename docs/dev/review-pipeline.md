@@ -44,7 +44,8 @@ The stored states are `open`, `verified`, `refuted`, `pitched`,
 on every read: `implementing` (the branch `review/<id>/<decision>`
 exists) and `merged` (a `Finding: <id>` trailer is reachable from
 `master`). Each new decision gets a new branch, so no run resumes work
-built for an earlier choice.
+built for an earlier choice. An answer to a blocked finding keeps its
+decision and branch (see below).
 
 Rank is computed from severity, confidence, and effort
 (`scripts/findings/findings.py#score`); agents never assign it.
@@ -81,10 +82,31 @@ back through every gate. It waits while the main checkout has
 uncommitted changes, and nothing is pushed. It checks for an earlier
 `Finding:` commit under its own lock, so two runs of one finding land it
 once. A failed gate or vetter gets
-a bounded number of repair rounds; after that, or when the chosen fix
-proves impossible, the finding goes to `blocked` with a reason and waits
-for your next `/pick-fix`. Relaunching any finding is safe: the run
-stops, resumes, or starts by the stored decision.
+a bounded number of repair rounds. Relaunching any finding is safe: the
+run stops, resumes, or starts by the stored decision.
+
+## Asks
+
+A run never changes your chosen fix, an accepted trade-off, or behavior
+beyond the decision on its own. Before working, the implementer checks
+the decision against `master` as it is now, since other fixes may have
+landed. When it learns something that would change your call (the fix
+is impossible or clearly worse, a trade-off proves different, the work
+needs a choice the decision does not cover, or another queued finding
+is affected), it stops that finding with an **ask**: what it found,
+options with trade-offs, a recommendation, and the findings it affects
+(`findings.py ask`). The finding goes to `blocked` with its branch kept,
+and the findings the ask names do not start until it is answered.
+Repairs that run out become an ask when a choice would resolve them;
+otherwise, and for failures that need no choice, the finding is
+`blocked` with a bare reason.
+
+There are two ways out of `blocked`:
+
+- **answer** (`findings.py answer <id> --note ...`): keep the decision,
+  with your reply added to it. The next run resumes the same branch.
+- **decide**: a different candidate or direction. A new decision number
+  and a fresh branch.
 
 VM acceptance recipes take a host-wide gate, so parallel implement runs
 boot VMs one invocation at a time

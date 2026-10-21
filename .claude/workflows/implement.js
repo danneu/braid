@@ -94,8 +94,8 @@ const acceptance = plan.acceptance.map(r => `just ${r}`)
 const IMPL = {
   type: 'object',
   properties: {
-    status: { enum: ['done', 'blocked'] },
-    reason: { type: 'string', description: 'why blocked, or a one-line summary of the change' },
+    status: { enum: ['done', 'ask', 'blocked'] },
+    reason: { type: 'string', description: 'one line: the question asked, why blocked, or a summary of the change' },
     proof_command: { type: 'string', description: 'the command that runs the proof check' },
     subject: { type: 'string', description: 'conventional commit subject, lowercase' },
     body: { type: 'string', description: 'why: what led to the change, how it was chosen' },
@@ -122,14 +122,27 @@ const VET = {
   required: ['tree', 'approved', 'problems', 'message'],
 }
 
-const implPrompt = (feedback, prior) => `You implement braid review finding ${id}. Work only inside the worktree \`${wt.path}\` (branch \`${wt.branch}\`): use absolute paths under it and run every command from it.
+// Runs ask instead of guessing (plan/2026-10-21-1424/D6): the implementer
+// records the ask itself, so its text reaches the store without a relay.
+const ASK_RULES = `Stop and ask the user when you learn something that would change their call:
+- the chosen solution is impossible, or clearly worse than another;
+- a trade-off the user accepted proves materially different;
+- the work needs a choice the decision does not cover that changes observable behavior, an invariant, or an ADR;
+- it affects another queued finding (\`${F} list <run> --state decided\` lists them).
+Anything with an obvious answer inside the decision, decide yourself and say so in the landing message body. To ask, leave the branch committed and clean, record it, and return status \`ask\` with the question in one line:
+\`\`\`sh
+${F} ask ${id} --input - <<'EOF'
+{"found": "<what you learned and why it matters>", "options": [{"key": "<kebab-case>", "title": "...", "summary": "<what changes>", "tradeoffs": "..."}, ...], "recommendation": {"key": "<option key>", "justification": "..."}, "affects": ["<ids of other findings it affects>"]}
+EOF
+\`\`\`
+Return status \`blocked\` with the reason only for a failure that needs no choice, such as broken tooling.`
 
-Read the finding, its pitch, and the user's decision with \`${F} show ${id}\` (run that from \`${wt.path}\`).
+const workRules = (feedback, prior) => `First check the decision against \`master\` as it is now (plan/2026-10-21-1424/D9): other findings may have landed since the pitch. Compare the finding's claim and the pitch's reasoning with the current code. An adaptation that keeps the chosen solution is yours to make; say what changed in the landing message body. One that changes the solution is an ask.
 
-The user chose this solution: ${decision}
+${ASK_RULES}
 
 Rules:
-- Apply exactly this solution. If it proves wrong or impossible, do not swap in another one: return status \`blocked\` with the reason, and leave the branch as it is.
+- Apply exactly this solution; never swap in another one on your own.
 - Follow AGENTS.md: principles, ADRs, doc comments, docs in sync, test preambles.
 ${regression
     ? `- Proof (regression): the finding's Proof section says what the test must show.\n  First commit only the test, and confirm it fails for the right reason. Give that commit a \`Proof: red\` trailer. Then commit the fix and confirm the test passes. Keep exactly one \`Proof: red\` commit on the branch.`
@@ -138,7 +151,20 @@ ${regression
 - Commit all work on the branch (stage files by name; never --amend, never --no-verify, never push, never touch master). Leave the worktree clean. Branch commit messages never land; only the message you return does.
 ${prior ? `\nThe branch already has work from an earlier round or run. Inspect it (\`git log master..HEAD\`, \`git diff master...HEAD\`) and continue from it.` : ''}${feedback ? `\n\nFix these problems from the gates or the vetter, then commit:\n${feedback}` : ''}
 
-Return the proof command and a commit message for the landed change: a lowercase conventional-commit subject and a body explaining why. The merge queue squashes the branch into one commit with that message. The proof command runs from the repository root of another checkout, so it must not name \`${wt.path}\`.`
+When done, return the proof command and a commit message for the landed change: a lowercase conventional-commit subject and a body explaining why. The merge queue squashes the branch into one commit with that message. The proof command runs from the repository root of another checkout, so it must not name \`${wt.path}\`.`
+
+const implPrompt = (feedback, prior, exhausted) => `You implement braid review finding ${id}. Work only inside the worktree \`${wt.path}\` (branch \`${wt.branch}\`): use absolute paths under it and run every command from it.
+
+Read the finding, its pitch, and the user's decision with \`${F} show ${id}\` (run that from \`${wt.path}\`). If the decision has answers, they are the user's replies to earlier asks and part of the decision.
+
+The user chose this solution: ${decision}
+
+${exhausted ? `The gates or the vetter still reject the branch after ${MAX_REPAIRS} repair rounds:
+${exhausted}
+
+Do not change the branch. If a choice by the user would resolve this, ask. Otherwise return status \`blocked\` with the reason. Return empty strings for the proof command, subject, and body.
+
+${ASK_RULES}` : workRules(feedback, prior)}`
 
 // Gates and the vetter judge a detached snapshot of the candidate commit that
 // no implementer works in (plan/2026-10-21-1424/D12), so nothing done in the
@@ -193,12 +219,31 @@ async function block(reason) {
   return { id, status: 'blocked', reason }
 }
 
+// The implementer recorded an ask; confirm the store holds it before reporting.
+async function asked(question) {
+  const now = await store('confirm-ask', `${F} launch ${id}`, 'Implement',
+    v => v && v.action === 'stop' ? { id: 'string', action: 'string', reason: 'string' } : { id: 'string', action: 'string' })
+  if (now.action !== 'stop' || now.reason !== 'status is blocked, not decided') {
+    throw new Error(`${id}: the implementer reported an ask, but the store says ${JSON.stringify(now)}`)
+  }
+  log(`${id}: asking: ${question}`)
+  return { id, status: 'asking', reason: question }
+}
+
+// The implementer's verdict on a round: keep going, or stop with an ask or a block.
+async function settle(result) {
+  if (!result) return { id, status: 'gap', reason: 'implementer failed; relaunch resumes the branch' }
+  if (result.status === 'ask') return await asked(result.reason)
+  if (result.status === 'blocked') return await block(result.reason)
+  return null
+}
+
 while (true) {
   if (needImplement) {
     phase('Implement')
     impl = await agent(implPrompt(feedback, prior), { label: `implement:${id}`, phase: 'Implement', effort: 'xhigh', schema: IMPL })
-    if (!impl) return { id, status: 'gap', reason: 'implementer failed; relaunch resumes the branch' }
-    if (impl.status === 'blocked') return await block(impl.reason)
+    const stopped = await settle(impl)
+    if (stopped) return stopped
     prior = true
   }
   phase('Gate')
@@ -219,7 +264,12 @@ while (true) {
     }
   }
   if (problems) {
-    if (repairs >= MAX_REPAIRS) return await block(`repairs exhausted after ${repairs} rounds. ${problems}`)
+    if (repairs >= MAX_REPAIRS) {
+      // A rejection the run cannot repair may still be a choice for the user.
+      phase('Implement')
+      const last = await agent(implPrompt(null, true, problems), { label: `implement:${id}`, phase: 'Implement', effort: 'xhigh', schema: IMPL })
+      return (await settle(last)) || await block(`repairs exhausted after ${repairs} rounds. ${problems}`)
+    }
     repairs++
     log(`${id}: repair round ${repairs}`)
     feedback = problems

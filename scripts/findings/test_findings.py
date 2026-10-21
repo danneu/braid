@@ -452,6 +452,86 @@ class QueueTest(StoreTest):
         self.assertEqual((Path(again["path"]) / "a.txt").read_text(), "work in progress\n")
 
 
+def ask(affects=()) -> dict:
+    return {
+        "found": "Finding 001 already landed half of this.",
+        "options": [{"key": "finish", "title": "Finish it", "summary": "s", "tradeoffs": "t"},
+                    {"key": "redo", "title": "Redo it", "summary": "s", "tradeoffs": "t"}],
+        "recommendation": {"key": "finish", "justification": "j"},
+        "affects": list(affects),
+    }
+
+
+class AskTest(StoreTest):
+    """Asks and answers (plan/2026-10-21-1424/PO3)."""
+
+    def decided(self) -> str:
+        (fid,) = self.to_pitched(finding())
+        self.cli("decide", fid, "--candidate", "ideal-fix")
+        self.git("branch", f"review/{fid}/1")
+        return fid
+
+    def test_an_answer_keeps_the_decision_and_resumes_its_branch(self):
+        fid = self.decided()
+        self.cli("ask", fid, "--input", "-", payload=ask())
+        self.assertEqual(self.state(fid), "blocked")
+        self.assertEqual(self.cli("launch", fid)["action"], "stop")
+        self.assertEqual(self.cli("answer", fid, "--note", "finish it"),
+                         {"id": fid, "decision": 1, "branch": f"review/{fid}/1"})
+        launch = self.cli("launch", fid)
+        self.assertEqual((launch["action"], launch["branch"], launch["decision"]),
+                         ("resume", f"review/{fid}/1", 1))
+        (answered,) = self.cli("show", fid)["decisions"][-1]["answers"]
+        self.assertEqual((answered["ask"]["found"], answered["answer"]), (ask()["found"], "finish it"))
+
+    def test_an_answer_also_resumes_a_bare_block(self):
+        fid = self.decided()
+        self.cli("block", fid, "--reason", "repairs exhausted")
+        self.cli("answer", fid, "--note", "the code was approved; land it")
+        self.assertEqual(self.cli("launch", fid)["action"], "resume")
+        (answered,) = self.cli("show", fid)["decisions"][-1]["answers"]
+        self.assertEqual(answered["blocked_reason"], "repairs exhausted")
+
+    def test_a_new_decision_on_an_ask_starts_a_fresh_branch(self):
+        fid = self.decided()
+        self.cli("ask", fid, "--input", "-", payload=ask())
+        self.cli("decide", fid, "--candidate", "local-fix")
+        launch = self.cli("launch", fid)
+        self.assertEqual((launch["action"], launch["branch"], launch["decision"]),
+                         ("start", f"review/{fid}/2", 2))
+
+    def test_answer_is_refused_unless_blocked(self):
+        (pitched,) = self.to_pitched(finding())
+        self.refused("answer", pitched, "--note", "n")
+        fid = self.decided()
+        self.refused("answer", fid, "--note", "n")
+        self.assertEqual(self.cli("launch", fid)["action"], "resume")
+
+    def test_an_open_ask_holds_the_findings_it_names(self):
+        asker, other = self.decided(), self.decided()
+        self.cli("ask", asker, "--input", "-", payload=ask(affects=[other]))
+        held = self.cli("launch", other)
+        self.assertEqual((held["action"], held["reason"]), ("stop", f"held by the open ask on {asker}"))
+        # The hold stops starts only; a run already past launch may still land.
+        self.assertEqual(self.cli("worktree", other)["branch"], f"review/{other}/1")
+        self.cli("answer", asker, "--note", "go on")
+        self.assertEqual(self.cli("launch", other)["action"], "resume")
+
+    def test_refuses_malformed_asks(self):
+        fid = self.decided()
+        cases = {
+            "one option": {**ask(), "options": ask()["options"][:1]},
+            "recommendation is not an option": {**ask(), "recommendation": {"key": "x", "justification": "j"}},
+            "affects itself": ask(affects=[fid]),
+            "affects an unknown finding": ask(affects=[f"{RUN}-999"]),
+            "unknown key": {**ask(), "extra": 1},
+        }
+        for name, payload in cases.items():
+            with self.subTest(name):
+                self.refused("ask", fid, "--input", "-", payload=payload)
+        self.assertEqual(self.state(fid), "implementing")
+
+
 class PayloadTest(StoreTest):
     def test_refuses_malformed_findings(self):
         cases = {

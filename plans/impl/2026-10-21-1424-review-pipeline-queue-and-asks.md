@@ -248,7 +248,7 @@ decision so it resumes its approved branch, and start one `drain`.
 - [x] C1. fix(findings): decide "already merged" under the merge-queue lock
 - [x] C2. fix(review): workflows parse only validated control fields from the store
 - [x] C3. feat(review): gate and vet a snapshot of the candidate and the message that lands
-- [ ] C4. feat(review): runs stop with an ask, and an answer resumes the same branch
+- [x] C4. feat(review): runs stop with an ask, and an answer resumes the same branch
 - [ ] C5. feat(review): drain the decided queue; /pick-fix only decides
 - [ ] C6. feat(review): critique every pitch and record dependencies it finds
 
@@ -280,3 +280,18 @@ decision so it resumes its approved branch, and start one `drain`.
   accurate message, which landed. Both worktrees were removed. The
   implementer wrote a correct message, so the vetter's rewrite path did
   not run live. It uses the same `message` field that landed here.
+- C4: an ask is stored on the current decision (`decision.ask`), and
+  `blocked` stays the only stored state. `answer` moves the open ask or
+  bare reason into `decision.answers` with the reply. It works on any
+  blocked finding, so 010's bare block can be answered too.
+- C4: an open ask holds only `launch`. `worktree`, `snapshot`, and
+  `land` ignore it, so a run already past launch can still land; I11
+  is about starts.
+- C4: the implementer records its own ask through `findings.py ask`,
+  as review agents do, so the text never passes through a relay
+  (I10). The workflow then confirms through `launch` that the finding
+  is blocked before reporting `asking`.
+- C4: when repairs run out, the implementer gets one more turn with the
+  last rejection and may not change the branch. It records an ask if a
+  choice by the user would resolve the rejection; otherwise the run
+  blocks with the bare reason, as D6 allows.

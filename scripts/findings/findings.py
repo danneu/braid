@@ -81,6 +81,8 @@ FINDING_KEYS = {
 }
 PITCH_KEYS = {"id", "issue", "candidates", "ideal", "rejected", "recommendation"}
 CANDIDATE_KEYS = {"key", "title", "summary", "tradeoffs", "worst_case"}
+ASK_KEYS = {"found", "options", "recommendation", "affects"}
+OPTION_KEYS = {"key", "title", "summary", "tradeoffs"}
 
 
 class StoreError(Exception):
@@ -173,6 +175,33 @@ def validate_pitch(raw, ctx: str) -> dict:
     _require(rec["key"] in keys, f"{ctx}: recommendation must name a candidate key")
     _text(rec, "justification", f"{ctx}: recommendation")
     return {k: raw[k] for k in ("issue", "candidates", "ideal", "rejected", "recommendation")}
+
+
+def validate_ask(raw, fid: str) -> dict:
+    """An ask has a pitch's shape (plan/2026-10-21-1424/D6): what was found, options, a recommendation."""
+    ctx = f"{fid}: ask"
+    _obj(raw, ASK_KEYS, ctx)
+    _text(raw, "found", ctx)
+    opts = raw["options"]
+    _require(isinstance(opts, list) and len(opts) >= 2, f"{ctx}: 'options' must list at least two choices")
+    keys = []
+    for i, o in enumerate(opts):
+        octx = f"{ctx}: option {i}"
+        _obj(o, OPTION_KEYS, octx)
+        key = _text(o, "key", octx, one_line=True)
+        _require(CANDIDATE_KEY.match(key) is not None, f"{octx}: key {key!r} must be kebab-case")
+        _require(key not in keys, f"{octx}: duplicate key {key!r}")
+        keys.append(key)
+        for field in OPTION_KEYS - {"key"}:
+            _text(o, field, octx)
+    rec = _obj(raw["recommendation"], {"key", "justification"}, f"{ctx}: recommendation")
+    _require(rec["key"] in keys, f"{ctx}: recommendation must name an option key")
+    _text(rec, "justification", f"{ctx}: recommendation")
+    affects = raw["affects"]
+    _require(isinstance(affects, list) and all(isinstance(a, str) for a in affects),
+             f"{ctx}: 'affects' must be a list of finding ids")
+    _require(fid not in affects, f"{ctx}: 'affects' names the finding itself")
+    return {k: raw[k] for k in ("found", "options", "recommendation", "affects")}
 
 
 def score(f: dict) -> float:
@@ -283,8 +312,21 @@ def render(f: dict) -> str:
         out.append(f"Candidate: `{d['candidate']}`" if d["candidate"] else "Candidate: none (direction in note)")
         if d.get("note"):
             out += ["", d["note"]]
+        for a in d.get("answers", []):
+            asked = a["ask"]["found"] if a.get("ask") else f"Blocked: {a['blocked_reason']}"
+            out += ["", f"Asked: {asked}", "", f"Answered: {a['answer']}"]
         if d.get("blocked_reason"):
             out += ["", f"Blocked: {d['blocked_reason']}"]
+        if d.get("ask"):
+            ask = d["ask"]
+            out += ["", "### Open ask", "", ask["found"], ""]
+            for o in ask["options"]:
+                tag = " (recommended)" if o["key"] == ask["recommendation"]["key"] else ""
+                out += [f"- **{o['title']}** `{o['key']}`{tag}: {o['summary']}",
+                        f"  - Trade-offs: {o['tradeoffs']}"]
+            out += ["", f"Recommendation: {ask['recommendation']['justification']}"]
+            if ask["affects"]:
+                out += ["", f"Affects: {', '.join(ask['affects'])}"]
     if f.get("note"):
         out += ["", "## Note", "", f["note"]]
     return "\n".join(out) + "\n"
@@ -318,6 +360,14 @@ class Store:
         d = self.run_dir(run_id)
         _require(d.is_dir(), f"unknown run {run_id}")
         return [self.load(p.stem) for p in sorted(d.glob("*.md")) if FINDING_ID.match(p.stem)]
+
+    def runs(self) -> list[str]:
+        return sorted(d.name for d in self.root.glob("*") if d.is_dir() and RUN_ID.match(d.name))
+
+    def held_by(self, fid: str) -> list[str]:
+        """Findings whose open ask names `fid`; it must not start until they are answered."""
+        return [f["id"] for run in self.runs() for f in self.findings(run)
+                if f["status"] == "blocked" and fid in f["decisions"][-1].get("ask", {}).get("affects", [])]
 
     @contextlib.contextmanager
     def locked(self):
@@ -523,7 +573,41 @@ def cmd_block(store: Store, fid: str, reason: str) -> dict:
     return {"id": fid, "status": "blocked"}
 
 
-def cmd_launch(store: Store, fid: str) -> dict:
+def cmd_ask(store: Store, fid: str, payload) -> dict:
+    """Stops a decided finding with a question for the user (plan/2026-10-21-1424/D6).
+
+    The branch and worktree are kept, so an answer that keeps the decision
+    resumes them.
+    """
+    f = store.load(fid)
+    _require(store.state(f) != "merged", f"{fid}: already merged")
+    ask = validate_ask(payload, fid)
+    for other in ask["affects"]:
+        store.load(other)
+    _transition(f, "blocked")
+    f["decisions"][-1]["ask"] = ask
+    _save_all(store, [f])
+    return {"id": fid, "status": "blocked"}
+
+
+def cmd_answer(store: Store, fid: str, note: str) -> dict:
+    """Unblocks a finding under its current decision (plan/2026-10-21-1424/D7).
+
+    The decision number, and so the branch, stay the same; the reply joins
+    the decision. A different direction is a new decision (`decide`).
+    """
+    f = store.load(fid)
+    _require(f["status"] == "blocked", f"{fid}: only a blocked finding can be answered; it is {f['status']}")
+    _require(note.strip() != "", f"{fid}: an answer needs text")
+    d = f["decisions"][-1]
+    d.setdefault("answers", []).append(
+        {"ask": d.pop("ask", None), "blocked_reason": d.pop("blocked_reason", None), "answer": note})
+    _transition(f, "decided")
+    _save_all(store, [f])
+    return {"id": fid, "decision": d["number"], "branch": branch_name(fid, d["number"])}
+
+
+def cmd_launch(store: Store, fid: str, hold: bool = True) -> dict:
     """What an implement run may do, decided before any side effect (plan/2026-10-21-1047/D12).
 
     Only control fields (plan/2026-10-21-1424/D1): a workflow relays this
@@ -535,6 +619,11 @@ def cmd_launch(store: Store, fid: str) -> dict:
         return {"id": fid, "action": "stop", "reason": "merged"}
     if f["status"] != "decided":
         return {"id": fid, "action": "stop", "reason": f"status is {f['status']}, not decided"}
+    # An open ask holds only starts (plan/2026-10-21-1424/I11); a run already
+    # past launch may still land.
+    held = store.held_by(fid) if hold else []
+    if held:
+        return {"id": fid, "action": "stop", "reason": f"held by the open ask on {', '.join(held)}"}
     decision = f["decisions"][-1]
     branch = branch_name(fid, decision["number"])
     return {
@@ -565,7 +654,7 @@ def _worktree_of(repo: Path, branch: str) -> Path | None:
 
 
 def _authorized(store: Store, fid: str) -> dict:
-    plan = cmd_launch(store, fid)
+    plan = cmd_launch(store, fid, hold=False)
     _require(plan["action"] != "stop", f"{fid}: {plan.get('reason')}")
     return plan
 
@@ -721,9 +810,15 @@ def _parser() -> argparse.ArgumentParser:
         s = sub.add_parser(name)
         s.add_argument("id")
         s.add_argument("--note")
-    s = sub.add_parser("block", help="stop a decided finding until the user decides again")
+    s = sub.add_parser("block", help="stop a decided finding for a failure that needs no choice")
     s.add_argument("id")
     s.add_argument("--reason", required=True)
+    s = sub.add_parser("ask", help="stop a decided finding with a question for the user")
+    s.add_argument("id")
+    s.add_argument("--input", required=True)
+    s = sub.add_parser("answer", help="unblock a finding under its current decision and branch")
+    s.add_argument("id")
+    s.add_argument("--note", required=True)
     sub.add_parser("launch", help="what an implement run may do now").add_argument("id")
     sub.add_parser("show", help="print one finding with its derived state").add_argument("id")
     s = sub.add_parser("list", help="list a run's findings in rank order")
@@ -758,6 +853,10 @@ def _dispatch(store: Store, repo: Path, args) -> object:
         return cmd_close(store, args.id, {"defer": "deferred", "drop": "dropped"}[args.cmd], args.note)
     if args.cmd == "block":
         return cmd_block(store, args.id, args.reason)
+    if args.cmd == "ask":
+        return cmd_ask(store, args.id, _read_payload(args.input))
+    if args.cmd == "answer":
+        return cmd_answer(store, args.id, args.note)
     if args.cmd == "launch":
         return cmd_launch(store, args.id)
     if args.cmd == "worktree":
