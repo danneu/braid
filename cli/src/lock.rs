@@ -5,7 +5,9 @@ use crate::mapper_close::{
     CloseMapperError, close_mapper_with_retry, forget_existing_scanned_devices_best_effort,
 };
 use crate::membership::{MembershipError, PoolMembership};
-use crate::online_state::{OnlineError, OnlineStateOps, RealOnlineStateOps, mark_offline};
+use crate::online_state::{
+    BRAID_ONLINE_UNIT, OnlineError, OnlineStateOps, RealOnlineStateOps, mark_offline,
+};
 use crate::parse::types::{BackingDevice, CryptsetupStatusOutput};
 use crate::parse::{parse_cryptsetup_luks_uuid, parse_cryptsetup_status};
 use crate::pool_lock::StopCoordinatorGuard;
@@ -543,27 +545,41 @@ where
     }
 }
 
-/// Compile dry-run steps for lock from the same ordered close set that
-/// `execute` consumes, keeping forget paths, dry-run steps, and real
-/// close calls byte-identical on identical inputs.
+/// Compile dry-run steps for lock from the same unit stops and ordered
+/// close set that `execute` consumes, in execute's order, keeping forget
+/// paths, dry-run steps, and real stop and close calls byte-identical on
+/// identical inputs.
 fn compile_lock_steps(
     pool_was_mounted: bool,
     pause_balance_before_unmount: bool,
+    unit_stops: &[LockUnitStop],
     close_set: &LockCloseSet,
     mount_point: &MountPoint,
 ) -> Vec<Step> {
     let mut steps = Vec::new();
 
+    if pool_was_mounted && pause_balance_before_unmount {
+        steps.push(Step {
+            risk: "safe",
+            description: "pause btrfs balance".into(),
+            commands: vec![CmdRequest::BtrfsBalancePause {
+                mount_point: mount_point.clone(),
+            }],
+        });
+    }
+
+    for stop in unit_stops {
+        steps.push(Step {
+            risk: "safe",
+            description: format!("stop {}", stop.unit()),
+            commands: vec![CmdRequest::SystemctlStop {
+                unit: stop.unit().to_owned(),
+                no_block: false,
+            }],
+        });
+    }
+
     if pool_was_mounted {
-        if pause_balance_before_unmount {
-            steps.push(Step {
-                risk: "safe",
-                description: "pause btrfs balance".into(),
-                commands: vec![CmdRequest::BtrfsBalancePause {
-                    mount_point: mount_point.clone(),
-                }],
-            });
-        }
         steps.push(Step {
             risk: "safe",
             description: format!("unmount {}", mount_point),
@@ -626,6 +642,9 @@ pub struct LockPlan {
     pub pool_was_mounted: bool,
     pause_balance_before_unmount: bool,
     umount_retry_attempts: u32,
+    /// Ordered unit stops consumed by preview and execute; empty without
+    /// `systemd_lifecycle`.
+    unit_stops: Vec<LockUnitStop>,
     /// Ordered mapper closes consumed by preview, forget, and execute.
     pub close_set: LockCloseSet,
     /// Planner-derived members confidently absent from every observed live
@@ -649,6 +668,7 @@ impl LockPlan {
             steps: compile_lock_steps(
                 self.pool_was_mounted,
                 self.pause_balance_before_unmount,
+                &self.unit_stops,
                 &self.close_set,
                 &self.mount_point,
             ),
@@ -671,35 +691,44 @@ impl LockPlan {
 
         let mount_point = &self.mount_point;
 
-        // 2. If mounted → unmount
+        // 1. Shutdown-only balance pause.
+        if self.pool_was_mounted && self.pause_balance_before_unmount {
+            emit_status(&line(StatusTag::Wait, "pool: pausing btrfs balance..."));
+            let pause_result = runner.run(&CmdRequest::BtrfsBalancePause {
+                mount_point: mount_point.clone(),
+            })?;
+            if pause_result.exit_status == 0 {
+                emit_status(&line(StatusTag::Ok, "pool: balance paused"));
+            } else if pause_result.exit_status == 2 {
+                // btrfs-progs v6.19.1, cmds/balance.c
+                // (cmd_balance_pause) maps only ENOTCONN to exit 2;
+                // every other failure returns 1. The wording paired with
+                // ENOTCONN is diagnostic, not part of this classifier.
+                emit_status(&line(
+                    StatusTag::Warn,
+                    "pool: balance was no longer running -- continuing",
+                ));
+            } else {
+                let stderr = pause_result.stderr.trim();
+                return Err(LockError::Failed(format!(
+                    "btrfs balance pause {mount_point} failed (exit {}): {stderr}",
+                    pause_result.exit_status
+                )));
+            }
+        }
+
+        // 2. Stop the planned units right before unmount. Every refusal
+        // lives in the planner, so a refused lock never stops a unit.
+        run_unit_stops(
+            &self.unit_stops,
+            &RealOnlineStateOps::new(runner),
+            &mut io::stderr(),
+        );
+
+        // 3. If mounted → unmount
         let mut umount_error: Option<LockError> = None;
         let mut first_mapper_error: Option<LockError> = None;
         if self.pool_was_mounted {
-            if self.pause_balance_before_unmount {
-                emit_status(&line(StatusTag::Wait, "pool: pausing btrfs balance..."));
-                let pause_result = runner.run(&CmdRequest::BtrfsBalancePause {
-                    mount_point: mount_point.clone(),
-                })?;
-                if pause_result.exit_status == 0 {
-                    emit_status(&line(StatusTag::Ok, "pool: balance paused"));
-                } else if pause_result.exit_status == 2 {
-                    // btrfs-progs v6.19.1, cmds/balance.c
-                    // (cmd_balance_pause) maps only ENOTCONN to exit 2;
-                    // every other failure returns 1. The wording paired with
-                    // ENOTCONN is diagnostic, not part of this classifier.
-                    emit_status(&line(
-                        StatusTag::Warn,
-                        "pool: balance was no longer running -- continuing",
-                    ));
-                } else {
-                    let stderr = pause_result.stderr.trim();
-                    return Err(LockError::Failed(format!(
-                        "btrfs balance pause {mount_point} failed (exit {}): {stderr}",
-                        pause_result.exit_status
-                    )));
-                }
-            }
-
             emit_status(&line(
                 StatusTag::Wait,
                 &format!("pool: unmounting {mount_point}..."),
@@ -736,7 +765,7 @@ impl LockPlan {
             }
         }
 
-        // 3. Close each planned mapper. The membership-side prelude is
+        // 4. Close each planned mapper. The membership-side prelude is
         // planner-derived so execute never infers absence from reconstructed
         // mapper names after scan or classification uncertainty.
         let mut all_already_closed = true;
@@ -776,7 +805,7 @@ impl LockPlan {
             }
         }
 
-        // 4. Return first fatal mapper error if any, otherwise deferred umount error
+        // 5. Return first fatal mapper error if any, otherwise deferred umount error
         if let Some(e) = first_mapper_error {
             return Err(e);
         }
@@ -784,7 +813,7 @@ impl LockPlan {
             return Err(e);
         }
 
-        // 5. If nothing was done → short message
+        // 6. If nothing was done → short message
         if !self.pool_was_mounted && all_already_closed && !self.cleanup_uncertain {
             emit_status("pool already locked\n");
         }
@@ -795,10 +824,11 @@ impl LockPlan {
 
 /// Plan a `braid lock` run. Owns the mountpoint probe, preflight,
 /// per-device probe (for UUID classification), close-set assembly,
-/// step compilation, and any `PreviewNote::Warn` notes: one per
-/// detected orphan mapper, per skipped candidate, the mounted fallback
-/// warning when per-device probe failed, or a single warn from a failed
-/// candidate scan. The returned `LockPlan` is the single source of
+/// the unit-stop list, step compilation, and any `PreviewNote::Warn`
+/// notes: one per detected orphan mapper, per skipped candidate, the
+/// mounted fallback warning when per-device probe failed, or a single
+/// warn from a failed candidate scan. It is lock's only refusal site and
+/// mutates nothing. The returned `LockPlan` is the single source of
 /// truth for both `--dry-run` preview and real execution.
 pub fn plan_lock<R, F>(
     runner: &R,
@@ -882,6 +912,9 @@ where
     };
     let members_known_closed =
         members_known_closed(membership, &acc.members_potentially_present, acc.cleanup);
+    // Resolve the unit stops last, after every refusal check above, so a
+    // refused lock does not even look up consumers. The stops run in execute.
+    let unit_stops = plan_unit_stops(config, &RealOnlineStateOps::new(runner));
 
     Ok(LockPlan {
         notes: acc.notes,
@@ -891,6 +924,7 @@ where
             LockMode::User => UMOUNT_RETRY_ATTEMPTS,
             LockMode::SystemdStop => SYSTEMD_STOP_UMOUNT_RETRY_ATTEMPTS,
         },
+        unit_stops,
         close_set,
         members_known_closed,
         cleanup_uncertain: acc.cleanup.is_uncertain(),
@@ -1197,11 +1231,6 @@ where
     F: Filesystem + ?Sized,
     S: Sleeper,
 {
-    if !opts.dry_run {
-        let online_ops = RealOnlineStateOps::new(runner);
-        run_lock_pre_steps(config, &online_ops, &mut std::io::stderr());
-    }
-
     let mut plan = plan_lock(runner, fs, config, membership, opts.mode)?;
     plan.notes.splice(0..0, opts.extra_notes);
     if opts.dry_run {
@@ -1211,28 +1240,64 @@ where
     plan.execute(runner, fs, sleeper)
 }
 
-/// Shared pre-unmount teardown for both plain `braid lock` and the
-/// `--systemd-stop` ExecStop path: stop scrub units, then each `BoundBy
-/// braid-online.service` consumer. Run unconditionally so teardown is
-/// code-owned regardless of systemd's cascade ordering; decision 018 covers
-/// when these ExecStop stops are no-ops vs. load-bearing.
-fn run_lock_pre_steps(cfg: &Config, online_ops: &dyn OnlineStateOps, out: &mut dyn Write) {
-    if !cfg.systemd_lifecycle() {
-        return;
-    }
+/// Scrub units lock stops, timer first so it cannot re-trigger the service,
+/// then the service, whose stop cancels an in-flight scrub.
+const SCRUB_UNITS: [&str; 2] = ["braid-scrub.timer", "braid-scrub.service"];
 
-    for unit in ["braid-scrub.timer", "braid-scrub.service"] {
-        stop_unit_silent(online_ops, unit);
-    }
+/// A unit that lock stops right before unmount. The planner picks each entry
+/// and its failure policy, so execute stops exactly the units the preview
+/// showed and never looks the list up again.
+#[derive(Debug, PartialEq, Eq)]
+enum LockUnitStop {
+    /// A scrub unit. A failed stop is silent.
+    Scrub(&'static str),
+    /// A `BoundBy braid-online.service` consumer such as smbd. A failed stop
+    /// warns.
+    BoundConsumer(String),
+}
 
-    let Ok(bound_by) = online_ops.list_bound_by("braid-online.service") else {
-        return;
-    };
-    for unit in bound_by {
-        if matches!(unit.as_str(), "braid-scrub.timer" | "braid-scrub.service") {
-            continue;
+impl LockUnitStop {
+    fn unit(&self) -> &str {
+        match self {
+            Self::Scrub(unit) => unit,
+            Self::BoundConsumer(unit) => unit,
         }
-        stop_unit_warn_on_error(online_ops, out, &unit);
+    }
+}
+
+/// Resolve lock's unit stops for both plain `braid lock` and the
+/// `--systemd-stop` ExecStop path: the scrub units, then each `BoundBy
+/// braid-online.service` consumer. Planned unconditionally so teardown is
+/// code-owned regardless of systemd's cascade ordering; decision 018 covers
+/// when these ExecStop stops are no-ops vs. load-bearing. It only reads
+/// systemd. A failed BoundBy lookup quietly plans no consumer stops.
+fn plan_unit_stops(cfg: &Config, online_ops: &dyn OnlineStateOps) -> Vec<LockUnitStop> {
+    if !cfg.systemd_lifecycle() {
+        return Vec::new();
+    }
+
+    let consumers = online_ops
+        .list_bound_by(BRAID_ONLINE_UNIT)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|unit| !SCRUB_UNITS.contains(&unit.as_str()))
+        .map(LockUnitStop::BoundConsumer);
+    SCRUB_UNITS
+        .into_iter()
+        .map(LockUnitStop::Scrub)
+        .chain(consumers)
+        .collect()
+}
+
+/// Execute's unit-stop step: stop each planned unit in order under its
+/// failure policy. A failed stop never aborts lock, because a consumer that
+/// is still running surfaces as a busy umount with its own retry and hint.
+fn run_unit_stops(stops: &[LockUnitStop], online_ops: &dyn OnlineStateOps, out: &mut dyn Write) {
+    for stop in stops {
+        match stop {
+            LockUnitStop::Scrub(unit) => stop_unit_silent(online_ops, unit),
+            LockUnitStop::BoundConsumer(unit) => stop_unit_warn_on_error(online_ops, out, unit),
+        }
     }
 }
 
@@ -1549,13 +1614,44 @@ mod tests {
             .with_mapper_open(mapper_bbb, "/dev/disk/by-id/b", BBB_UUID)
     }
 
-    // Intent: cmd_lock skips module-owned lifecycle pre-steps without the
-    // systemd_lifecycle capability.
+    fn bound_by_output(units: &str) -> RawCommandOutput {
+        RawCommandOutput {
+            cmd: "systemctl show -P BoundBy braid-online.service".into(),
+            stdout: format!("{units}\n"),
+            stderr: String::new(),
+            exit_status: 0,
+        }
+    }
+
+    fn stop_request(unit: &str) -> CmdRequest {
+        CmdRequest::SystemctlStop {
+            unit: unit.into(),
+            no_block: false,
+        }
+    }
+
+    fn bound_by_request() -> CmdRequest {
+        CmdRequest::SystemctlShowBoundBy {
+            unit: BRAID_ONLINE_UNIT.into(),
+        }
+    }
+
+    /// The stop list `plan_unit_stops` yields for the scrub units plus smbd.
+    fn scrub_and_smbd_stops() -> Vec<LockUnitStop> {
+        vec![
+            LockUnitStop::Scrub("braid-scrub.timer"),
+            LockUnitStop::Scrub("braid-scrub.service"),
+            LockUnitStop::BoundConsumer("smbd.service".into()),
+        ]
+    }
+
+    // Intent: cmd_lock plans and runs no unit stops without the
+    //   systemd_lifecycle capability.
     // Why it exists: standalone CLI installs do not define braid-online or
-    // scrub units, so lock must not spawn systemctl for them.
+    //   scrub units, so lock must not spawn systemctl for them.
     // Scenario: CLI-only host locks an already-unmounted pool.
     #[test]
-    fn cmd_lock_skips_lifecycle_pre_steps_when_lifecycle_disabled() {
+    fn cmd_lock_skips_unit_stops_when_lifecycle_disabled() {
         let runner = MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
                 path: MountPoint::new("/mnt/storage".to_owned()).into(),
@@ -1573,88 +1669,186 @@ mod tests {
         assert!(
             !requests.iter().any(|request| matches!(
                 request,
-                CmdRequest::SystemctlStop { unit, .. }
-                    if unit == "braid-scrub.timer" || unit == "braid-scrub.service"
+                CmdRequest::SystemctlStop { .. } | CmdRequest::SystemctlShowBoundBy { .. }
             )),
-            "unexpected scrub stop request: {requests:?}"
-        );
-        assert!(
-            !requests.iter().any(|request| matches!(
-                request,
-                CmdRequest::SystemctlShowBoundBy { unit } if unit == "braid-online.service"
-            )),
-            "unexpected BoundBy request: {requests:?}"
+            "unexpected systemctl request: {requests:?}"
         );
     }
 
-    // Intent: cmd_lock runs module-owned lifecycle pre-steps when configured.
-    // Why it exists: module-managed lock must stop scrub and braid-online-bound
-    // consumers before unmounting the pool.
-    // Scenario: NixOS module config emits systemd_lifecycle=true and the pool
-    // is already unmounted.
+    // Intent: on a lifecycle host, a real lock stops the scrub timer, the
+    //   scrub service, then each BoundBy consumer, after planning and right
+    //   before umount.
+    // Why it exists: module-managed lock must stop scrub and the shares that
+    //   hold the mount before it unmounts, and only once the planner has
+    //   decided not to refuse.
+    // Scenario: smbd.service is bound to braid-online.service and the
+    //   operator runs `braid lock` on a mounted pool.
     #[test]
-    fn cmd_lock_runs_lifecycle_pre_steps_when_lifecycle_enabled() {
-        let runner = MockRunner::default()
+    fn cmd_lock_stops_units_after_planning_and_before_umount() {
+        let runner = lock_mounted_runner()
+            .with_output(bound_by_request(), bound_by_output("smbd.service"))
             .with_output(
-                CmdRequest::SystemctlStop {
-                    unit: "braid-scrub.timer".into(),
-                    no_block: false,
-                },
+                stop_request("braid-scrub.timer"),
                 lock_ok_raw("systemctl stop braid-scrub.timer"),
             )
             .with_output(
-                CmdRequest::SystemctlStop {
-                    unit: "braid-scrub.service".into(),
-                    no_block: false,
-                },
+                stop_request("braid-scrub.service"),
                 lock_ok_raw("systemctl stop braid-scrub.service"),
             )
             .with_output(
-                CmdRequest::SystemctlShowBoundBy {
-                    unit: "braid-online.service".into(),
-                },
-                lock_ok_raw("systemctl show -P BoundBy braid-online.service"),
+                stop_request("smbd.service"),
+                lock_ok_raw("systemctl stop smbd.service"),
             )
             .with_output(
-                CmdRequest::MountpointCheck {
-                    path: MountPoint::new("/mnt/storage".to_owned()).into(),
+                CmdRequest::CryptsetupClose {
+                    mapper: MapperName::from_basename("braid-aaa".into()),
                 },
-                lock_err_raw("mountpoint -q /mnt/storage", 1, ""),
+                lock_ok_raw("cryptsetup close braid-aaa"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupClose {
+                    mapper: MapperName::from_basename("braid-bbb".into()),
+                },
+                lock_ok_raw("cryptsetup close braid-bbb"),
             );
-        let fs = lock_fs(&[]);
-        let config = cfg(r#"{"mount_point":"/mnt/storage","systemd_lifecycle":true}"#);
+        let fs = lock_fs(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]);
+        let config = lifecycle_config();
         let membership = lock_test_membership();
 
         cmd_lock_impl(&runner, &fs, &LockNoopSleeper, &config, &membership, false)
             .expect("lock should succeed");
 
         let requests = runner.requests();
-        for unit in ["braid-scrub.timer", "braid-scrub.service"] {
-            assert!(
-                requests.iter().any(|request| matches!(
-                    request,
-                    CmdRequest::SystemctlStop { unit: requested, no_block: false }
-                        if requested.as_str() == unit
-                )),
-                "missing stop for {unit}: {requests:?}"
-            );
-        }
         assert!(
-            requests.iter().any(|request| matches!(
-                request,
-                CmdRequest::SystemctlShowBoundBy { unit } if unit == "braid-online.service"
-            )),
-            "missing BoundBy request: {requests:?}"
+            matches!(requests.first(), Some(CmdRequest::MountpointCheck { .. })),
+            "planning must come first: {requests:?}"
+        );
+        let lifecycle: Vec<&CmdRequest> = requests
+            .iter()
+            .filter(|request| {
+                matches!(
+                    request,
+                    CmdRequest::SystemctlShowBoundBy { .. }
+                        | CmdRequest::SystemctlStop { .. }
+                        | CmdRequest::Umount { .. }
+                )
+            })
+            .collect();
+        assert_eq!(
+            lifecycle,
+            vec![
+                &bound_by_request(),
+                &stop_request("braid-scrub.timer"),
+                &stop_request("braid-scrub.service"),
+                &stop_request("smbd.service"),
+                &umount_request(),
+            ]
         );
     }
 
-    // Intent: run_lock_pre_steps skips scrub units returned from BoundBy.
-    // Why it exists: scrub units are stopped silently in a separate phase, and
-    // the consumer-warning path must not revisit them.
-    // Scenario: braid-online.service has scrub units plus SMB/NFS consumers
-    // bound to it while lock prepares to unmount the pool.
+    // Intent: a lock that refuses stops no unit and does not even look up
+    //   BoundBy consumers; every refusal comes before any unit stop.
+    // Why it exists: lock used to stop the scrub units and every BoundBy
+    //   consumer before plan_lock ran its refusal checks. A refusal then left
+    //   the pool mounted and braid-online.service active with shares and the
+    //   scrub timer down, and `braid unlock` could not bring them back.
+    // Scenario: on a module install, the shutdown path left a paused balance
+    //   behind. The operator runs `braid lock`, which refuses on that
+    //   exclusive op.
     #[test]
-    fn bound_by_pre_step_skips_the_scrub_units() {
+    fn refused_lock_stops_no_units() {
+        let runner = lock_with_fsid_probe_mocks(MockRunner::default().with_output(
+            CmdRequest::MountpointCheck {
+                path: MountPoint::new("/mnt/storage".to_owned()).into(),
+            },
+            lock_ok_raw("mountpoint -q /mnt/storage"),
+        ));
+        let fs = lock_fs(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"])
+            .with_excl_op("balance paused");
+        let config = lifecycle_config();
+        let membership = lock_test_membership();
+
+        let err = cmd_lock_impl(&runner, &fs, &LockNoopSleeper, &config, &membership, false)
+            .expect_err("should refuse -- balance is paused");
+
+        assert!(
+            err.to_string().contains("in progress"),
+            "expected paused-balance refusal, got: {err}"
+        );
+        let requests = runner.requests();
+        assert!(
+            !requests
+                .iter()
+                .any(|request| matches!(request, CmdRequest::SystemctlStop { .. })),
+            "a refused lock must stop no unit: {requests:?}"
+        );
+        assert!(
+            !requests
+                .iter()
+                .any(|request| matches!(request, CmdRequest::SystemctlShowBoundBy { .. })),
+            "a refused lock must not look up BoundBy consumers: {requests:?}"
+        );
+    }
+
+    // Intent: on a lifecycle host, the `braid lock --dry-run` preview shows a
+    //   stop step per planned unit, before the unmount, and planning stops
+    //   nothing.
+    // Why it exists: the stops used to run outside the plan, so the preview
+    //   never showed that lock would take shares down, breaking ADR 022's
+    //   rule that the preview shows the plan execute consumes.
+    // Scenario: smbd.service is bound to braid-online.service and the
+    //   operator previews `braid lock --dry-run` on a mounted pool.
+    #[test]
+    fn dry_run_preview_shows_unit_stops_before_umount() {
+        let runner = lock_with_fsid_probe_mocks(MockRunner::default().with_output(
+            CmdRequest::MountpointCheck {
+                path: MountPoint::new("/mnt/storage".to_owned()).into(),
+            },
+            lock_ok_raw("mountpoint -q /mnt/storage"),
+        ))
+        .with_output(bound_by_request(), bound_by_output("smbd.service"));
+        let fs = lock_fs(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]);
+        let config = lifecycle_config();
+
+        let plan = plan_lock(
+            &runner,
+            &fs,
+            &config,
+            &lock_test_membership(),
+            LockMode::User,
+        )
+        .expect("plan_lock should succeed on mounted pool");
+        let output = plan.preview().render();
+
+        assert_lines_in_order(
+            &output,
+            &[
+                "[safe] stop braid-scrub.timer",
+                "$ systemctl stop braid-scrub.timer",
+                "[safe] stop braid-scrub.service",
+                "$ systemctl stop braid-scrub.service",
+                "[safe] stop smbd.service",
+                "$ systemctl stop smbd.service",
+                "[safe] unmount /mnt/storage",
+            ],
+        );
+        let requests = runner.requests();
+        assert!(
+            !requests
+                .iter()
+                .any(|request| matches!(request, CmdRequest::SystemctlStop { .. })),
+            "planning must stop no unit: {requests:?}"
+        );
+    }
+
+    // Intent: plan_unit_stops plans the scrub units, then each BoundBy
+    //   consumer other than the scrub units, and only reads systemd to do it.
+    // Why it exists: the scrub units carry their own silent stop policy and
+    //   must not be stopped twice, and the planner may not stop anything.
+    // Scenario: braid-online.service has the scrub units plus SMB/NFS
+    //   consumers bound to it while lock plans.
+    #[test]
+    fn plan_unit_stops_skips_scrub_units_in_bound_by() {
         let config = lifecycle_config();
         let ops = RecordingOnlineStateOps::new();
         ops.set_bound_by_ok(vec![
@@ -1663,34 +1857,57 @@ mod tests {
             "smbd.service".into(),
             "nfs-server.service".into(),
         ]);
-        let mut out = Vec::new();
 
-        run_lock_pre_steps(&config, &ops, &mut out);
+        let stops = plan_unit_stops(&config, &ops);
 
         assert_eq!(
-            ops.calls(),
+            stops,
             vec![
-                "stop braid-scrub.timer no_block=false",
-                "stop braid-scrub.service no_block=false",
-                "list_bound_by braid-online.service",
-                "stop smbd.service no_block=false",
-                "stop nfs-server.service no_block=false",
+                LockUnitStop::Scrub("braid-scrub.timer"),
+                LockUnitStop::Scrub("braid-scrub.service"),
+                LockUnitStop::BoundConsumer("smbd.service".into()),
+                LockUnitStop::BoundConsumer("nfs-server.service".into()),
             ]
         );
-        assert_eq!(String::from_utf8(out).unwrap(), "");
+        assert_eq!(ops.calls(), vec!["list_bound_by braid-online.service"]);
     }
 
-    // Intent: run_lock_pre_steps reports the exit code and stderr from a
-    // nonzero consumer stop.
-    // Why it exists: operators need systemctl's diagnostic when a BoundBy
-    // consumer blocks shutdown or unmount cleanup.
-    // Scenario: smbd.service is bound to braid-online.service but systemctl
-    // stop returns a nonzero status during lock.
+    // Intent: a failed BoundBy lookup still plans the scrub stops and plans
+    //   no consumer stop, without failing the lock.
+    // Why it exists: the BoundBy lookup is best-effort; a failed systemctl
+    //   show must not block lock or abort the scrub stops.
+    // Scenario: systemctl cannot read braid-online.service BoundBy while lock
+    //   plans.
     #[test]
-    fn bound_by_pre_step_warns_on_nonzero_stop() {
+    fn plan_unit_stops_keeps_scrub_stops_when_bound_by_lookup_fails() {
         let config = lifecycle_config();
         let ops = RecordingOnlineStateOps::new();
-        ops.set_bound_by_ok(vec!["smbd.service".into()]);
+        ops.set_bound_by_err(StagedOnlineFailure::SystemctlShow {
+            unit: "braid-online.service".into(),
+            exit_code: 1,
+            stderr: String::new(),
+        });
+
+        let stops = plan_unit_stops(&config, &ops);
+
+        assert_eq!(
+            stops,
+            vec![
+                LockUnitStop::Scrub("braid-scrub.timer"),
+                LockUnitStop::Scrub("braid-scrub.service"),
+            ]
+        );
+    }
+
+    // Intent: run_unit_stops reports the exit code and stderr from a nonzero
+    //   consumer stop and goes on.
+    // Why it exists: operators need systemctl's diagnostic when a BoundBy
+    //   consumer may still hold the mount busy.
+    // Scenario: smbd.service is bound to braid-online.service but systemctl
+    //   stop returns a nonzero status during lock.
+    #[test]
+    fn unit_stop_warns_on_nonzero_consumer_stop() {
+        let ops = RecordingOnlineStateOps::new();
         ops.set_systemctl_stop_err(
             "smbd.service",
             StagedOnlineFailure::SystemctlStop {
@@ -1701,7 +1918,7 @@ mod tests {
         );
         let mut out = Vec::new();
 
-        run_lock_pre_steps(&config, &ops, &mut out);
+        run_unit_stops(&scrub_and_smbd_stops(), &ops, &mut out);
 
         assert_eq!(
             String::from_utf8(out).unwrap(),
@@ -1712,7 +1929,6 @@ mod tests {
             vec![
                 "stop braid-scrub.timer no_block=false",
                 "stop braid-scrub.service no_block=false",
-                "list_bound_by braid-online.service",
                 "stop smbd.service no_block=false",
             ]
         );
@@ -1724,10 +1940,8 @@ mod tests {
     // not imply that diagnostic text was accidentally truncated.
     // Scenario: smbd.service remains active but systemctl stop emits no text.
     #[test]
-    fn bound_by_pre_step_nonzero_stop_omits_empty_stderr_suffix() {
-        let config = lifecycle_config();
+    fn unit_stop_warning_omits_empty_stderr_suffix() {
         let ops = RecordingOnlineStateOps::new();
-        ops.set_bound_by_ok(vec!["smbd.service".into()]);
         ops.set_systemctl_stop_err(
             "smbd.service",
             StagedOnlineFailure::SystemctlStop {
@@ -1738,7 +1952,7 @@ mod tests {
         );
         let mut out = Vec::new();
 
-        run_lock_pre_steps(&config, &ops, &mut out);
+        run_unit_stops(&scrub_and_smbd_stops(), &ops, &mut out);
 
         assert_eq!(
             String::from_utf8(out).unwrap(),
@@ -1746,97 +1960,33 @@ mod tests {
         );
     }
 
-    // Intent: run_lock_pre_steps warns byte-exactly for generic stop errors.
+    // Intent: run_unit_stops warns byte-exactly for generic stop errors.
     // Why it exists: the Display form preserves command spawn failure detail
     // rather than collapsing every failure into an exit-code message.
     // Scenario: smbd.service is bound to braid-online.service but spawning
     // systemctl fails before an exit status exists.
     #[test]
-    fn bound_by_pre_step_warns_on_spawn_error() {
-        let config = lifecycle_config();
+    fn unit_stop_warns_on_consumer_spawn_error() {
         let ops = RecordingOnlineStateOps::new();
-        ops.set_bound_by_ok(vec!["smbd.service".into()]);
         ops.set_systemctl_stop_err("smbd.service", StagedOnlineFailure::Spawn("boom".into()));
         let mut out = Vec::new();
 
-        run_lock_pre_steps(&config, &ops, &mut out);
+        run_unit_stops(&scrub_and_smbd_stops(), &ops, &mut out);
 
         assert_eq!(
             String::from_utf8(out).unwrap(),
             "braid: WARNING: failed to stop smbd.service (command failed: boom) -- continuing; umount may fail\n"
         );
-        assert_eq!(
-            ops.calls(),
-            vec![
-                "stop braid-scrub.timer no_block=false",
-                "stop braid-scrub.service no_block=false",
-                "list_bound_by braid-online.service",
-                "stop smbd.service no_block=false",
-            ]
-        );
     }
 
-    // Intent: run_lock_pre_steps silently returns when BoundBy lookup fails.
-    // Why it exists: the old wrapper treated systemctl show BoundBy failure
-    // as best-effort and did not warn during lock.
-    // Scenario: systemctl cannot read braid-online.service BoundBy while lock
-    // still needs to continue toward unmount and mapper close.
-    #[test]
-    fn bound_by_pre_step_silently_continues_when_list_bound_by_errs() {
-        let config = lifecycle_config();
-        let ops = RecordingOnlineStateOps::new();
-        ops.set_bound_by_err(StagedOnlineFailure::SystemctlShow {
-            unit: "braid-online.service".into(),
-            exit_code: 1,
-            stderr: String::new(),
-        });
-        let mut out = Vec::new();
-
-        run_lock_pre_steps(&config, &ops, &mut out);
-
-        assert_eq!(
-            ops.calls(),
-            vec![
-                "stop braid-scrub.timer no_block=false",
-                "stop braid-scrub.service no_block=false",
-                "list_bound_by braid-online.service",
-            ]
-        );
-        assert_eq!(String::from_utf8(out).unwrap(), "");
-    }
-
-    // Intent: run_lock_pre_steps treats an empty BoundBy property as success.
-    // Why it exists: empty output means no consumers, distinct from a failed
-    // systemctl lookup, and should leave no warning text behind.
-    // Scenario: braid-online.service has no BindsTo consumers when lock starts.
-    #[test]
-    fn bound_by_pre_step_handles_empty_bound_by_property() {
-        let config = lifecycle_config();
-        let ops = RecordingOnlineStateOps::new();
-        ops.set_bound_by_ok(Vec::new());
-        let mut out = Vec::new();
-
-        run_lock_pre_steps(&config, &ops, &mut out);
-
-        assert_eq!(
-            ops.calls(),
-            vec![
-                "stop braid-scrub.timer no_block=false",
-                "stop braid-scrub.service no_block=false",
-                "list_bound_by braid-online.service",
-            ]
-        );
-        assert_eq!(String::from_utf8(out).unwrap(), "");
-    }
-
-    // Intent: run_lock_pre_steps swallows missing scrub-unit stop failures.
+    // Intent: run_unit_stops swallows scrub-unit stop failures and still
+    //   stops the consumers after them.
     // Why it exists: autoScrub-disabled module configs may not define scrub
-    // units, while BoundBy consumers still need the warning helper.
+    //   units, while BoundBy consumers still need stopping before unmount.
     // Scenario: braid-scrub.timer is absent, but smbd.service is bound to
-    // braid-online.service and still needs to be stopped before unmount.
+    //   braid-online.service and still needs to be stopped before unmount.
     #[test]
-    fn scrub_stop_pre_step_swallows_missing_unit() {
-        let config = lifecycle_config();
+    fn unit_stop_swallows_missing_scrub_unit() {
         let ops = RecordingOnlineStateOps::new();
         ops.set_systemctl_stop_err(
             "braid-scrub.timer",
@@ -1846,10 +1996,9 @@ mod tests {
                 stderr: "Unit braid-scrub.timer not loaded.".into(),
             },
         );
-        ops.set_bound_by_ok(vec!["smbd.service".into()]);
         let mut out = Vec::new();
 
-        run_lock_pre_steps(&config, &ops, &mut out);
+        run_unit_stops(&scrub_and_smbd_stops(), &ops, &mut out);
 
         assert_eq!(String::from_utf8(out).unwrap(), "");
         assert_eq!(
@@ -1857,7 +2006,6 @@ mod tests {
             vec![
                 "stop braid-scrub.timer no_block=false",
                 "stop braid-scrub.service no_block=false",
-                "list_bound_by braid-online.service",
                 "stop smbd.service no_block=false",
             ]
         );
@@ -4364,7 +4512,7 @@ mod tests {
             ],
             vec![],
         );
-        let steps = compile_lock_steps(true, false, &close_set, &mount_point);
+        let steps = compile_lock_steps(true, false, &[], &close_set, &mount_point);
         let output = Step::render_dry_run(&steps);
         assert_eq!(
             steps.len(),
@@ -4402,7 +4550,7 @@ mod tests {
         use crate::types::MountPoint;
         let mount_point = MountPoint::new("/mnt/storage".into());
         let close_set = test_close_set(vec![member_close("braid-disk1", "disk1")], vec![]);
-        let steps = compile_lock_steps(false, false, &close_set, &mount_point);
+        let steps = compile_lock_steps(false, false, &[], &close_set, &mount_point);
         let output = Step::render_dry_run(&steps);
         assert_eq!(steps.len(), 1, "not-mounted lock must emit one close step");
         assert_lines_in_order(&output, &["close LUKS mapper", "$ cryptsetup close"]);
@@ -4417,7 +4565,7 @@ mod tests {
         use crate::types::MountPoint;
         let mount_point = MountPoint::new("/mnt/storage".into());
         let close_set = test_close_set(vec![], vec![]);
-        let steps = compile_lock_steps(false, false, &close_set, &mount_point);
+        let steps = compile_lock_steps(false, false, &[], &close_set, &mount_point);
         assert!(steps.is_empty());
     }
 
@@ -4440,7 +4588,7 @@ mod tests {
             ],
             vec![],
         );
-        let steps = compile_lock_steps(true, false, &close_set, &mount_point);
+        let steps = compile_lock_steps(true, false, &[], &close_set, &mount_point);
         assert_eq!(
             lock_forget_step_devices(&steps),
             vec![
@@ -4467,7 +4615,7 @@ mod tests {
             vec![member_close("braid-aaa", "aaa")],
             vec![orphan_close("braid-orphan", "orphan")],
         );
-        let steps = compile_lock_steps(true, false, &close_set, &mount_point);
+        let steps = compile_lock_steps(true, false, &[], &close_set, &mount_point);
         assert_eq!(
             lock_forget_step_devices(&steps),
             vec![
@@ -4489,7 +4637,7 @@ mod tests {
         use crate::types::MountPoint;
         let mount_point = MountPoint::new("/mnt/storage".into());
         let close_set = test_close_set(vec![], vec![]);
-        let steps = compile_lock_steps(true, false, &close_set, &mount_point);
+        let steps = compile_lock_steps(true, false, &[], &close_set, &mount_point);
         assert_eq!(
             lock_count_forget_steps(&steps),
             0,
@@ -4505,38 +4653,40 @@ mod tests {
     }
 
     // Intent: systemd-stop dry-run includes a balance pause before umount
-    // when planning observed a running balance.
+    // when planning observed a running balance, and the unit stops sit
+    // between the pause and the umount.
     // Why it exists: preview and execute must share the same ordered mutation
-    // path, so the generated plan cannot omit the quiesce request.
+    // path, so the generated plan cannot omit the quiesce request or move the
+    // unit stops away from the umount they free.
     // Scenario: UPS shutdown reaches ExecStop during an in-flight balance and
-    // lock previews pause -> umount -> close.
+    // lock previews pause -> stop -> umount -> close.
     #[test]
     fn dry_run_lock_systemd_stop_pause_precedes_umount() {
         use crate::types::MountPoint;
         let mount_point = MountPoint::new("/mnt/storage".into());
         let close_set = test_close_set(vec![member_close("braid-aaa", "aaa")], vec![]);
-        let steps = compile_lock_steps(true, true, &close_set, &mount_point);
+        let unit_stops = [LockUnitStop::BoundConsumer("smbd.service".into())];
+        let steps = compile_lock_steps(true, true, &unit_stops, &close_set, &mount_point);
 
-        let pause_position = steps
-            .iter()
-            .position(|step| {
-                step.commands
-                    .iter()
-                    .any(|cmd| matches!(cmd, CmdRequest::BtrfsBalancePause { .. }))
-            })
-            .expect("pause step should be present");
-        let umount_position = steps
-            .iter()
-            .position(|step| {
-                step.commands
-                    .iter()
-                    .any(|cmd| matches!(cmd, CmdRequest::Umount { .. }))
-            })
-            .expect("umount step should be present");
+        let position = |is_step: fn(&CmdRequest) -> bool, what: &str| {
+            steps
+                .iter()
+                .position(|step| step.commands.iter().any(is_step))
+                .unwrap_or_else(|| panic!("{what} step should be present: {steps:?}"))
+        };
+        let pause_position = position(
+            |cmd| matches!(cmd, CmdRequest::BtrfsBalancePause { .. }),
+            "pause",
+        );
+        let stop_position = position(
+            |cmd| matches!(cmd, CmdRequest::SystemctlStop { .. }),
+            "stop",
+        );
+        let umount_position = position(|cmd| matches!(cmd, CmdRequest::Umount { .. }), "umount");
 
         assert!(
-            pause_position < umount_position,
-            "pause step must precede umount"
+            pause_position < stop_position && stop_position < umount_position,
+            "steps must run pause -> stop -> umount: {steps:?}"
         );
     }
 
@@ -4918,7 +5068,7 @@ mod tests {
         let mut acc = CloseSetAccumulator::default();
         let close_set = build_close_sets_full(&runner, &fs, &pool, &membership, &mut acc);
         let mp = MountPoint::new("/mnt/storage".into());
-        let steps = super::compile_lock_steps(true, false, &close_set, &mp);
+        let steps = super::compile_lock_steps(true, false, &[], &close_set, &mp);
         assert_eq!(
             lock_forget_step_devices(&steps),
             vec![
@@ -5250,7 +5400,7 @@ mod tests {
         let mut acc = CloseSetAccumulator::default();
         let close_set = build_close_sets_uuid_scanned_fallback(&runner, &fs, &membership, &mut acc);
         let mp = MountPoint::new("/mnt/storage".into());
-        let steps = super::compile_lock_steps(true, false, &close_set, &mp);
+        let steps = super::compile_lock_steps(true, false, &[], &close_set, &mp);
         let forget = lock_forget_step_devices(&steps);
         // Members first, orphan last -- mirroring LockCloseSet order.
         assert_eq!(

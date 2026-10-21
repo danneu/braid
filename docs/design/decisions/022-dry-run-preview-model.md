@@ -142,6 +142,17 @@ that close set so preview and real execution share one identity
 classification. `LockPlan::preview()` derives `Vec<Step>` on demand
 from the close set rather than caching rendered steps.
 
+The lock plan also owns the module-install unit stops (ADR 018 "On
+`lock`"). `plan_lock` resolves the scrub units and the `BoundBy
+braid-online.service` consumers into typed `LockUnitStop` entries, each
+carrying its failure policy, only after every refusal check has passed.
+The preview renders a `stop <unit>` step per entry, and
+`LockPlan::execute` runs them right before unmount without looking the
+list up again. So the lock wrapper calls the planner first, the planner
+is lock's only refusal site, and planning mutates nothing. On a
+lifecycle host, a dry-run therefore also spawns the read-only
+`systemctl show -P BoundBy braid-online.service` lookup.
+
 Older dry-run seams in `unlock` and `enroll` may remain until those
 commands are intentionally migrated. Do not use their older helpers or
 cached step fields as precedent for commands already on the typed

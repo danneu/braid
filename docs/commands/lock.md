@@ -56,6 +56,8 @@ When braid is installed via the NixOS module, `braid lock` also:
 
 Standalone CLI installs (no NixOS module) skip all three -- there is no `braid-online.service` or scrub unit to stop.
 
+On module installs, lock stops the scrub units and consumers only after every check in steps 1-2 has passed, right before unmount. So a lock that refuses, for example because a balance is running or paused, leaves scrub and your shares running. `braid lock --dry-run` lists these stops as `stop <unit>` steps.
+
 ## Error handling
 
 - Refuses if another braid operation is in progress (pool lock `/run/braid-pool.lock` is held) -- retry once it finishes.

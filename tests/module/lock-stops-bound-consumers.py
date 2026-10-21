@@ -81,7 +81,8 @@ with subtest("setup: BoundBy lists the consumer"):
 
 with subtest("cycle 1: braid lock stops consumer and unmounts"):
     machine.succeed("braid lock")
-    # Consumer must be inactive after lock (cmd_lock's BoundBy pre-step stopped it).
+    # Consumer must be inactive after lock (the lock plan's BoundBy stop step
+    # stopped it right before unmount).
     machine.fail("systemctl is-active {}".format(CONSUMER))
     machine.fail("mountpoint -q /mnt/storage")
     # `cryptsetup status` exits non-zero for inactive mappers; the test
@@ -103,7 +104,7 @@ with subtest("cycle 2: re-unlock and confirm consumer holds the mount again"):
 with subtest("cycle 2: systemctl stop braid-online.service unmounts via ExecStop"):
     # Exercises ExecStop reentry after systemd's BoundBy cascade:
     # systemd deactivates the consumer first, then ExecStop runs
-    # `braid lock --systemd-stop`, whose cmd_lock BoundBy pre-step sees
+    # `braid lock --systemd-stop`, whose planned BoundBy stop step finds
     # the consumer already inactive (no-op stop). The systemd-stop arm
     # skips mark_offline, avoiding a recursive stop of the unit we are
     # already stopping.
