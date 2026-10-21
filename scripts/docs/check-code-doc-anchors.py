@@ -19,7 +19,8 @@ SEARCH_ROOTS = [
     ROOT / "AGENTS.md",
     ROOT / "README.md",
     ROOT / ".claude/agents",
-    ROOT / "prompts",
+    ROOT / ".claude/workflows",
+    ROOT / ".claude/skills",
 ]
 CITE_PATTERN = re.compile(r"(docs/[A-Za-z0-9_./-]+\.md)#([A-Za-z0-9_-]+)")
 

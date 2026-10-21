@@ -49,6 +49,7 @@ Worked example: [granularity-mismatch.md](docs/dev/granularity-mismatch.md).
 - dry-run, preview, or mutating command planning/execution -> [ADR 022 dry-run-preview-model](docs/design/decisions/022-dry-run-preview-model.md)
 - mutation code (invariant placement, fail-closed policy, residual guards, state enums) -> [safety-heuristics.md](docs/dev/safety-heuristics.md)
 - writing or reviewing a plan -> [planning-hygiene.md](docs/dev/planning-hygiene.md)
+- the review pipeline (`findings/`, `scripts/findings/`, `.claude/workflows/`, `/pick-fix`) -> [review-pipeline.md](docs/dev/review-pipeline.md)
 - editing a frozen (Superseded/Deprecated) ADR or a `## See` section -> [doc-citations.md#decision-doc-references](docs/dev/doc-citations.md#decision-doc-references) (enforced by `scripts/docs/check-see-paths.py`)
 - `doctor`/`status`/`unlock` recovery messaging or the LUKS header-backup workflow -> [luks-unlock.md](docs/internals/luks-unlock.md#header-backup-workflow-and-messaging)
 

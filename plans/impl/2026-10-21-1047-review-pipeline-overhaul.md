@@ -256,7 +256,7 @@ choosing a solution for each finding:
 - [x] C3. feat(review): add the review workflow and unified reviewer agent
 - [x] C4. feat(review): add the implement workflow with vetting and the local merge queue
 - [x] C5. feat(review): add /pick-fix to decide pitches and launch implement runs
-- [ ] C6. chore(review): retire the prompt-driven fan-out and document the pipeline
+- [x] C6. chore(review): retire the prompt-driven fan-out and document the pipeline
 
 ## Implementation notes
 
@@ -332,6 +332,10 @@ choosing a solution for each finding:
 - C5: not exercised end to end, because the questions need the user. The
   store calls it makes are covered by the script tests, and starting
   `implement` by name was verified in C4.
+- C6: `scripts/docs/check-code-doc-anchors.py` scanned `prompts/` for
+  docs anchors. It now scans `.claude/workflows/` and `.claude/skills/`,
+  the pipeline's agent tooling. `docs/dev/doc-citations.md` dropped its
+  `prompts/` exemption, since the directory is gone.
 
 ## Follow Up
 

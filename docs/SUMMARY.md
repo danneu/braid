@@ -102,6 +102,7 @@
 - [Reference source](dev/reference-source.md)
 - [TUI snapshots](dev/tui-snapshots.md)
 - [Planning and review hygiene](dev/planning-hygiene.md)
+- [Review pipeline](dev/review-pipeline.md)
 - [Mutation safety heuristics](dev/safety-heuristics.md)
 - [Granularity mismatch](dev/granularity-mismatch.md)
 - [Doc and ADR file references](dev/doc-citations.md)
