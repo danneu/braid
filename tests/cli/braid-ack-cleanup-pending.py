@@ -8,7 +8,7 @@
 #
 # Why it exists: both halves of this contract (status surfacing in
 #   status.rs#resolve_alert_state and the sentinel-only retry branch in
-#   ack.rs#cmd_ack_impl) are heavily unit-tested, but every unit test runs
+#   ack.rs#ack_alert_records) are heavily unit-tested, but every unit test runs
 #   against an isolated temp dir with an injected runner. None drives the
 #   production /var/lib/braid path through the real binaries. A wiring
 #   regression -- a path mismatch, a renderer that drops the cause, a
@@ -99,9 +99,10 @@ with subtest("status reports the cleanup-pending cause"):
     )
 
 # Consume: the operator removes the poison and re-runs ack. The sentinel-only
-# branch in cmd_ack_impl is hoisted above probe_pool_alerts, so it re-enters
-# cleanup directly and prints the documented confirmation. Capture stdout
-# separately so the systemctl-stop warning on stderr does not pollute it.
+# branch in ack_alert_records is hoisted above probe_pool_alerts, so it
+# re-enters cleanup directly and prints the documented confirmation. Capture
+# stdout separately so the systemctl-stop warning on stderr does not pollute
+# it.
 with subtest("retry clears the sentinel"):
     machine.succeed("rmdir /var/lib/braid/alert-latch.json.corrupt")
     rc, _ = machine.execute(

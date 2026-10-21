@@ -89,7 +89,7 @@ On exit 1, the `braid-monitor.service` wrapper starts `braid-alert.service`, a l
 
 A failed scheduled scrub is a third, independent trigger with the same shape: `braid-scrub.service`'s `onFailure` runs `braid-scrub-failed.service`, which starts `braid-alert.service` directly *and* writes the `scrub-failed` flag, which the next monitor cycle latches as a `ScrubFailed` cause. A deliberate cancel (lock/suspend/shutdown) and a corruption-found scrub (btrfs exit 3) are both successes, so neither fires this path. This whole path exists only when `braid.monitor` is enabled.
 
-The beep stops only when `braid ack` clears the latch and runs `systemctl stop braid-alert.service`; that stop cascades to `braid-beep.service` through `BindsTo`. The same ack also stops `braid-alert-advisory.service`, so a Warning-tier advisory is silenced too.
+The beep stops only when `braid ack` runs `systemctl stop braid-alert.service` after clearing the alert state; that stop cascades to `braid-beep.service` through `BindsTo`. The same ack also stops `braid-alert-advisory.service`, so a Warning-tier advisory is silenced too. Ack runs the stop even when it finds no alert state to clear, so a unit started without a record -- for example after monitor failed to write the latch -- still goes quiet.
 
 ## Related commands
 

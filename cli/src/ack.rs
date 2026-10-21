@@ -21,7 +21,7 @@ use crate::util::detail_suffix;
 /// `causes.len()`.
 const ACK_NO_COUNT_LINE: &str = "acknowledged current alerts";
 
-/// Production entry point that wires ack cleanup to the real beeper stop hook.
+/// Production entry point that wires ack to the real alert-unit stop hook.
 ///
 /// Tests call `cmd_ack_impl` directly with explicit hooks so they never shell
 /// out to host systemd while still exercising the same ack logic.
@@ -39,6 +39,10 @@ pub fn cmd_ack<R: CommandRunner, F: Filesystem + ?Sized>(
 /// to systemd.
 ///
 /// Production goes through `cmd_ack`, which supplies the real systemd hook.
+/// This is ack's one stop call site: it runs after the record work on every
+/// outcome except a refusal (`AckError::is_refusal`), and is not gated on the
+/// entry snapshot, because the units can run with no record on disk. See
+/// `docs/design/decisions/014-alerts.md#ack-always-silences-after-its-record-work`.
 pub(crate) fn cmd_ack_impl<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
@@ -46,6 +50,27 @@ pub(crate) fn cmd_ack_impl<R: CommandRunner, F: Filesystem + ?Sized>(
     paths: &StatePaths,
     stop_beeper: &dyn Fn(),
 ) -> Result<(), AckError> {
+    let records = ack_alert_records(runner, fs, mount_point, paths);
+    if !matches!(&records, Err(e) if e.is_refusal()) {
+        stop_beeper();
+    }
+    // Print the confirmation only after the stop, so it follows any stop
+    // warning and reports a finished ack.
+    println!("{}", records?);
+    Ok(())
+}
+
+/// Ack's record work -- re-baseline, flag removal, latch removal -- gated on
+/// one snapshot of the alert files taken at entry.
+///
+/// Returns the confirmation line instead of printing it, so `cmd_ack_impl`
+/// can stop the alert units first. Silencing is not this function's job.
+fn ack_alert_records<R: CommandRunner, F: Filesystem + ?Sized>(
+    runner: &R,
+    fs: &F,
+    mount_point: &MountPoint,
+    paths: &StatePaths,
+) -> Result<String, AckError> {
     // Snapshot the gating inputs (alert latch + smartd flag + cleanup-pending
     // sentinel) before probing the pool. They feed the "is there an alert?"
     // decision, the cleanup-only retry branch, and the snapshot-scoped cleanup
@@ -81,11 +106,8 @@ pub(crate) fn cmd_ack_impl<R: CommandRunner, F: Filesystem + ?Sized>(
     let has_alert = !causes.is_empty() || smartd_active || scrub_failed_active || latch_corrupt;
 
     if cleanup_pending && !has_alert {
-        if let Err(e) = cleanup_alert_files_and_beeper(paths, stop_beeper, false, false) {
-            return Err(AckError::CleanupFailed(e));
-        }
-        println!("{ACK_NO_COUNT_LINE}");
-        return Ok(());
+        cleanup_alert_files(paths, false, false).map_err(AckError::CleanupFailed)?;
+        return Ok(ACK_NO_COUNT_LINE.to_owned());
     }
 
     // 2. Check if pool is mounted. The probe runs before the no-signal no-op
@@ -97,20 +119,14 @@ pub(crate) fn cmd_ack_impl<R: CommandRunner, F: Filesystem + ?Sized>(
     };
 
     // Nothing to acknowledge is one no-op, decided from the entry snapshot
-    // alone: mount state never changes its outcome.
+    // alone: mount state never changes its outcome. It changes no alert
+    // file, but `cmd_ack_impl` still stops the alert units after it.
     if !has_alert {
-        println!("no active alerts");
-        return Ok(());
+        return Ok("no active alerts".to_owned());
     }
 
     if !pool.mounted {
-        return ack_offline(
-            &causes,
-            remove_smartd,
-            remove_scrub_failed,
-            paths,
-            stop_beeper,
-        );
+        return ack_offline(&causes, remove_smartd, remove_scrub_failed, paths);
     }
 
     // 3. Run btrfs device stats
@@ -142,18 +158,13 @@ pub(crate) fn cmd_ack_impl<R: CommandRunner, F: Filesystem + ?Sized>(
         write_enospc_baseline(runner, mount_point, &pool, missing_count, paths, now);
     }
 
-    if let Err(e) =
-        cleanup_alert_files_and_beeper(paths, stop_beeper, remove_smartd, remove_scrub_failed)
-    {
-        return Err(AckError::CleanupFailed(e));
-    }
+    cleanup_alert_files(paths, remove_smartd, remove_scrub_failed)
+        .map_err(AckError::CleanupFailed)?;
 
-    // 8. Print a count for latched causes. Smartd-only and corrupt-latch
+    // 8. Report a count for latched causes. Smartd-only and corrupt-latch
     // gated acknowledgments still completed real cleanup, but have no
     // meaningful latch count to report.
-    println!("{}", format_ack_confirmation(causes.len()));
-
-    Ok(())
+    Ok(format_ack_confirmation(causes.len()))
 }
 
 /// Mounted ack confirmation builder so the user-facing count remains strictly
@@ -172,15 +183,15 @@ fn format_ack_confirmation(latched_count: usize) -> String {
 /// Acknowledges a present alert signal on a genuinely unmounted pool, where
 /// no live `btrfs device stats` exists to re-baseline error counters.
 ///
-/// Holds no has-alert gate: `cmd_ack_impl` takes the no-signal no-op before
-/// the mounted/offline split, so that outcome cannot depend on mount state.
+/// Holds no has-alert gate: `ack_alert_records` takes the no-signal no-op
+/// before the mounted/offline split, so that outcome cannot depend on mount
+/// state.
 fn ack_offline(
     causes: &[AlertCause],
     remove_smartd: bool,
     remove_scrub_failed: bool,
     paths: &StatePaths,
-    stop_beeper: &dyn Fn(),
-) -> Result<(), AckError> {
+) -> Result<String, AckError> {
     // Refuse if the latch contains any BtrfsDeviceErrors cause: the counter
     // baseline that suppresses re-firing requires live `btrfs device stats`
     // output, which we cannot produce with the pool offline. Refusing the
@@ -217,55 +228,39 @@ fn ack_offline(
         save_acked_stats(&acked, paths).map_err(AckError::Io)?;
     }
 
-    if let Err(e) =
-        cleanup_alert_files_and_beeper(paths, stop_beeper, remove_smartd, remove_scrub_failed)
-    {
-        return Err(AckError::CleanupFailed(e));
-    }
-    println!("{ACK_NO_COUNT_LINE}");
-    Ok(())
+    cleanup_alert_files(paths, remove_smartd, remove_scrub_failed)
+        .map_err(AckError::CleanupFailed)?;
+    Ok(ACK_NO_COUNT_LINE.to_owned())
 }
 
-/// Cleanup of all alert-side files plus the beeper unit, used by both the
-/// mounted and offline branches of `cmd_ack_impl`.
+/// Cleanup of all alert-side files, used by the cleanup-only retry, mounted,
+/// and offline branches of `ack_alert_records`.
 ///
 /// Each `remove_*` call is NotFound-tolerant, so a missing file is not an
-/// error. `stop_beeper` runs first so a later file-removal failure cannot
-/// prevent the beeper-stop hook from being reached. A real I/O error on any
-/// `remove_*` then short-circuits the remaining removals via `?` and
-/// propagates the error.
+/// error. A real I/O error on any `remove_*` short-circuits the remaining
+/// removals via `?` and propagates the error. Cleanup does not stop the alert
+/// units: `cmd_ack_impl` does that after cleanup returns, whether it succeeded
+/// or failed.
 ///
-/// The beeper stop is best-effort: production issues `systemctl stop` for both
-/// alert units (`braid-alert.service` and `braid-alert-advisory.service`), logs
-/// a warning when spawning `systemctl` fails or a unit exits non-zero, and
-/// returns no error to cleanup. The ordering guarantees the hook is invoked on
-/// every cleanup call, not that the audible alert was silenced.
-///
-/// `cmd_ack_impl` derives `remove_smartd` / `remove_scrub_failed` once from
+/// `ack_alert_records` derives `remove_smartd` / `remove_scrub_failed` once from
 /// inputs snapshotted at entry. Cleanup deletes each flag only when the snapshot
 /// already represented an active source for it: the flag was present at entry,
 /// or the latch carried the matching `SmartdAlert` / `ScrubFailed` cause. A flag
 /// that arrives after a snapshot with neither condition is left for the next
 /// monitor cycle.
 ///
-/// Cleanup marks `alert-cleanup-pending` after `stop_beeper` and before any
-/// destructive removal. The removals then run in smartd-flag, scrub-failed-flag,
-/// latch, corrupt-sidecar order so ADR 014's forensic sidecar is the last
-/// destructive step. The marker is cleared only after every removal succeeds. If
-/// marker creation itself fails, no destructive removal has run and the original
-/// entry signals still drive retry; if a later step fails, the marker remains to
-/// drive the cleanup-only retry branch in `cmd_ack_impl`.
-///
-/// The `stop_beeper` parameter is the injected `&dyn Fn()` from
-/// `cmd_ack_impl`; callers must forward their own hook so tests can record
-/// beeper invocations.
-fn cleanup_alert_files_and_beeper(
+/// Cleanup marks `alert-cleanup-pending` before any destructive removal. The
+/// removals then run in smartd-flag, scrub-failed-flag, latch, corrupt-sidecar
+/// order so ADR 014's forensic sidecar is the last destructive step. The marker
+/// is cleared only after every removal succeeds. If marker creation itself
+/// fails, no destructive removal has run and the original entry signals still
+/// drive retry; if a later step fails, the marker remains to drive the
+/// cleanup-only retry branch in `ack_alert_records`.
+fn cleanup_alert_files(
     paths: &StatePaths,
-    stop_beeper: &dyn Fn(),
     remove_smartd: bool,
     remove_scrub_failed: bool,
 ) -> Result<(), std::io::Error> {
-    stop_beeper();
     alert::mark_alert_cleanup_pending(paths)?;
     if remove_smartd {
         alert::remove_smartd_alert_flag(paths)?;
@@ -353,12 +348,13 @@ fn write_enospc_baseline<R: CommandRunner>(
 }
 
 /// Shells out directly rather than via `OnlineStateOps::systemctl_stop`
-/// because the beeper stop also runs on the offline cleanup path
-/// (`ack_offline`), which issues no `CommandRunner` requests.
+/// because the beeper stop also runs after an offline ack (`ack_offline`),
+/// which issues no `CommandRunner` requests.
 ///
 /// Stops both alert units: the Critical beeper (`braid-alert.service`) and the
 /// non-beeping Warning advisory (`braid-alert-advisory.service`), so one ack
-/// silences whichever tier the last monitor cycle started.
+/// silences whichever tier the last monitor cycle started. Best-effort: a
+/// failed spawn or a non-zero exit logs a warning and never fails the ack.
 fn stop_beeper() {
     stop_unit("braid-alert.service");
     stop_unit("braid-alert-advisory.service");
@@ -415,11 +411,11 @@ pub enum AckError {
     /// `AckError` cannot silently bypass the partial-state recovery message.
     #[error("I/O error: {0}")]
     Io(#[source] std::io::Error),
-    /// Cleanup of latch + smartd-alert + corrupt-latch files failed after the
-    /// best-effort beeper stop hook had already been attempted and ack had
-    /// already started persisting state: after `save_acked_stats` in the
+    /// Cleanup of latch + smartd-alert + corrupt-latch files failed after ack
+    /// had already started persisting state: after `save_acked_stats` in the
     /// mounted path, after offline missing-device ack state was persisted, or
-    /// after one cleanup file was already removed. Retry still has a signal:
+    /// after one cleanup file was already removed. Not a refusal: ack still
+    /// stops the alert units after the failed removal. Retry still has a signal:
     /// if `mark_alert_cleanup_pending` failed, no destructive removal has run
     /// and the original entry signals drive the regular ack path; if it
     /// succeeded and a later step failed, the `alert-cleanup-pending` sentinel
@@ -431,6 +427,22 @@ pub enum AckError {
          fix the I/O error and re-run `braid ack`: {0}"
     )]
     CleanupFailed(#[source] std::io::Error),
+}
+
+impl AckError {
+    /// Whether ack declined before changing any alert state. A refusal leaves
+    /// the alert units running, so the alarm still marks the alert ack did not
+    /// handle; every other outcome, a cleanup failure included, silences them.
+    fn is_refusal(&self) -> bool {
+        match self {
+            AckError::CleanupFailed(_) => false,
+            AckError::OfflineBtrfsErrorsRefused
+            | AckError::Probe(_)
+            | AckError::Cmd(_)
+            | AckError::Parse(_)
+            | AckError::Io(_) => true,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -466,6 +478,17 @@ mod tests {
     fn latched_causes(state: &alert::AlertState) -> Vec<AlertCause> {
         state.causes.iter().map(|c| c.cause.clone()).collect()
     }
+
+    /// `btrfs device stats` payload for `MonitorTestRunner`'s two-disk pool:
+    /// devid 1 has errors and devid 2 is clean. Both are recognized (present
+    /// in show), so monitor latches `BtrfsDeviceErrors { devid: 1 }`.
+    const STATS_DEVID1_ERRORS: &str = r#"{
+    "__header": {"version": "1"},
+    "device-stats": [
+        {"device": "/dev/mapper/braid-vdb", "devid": 1, "write_io_errs": 0, "read_io_errs": 3, "flush_io_errs": 0, "corruption_errs": 1, "generation_errs": 0},
+        {"device": "/dev/mapper/braid-vdc", "devid": 2, "write_io_errs": 0, "read_io_errs": 0, "flush_io_errs": 0, "corruption_errs": 0, "generation_errs": 0}
+    ]
+}"#;
 
     // Intent: The ack beeper-stop spawn path gives systemctl only braid's
     // explicit child-environment allowlist.
@@ -534,8 +557,8 @@ mod tests {
     }
 
     // Intent: Offline ack with no alert signal is the same no-op as mounted
-    //   ack: it returns Ok, never calls the beeper hook, and creates no state
-    //   file.
+    //   ack: it returns Ok, stops the alert units once like every
+    //   non-refused ack, and creates no state file.
     // Why it exists: Offline ack used to refuse this case with exit 1
     //   (`pool is not mounted -- nothing to acknowledge`) while the mounted
     //   no-op exited 0, though the docs and clap help promised exit 0 for
@@ -562,8 +585,8 @@ mod tests {
         );
         assert_eq!(
             beeper_calls.get(),
-            0,
-            "no-op ack must not stop the alert units"
+            1,
+            "no-op ack still stops the alert units"
         );
         let created: Vec<_> = std::fs::read_dir(dir.path())
             .unwrap()
@@ -688,14 +711,6 @@ mod tests {
     //   devid 1 must alert again -- the baseline is a floor, not a permanent mute.
     #[test]
     fn ack_baseline_suppresses_then_refires_btrfs_device_errors() {
-        // devid 1 has errors; devid 2 clean. Both are recognized (present in show).
-        const STATS_DEVID1_ERRORS: &str = r#"{
-    "__header": {"version": "1"},
-    "device-stats": [
-        {"device": "/dev/mapper/braid-vdb", "devid": 1, "write_io_errs": 0, "read_io_errs": 3, "flush_io_errs": 0, "corruption_errs": 1, "generation_errs": 0},
-        {"device": "/dev/mapper/braid-vdc", "devid": 2, "write_io_errs": 0, "read_io_errs": 0, "flush_io_errs": 0, "corruption_errs": 0, "generation_errs": 0}
-    ]
-}"#;
         // devid 1 strictly above the acked baseline (read_io_errs 5 > 3) for the
         // re-fire phase.
         const STATS_DEVID1_ERRORS_HIGHER: &str = r#"{
@@ -780,6 +795,130 @@ mod tests {
         }
     }
 
+    // Intent: ack stops the alert units even when no alert record reached disk:
+    //   the mounted and offline `no active alerts` no-ops each invoke the stop
+    //   hook once, and both still return Ok.
+    // Why it exists: ack used to stop the units only after it found a record
+    //   (latch, flag, corrupt latch, or cleanup-pending marker). cmd_monitor
+    //   still returns Alert when the latch save fails, so the wrapper starts
+    //   braid-alert.service with nothing on disk. Ack then printed `no active
+    //   alerts`, and the beeper kept sounding.
+    // Scenario: the latch write fails (here a directory sits at its
+    //   atomic-write temp path). Monitor sees errors on devid 1 and alerts with
+    //   no latch on disk. The operator runs `braid ack` on the mounted pool,
+    //   then again after locking it.
+    #[test]
+    fn cmd_ack_stops_alert_units_when_monitor_alerted_without_a_latch() {
+        let (_dir, paths) = isolated_paths();
+        std::fs::create_dir(
+            paths
+                .alert_latch_json()
+                .with_file_name(".alert-latch.json.tmp"),
+        )
+        .unwrap();
+        let fs = monitor_fs_btrfs();
+        let mp = monitor_mp();
+        let runner = MonitorTestRunner::with_stats_payload(STATS_DEVID1_ERRORS);
+
+        match cmd_monitor(&runner, &fs, &mp, &paths) {
+            MonitorResult::Alert(s) => assert_eq!(
+                latched_causes(&s),
+                vec![AlertCause::BtrfsDeviceErrors {
+                    devid: Devid::new(1)
+                }],
+                "monitor must alert on the devid-1 btrfs error"
+            ),
+            other => panic!("expected Alert, got {other:?}"),
+        }
+        assert!(
+            !paths.alert_latch_json().exists(),
+            "the latch save must have failed"
+        );
+
+        let mounted_calls = std::cell::Cell::new(0u32);
+        let mounted_beeper = || mounted_calls.set(mounted_calls.get() + 1);
+        let mounted = cmd_ack_impl(&runner, &fs, &mp, &paths, &mounted_beeper);
+        assert!(
+            mounted.is_ok(),
+            "mounted no-record ack stays a no-op, got {mounted:?}"
+        );
+        assert_eq!(
+            mounted_calls.get(),
+            1,
+            "mounted no-record ack must stop the alert units"
+        );
+
+        let offline_calls = std::cell::Cell::new(0u32);
+        let offline_beeper = || offline_calls.set(offline_calls.get() + 1);
+        let offline = cmd_ack_impl(
+            &AckPanicRunner,
+            &ack_fs_not_mounted(),
+            &ack_mp(),
+            &paths,
+            &offline_beeper,
+        );
+        assert!(
+            offline.is_ok(),
+            "offline no-record ack stays a no-op, got {offline:?}"
+        );
+        assert_eq!(
+            offline_calls.get(),
+            1,
+            "offline no-record ack must stop the alert units"
+        );
+    }
+
+    // Intent: ack stops the alert units once, as its last step. When the stop
+    //   hook runs, the snapshotted flags, the latch, and the cleanup-pending
+    //   marker are already gone, and a flag written right after the stop
+    //   survives the ack.
+    // Why it exists: ack used to stop the units before its removals. A smartd
+    //   or scrub hook that fired in between restarted the unit and then lost
+    //   its flag to ack's removal, so the beeper sounded with no record and
+    //   `braid status` showed nothing.
+    // Scenario: monitor latched SmartdAlert and ScrubFailed, and both flags are
+    //   on disk. The operator runs `braid ack` on the mounted pool, and smartd
+    //   fires again just after ack stops the units.
+    #[test]
+    fn cmd_ack_stops_alert_units_after_removing_snapshotted_files() {
+        let (_dir, paths) = isolated_paths();
+        ack_write_latch(
+            &paths,
+            vec![AlertCause::SmartdAlert, AlertCause::ScrubFailed],
+        );
+        std::fs::write(paths.smartd_alert(), b"").unwrap();
+        std::fs::write(paths.scrub_failed(), b"").unwrap();
+        let runner = ack_mounted_probe_runner_with_device_stats();
+        let files_at_stop = std::cell::RefCell::new(Vec::new());
+        let beeper = || {
+            let left: Vec<_> = [
+                paths.smartd_alert(),
+                paths.scrub_failed(),
+                paths.alert_latch_json(),
+                paths.alert_cleanup_pending(),
+            ]
+            .into_iter()
+            .filter(|p| p.exists())
+            .collect();
+            files_at_stop.borrow_mut().push(left);
+            // smartd fires right after the stop.
+            std::fs::write(paths.smartd_alert(), b"").unwrap();
+        };
+
+        let result = cmd_ack_impl(&runner, &ack_fs_btrfs(), &ack_mp(), &paths, &beeper);
+
+        assert!(result.is_ok(), "ack must succeed, got {result:?}");
+        assert_eq!(
+            files_at_stop.into_inner(),
+            vec![Vec::<std::path::PathBuf>::new()],
+            "the stop must run once, after every snapshotted file is gone"
+        );
+        assert!(
+            paths.smartd_alert().exists(),
+            "a flag written after the stop must survive for the next monitor cycle"
+        );
+    }
+
     /*
      * Intent: Mounted ack still runs the full ack path when only the
      * smartd alert flag exists and monitor has not latched it yet.
@@ -828,12 +967,12 @@ mod tests {
     /*
      * Intent: Offline ack with a bare smartd-alert flag present at entry and
      * no latch clears the flag and exits Ok.
-     * Why it exists: cmd_ack_impl's no-signal gate must count `smartd_active`.
-     * Every other offline smartd test either carries a SmartdAlert *cause* in
-     * the latch (gate satisfied by `causes`) or has the flag arrive mid-probe
-     * (flag kept), so a regression dropping the `smartd_active` term would
-     * slip through: ack would take the `no active alerts` no-op and leave the
-     * flag. This pins that term directly.
+     * Why it exists: ack_alert_records's no-signal gate must count
+     * `smartd_active`. Every other offline smartd test either carries a
+     * SmartdAlert *cause* in the latch (gate satisfied by `causes`) or has
+     * the flag arrive mid-probe (flag kept), so a regression dropping the
+     * `smartd_active` term would slip through: ack would take the `no active
+     * alerts` no-op and leave the flag. This pins that term directly.
      * Scenario: smartd wrote /var/lib/braid/smartd-alert; before monitor
      * latched it, the user locked the pool and runs `braid ack`.
      */
@@ -943,7 +1082,7 @@ mod tests {
 
     // Intent: Offline ack of a bare scrub-failed flag (no latch) clears the flag
     //   and exits Ok, and writes no acked-stats.
-    // Why it exists: cmd_ack_impl's no-signal gate must count
+    // Why it exists: ack_alert_records's no-signal gate must count
     //   `scrub_failed_active`; a regression dropping that term would take the
     //   `no active alerts` no-op and leave the flag. Mirrors the smartd
     //   bare-flag offline test, and pins that ScrubFailed falls through the
@@ -1206,7 +1345,7 @@ mod tests {
     // ComputationError runs the full ack path -- btrfs device stats are
     // queried, the latch is removed, a fresh acked-stats baseline is written,
     // and the beeper hook fires exactly once.
-    // Why it exists: The mounted gate at cmd_ack_impl falls through on any
+    // Why it exists: The mounted gate in ack_alert_records falls through on any
     // non-empty `causes`. A future refactor that narrowed the gate to
     // "actionable" causes, or that special-cased SmartdAlert without doing the
     // same for ComputationError, would silently no-op this mounted ack and
@@ -1262,18 +1401,17 @@ mod tests {
      * cleanup file removal fails, the user-visible error names the partial
      * state and points at the recovery path. The new baseline is durable,
      * the latch is removed, the corrupt sidecar remains, and the beeper-stop
-     * hook has already fired.
+     * hook still fires after the failed removal.
      * Why it exists: Without the dedicated variant, a cleanup-phase I/O
      * error surfaces as "I/O error: <kind>" with no hint that re-running ack
-     * will eventually clear the latch. Without the ordering pin, a failure
-     * after latch removal can leave a retry behind the no-op gate with an
-     * unreached beeper-stop hook; the cleanup-pending sentinel now preserves
-     * the retry signal while the beeper-stop hook remains first.
+     * will eventually clear the latch. The cleanup-pending sentinel preserves
+     * the retry signal after the latch is gone, and a failed removal must not
+     * skip the stop.
      * Scenario: a directory sits at the corrupt-latch sidecar path (manual
      * tampering, leftover from a previous bug, or permission drift), so
      * remove_file fails with EISDIR/EPERM. The latch carried
      * BtrfsDeviceErrors. Mounted pool, healthy device stats. cmd_ack must
-     * save the new baseline, invoke the beeper hook, fail cleanup, and
+     * save the new baseline, fail cleanup, invoke the beeper hook, and
      * return the dedicated variant.
      */
     #[test]
@@ -1333,19 +1471,19 @@ mod tests {
     }
 
     /*
-     * Intent: Mounted cleanup invokes the beeper-stop hook before the first
-     * cleanup file removal can fail.
+     * Intent: Mounted ack still invokes the beeper-stop hook when the first
+     * cleanup file removal fails.
      * Why it exists: The corrupt-sidecar cleanup failure tests exercise the
      * third removal. This test exercises the first removal so the union pins
-     * the stronger invariant: stop_beeper runs before every remove_*, not
-     * merely sometime during cleanup.
+     * that the stop runs after a failure at any removal step, not only after
+     * a late one.
      * Scenario: monitor latched SmartdAlert, but the smartd flag path is a
      * poison directory. Mounted pool, healthy device stats. cmd_ack must save
-     * the new baseline, invoke the beeper hook, fail on the smartd flag
-     * removal, and leave later cleanup files untouched.
+     * the new baseline, fail on the smartd flag removal, leave later cleanup
+     * files untouched, and then invoke the beeper hook.
      */
     #[test]
-    fn cmd_ack_stops_beeper_before_mounted_smartd_flag_cleanup_error() {
+    fn cmd_ack_stops_beeper_after_mounted_smartd_flag_cleanup_error() {
         let (_dir, paths) = isolated_paths();
         ack_write_latch(&paths, vec![AlertCause::SmartdAlert]);
         // smartd_alert_active ignores directories, but the latched
@@ -1381,20 +1519,18 @@ mod tests {
         assert_eq!(
             beeper_calls.get(),
             1,
-            "stop_beeper must fire before the first cleanup remove_* fails"
+            "stop_beeper must fire after the first cleanup remove_* fails"
         );
     }
 
-    // Intent: After cleanup_alert_files_and_beeper fails at
-    //   remove_alert_latch_corrupt, the alert-cleanup-pending sentinel remains
-    //   on disk, so the retry re-enters cleanup, re-invokes the stop hook, and
-    //   completes cleanup.
-    // Why it exists: c889f9c made stop_beeper run first but did not change the
-    //   removal order. The retry on a poisoned corrupt sidecar still hit the
-    //   mounted no-op gate because the latch JSON had already been removed.
-    //   The sentinel preserves the retry signal without moving the corrupt
-    //   sidecar's destructive step, which would break ADR 014's forensic
-    //   guarantee.
+    // Intent: After cleanup_alert_files fails at remove_alert_latch_corrupt,
+    //   the alert-cleanup-pending sentinel remains on disk, so the retry
+    //   re-enters cleanup, re-invokes the stop hook, and completes cleanup.
+    // Why it exists: the retry on a poisoned corrupt sidecar used to hit the
+    //   mounted no-op gate because the latch JSON had already been removed, so
+    //   cleanup never finished. The sentinel preserves the retry signal
+    //   without moving the corrupt sidecar's destructive step, which would
+    //   break ADR 014's forensic guarantee.
     // Scenario: monitor latched BtrfsDeviceErrors{devid:1}. A directory sits
     //   at alert-latch.json.corrupt. `braid ack` returns CleanupFailed.
     //   Operator removes the directory and re-runs `braid ack`.
@@ -1586,9 +1722,9 @@ mod tests {
     }
 
     // Intent: When the retry's only entry signal is the cleanup-pending
-    //   sentinel, cmd_ack_impl takes the hoisted sentinel-only branch before
-    //   probe_pool_alerts. The retry issues zero runner requests and does not
-    //   rewrite acked-stats.json.
+    //   sentinel, ack_alert_records takes the hoisted sentinel-only branch
+    //   before probe_pool_alerts. The retry issues zero runner requests and
+    //   does not rewrite acked-stats.json.
     // Why it exists: a sentinel-aware gate below probe_pool_alerts would
     //   re-wedge cleanup on probe failure and could re-baseline new counters
     //   that arrived after the failed first ack. The retry is finishing the
@@ -1685,7 +1821,7 @@ mod tests {
         assert_eq!(
             beeper_calls_first.get(),
             1,
-            "stop hook must fire before marker creation"
+            "stop hook must fire even when marker creation fails"
         );
         assert_eq!(
             std::fs::read(paths.alert_latch_json()).unwrap(),
@@ -1728,8 +1864,8 @@ mod tests {
     //   corrupt bytes to alert-latch.json.corrupt because it rewrites the
     //   latch, while ack deletes the latch outright in cleanup.
     // Why it exists: a symmetry edit could swap load_alert_latch for
-    //   load_alert_latch_or_quarantine in cmd_ack_impl. On the success path,
-    //   the sidecar would be created by quarantine and then deleted by
+    //   load_alert_latch_or_quarantine in ack_alert_records. On the success
+    //   path, the sidecar would be created by quarantine and then deleted by
     //   remove_alert_latch_corrupt during cleanup, so a sidecar-absence
     //   assertion at the end of a successful ack proves nothing. Forcing
     //   cleanup to fail at mark_alert_cleanup_pending stops execution before
@@ -2046,14 +2182,13 @@ mod tests {
      * missing-device ack update to acked-stats.json before cleanup. When the
      * third cleanup file removal then fails, the user-visible error names the
      * partial state, the latch is removed, the corrupt sidecar remains, and
-     * the beeper-stop hook has already fired.
-     * Why it exists: cmd_ack_impl and ack_offline have separate cleanup call
+     * the beeper-stop hook still fires.
+     * Why it exists: the mounted and offline paths have separate cleanup call
      * sites. A regression that reverts only the offline wrapping would
      * silently fall back to AckError::Io and the mounted test would still
-     * pass. The beeper assertion independently pins that the offline path's
-     * cleanup reaches stop_beeper before a later remove_* can short-circuit.
-     * The cleanup-pending sentinel is the retry signal after the latch is
-     * already removed.
+     * pass. The beeper assertion independently pins that an offline
+     * CleanupFailed still stops the alert units. The cleanup-pending sentinel
+     * is the retry signal after the latch is already removed.
      * Scenario: pool offline, latch contains MissingDevice{devid:1}, and a
      * directory sits at the corrupt-latch sidecar path so remove_file fails
      * with EISDIR/EPERM.
@@ -2121,7 +2256,7 @@ mod tests {
 
     // Intent: Offline ack treats an unreadable alert latch as active even
     //   when no causes can be parsed from it.
-    // Why it exists: ADR 014's recovery contract depends on `cmd_ack_impl`
+    // Why it exists: ADR 014's recovery contract depends on `ack_alert_records`
     //   mapping both Read and Parse latch load failures to `latch_corrupt =
     //   true`. If a future refactor narrows that gate to Parse only, ack takes
     //   the `no active alerts` no-op before cleanup and leaves the user unable
@@ -2151,7 +2286,7 @@ mod tests {
         assert_eq!(
             beeper_calls.get(),
             1,
-            "stop_beeper must fire before the failed latch removal"
+            "stop_beeper must fire after the failed latch removal"
         );
         assert!(
             paths.alert_latch_json().exists(),
@@ -2171,13 +2306,16 @@ mod tests {
      * Intent: Offline ack refuses with OfflineBtrfsErrorsRefused when the
      * latch contains any BtrfsDeviceErrors cause, even if it also contains
      * a MissingDevice cause that would otherwise be acceptable. The latch
-     * and acked-stats.json are both untouched -- all-or-nothing atomicity.
+     * and acked-stats.json are both untouched -- all-or-nothing atomicity --
+     * and the alert units keep running.
      *
      * Why it exists: Pins the all-or-nothing contract. A buggy implementation
      * that applied the MissingDevice ack update before checking for
      * BtrfsDeviceErrors would partially apply the ack, then refuse, leaving
      * the user with an inconsistent state. Starting from acked-stats.json
-     * absent makes that partial-apply visible (the file would appear).
+     * absent makes that partial-apply visible (the file would appear). The
+     * beeper assertion pins that a refusal does not silence an alert that ack
+     * left in place.
      *
      * Scenario: pool had btrfs device errors AND a missing device. User
      * locked the pool and ran `braid ack`. The user must be told to unlock
@@ -2199,13 +2337,15 @@ mod tests {
         );
         let original_latch_bytes = std::fs::read(paths.alert_latch_json()).unwrap();
         assert!(!paths.acked_stats_json().exists());
+        let beeper_calls = std::cell::Cell::new(0u32);
+        let beeper = || beeper_calls.set(beeper_calls.get() + 1);
 
         let result = cmd_ack_impl(
             &AckPanicRunner,
             &ack_fs_not_mounted(),
             &ack_mp(),
             &paths,
-            &ack_noop_beeper,
+            &beeper,
         );
         assert!(
             matches!(result, Err(AckError::OfflineBtrfsErrorsRefused)),
@@ -2217,6 +2357,11 @@ mod tests {
         assert!(
             !paths.acked_stats_json().exists(),
             "partial apply must not create acked-stats.json"
+        );
+        assert_eq!(
+            beeper_calls.get(),
+            0,
+            "a refused ack must leave the alert units running"
         );
     }
 
@@ -2322,14 +2467,15 @@ mod tests {
     /*
      * Intent: A corrupt acked-stats.json combined with a latched
      * MissingDevice cause causes offline ack to fail with AckError::Io,
-     * leaving the corrupt file byte-identical. Mutation paths must
-     * fail-closed, not silently overwrite.
+     * leaving the corrupt file byte-identical and the alert units running.
+     * Mutation paths must fail-closed, not silently overwrite.
      *
      * Why it exists: Pins the use of load_acked_stats_fallible (not the
      * lossy load_acked_stats) on the offline-ack mutation path. The lossy
      * detector loader would treat the corrupt file as empty and silently
      * overwrite it on save -- destroying forensic evidence of the
-     * corruption and possibly losing valid acks.
+     * corruption and possibly losing valid acks. An I/O error before cleanup
+     * is a refusal, so it must not silence the alert it left latched.
      *
      * Scenario: acked-stats.json was hand-edited (or filesystem-corrupted)
      * to invalid JSON. Latch contains MissingDevice{devid:1}. User runs
@@ -2347,13 +2493,15 @@ mod tests {
                 devid: Devid::new(1),
             }],
         );
+        let beeper_calls = std::cell::Cell::new(0u32);
+        let beeper = || beeper_calls.set(beeper_calls.get() + 1);
 
         let result = cmd_ack_impl(
             &AckPanicRunner,
             &ack_fs_not_mounted(),
             &ack_mp(),
             &paths,
-            &ack_noop_beeper,
+            &beeper,
         );
         assert!(
             matches!(result, Err(AckError::Io(_))),
@@ -2364,6 +2512,11 @@ mod tests {
         assert_eq!(
             after_bytes, original_bytes,
             "corrupt acked-stats must not be silently overwritten"
+        );
+        assert_eq!(
+            beeper_calls.get(),
+            0,
+            "an I/O error before cleanup must leave the alert units running"
         );
     }
 

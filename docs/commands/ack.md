@@ -39,6 +39,8 @@ If there's nothing to acknowledge, mounted or offline, ack exits 0 with:
 no active alerts
 ```
 
+Ack still stops the alert units in that case, so a beeper that is sounding with no recorded alert goes quiet.
+
 ## Exit codes
 
 | Exit code | Meaning |
@@ -50,16 +52,18 @@ no active alerts
 ## What happens under the hood
 
 1. Reads the alert latch to determine how many alerts are active.
-2. If no alert source is present -- no latch entry, no smartd alert flag, no scrub-failed flag, no corrupt latch, and no pending ack cleanup -- exits 0 with `no active alerts`, whether the pool is mounted or offline. It does not query btrfs, rewrite `acked-stats.json`, or stop the alert units.
+2. If no alert source is present -- no latch entry, no smartd alert flag, no scrub-failed flag, no corrupt latch, and no pending ack cleanup -- skips to step 8 and prints `no active alerts` (exit 0), whether the pool is mounted or offline. It does not query btrfs or rewrite `acked-stats.json`.
 3. If the pool is mounted:
    - Snapshots the current `btrfs device stats` error counters and missing-device state.
    - Writes that snapshot as the new acknowledged baseline (`acked-stats.json`). Future monitor runs compare against this baseline, so the same error counts won't trigger again.
    - If a latched `EnospcRisk` is still at risk on a fresh `btrfs device usage` probe, writes a snooze marker (`enospc-ack.json`) with a reminder deadline one interval (7 days) out. This *snoozes* the monitor reminder -- it does not resolve the risk, and `braid status` keeps showing the live advisory. If the pool has recovered by ack time, no marker is written, so a later recurrence alerts immediately.
-4. Stops both alert units, best-effort: `braid-alert.service` (the Critical beeper -- that stop cascades through `BindsTo` to the `braid-beep.service` loop when beeping is enabled) and `braid-alert-advisory.service` (the non-beeping Warning advisory started on the proactive ENOSPC/capacity path). One ack silences whichever tier the last monitor cycle started. This runs first so the stop attempt is reached before any later file-removal I/O error can short-circuit the rest of cleanup.
-5. Removes the smartd alert flag (`smartd-alert`) if present.
-6. Removes the scrub-failed flag (`scrub-failed`) if present.
-7. Removes the alert latch file (`alert-latch.json`).
-8. Removes the corrupt-latch sidecar (`alert-latch.json.corrupt`) if present.
+4. Removes the smartd alert flag (`smartd-alert`) if present.
+5. Removes the scrub-failed flag (`scrub-failed`) if present.
+6. Removes the alert latch file (`alert-latch.json`).
+7. Removes the corrupt-latch sidecar (`alert-latch.json.corrupt`) if present.
+8. Stops both alert units, best-effort: `braid-alert.service` (the Critical beeper -- that stop cascades through `BindsTo` to the `braid-beep.service` loop when beeping is enabled) and `braid-alert-advisory.service` (the non-beeping Warning advisory started on the proactive ENOSPC/capacity path). One ack silences whichever tier the last monitor cycle started.
+
+The stop in step 8 runs on every ack that is not refused, even when there was nothing to acknowledge or a removal failed. A unit can keep sounding with no alert record on disk -- for example when monitor could not write the latch -- and ack still silences it. The stop runs after the removals, so a SMART or scrub alert that fires after the stop keeps its flag for the next monitor cycle. A refused ack leaves the units running: a probe or fstype error, the offline btrfs-error refusal, or an I/O error before cleanup.
 
 **Offline ack.** When the pool is locked or unmounted, an `EnospcRisk` ack still clears the latch but writes no snooze marker (offline cannot probe the pool key or confirm risk). A still-at-risk pool re-fires `EnospcRisk` -- a quiet Warning, no beep -- on remount and each subsequent mounted cycle until a mounted ack snoozes it.
 
@@ -85,9 +89,9 @@ None.
 
 ## Safety checks
 
-- If no alert signal is present -- no latch entries, no smartd alert flag, no scrub-failed flag, no corrupt latch, and no pending ack cleanup -- ack is a no-op whether the pool is mounted or offline: it prints `no active alerts`, exits 0, and does not mutate `acked-stats.json` or any other alert state.
-- If the pool is offline and any latched cause is a btrfs device error, ack refuses with "cannot ack btrfs device errors while pool is offline -- unlock the pool first" and leaves all alert state untouched (a co-latched missing device is not partially acknowledged).
-- If the configured mount point is mounted as something other than btrfs, ack refuses with the fstype mismatch and does not clear or rewrite alert state
+- If no alert signal is present -- no latch entries, no smartd alert flag, no scrub-failed flag, no corrupt latch, and no pending ack cleanup -- ack is a no-op whether the pool is mounted or offline: it prints `no active alerts`, exits 0, and does not mutate `acked-stats.json` or any other alert file. It still stops the alert units.
+- If the pool is offline and any latched cause is a btrfs device error, ack refuses with "cannot ack btrfs device errors while pool is offline -- unlock the pool first" and leaves all alert state untouched and the alert units running (a co-latched missing device is not partially acknowledged).
+- If the configured mount point is mounted as something other than btrfs, ack refuses with the fstype mismatch, does not clear or rewrite alert state, and leaves the alert units running
 - If another braid operation holds the pool lock (`/run/braid-pool.lock`), waits up to 10 seconds for it to finish: proceeds if the lock frees within that window, otherwise exits 1 with the pool-lock retry message.
 
 ## Related commands
