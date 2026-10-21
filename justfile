@@ -1,5 +1,11 @@
 system := `nix eval --impure --expr builtins.currentSystem --raw`
 
+# Every command that can boot a VM runs under this host-wide gate, so separate
+# invocations (concurrent implement runs, or you) take turns for the Mac's RAM.
+# Concurrency inside one invocation (--max-jobs, -j) is unchanged. Enforced by
+# scripts/vm-gate/test_vm_gate.py; see docs/dev/testing.md#vm-booting-recipes-share-a-host-wide-gate.
+vm_gate := "python3 scripts/vm-gate/vm_gate.py"
+
 # Internal: shared build logic for VM test commands
 _build-checks flake_attr *args:
     #!/usr/bin/env bash
@@ -45,7 +51,7 @@ _build-checks flake_attr *args:
         flags=()
         if $rebuild; then flags+=(--rebuild); fi
         # --no-link: tests run for side effects only; suppress result/result-N symlinks (one per check) that would otherwise pile up in the repo root.
-        nix build --no-link "${installables[@]}" "${flags[@]}" --max-jobs 7 "${build_dir[@]}" $nix_override $keep_going $verbose || rc=$?
+        {{vm_gate}} nix build --no-link "${installables[@]}" "${flags[@]}" --max-jobs 7 "${build_dir[@]}" $nix_override $keep_going $verbose || rc=$?
     else
         installables=()
         for t in "${tests[@]}"; do
@@ -54,7 +60,7 @@ _build-checks flake_attr *args:
         flags=()
         if $rebuild; then flags+=(--rebuild); fi
         # --no-link: tests run for side effects only; suppress result/result-N symlinks (one per check) that would otherwise pile up in the repo root.
-        nix build --no-link "${installables[@]}" "${flags[@]}" --max-jobs 7 "${build_dir[@]}" $nix_override $keep_going $verbose || rc=$?
+        {{vm_gate}} nix build --no-link "${installables[@]}" "${flags[@]}" --max-jobs 7 "${build_dir[@]}" $nix_override $keep_going $verbose || rc=$?
     fi
     if [ $rc -eq 0 ]; then
         printf '\033]777;notify;braid;tests passed\033\\'
@@ -109,7 +115,7 @@ test-fast:
     else
         echo "build-dir: default"
     fi
-    nix run .#nix-fast-build -- --no-link -j 7 --eval-workers 4 --eval-max-memory-size 2048 --skip-cached --no-nom -f ".#checks" "${build_dir[@]}"
+    {{vm_gate}} nix run .#nix-fast-build -- --no-link -j 7 --eval-workers 4 --eval-max-memory-size 2048 --skip-cached --no-nom -f ".#checks" "${build_dir[@]}"
 
 # Run parser compatibility canary tests (CLI parsers against live tool output)
 test-parsers *args:
@@ -124,6 +130,11 @@ test-rust:
 # Run the review-pipeline finding store tests (scripts/findings/findings.py)
 test-findings:
     python3 -m unittest discover -s scripts/findings
+
+# Run the host-wide VM gate tests, including the check that every VM-booting
+# recipe takes the gate (scripts/vm-gate/vm_gate.py)
+test-vm-gate:
+    python3 -m unittest discover -s scripts/vm-gate
 
 # Run state-mode tests that mutate process-wide umask; keep them serial and
 # outside the default parallel Rust lane.
@@ -145,21 +156,21 @@ clippy-fix:
 
 # Capture tool output fixtures into cli/tests/fixtures/nixos-26.05/
 capture-fixtures:
-    nix build .#checks.{{system}}.capture-tool-fixtures -L
+    {{vm_gate}} nix build .#checks.{{system}}.capture-tool-fixtures -L
     chmod u+w cli/tests/fixtures/nixos-26.05/* 2>/dev/null || true
     cp -f result/fixtures/* cli/tests/fixtures/nixos-26.05/
     @echo "Fixtures written to cli/tests/fixtures/nixos-26.05/"
 
 # Capture in-progress fixtures from progress-monitoring VM test
 capture-progress-fixtures:
-    nix build .#checks.{{system}}.progress-monitoring -L
+    {{vm_gate}} nix build .#checks.{{system}}.progress-monitoring -L
     chmod u+w cli/tests/fixtures/nixos-26.05/* 2>/dev/null || true
     cp -f result/fixtures/* cli/tests/fixtures/nixos-26.05/
     @echo "Progress fixtures written to cli/tests/fixtures/nixos-26.05/"
 
 # Capture upsc fixtures for the NUT parser into cli/tests/fixtures/nixos-26.05/upsc/
 capture-ups-fixtures:
-    nix build .#checks.{{system}}.capture-ups-fixtures -L
+    {{vm_gate}} nix build .#checks.{{system}}.capture-ups-fixtures -L
     mkdir -p cli/tests/fixtures/nixos-26.05/upsc
     chmod u+w cli/tests/fixtures/nixos-26.05/upsc/* 2>/dev/null || true
     cp -f result/fixtures/* cli/tests/fixtures/nixos-26.05/upsc/
@@ -177,7 +188,7 @@ test-all-unstable:
 
 # Capture tool output fixtures from nixos-unstable into cli/tests/fixtures/nixos-unstable/
 capture-fixtures-unstable:
-    nix build .#checks.{{system}}.capture-tool-fixtures --override-input nixpkgs github:NixOS/nixpkgs/nixos-unstable -L
+    {{vm_gate}} nix build .#checks.{{system}}.capture-tool-fixtures --override-input nixpkgs github:NixOS/nixpkgs/nixos-unstable -L
     rm -rf cli/tests/fixtures/nixos-unstable
     mkdir -p cli/tests/fixtures/nixos-unstable
     cp -f result/fixtures/* cli/tests/fixtures/nixos-unstable/
@@ -185,14 +196,14 @@ capture-fixtures-unstable:
 
 # Capture in-progress fixtures from nixos-unstable (adds to existing unstable fixtures)
 capture-progress-fixtures-unstable:
-    nix build .#checks.{{system}}.progress-monitoring --override-input nixpkgs github:NixOS/nixpkgs/nixos-unstable -L
+    {{vm_gate}} nix build .#checks.{{system}}.progress-monitoring --override-input nixpkgs github:NixOS/nixpkgs/nixos-unstable -L
     mkdir -p cli/tests/fixtures/nixos-unstable
     cp -f result/fixtures/* cli/tests/fixtures/nixos-unstable/
     @echo "Unstable progress fixtures written to cli/tests/fixtures/nixos-unstable/"
 
 # Capture upsc fixtures from nixos-unstable into cli/tests/fixtures/nixos-unstable/upsc/
 capture-ups-fixtures-unstable:
-    nix build .#checks.{{system}}.capture-ups-fixtures --override-input nixpkgs github:NixOS/nixpkgs/nixos-unstable -L
+    {{vm_gate}} nix build .#checks.{{system}}.capture-ups-fixtures --override-input nixpkgs github:NixOS/nixpkgs/nixos-unstable -L
     mkdir -p cli/tests/fixtures/nixos-unstable/upsc
     chmod u+w cli/tests/fixtures/nixos-unstable/upsc/* 2>/dev/null || true
     cp -f result/fixtures/* cli/tests/fixtures/nixos-unstable/upsc/
@@ -210,7 +221,7 @@ test-rust-unstable:
 
 # Boot interactive VM with btrfs + Samba playground
 playground:
-    nix run .#playground
+    {{vm_gate}} nix run .#playground
 
 # Cut a release: bump cli/Cargo.toml + Cargo.lock, tag vX.Y.Z, push master+tag.
 # The tag triggers .github/workflows/release.yml, which builds x86_64-linux,

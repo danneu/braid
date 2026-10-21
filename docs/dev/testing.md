@@ -29,6 +29,12 @@ fn the_test() { ... }
 
 `just test-vm` and `just test-all` build whatever is registered under `checks.<system>` in `flake.nix` -- there is no default per-test list in the justfile. When adding a new `tests/cli/*.nix` or `tests/module/*.nix`, also add a matching `pkgs.testers.nixosTest (import ./tests/cli/<name>.nix { braid = linuxCrane.braid; })` entry to `flake.nix`. An unregistered test sits in the tree but never runs under `nix flake check`.
 
+### VM-booting recipes share a host-wide gate
+
+VM tests boot QEMU on the Mac itself, so separate invocations compete for RAM. Every justfile command that can boot a VM runs under `{{vm_gate}}` (`scripts/vm-gate/vm_gate.py`), an flock that lets one invocation run at a time across all checkouts and worktrees. A second invocation prints `vm-gate: waiting ...` and starts when the first exits. Concurrency inside one invocation (`--max-jobs`, `-j`) is unchanged. The kernel drops the lock when the holder exits, so a crashed run never leaves it stuck.
+
+When you add a recipe that builds checks or runs a VM, prefix the command with `{{vm_gate}}`. `just test-vm-gate` fails on an ungated `nix build` or `nix run` line unless it targets `.#packages.*` or `nixpkgs#`.
+
 ## VM-test framework gotchas
 
 ### `just test-repro` requires the full `repro-` prefix

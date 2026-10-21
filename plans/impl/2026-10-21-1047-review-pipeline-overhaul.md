@@ -252,7 +252,7 @@ choosing a solution for each finding:
 ## Commit progress
 
 - [x] C1. feat(findings): add the script-owned finding store with git-derived status
-- [ ] C2. feat(just): serialize VM-booting recipe invocations through a host-wide gate
+- [x] C2. feat(just): serialize VM-booting recipe invocations through a host-wide gate
 - [ ] C3. feat(review): add the review workflow and unified reviewer agent
 - [ ] C4. feat(review): add the implement workflow with vetting and the local merge queue
 - [ ] C5. feat(review): add /pick-fix to decide pitches and launch implement runs
@@ -274,3 +274,9 @@ choosing a solution for each finding:
 - C1: a duplicate merge deletes the absorbed files and records their IDs
   and locations on the keeper. D4 has no "duplicate" state, and adding
   one would only keep files nobody acts on.
+- C2: the gate is an flock held by the exec'd command (`scripts/vm-gate/vm_gate.py`),
+  so the kernel releases it when the command exits or crashes. It covers
+  every justfile command that builds checks or runs a VM, including
+  `playground`: an open playground makes implement runs wait, which is
+  what I8 asks for. A test fails on any ungated `nix build` or `nix run`
+  line that isn't a package or nixpkgs tool.
