@@ -28,12 +28,12 @@ const MAX_LAND_WAITS = 12
 
 const RAN = {
   type: 'object',
-  properties: { stdout: { type: 'string' }, exit_code: { type: 'integer' } },
-  required: ['stdout', 'exit_code'],
+  properties: { stdout: { type: 'string' }, stderr: { type: 'string' } },
+  required: ['stdout', 'stderr'],
 }
 async function sh(label, command, phaseName) {
   const r = await agent(
-    `Run this exact command once with the Bash tool, with a 600000 ms timeout, and return its stdout verbatim and its exit code. Do nothing else.\n\n${command}`,
+    `Run this exact command once with the Bash tool, with a 600000 ms timeout. Return its stdout and its stderr exactly as printed, each an empty string if there was none. Add no notes or commentary to either. Do nothing else.\n\n${command}`,
     { label, phase: phaseName, model: 'haiku', effort: 'low', schema: RAN },
   )
   if (!r) throw new Error(`${label}: runner failed`)
@@ -54,11 +54,25 @@ function expect(label, value, shape) {
   if (bad.length) throw new Error(`${label}: malformed store result (${bad.map(([k, t]) => `${k}: ${t}`).join(', ')}): ${JSON.stringify(value)}`)
   return value
 }
+// The store prints a JSON document on stdout only when it succeeds; an error
+// goes to stderr alone. So the document is the success signal, not the exit
+// code, which a runner cannot always see and sometimes invents. Runners also
+// add notes despite being told not to, so take the document out of the text.
+function jsonBlock(text) {
+  const lines = text.split('\n')
+  for (let s = 0; s < lines.length; s++) {
+    if (!/^[[{]/.test(lines[s])) continue
+    for (let e = s; e < lines.length; e++) {
+      if (!/^[\]}]/.test(lines[e]) && e !== s) continue
+      try { return JSON.parse(lines.slice(s, e + 1).join('\n')) } catch (err) { /* keep looking */ }
+    }
+  }
+  return undefined
+}
 async function store(label, command, phaseName, shapeOf) {
   const r = await sh(label, command, phaseName)
-  if (r.exit_code !== 0) throw new Error(`${label}: ${r.stdout}`)
-  let value
-  try { value = JSON.parse(r.stdout) } catch (e) { throw new Error(`${label}: store result is not JSON: ${r.stdout}`) }
+  const value = jsonBlock(r.stdout)
+  if (value === undefined) throw new Error(`${label}: store failed: ${r.stderr || r.stdout}`)
   return expect(label, value, shapeOf(value))
 }
 

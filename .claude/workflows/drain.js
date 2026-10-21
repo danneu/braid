@@ -24,21 +24,34 @@ const IMPLEMENT = opts.implement ? { scriptPath: opts.implement } : 'implement'
 
 const RAN = {
   type: 'object',
-  properties: { stdout: { type: 'string' }, exit_code: { type: 'integer' } },
-  required: ['stdout', 'exit_code'],
+  properties: { stdout: { type: 'string' }, stderr: { type: 'string' } },
+  required: ['stdout', 'stderr'],
+}
+// The store prints a JSON document on stdout only when it succeeds, so the
+// document is the success signal, not a relayed exit code; runners sometimes
+// add notes, so take the document out of the text.
+function jsonBlock(text) {
+  const lines = text.split('\n')
+  for (let s = 0; s < lines.length; s++) {
+    if (!/^[[{]/.test(lines[s])) continue
+    for (let e = s; e < lines.length; e++) {
+      if (!/^[\]}]/.test(lines[e]) && e !== s) continue
+      try { return JSON.parse(lines.slice(s, e + 1).join('\n')) } catch (err) { /* keep looking */ }
+    }
+  }
+  return undefined
 }
 // The store returns ids only (plan/2026-10-21-1424/D1); the shape is checked
 // so a garbled relay stops the drain instead of starting the wrong work.
 const LISTS = ['runnable', 'waiting', 'held', 'asking', 'blocked']
 async function queue() {
   const r = await agent(
-    `Run this exact command once with the Bash tool and return its stdout verbatim and its exit code. Do nothing else.\n\n${F} queue`,
+    `Run this exact command once with the Bash tool. Return its stdout and its stderr exactly as printed, each an empty string if there was none. Add no notes or commentary to either. Do nothing else.\n\n${F} queue`,
     { label: 'queue', phase: 'Queue', model: 'haiku', effort: 'low', schema: RAN },
   )
   if (!r) throw new Error('queue: runner failed')
-  if (r.exit_code !== 0) throw new Error(`queue: ${r.stdout}`)
-  let q
-  try { q = JSON.parse(r.stdout) } catch (e) { throw new Error(`queue: not JSON: ${r.stdout}`) }
+  const q = jsonBlock(r.stdout)
+  if (q === undefined) throw new Error(`queue: store failed: ${r.stderr || r.stdout}`)
   const ok = q && LISTS.every(k => Array.isArray(q[k]) && q[k].every(x => typeof x === 'string'))
   if (!ok) throw new Error(`queue: malformed store result: ${r.stdout}`)
   return q
