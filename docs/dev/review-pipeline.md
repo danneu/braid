@@ -15,6 +15,7 @@ revised by `plan/2026-10-21-1424` (`plans/impl/2026-10-21-1424-review-pipeline-q
 | Verify | `review` workflow | a skeptic tries to refute each finding |
 | Merge | `review` workflow | duplicates across slices collapse; dependencies recorded |
 | Pitch | `review` workflow | ideal fix, ranked candidates, rejected options, recommendation |
+| Critique | `review` workflow | a critic attacks each pitch against the run's other pitches; one revision; orderings recorded |
 | Pick | you, via `/pick-fix` | choose a candidate, defer, or drop; answer asks |
 | Drain | `drain` workflow | start an `implement` run per runnable finding, a few at a time |
 | Implement | `implement` workflow | worktree, proof, fix, gates, vetter, merge queue |
@@ -57,6 +58,15 @@ exists) and `merged` (a `Finding: <id>` trailer is reachable from
 `master`). Each new decision gets a new branch, so no run resumes work
 built for an earlier choice. An answer to a blocked finding keeps its
 decision and branch (see below).
+
+Before you see a pitch, a critic reads it alongside every other pitch in
+the run. It checks that the ideal really is the simplest structure that
+rules the problem out, that no candidate is missing, that the
+recommendation follows from the trade-offs, and that no pitch conflicts
+with another. When one fix must land after another, it records the
+ordering with `findings.py depends`, which refuses cycles. You can edit
+dependencies the same way. A `revise` verdict gets one revision, and
+each pitch shows its critique or says "Not critiqued."
 
 Rank is computed from severity, confidence, and effort
 (`scripts/findings/findings.py#score`); agents never assign it.

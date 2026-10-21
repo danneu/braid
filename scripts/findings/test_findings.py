@@ -556,6 +556,79 @@ class AskTest(StoreTest):
         self.assertEqual(self.state(fid), "implementing")
 
 
+class DependsTest(StoreTest):
+    """Editable dependencies (plan/2026-10-21-1424/PO2)."""
+
+    def test_adds_and_removes_edges(self):
+        a, b, c = self.to_pitched(finding(), finding(), finding())
+        self.assertEqual(self.cli("depends", c, "--add", a, "--add", b), {"id": c, "depends_on": [a, b]})
+        self.assertEqual(self.cli("depends", c, "--remove", a), {"id": c, "depends_on": [b]})
+        self.assertEqual(self.cli("depends", c, "--add", b)["depends_on"], [b], "adding twice is one edge")
+        self.assertEqual(self.cli("show", c)["depends_on"], [b])
+
+    def test_refuses_bad_edges_and_changes_nothing(self):
+        a, b, c = self.to_pitched(finding(), finding(), finding())
+        self.cli("depends", b, "--add", a)
+        self.cli("depends", c, "--add", b)
+        self.cli("decide", a, "--candidate", "ideal-fix")
+        merged = self.to_pitched(finding())[0]
+        self.land(merged)
+        cases = {
+            "self-edge": (a, "--add", a),
+            "direct cycle": (a, "--add", b),
+            "longer cycle": (a, "--add", c),
+            "unknown id": (a, "--add", f"{RUN}-999"),
+            "edge on a merged finding": (merged, "--add", a),
+        }
+        before = {i: self.cli("show", i)["depends_on"] for i in (a, b, c, merged)}
+        for name, args in cases.items():
+            with self.subTest(name):
+                self.refused("depends", *args)
+        self.assertEqual({i: self.cli("show", i)["depends_on"] for i in before}, before)
+
+    def test_merge_refuses_a_cycle(self):
+        a, b = self.ingest(finding(), finding())
+        self.cli("verify", "--input", "-", payload=[{"id": i, "verdict": "verified", "reason": "r"} for i in (a, b)])
+        self.refused("merge", "--input", "-", payload={"depends_on": {a: [b], b: [a]}})
+
+
+class CritiqueTest(StoreTest):
+    """One critic verdict and at most one revision per pitch (plan/2026-10-21-1424/D3)."""
+
+    def test_a_revise_verdict_allows_exactly_one_revision(self):
+        (fid,) = self.to_pitched(finding())
+        self.refused("pitch", "--input", "-", payload=[pitch(fid, keys=("better", "ideal-fix"))])
+        self.cli("critique", "--input", "-", payload=[{"id": fid, "verdict": "revise", "points": ["missing x"]}])
+        self.cli("pitch", "--input", "-", payload=[pitch(fid, keys=("better", "ideal-fix"))])
+        shown = self.cli("show", fid)
+        self.assertEqual((shown["pitch"]["ideal"], shown["critique"]["revised"]), ("better", True))
+        self.refused("pitch", "--input", "-", payload=[pitch(fid)])
+        self.refused("critique", "--input", "-", payload=[{"id": fid, "verdict": "sound", "points": []}])
+
+    def test_a_sound_verdict_allows_no_revision(self):
+        (fid,) = self.to_pitched(finding())
+        self.cli("critique", "--input", "-", payload=[{"id": fid, "verdict": "sound", "points": []}])
+        self.refused("pitch", "--input", "-", payload=[pitch(fid)])
+        self.assertIn("### Critique (sound)", (self.store / RUN / f"{fid}.md").read_text())
+
+    def test_an_uncritiqued_pitch_says_so(self):
+        (fid,) = self.to_pitched(finding())
+        self.assertIn("Not critiqued.", (self.store / RUN / f"{fid}.md").read_text())
+
+    def test_refuses_malformed_critiques(self):
+        (fid,) = self.to_pitched(finding())
+        (open_,) = self.ingest(finding())
+        cases = {
+            "revise without points": [{"id": fid, "verdict": "revise", "points": []}],
+            "bad verdict": [{"id": fid, "verdict": "meh", "points": []}],
+            "not pitched": [{"id": open_, "verdict": "sound", "points": []}],
+        }
+        for name, payload in cases.items():
+            with self.subTest(name):
+                self.refused("critique", "--input", "-", payload=payload)
+        self.assertNotIn("critique", self.cli("show", fid))
+
+
 class PayloadTest(StoreTest):
     def test_refuses_malformed_findings(self):
         cases = {

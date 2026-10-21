@@ -250,7 +250,7 @@ decision so it resumes its approved branch, and start one `drain`.
 - [x] C3. feat(review): gate and vet a snapshot of the candidate and the message that lands
 - [x] C4. feat(review): runs stop with an ask, and an answer resumes the same branch
 - [x] C5. feat(review): drain the decided queue; /pick-fix only decides
-- [ ] C6. feat(review): critique every pitch and record dependencies it finds
+- [x] C6. feat(review): critique every pitch and record dependencies it finds
 
 ## Implementation notes
 
@@ -317,3 +317,14 @@ decision so it resumes its approved branch, and start one `drain`.
 - C5: PO9 is met by the skill's text, not a live session, because
   `/pick-fix` needs the user to answer. The only Workflow call it
   describes is the `drain` the user accepts at the end.
+- C6: the critic's verdict is stored on the finding (`critique`). `pitch`
+  accepts a pitched finding again only once, and only after a `revise`
+  verdict, so "one revision, no second round" is enforced by the store.
+  The review's merge step also refuses dependency cycles now.
+- C6: PO8 ran live: a `review` of `command:ups-status` (run
+  `261021-1459`). It pitched 7 findings, and every pitch got a critic
+  verdict. The critics recorded 7 dependency edges, and coverage was
+  complete. The skipped-critic gap path did not run live; it is the
+  same gap accounting the other phases use. Every verdict was
+  `revise`, so each pitch was revised once. Whether the critic is too
+  eager is for the user to judge when they read that run's pitches.

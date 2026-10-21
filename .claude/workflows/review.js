@@ -8,10 +8,12 @@ export const meta = {
     { title: 'Verify', detail: 'one skeptic per finding' },
     { title: 'Merge', detail: 'collapse duplicates, set dependencies' },
     { title: 'Pitch', detail: 'ranked solutions per finding' },
+    { title: 'Critique', detail: 'one critic per pitch; one revision when asked' },
   ],
 }
 
-// Steps 1-4 of plan/2026-10-21-1047. Agents record their results through
+// Steps 1-4 of plan/2026-10-21-1047, plus the pitch critic of
+// plan/2026-10-21-1424/D3. Agents record their results through
 // scripts/findings/findings.py, which validates every payload and owns all
 // state; this script only routes work and accounts for coverage. A slice or
 // finding whose agent fails stays where it was, and the return value names
@@ -173,13 +175,64 @@ const pitched = await parallel(toPitch.map(id => () =>
   }),
 ))
 pitched.forEach((p, i) => { if (!p) gaps.push(`pitch failed: ${toPitch[i]} (still verified)`) })
+const pitchedIds = toPitch.filter((_, i) => pitched[i])
+
+// Every pitch faces a critic before the user sees it (plan/2026-10-21-1424/D3).
+// A barrier: each critic reads every other pitch in the run, to catch
+// conflicts and ordering.
+const critiquePrompt = id => `You are a critic. Attack the pitch for braid review finding ${id} before the user sees it.
+
+Read it with \`${FINDINGS} show ${id}\`, the code it cites, \`docs/design/principles.md\`, and the relevant ADRs. Then read every other pitch in this run: \`${FINDINGS} list ${run} --state pitched\`, and \`${FINDINGS} show <id>\` for each.
+
+Attack these points, and only these:
+- the ideal is not the simplest structure in which the problem cannot happen (AGENTS.md design bar);
+- a candidate worth choosing is missing;
+- the ranking or the recommendation does not follow from the stated trade-offs;
+- the pitch conflicts with another pitch in the run (one's fix undoes, contradicts, or already covers the other's);
+- an ordering is needed: this fix must land after another finding's, or before it.
+
+Record every ordering you find as a dependency (the finding that must land first goes in \`--add\`):
+\`\`\`sh
+${FINDINGS} depends <finding that waits> --add <finding that lands first>
+\`\`\`
+Then record your verdict: \`sound\` if nothing above needs the pitch changed, else \`revise\` with one concrete point per problem. A dependency alone is not a reason to revise.
+\`\`\`sh
+${FINDINGS} critique --input - <<'EOF'
+[{"id": "${id}", "verdict": "sound|revise", "points": ["<concrete problem and what the pitch should say instead>"]}]
+EOF
+\`\`\`
+${READ_ONLY} Return the verdict.`
+
+const reviseNote = id => `\n\nThis finding is already pitched, and a critic asked for one revision. Read its points under Critique in \`${FINDINGS} show ${id}\`. Address each point, or keep your position where a point is wrong and say why in the pitch's text. Record the full revised pitch with the same command; this is the only revision.`
+
+let critiqued = []
+if (pitchedIds.length) {
+  phase('Critique')
+  const verdicts = await parallel(pitchedIds.map(id => () =>
+    agent(critiquePrompt(id), {
+      label: `critique:${id}`, phase: 'Critique', effort: 'xhigh',
+      schema: { type: 'object', properties: { verdict: { enum: ['sound', 'revise'] } }, required: ['verdict'] },
+    }),
+  ))
+  verdicts.forEach((v, i) => { if (!v) gaps.push(`critique failed: ${pitchedIds[i]} (pitched, not critiqued)`) })
+  critiqued = pitchedIds.filter((_, i) => verdicts[i])
+  const toRevise = pitchedIds.filter((_, i) => verdicts[i] && verdicts[i].verdict === 'revise')
+  const revised = await parallel(toRevise.map(id => () =>
+    agent(pitchPrompt(id) + reviseNote(id), {
+      label: `revise:${id}`, phase: 'Critique', effort: 'xhigh',
+      schema: { type: 'object', properties: { recommendation: { type: 'string' } }, required: ['recommendation'] },
+    }),
+  ))
+  revised.forEach((r, i) => { if (!r) gaps.push(`revision failed: ${toRevise[i]} (critique stands, pitch unrevised)`) })
+}
 
 gaps.forEach(g => log(`gap: ${g}`))
 return {
   run,
   index: `findings/${run}/index.md`,
   slices: slices.map(s => s.id),
-  pitched: toPitch.filter((_, i) => pitched[i]),
+  pitched: pitchedIds,
+  critiqued,
   coverage: gaps.length ? 'partial' : 'complete',
   gaps,
 }

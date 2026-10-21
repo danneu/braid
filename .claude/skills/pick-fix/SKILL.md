@@ -48,6 +48,13 @@ Read `FINDINGS show <id>` and print, in plain words:
 5. Rejected solutions and why each lost.
 6. The recommendation and its justification.
 7. Dependencies (`depends_on`) and their states.
+8. The critic's verdict and points, and whether the pitch was revised
+   after it. A pitch with no critique is marked **not critiqued**
+   (`plan/2026-10-21-1424/I15`); say so plainly.
+
+If the user says a finding must land after another, record it with
+`FINDINGS depends <id> --add <other id>` (`--remove` drops one); the
+drain will not start it until the other merges.
 
 Then ask with `AskUserQuestion` (one question per finding).
 

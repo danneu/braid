@@ -307,6 +307,13 @@ def render(f: dict) -> str:
         out += [f"- **{r['title']}**: {r['reason']}" for r in pitch["rejected"]]
         rec = pitch["recommendation"]
         out += ["", f"### Recommendation: `{rec['key']}`", "", rec["justification"]]
+        c = f.get("critique")
+        if c is None:
+            out += ["", "### Critique", "", "Not critiqued."]
+        else:
+            status = {"sound": "sound", "revise": "revised after critique" if c["revised"] else "revision pending"}
+            out += ["", f"### Critique ({status[c['verdict']]})", ""]
+            out += [f"- {p}" for p in c["points"]] or ["No objections."]
     for d in f.get("decisions", []):
         out += ["", f"## Decision {d['number']}", ""]
         out.append(f"Candidate: `{d['candidate']}`" if d["candidate"] else "Candidate: none (direction in note)")
@@ -520,8 +527,43 @@ def cmd_merge(store: Store, payload) -> dict:
         for t in targets:
             store.load(t)
         get(fid)["depends_on"] = targets
+    _require_acyclic(store, {fid: get(fid)["depends_on"] for fid in deps})
     _save_all(store, [f for fid, f in loaded.items() if fid not in removed], removed)
     return {"kept": [g["keep"] for g in groups], "removed": removed}
+
+
+def _require_acyclic(store: Store, edges: dict[str, list[str]]) -> None:
+    """Refuses a dependency graph with a cycle; `edges` overrides stored `depends_on` lists."""
+    def deps(fid: str) -> list[str]:
+        return edges[fid] if fid in edges else store.load(fid)["depends_on"]
+
+    done: set[str] = set()
+
+    def visit(fid: str, path: list[str]) -> None:
+        _require(fid not in path, f"dependency cycle: {' -> '.join([*path, fid])}")
+        if fid in done:
+            return
+        for d in deps(fid):
+            visit(d, [*path, fid])
+        done.add(fid)
+
+    for fid in edges:
+        visit(fid, [])
+
+
+def cmd_depends(store: Store, fid: str, add: list[str], remove: list[str]) -> dict:
+    """Edits a finding's dependencies after review (plan/2026-10-21-1424/D2)."""
+    f = store.load(fid)
+    _require(store.state(f) != "merged", f"{fid}: already merged; its dependencies no longer matter")
+    for d in add:
+        _require(d != fid, f"{fid}: a finding cannot depend on itself")
+        store.load(d)
+    deps = [d for d in f["depends_on"] if d not in remove]
+    deps += [d for d in add if d not in deps]
+    _require_acyclic(store, {fid: deps})
+    f["depends_on"] = deps
+    _save_all(store, [f])
+    return {"id": fid, "depends_on": deps}
 
 
 def cmd_pitch(store: Store, payload) -> dict:
@@ -531,10 +573,38 @@ def cmd_pitch(store: Store, payload) -> dict:
         _require(isinstance(raw, dict) and "id" in raw, f"{ctx}: missing 'id'")
         pitch = validate_pitch(raw, ctx)
         f = store.load(raw["id"])
-        _transition(f, "pitched")
+        if f["status"] == "pitched":
+            # The one revision a critic may ask for (plan/2026-10-21-1424/D3).
+            c = f.get("critique")
+            _require(c is not None and c["verdict"] == "revise" and not c["revised"],
+                     f"{ctx}: {f['id']} is pitched; it can be pitched again only once, after a critic asks")
+            c["revised"] = True
+        else:
+            _transition(f, "pitched")
         f["pitch"] = pitch
         changed.append(f)
     _require(len({f["id"] for f in changed}) == len(changed), "pitch: duplicate ids")
+    _save_all(store, changed)
+    return {"updated": [f["id"] for f in changed]}
+
+
+def cmd_critique(store: Store, payload) -> dict:
+    """Records a critic's verdict on a pitch, once per finding (plan/2026-10-21-1424/D3)."""
+    changed = []
+    for i, raw in enumerate(_list(payload, "critique")):
+        ctx = f"critique {i}"
+        _obj(raw, {"id", "verdict", "points"}, ctx)
+        f = store.load(raw["id"])
+        _require(f["status"] == "pitched", f"{ctx}: {f['id']} is {f['status']}, not pitched")
+        _require("critique" not in f, f"{ctx}: {f['id']} was already critiqued")
+        verdict = _enum(raw, "verdict", {"sound", "revise"}, ctx)
+        points = raw["points"]
+        _require(isinstance(points, list) and all(isinstance(p, str) and p.strip() for p in points),
+                 f"{ctx}: 'points' must be a list of strings")
+        _require(verdict == "sound" or points, f"{ctx}: a revise verdict needs points")
+        f["critique"] = {"verdict": verdict, "points": points, "revised": False}
+        changed.append(f)
+    _require(len({f["id"] for f in changed}) == len(changed), "critique: duplicate ids")
     _save_all(store, changed)
     return {"updated": [f["id"] for f in changed]}
 
@@ -842,6 +912,12 @@ def _parser() -> argparse.ArgumentParser:
     s = sub.add_parser("answer", help="unblock a finding under its current decision and branch")
     s.add_argument("id")
     s.add_argument("--note", required=True)
+    s = sub.add_parser("depends", help="add or remove dependencies of an unmerged finding")
+    s.add_argument("id")
+    s.add_argument("--add", action="append", default=[], help="a finding that must merge first (repeatable)")
+    s.add_argument("--remove", action="append", default=[], help="a dependency to drop (repeatable)")
+    s = sub.add_parser("critique", help="record critic verdicts on pitched findings")
+    s.add_argument("--input", required=True)
     sub.add_parser("launch", help="what an implement run may do now").add_argument("id")
     sub.add_parser("queue", help="the decided queue: runnable, waiting on dependencies, held, asking, blocked")
     sub.add_parser("show", help="print one finding with its derived state").add_argument("id")
@@ -881,6 +957,10 @@ def _dispatch(store: Store, repo: Path, args) -> object:
         return cmd_ask(store, args.id, _read_payload(args.input))
     if args.cmd == "answer":
         return cmd_answer(store, args.id, args.note)
+    if args.cmd == "depends":
+        return cmd_depends(store, args.id, args.add, args.remove)
+    if args.cmd == "critique":
+        return cmd_critique(store, _read_payload(args.input))
     if args.cmd == "launch":
         return cmd_launch(store, args.id)
     if args.cmd == "queue":
