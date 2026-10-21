@@ -271,72 +271,8 @@ fn cryptsetup_status_active(mapper: &str, device: &str) -> RawCommandOutput {
     )
 }
 
-fn btrfs_device_stats_healthy() -> RawCommandOutput {
-    mock_ok(
-        "btrfs --format json device stats /mnt/storage",
-        r#"{
-            "device-stats": [
-                {
-                    "device": "/dev/mapper/braid-disk1",
-                    "devid": 1,
-                    "write_io_errs": 0,
-                    "read_io_errs": 0,
-                    "flush_io_errs": 0,
-                    "corruption_errs": 0,
-                    "generation_errs": 0
-                },
-                {
-                    "device": "/dev/mapper/braid-disk3",
-                    "devid": 3,
-                    "write_io_errs": 0,
-                    "read_io_errs": 0,
-                    "flush_io_errs": 0,
-                    "corruption_errs": 0,
-                    "generation_errs": 0
-                }
-            ]
-        }"#,
-    )
-}
-
-fn btrfs_device_stats_with_stale_devid() -> RawCommandOutput {
-    mock_ok(
-        "btrfs --format json device stats /mnt/storage",
-        r#"{
-            "device-stats": [
-                {
-                    "device": "/dev/mapper/braid-disk1",
-                    "devid": 1,
-                    "write_io_errs": 0,
-                    "read_io_errs": 0,
-                    "flush_io_errs": 0,
-                    "corruption_errs": 0,
-                    "generation_errs": 0
-                },
-                {
-                    "device": "/dev/mapper/braid-disk3",
-                    "devid": 3,
-                    "write_io_errs": 0,
-                    "read_io_errs": 0,
-                    "flush_io_errs": 0,
-                    "corruption_errs": 0,
-                    "generation_errs": 0
-                },
-                {
-                    "device": "/dev/mapper/braid-stale",
-                    "devid": 99,
-                    "write_io_errs": 0,
-                    "read_io_errs": 3,
-                    "flush_io_errs": 0,
-                    "corruption_errs": 1,
-                    "generation_errs": 0
-                }
-            ]
-        }"#,
-    )
-}
-
-/// Mounted probe runner that intentionally omits `BtrfsDeviceStatsJson`.
+/// Mounted probe runner with no `BtrfsDeviceStatsJson` mock: ack reads no
+/// live counters, so a stats query fails the ack with `MissingMock`.
 pub(crate) fn ack_mounted_probe_runner() -> MockRunner {
     MockRunner::default()
         .with_output(
@@ -357,26 +293,6 @@ pub(crate) fn ack_mounted_probe_runner() -> MockRunner {
             },
             cryptsetup_status_active("braid-disk3", "/dev/vdc"),
         )
-}
-
-/// Mounted probe runner plus the healthy stats response for full ack paths.
-pub(crate) fn ack_mounted_probe_runner_with_device_stats() -> MockRunner {
-    ack_mounted_probe_runner().with_output(
-        CmdRequest::BtrfsDeviceStatsJson {
-            mount_point: ack_mp(),
-        },
-        btrfs_device_stats_healthy(),
-    )
-}
-
-/// Mounted probe runner plus stats containing an unrecognized stale devid.
-pub(crate) fn ack_mounted_probe_runner_with_stale_devid_stats() -> MockRunner {
-    ack_mounted_probe_runner().with_output(
-        CmdRequest::BtrfsDeviceStatsJson {
-            mount_point: ack_mp(),
-        },
-        btrfs_device_stats_with_stale_devid(),
-    )
 }
 
 /// At-risk `btrfs device usage --raw` for the ack pool (devids 1 and 3, matching
@@ -486,10 +402,10 @@ fn btrfs_show_2disk_no_uuid() -> RawCommandOutput {
     )
 }
 
-/// Mounted probe + device-stats runner plus an at-risk usage stub, so a mounted
+/// Mounted probe runner plus an at-risk usage stub, so a mounted
 /// ack of an EnospcRisk latch can re-probe and write a keyed baseline.
 pub(crate) fn ack_mounted_probe_runner_with_enospc_usage() -> MockRunner {
-    ack_mounted_probe_runner_with_device_stats().with_output(
+    ack_mounted_probe_runner().with_output(
         CmdRequest::BtrfsDeviceUsageRaw {
             mount_point: ack_mp(),
         },
@@ -500,7 +416,7 @@ pub(crate) fn ack_mounted_probe_runner_with_enospc_usage() -> MockRunner {
 /// Mounted probe runner plus an at-risk usage snapshot that already carries a
 /// missing-device marker, so ack must clear the latch without writing a baseline.
 pub(crate) fn ack_mounted_probe_runner_with_missing_enospc_usage() -> MockRunner {
-    ack_mounted_probe_runner_with_device_stats().with_output(
+    ack_mounted_probe_runner().with_output(
         CmdRequest::BtrfsDeviceUsageRaw {
             mount_point: ack_mp(),
         },
@@ -512,7 +428,7 @@ pub(crate) fn ack_mounted_probe_runner_with_missing_enospc_usage() -> MockRunner
 /// `device_size == 0` (a present device whose size probe failed), so ack must clear the latch
 /// without writing a baseline -- the ADR 014 guard keys on size, not on the missing marker.
 pub(crate) fn ack_mounted_probe_runner_with_zero_size_real_path_enospc_usage() -> MockRunner {
-    ack_mounted_probe_runner_with_device_stats().with_output(
+    ack_mounted_probe_runner().with_output(
         CmdRequest::BtrfsDeviceUsageRaw {
             mount_point: ack_mp(),
         },
@@ -520,10 +436,10 @@ pub(crate) fn ack_mounted_probe_runner_with_zero_size_real_path_enospc_usage() -
     )
 }
 
-/// Mounted probe + device-stats runner plus a healthy (dead-band) usage stub, so a
+/// Mounted probe runner plus a healthy (dead-band) usage stub, so a
 /// mounted ack of an EnospcRisk latch whose pool recovered writes no snooze marker.
 pub(crate) fn ack_mounted_probe_runner_with_healthy_enospc_usage() -> MockRunner {
-    ack_mounted_probe_runner_with_device_stats().with_output(
+    ack_mounted_probe_runner().with_output(
         CmdRequest::BtrfsDeviceUsageRaw {
             mount_point: ack_mp(),
         },
@@ -552,12 +468,6 @@ pub(crate) fn ack_mounted_probe_runner_no_uuid_with_enospc_usage() -> MockRunner
                 mapper: MapperName::from_basename("braid-disk3".into()),
             },
             cryptsetup_status_active("braid-disk3", "/dev/vdc"),
-        )
-        .with_output(
-            CmdRequest::BtrfsDeviceStatsJson {
-                mount_point: ack_mp(),
-            },
-            btrfs_device_stats_healthy(),
         )
         .with_output(
             CmdRequest::BtrfsDeviceUsageRaw {

@@ -104,6 +104,7 @@ def write_missing_latch(devid):
                         "detected_at": "2023-11-14T22:13:20Z",
                         "type": "missing_device",
                         "devid": devid,
+                        "still_missing": True,
                     }
                 ]
             }

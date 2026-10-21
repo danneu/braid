@@ -69,11 +69,31 @@ impl LatchedCause {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AlertCause {
+    /// Device-stat errors above the acked baseline on a present, recognized
+    /// devid. `counters` is the evidence: the devid's counters on the latest
+    /// monitor cycle that raised this cause, kept current by the latch merge.
+    /// `braid ack` commits exactly that evidence as the devid's baseline, so
+    /// errors logged after the last cycle still re-fire (ADR 014). `None` means
+    /// braid holds no evidence it may commit -- a latch written before causes
+    /// carried counters, or evidence stripped when the devid passed to another
+    /// disk -- and ack then leaves that devid's baseline unchanged.
     BtrfsDeviceErrors {
         devid: Devid,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        counters: Option<DeviceErrorCounters>,
     },
+    /// A recognized devid in the alert-local missing set. `still_missing` is
+    /// the evidence: true while the latest monitor cycle that saw the pool saw
+    /// this devid missing, and the devid still names the disk it saw. `braid
+    /// ack` marks the devid `missing_acked` only then (ADR 014). It is false
+    /// once a monitor cycle sees the devid outside the missing set, once a
+    /// membership command hands the devid to another disk or drops it, and in
+    /// a latch written before causes carried it. Ack then commits nothing, so
+    /// a later absence of that devid still alerts.
     MissingDevice {
         devid: Devid,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        still_missing: bool,
     },
     SmartdAlert,
     /// The scheduled maintenance scrub (`braid-scrub.service`) failed to run or
@@ -119,11 +139,16 @@ impl AlertCause {
     /// first-detection suffixes, so `braid status` and the TUI cannot drift.
     pub(crate) fn describe(&self, devid_names: Option<&HashMap<Devid, String>>) -> String {
         match self {
-            AlertCause::BtrfsDeviceErrors { devid } => {
+            AlertCause::BtrfsDeviceErrors { devid, counters } => {
                 let name = devid_to_name(devid_names, *devid);
-                format!("btrfs device errors on {name}")
+                match counters.as_ref().map(DeviceErrorCounters::describe_nonzero) {
+                    Some(counts) if !counts.is_empty() => {
+                        format!("btrfs device errors on {name}: {counts}")
+                    }
+                    _ => format!("btrfs device errors on {name}"),
+                }
             }
-            AlertCause::MissingDevice { devid } => {
+            AlertCause::MissingDevice { devid, .. } => {
                 let name = devid_to_name(devid_names, *devid);
                 format!("missing device: {name}")
             }
@@ -176,16 +201,51 @@ pub struct AckedStats(pub BTreeMap<String, AckedDisk>);
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct AckedDisk {
     pub missing_acked: bool,
-    pub device_stats: AckedDeviceCounters,
+    pub device_stats: DeviceErrorCounters,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-pub struct AckedDeviceCounters {
+/// The five btrfs device-stat error counters of one devid, under the names
+/// `btrfs device stats` uses. One type serves both the acked baseline
+/// (`AckedDisk::device_stats`) and the evidence a latched `BtrfsDeviceErrors`
+/// cause carries, so ack copies latched evidence into the baseline verbatim.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct DeviceErrorCounters {
     pub read_io_errs: u64,
     pub write_io_errs: u64,
     pub flush_io_errs: u64,
     pub corruption_errs: u64,
     pub generation_errs: u64,
+}
+
+impl DeviceErrorCounters {
+    /// The nonzero counters as `read 3, corruption 1`, in the order the
+    /// per-disk `braid status` line uses, for the human cause label.
+    fn describe_nonzero(&self) -> String {
+        [
+            ("read", self.read_io_errs),
+            ("write", self.write_io_errs),
+            ("flush", self.flush_io_errs),
+            ("corruption", self.corruption_errs),
+            ("generation", self.generation_errs),
+        ]
+        .iter()
+        .filter(|(_, count)| *count > 0)
+        .map(|(label, count)| format!("{label} {count}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+    }
+}
+
+impl From<&DeviceErrorStats> for DeviceErrorCounters {
+    fn from(row: &DeviceErrorStats) -> Self {
+        DeviceErrorCounters {
+            read_io_errs: row.read_io_errs,
+            write_io_errs: row.write_io_errs,
+            flush_io_errs: row.flush_io_errs,
+            corruption_errs: row.corruption_errs,
+            generation_errs: row.generation_errs,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -254,7 +314,10 @@ pub fn compute_alert_state(
         let acked_counters = acked_disk.map(|d| &d.device_stats);
 
         if has_new_errors(dev, acked_counters) {
-            causes.push(AlertCause::BtrfsDeviceErrors { devid });
+            causes.push(AlertCause::BtrfsDeviceErrors {
+                devid,
+                counters: Some(DeviceErrorCounters::from(dev)),
+            });
         }
     }
 
@@ -262,7 +325,10 @@ pub fn compute_alert_state(
         let key = devid.to_string();
         let missing_acked = acked.0.get(&key).map(|d| d.missing_acked).unwrap_or(false);
         if !missing_acked {
-            causes.push(AlertCause::MissingDevice { devid });
+            causes.push(AlertCause::MissingDevice {
+                devid,
+                still_missing: true,
+            });
         }
     }
 
@@ -291,8 +357,8 @@ fn exceeds_acked(current: u64, acked: u64) -> bool {
     current > if current < acked { 0 } else { acked }
 }
 
-fn has_new_errors(current: &DeviceErrorStats, acked: Option<&AckedDeviceCounters>) -> bool {
-    let zero = AckedDeviceCounters::default();
+fn has_new_errors(current: &DeviceErrorStats, acked: Option<&DeviceErrorCounters>) -> bool {
+    let zero = DeviceErrorCounters::default();
     let a = acked.unwrap_or(&zero);
     exceeds_acked(current.read_io_errs, a.read_io_errs)
         || exceeds_acked(current.write_io_errs, a.write_io_errs)
@@ -302,43 +368,64 @@ fn has_new_errors(current: &DeviceErrorStats, acked: Option<&AckedDeviceCounters
 }
 
 // ---------------------------------------------------------------------------
-// Snapshot current state for ack
+// Ack: commit latched evidence
 // ---------------------------------------------------------------------------
 
-pub fn snapshot_current(
-    current_stats: &BtrfsDeviceStatsOutput,
-    devids: &AlertDevids,
-) -> AckedStats {
-    let mut map = BTreeMap::new();
+/// A latched cause that `commit_latched_evidence` committed nothing for,
+/// because the latch holds no evidence ack may commit for it. Ack warns about
+/// each one, since its alert can fire again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnbackedCause {
+    /// A `BtrfsDeviceErrors` cause without `counters`.
+    DeviceErrors(Devid),
+    /// A `MissingDevice` cause without `still_missing`.
+    MissingDevice(Devid),
+}
 
-    for dev in &current_stats.devices {
-        if !devids.recognized.contains(&dev.devid) {
-            continue;
+/// Apply the latch to the acked baselines, and nothing else: a device-error
+/// cause sets its devid's counter baseline to the latched counters, a
+/// missing-device cause that is still missing sets `missing_acked`, and every
+/// other entry stays as it was. Ack reads no live state, so a condition the
+/// monitor never latched cannot be acknowledged unseen (ADR 014).
+///
+/// Returns the causes that carried no evidence. Their entries stay unchanged,
+/// so each fires again if its condition holds on a later cycle.
+pub fn commit_latched_evidence(
+    acked: &mut AckedStats,
+    causes: &[AlertCause],
+) -> Vec<UnbackedCause> {
+    let mut unbacked = Vec::new();
+    for cause in causes {
+        match cause {
+            AlertCause::BtrfsDeviceErrors {
+                devid,
+                counters: Some(counters),
+            } => {
+                acked.0.entry(devid.to_string()).or_default().device_stats = *counters;
+            }
+            AlertCause::BtrfsDeviceErrors {
+                devid,
+                counters: None,
+            } => unbacked.push(UnbackedCause::DeviceErrors(*devid)),
+            AlertCause::MissingDevice {
+                devid,
+                still_missing: true,
+            } => {
+                acked.0.entry(devid.to_string()).or_default().missing_acked = true;
+            }
+            AlertCause::MissingDevice {
+                devid,
+                still_missing: false,
+            } => unbacked.push(UnbackedCause::MissingDevice(*devid)),
+            // Flag-, probe-, and capacity-driven causes have no acked-stats
+            // baseline; ack clears them through cleanup and the ENOSPC snooze.
+            AlertCause::SmartdAlert
+            | AlertCause::ScrubFailed
+            | AlertCause::ComputationError { .. }
+            | AlertCause::EnospcRisk { .. } => {}
         }
-        let key = dev.devid.to_string();
-        map.insert(
-            key,
-            AckedDisk {
-                missing_acked: false,
-                device_stats: AckedDeviceCounters {
-                    read_io_errs: dev.read_io_errs,
-                    write_io_errs: dev.write_io_errs,
-                    flush_io_errs: dev.flush_io_errs,
-                    corruption_errs: dev.corruption_errs,
-                    generation_errs: dev.generation_errs,
-                },
-            },
-        );
     }
-
-    // Missing devices get missing_acked = true. Preserve any existing
-    // device_stats snapshot for null-underlying devices that also appeared
-    // in stats above.
-    for &devid in &devids.missing {
-        map.entry(devid.to_string()).or_default().missing_acked = true;
-    }
-
-    AckedStats(map)
+    unbacked
 }
 
 /// Drop the acked entry for `devid`. Returns true if an entry was removed.
@@ -358,11 +445,49 @@ pub fn load_acked_stats_fallible(paths: &StatePaths) -> Result<AckedStats, std::
     serde_json::from_str(&contents).map_err(std::io::Error::other)
 }
 
-/// Load acked-stats, drop entries for each devid, and persist on change.
+/// Ack's loader for its read-modify-write of acked-stats. An unparseable file
+/// is moved aside to `acked-stats.json.corrupt` (the first sidecar is kept)
+/// and ack starts from an empty baseline: acknowledged counts then re-fire
+/// instead of staying buried, and the monitor stops latching
+/// `ComputationError` for a file it cannot read (ADR 014).
 ///
-/// Read and parse errors are propagated so mutation paths can fail closed
-/// when ack state may be stale.
-pub fn drop_ghost_acked_for_devids(
+/// Returns the quarantine detail with the empty baseline. The caller must save
+/// the result even when nothing else changed, so the live file is replaced
+/// even if the sidecar could not take the bytes. A read failure propagates:
+/// ack cannot tell what the file holds.
+pub fn load_acked_stats_or_quarantine(
+    paths: &StatePaths,
+) -> Result<(AckedStats, Option<String>), std::io::Error> {
+    let path = paths.acked_stats_json();
+    let bytes = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((AckedStats::default(), None));
+        }
+        Err(e) => return Err(e),
+    };
+    match serde_json::from_slice(&bytes) {
+        Ok(acked) => Ok((acked, None)),
+        Err(e) => {
+            let sidecar = paths.acked_stats_corrupt();
+            let detail = match quarantine_corrupt_file(&path, &sidecar, "acked-stats") {
+                Some(quarantine_detail) => format!("{e}; {quarantine_detail}"),
+                None => format!("{e}; moved to {}", sidecar.display()),
+            };
+            Ok((AckedStats::default(), Some(detail)))
+        }
+    }
+}
+
+/// Forget the alert state of the disks that held `devids`: drop their acked
+/// baselines and strip their latched evidence. Called wherever a devid leaves
+/// the pool or passes to another disk (add, remove, remove-missing, replace,
+/// recover), so a later disk on that devid never inherits the previous
+/// holder's baseline, now or at the next ack (ADR 014).
+///
+/// Read and parse errors on acked-stats propagate so mutation paths can fail
+/// closed when ack state may be stale.
+pub fn drop_ghost_alert_state_for_devids(
     paths: &StatePaths,
     devids: &[Devid],
 ) -> Result<bool, std::io::Error> {
@@ -378,15 +503,79 @@ pub fn drop_ghost_acked_for_devids(
     if changed {
         save_acked_stats(&acked, paths)?;
     }
+    changed |= strip_latched_evidence(paths, |devid| devids.contains(&devid))?;
     Ok(changed)
 }
 
-/// Delete acked-stats outright. Absence is already the empty state.
-pub fn remove_acked_stats(paths: &StatePaths) -> Result<(), std::io::Error> {
+/// Forget every disk's alert state for a fresh pool identity (bootstrap):
+/// delete acked-stats and strip all latched evidence. Absent files are
+/// already the empty state.
+pub fn drop_all_ghost_alert_state(paths: &StatePaths) -> Result<(), std::io::Error> {
     match std::fs::remove_file(paths.acked_stats_json()) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e),
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    strip_latched_evidence(paths, |_| true)?;
+    Ok(())
+}
+
+/// Strip the evidence of latched causes on the devids `stale` selects: the
+/// counters of `BtrfsDeviceErrors` and the `still_missing` of `MissingDevice`.
+/// The causes stay latched until ack, but their evidence belongs to the disk
+/// that held the devid when the monitor saw it. Ack must not commit it for a
+/// later disk: old counts would become the new disk's baseline, and an old
+/// absence would mark the new disk `missing_acked` and silence its own
+/// absence. An unparseable latch is left as it is: ack commits nothing from
+/// it, and the monitor quarantines it.
+fn strip_latched_evidence(
+    paths: &StatePaths,
+    stale: impl Fn(Devid) -> bool,
+) -> Result<bool, std::io::Error> {
+    let latch_context =
+        |e: std::io::Error| std::io::Error::new(e.kind(), format!("alert latch: {e}"));
+    let mut state = match load_alert_latch(paths) {
+        Ok(Some(state)) => state,
+        Ok(None) | Err(LatchLoadError::Parse(_)) => return Ok(false),
+        Err(LatchLoadError::Read(e)) => return Err(latch_context(e)),
+    };
+    let mut changed = false;
+    for latched in &mut state.causes {
+        match &mut latched.cause {
+            AlertCause::BtrfsDeviceErrors { devid, counters } if stale(*devid) => {
+                changed |= counters.take().is_some();
+            }
+            AlertCause::MissingDevice {
+                devid,
+                still_missing,
+            } if stale(*devid) => {
+                changed |= std::mem::take(still_missing);
+            }
+            _ => {}
+        }
+    }
+    if changed {
+        save_alert_latch(&state, paths).map_err(latch_context)?;
+    }
+    Ok(changed)
+}
+
+/// Withdraw the `still_missing` evidence of every latched missing-device cause
+/// whose devid this monitor cycle saw outside the missing set (`missing_now`):
+/// the disk came back, or the devid left the pool. The cause stays latched
+/// until ack, but ack will not mark the devid `missing_acked`, so a later
+/// absence still alerts (ADR 014). A cycle that sees the devid missing again
+/// refreshes the cause with fresh evidence through `merge_into_latch`.
+pub fn withdraw_returned_missing(state: &mut AlertState, missing_now: &BTreeSet<Devid>) {
+    for latched in &mut state.causes {
+        if let AlertCause::MissingDevice {
+            devid,
+            still_missing,
+        } = &mut latched.cause
+            && !missing_now.contains(devid)
+        {
+            *still_missing = false;
+        }
     }
 }
 
@@ -512,25 +701,34 @@ pub fn load_alert_latch_or_quarantine(paths: &StatePaths) -> (Option<AlertState>
     }
 }
 
-/// Preserve the first unreadable latch sidecar without clobbering prior bytes.
+fn quarantine_corrupt_latch(paths: &StatePaths) -> Option<String> {
+    quarantine_corrupt_file(
+        &paths.alert_latch_json(),
+        &paths.alert_latch_corrupt(),
+        "latch",
+    )
+}
+
+/// Move an unreadable state file to its sidecar without clobbering an earlier
+/// sidecar's bytes; `None` means the move succeeded, and `Some` describes what
+/// went wrong for the caller's warning or `ComputationError` detail.
 ///
 /// The hard-link step is the atomic no-clobber primitive: it fails with
 /// AlreadyExists if the sidecar path is already occupied, avoiding an
 /// exists-then-rename race that could replace the original forensic bytes.
-fn quarantine_corrupt_latch(paths: &StatePaths) -> Option<String> {
-    let src = paths.alert_latch_json();
-    let dst = paths.alert_latch_corrupt();
-    match std::fs::hard_link(&src, &dst) {
-        Ok(()) => match std::fs::remove_file(&src) {
+fn quarantine_corrupt_file(src: &Path, dst: &Path, what: &str) -> Option<String> {
+    match std::fs::hard_link(src, dst) {
+        Ok(()) => match std::fs::remove_file(src) {
             Ok(()) => None,
             Err(e) => Some(format!(
-                "quarantined corrupt latch but failed to remove source: {e}"
+                "quarantined corrupt {what} but failed to remove source: {e}"
             )),
         },
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Some(
-            "prior alert-latch.json.corrupt sidecar exists -- new corrupt bytes were not separately preserved".to_string(),
-        ),
-        Err(e) => Some(format!("failed to quarantine corrupt latch: {e}")),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Some(format!(
+            "prior {} sidecar exists -- new corrupt bytes were not separately preserved",
+            dst.file_name().unwrap_or_default().to_string_lossy()
+        )),
+        Err(e) => Some(format!("failed to quarantine corrupt {what}: {e}")),
     }
 }
 
@@ -793,11 +991,17 @@ pub fn merge_into_latch(
 /// Two causes match by key if they identify the same "slot" in the latch.
 fn same_cause_key(a: &AlertCause, b: &AlertCause) -> bool {
     match (a, b) {
+        // Keyed by devid alone: the counters and `still_missing` are evidence
+        // the refresh replaces, so the latched evidence tracks the newest
+        // cycle that saw the condition.
         (
-            AlertCause::BtrfsDeviceErrors { devid: a },
-            AlertCause::BtrfsDeviceErrors { devid: b },
+            AlertCause::BtrfsDeviceErrors { devid: a, .. },
+            AlertCause::BtrfsDeviceErrors { devid: b, .. },
         ) => a == b,
-        (AlertCause::MissingDevice { devid: a }, AlertCause::MissingDevice { devid: b }) => a == b,
+        (
+            AlertCause::MissingDevice { devid: a, .. },
+            AlertCause::MissingDevice { devid: b, .. },
+        ) => a == b,
         (AlertCause::SmartdAlert, AlertCause::SmartdAlert) => true,
         // Scrub-failure is a singleton: one slot, replaced each cycle. Mandatory
         // -- the flag persists from onFailure until ack, so without this arm the
@@ -834,6 +1038,21 @@ mod tests {
             flush_io_errs: 0,
             corruption_errs: 0,
             generation_errs: 0,
+        }
+    }
+
+    fn read_errs(read_io_errs: u64) -> DeviceErrorCounters {
+        DeviceErrorCounters {
+            read_io_errs,
+            ..Default::default()
+        }
+    }
+
+    /// A device-error cause carrying `read` read errors as its evidence.
+    fn device_errors(devid: u64, read: u64) -> AlertCause {
+        AlertCause::BtrfsDeviceErrors {
+            devid: Devid::new(devid),
+            counters: Some(read_errs(read)),
         }
     }
 
@@ -875,7 +1094,7 @@ mod tests {
             "1".to_owned(),
             AckedDisk {
                 missing_acked: false,
-                device_stats: AckedDeviceCounters {
+                device_stats: DeviceErrorCounters {
                     read_io_errs: 3,
                     write_io_errs: 0,
                     flush_io_errs: 0,
@@ -918,28 +1137,52 @@ mod tests {
 
         assert_eq!(
             AlertCause::BtrfsDeviceErrors {
-                devid: Devid::new(2)
+                devid: Devid::new(2),
+                counters: Some(DeviceErrorCounters {
+                    read_io_errs: 3,
+                    write_io_errs: 4,
+                    flush_io_errs: 5,
+                    corruption_errs: 6,
+                    generation_errs: 7,
+                }),
             }
             .describe(Some(&names)),
-            "btrfs device errors on disk2 (devid 2)"
+            "btrfs device errors on disk2 (devid 2): read 3, write 4, flush 5, corruption 6, generation 7"
         );
         assert_eq!(
             AlertCause::BtrfsDeviceErrors {
-                devid: Devid::new(3)
+                devid: Devid::new(3),
+                counters: Some(DeviceErrorCounters {
+                    read_io_errs: 3,
+                    corruption_errs: 1,
+                    ..Default::default()
+                }),
             }
             .describe(Some(&names)),
-            "btrfs device errors on devid 3"
+            "btrfs device errors on devid 3: read 3, corruption 1",
+            "only nonzero counters are listed"
+        );
+        assert_eq!(
+            AlertCause::BtrfsDeviceErrors {
+                devid: Devid::new(3),
+                counters: None,
+            }
+            .describe(Some(&names)),
+            "btrfs device errors on devid 3",
+            "a cause without evidence renders no counts"
         );
         assert_eq!(
             AlertCause::MissingDevice {
-                devid: Devid::new(2)
+                devid: Devid::new(2),
+                still_missing: true
             }
             .describe(Some(&names)),
             "missing device: disk2 (devid 2)"
         );
         assert_eq!(
             AlertCause::MissingDevice {
-                devid: Devid::new(3)
+                devid: Devid::new(3),
+                still_missing: true
             }
             .describe(Some(&names)),
             "missing device: devid 3"
@@ -1063,11 +1306,49 @@ mod tests {
         let original = AlertState {
             causes: vec![latched(AlertCause::MissingDevice {
                 devid: Devid::new(7),
+                still_missing: true,
             })],
         };
         std::fs::write(&path, serde_json::to_string(&original).unwrap()).unwrap();
         let result = load_alert_latch_at(&path).unwrap();
         assert_eq!(result, Some(original));
+    }
+
+    // Intent: device-error and missing-device causes written before causes
+    //   carried evidence still load, with no evidence, instead of failing to
+    //   parse.
+    // Why it exists: released braid wrote `btrfs_device_errors` and
+    //   `missing_device` causes with only a devid. Failing the parse would
+    //   quarantine the whole latch and drop every other latched cause; loading
+    //   them without evidence makes ack commit nothing for those devids, so
+    //   each alert fires once more if its condition holds and the monitor then
+    //   latches fresh evidence.
+    // Scenario: an upgraded host still holds a latch from the previous braid.
+    #[test]
+    fn load_alert_latch_accepts_causes_without_evidence() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("older-latch.json");
+        std::fs::write(
+            &path,
+            br#"{"causes":[{"detected_at":"2023-11-14T22:13:20Z","type":"btrfs_device_errors","devid":1},{"detected_at":"2023-11-14T22:13:20Z","type":"missing_device","devid":2}]}"#,
+        )
+        .unwrap();
+
+        let state = load_alert_latch_at(&path).unwrap().unwrap();
+
+        assert_eq!(
+            state.causes,
+            vec![
+                latched(AlertCause::BtrfsDeviceErrors {
+                    devid: Devid::new(1),
+                    counters: None,
+                }),
+                latched(AlertCause::MissingDevice {
+                    devid: Devid::new(2),
+                    still_missing: false,
+                }),
+            ]
+        );
     }
 
     /*
@@ -1099,7 +1380,8 @@ mod tests {
         assert_eq!(
             state.causes,
             vec![latched(AlertCause::MissingDevice {
-                devid: Devid::new(7)
+                devid: Devid::new(7),
+                still_missing: false,
             })],
             "timestamped causes must round-trip; the active key is ignored"
         );
@@ -1172,6 +1454,7 @@ mod tests {
             causes: vec![LatchedCause::new(
                 AlertCause::MissingDevice {
                     devid: Devid::new(7),
+                    still_missing: true,
                 },
                 "2024-01-02T03:04:05Z".to_owned(),
             )],
@@ -1574,8 +1857,14 @@ mod tests {
         assert_eq!(
             alert[0],
             AlertCause::BtrfsDeviceErrors {
-                devid: Devid::new(1)
-            }
+                devid: Devid::new(1),
+                counters: Some(DeviceErrorCounters {
+                    read_io_errs: 3,
+                    corruption_errs: 1,
+                    ..Default::default()
+                }),
+            },
+            "the cause must carry the row's counters as its evidence"
         );
     }
 
@@ -1598,7 +1887,8 @@ mod tests {
         assert_eq!(
             alert[0],
             AlertCause::MissingDevice {
-                devid: Devid::new(2)
+                devid: Devid::new(2),
+                still_missing: true
             }
         );
     }
@@ -1633,7 +1923,7 @@ mod tests {
             "1".to_owned(),
             AckedDisk {
                 missing_acked: false,
-                device_stats: AckedDeviceCounters {
+                device_stats: DeviceErrorCounters {
                     read_io_errs: 3,
                     ..Default::default()
                 },
@@ -1664,7 +1954,7 @@ mod tests {
     //   current > acked" change, which would silently suppress a later nonzero
     //   counter, fails here.
     // Scenario: an add reused devid 1 (last_devid+1) and crashed before
-    //   drop_ghost_acked_for_devids ran, so the acked baseline still reads
+    //   drop_ghost_alert_state_for_devids ran, so the acked baseline still reads
     //   read_io_errs=5 from the prior holder. A monitor cycle runs before
     //   recover sweeps it, and the fresh disk has already logged 1 read error.
     #[test]
@@ -1678,7 +1968,7 @@ mod tests {
             "1".to_owned(),
             AckedDisk {
                 missing_acked: false,
-                device_stats: AckedDeviceCounters {
+                device_stats: DeviceErrorCounters {
                     read_io_errs: 5,
                     ..Default::default()
                 },
@@ -1709,7 +1999,7 @@ mod tests {
             "2".to_owned(),
             AckedDisk {
                 missing_acked: true,
-                device_stats: AckedDeviceCounters::default(),
+                device_stats: DeviceErrorCounters::default(),
             },
         );
         let acked = AckedStats(acked_map);
@@ -1746,60 +2036,120 @@ mod tests {
         assert_eq!(alert.len(), 3);
     }
 
+    // Intent: commit_latched_evidence writes exactly what the latch holds: a
+    //   device-error cause's counters become its devid's baseline (keeping
+    //   missing_acked), a missing-device cause sets missing_acked (keeping the
+    //   counter baseline), and every other entry stays as it was.
+    // Why it exists: ack used to rebuild the whole file from live counters and
+    //   live membership, which acknowledged conditions nobody had been shown.
+    //   This pins the read-modify-write that replaced it.
+    // Scenario: the latch holds device errors on devid 1 and a missing devid 2;
+    //   acked-stats already holds baselines for devids 1, 2, and an unrelated 5.
     #[test]
-    fn snapshot_current_captures_stats() {
-        let mut dev = zero_device(Devid::new(1));
-        dev.read_io_errs = 3;
-        dev.corruption_errs = 1;
-        let stats = make_stats(vec![dev]);
-        let snapshot = snapshot_current(
-            &stats,
-            &AlertDevids {
-                recognized: BTreeSet::from([Devid::new(1), Devid::new(2)]),
-                missing: BTreeSet::from([Devid::new(2)]),
-            },
+    fn commit_latched_evidence_writes_only_latched_entries() {
+        let mut acked = AckedStats(BTreeMap::from([
+            ("1".to_owned(), acked_disk(true, 1)),
+            ("2".to_owned(), acked_disk(false, 9)),
+            ("5".to_owned(), acked_disk(false, 4)),
+        ]));
+        let evidence = DeviceErrorCounters {
+            read_io_errs: 3,
+            corruption_errs: 1,
+            ..Default::default()
+        };
+
+        let unbacked = commit_latched_evidence(
+            &mut acked,
+            &[
+                AlertCause::BtrfsDeviceErrors {
+                    devid: Devid::new(1),
+                    counters: Some(evidence),
+                },
+                AlertCause::MissingDevice {
+                    devid: Devid::new(2),
+                    still_missing: true,
+                },
+                AlertCause::SmartdAlert,
+            ],
         );
 
-        let disk1 = snapshot.0.get("1").unwrap();
-        assert!(!disk1.missing_acked);
-        assert_eq!(disk1.device_stats.read_io_errs, 3);
-        assert_eq!(disk1.device_stats.corruption_errs, 1);
-
-        let disk2 = snapshot.0.get("2").unwrap();
-        assert!(disk2.missing_acked);
+        assert!(unbacked.is_empty());
+        assert_eq!(
+            acked.0.get("1"),
+            Some(&AckedDisk {
+                missing_acked: true,
+                device_stats: evidence,
+            }),
+            "latched counters become the baseline; missing_acked is kept"
+        );
+        assert_eq!(
+            acked.0.get("2"),
+            Some(&acked_disk(true, 9)),
+            "missing_acked is set; the counter baseline is kept"
+        );
+        assert_eq!(
+            acked.0.get("5"),
+            Some(&acked_disk(false, 4)),
+            "an entry no latched cause names stays as it was"
+        );
+        assert_eq!(acked.0.len(), 3, "no entry is created for unlatched devids");
     }
 
-    // Intent: snapshot_current marks a null-underlying devid as
-    // missing-acked while preserving the stats row counters for that devid.
-    // Why it exists: the missing-devid pass must update the existing snapshot
-    // entry, not overwrite it with default counters.
-    // Scenario: btrfs still reports the mapper for devid 2 after hot-unplug,
-    // while probe also classifies devid 2 as alert-local missing.
+    // Intent: a device-error cause without evidence commits nothing and is
+    //   reported back, so ack can warn that the alert fires again.
+    // Why it exists: a latch written before causes carried counters, or one
+    //   whose evidence was stripped when the devid passed to another disk, must
+    //   take the loud path. Committing a default (zero) baseline would be
+    //   harmless only by luck; committing nothing keeps the old baseline.
+    // Scenario: devid 4 has a baseline of 2 read errors and an evidence-less
+    //   latched cause.
     #[test]
-    fn snapshot_current_preserves_null_underlying_stats() {
-        let mut dev = zero_device(Devid::new(2));
-        dev.read_io_errs = 3;
-        dev.write_io_errs = 4;
-        dev.flush_io_errs = 5;
-        dev.corruption_errs = 6;
-        dev.generation_errs = 7;
-        let stats = make_stats(vec![dev]);
+    fn commit_latched_evidence_reports_unbacked_device_errors() {
+        let mut acked = AckedStats(BTreeMap::from([("4".to_owned(), acked_disk(false, 2))]));
 
-        let snapshot = snapshot_current(
-            &stats,
-            &AlertDevids {
-                recognized: BTreeSet::from([Devid::new(2)]),
-                missing: BTreeSet::from([Devid::new(2)]),
-            },
+        let unbacked = commit_latched_evidence(
+            &mut acked,
+            &[AlertCause::BtrfsDeviceErrors {
+                devid: Devid::new(4),
+                counters: None,
+            }],
         );
 
-        let disk2 = snapshot.0.get("2").unwrap();
-        assert!(disk2.missing_acked);
-        assert_eq!(disk2.device_stats.read_io_errs, 3);
-        assert_eq!(disk2.device_stats.write_io_errs, 4);
-        assert_eq!(disk2.device_stats.flush_io_errs, 5);
-        assert_eq!(disk2.device_stats.corruption_errs, 6);
-        assert_eq!(disk2.device_stats.generation_errs, 7);
+        assert_eq!(unbacked, vec![UnbackedCause::DeviceErrors(Devid::new(4))]);
+        assert_eq!(
+            acked.0.get("4"),
+            Some(&acked_disk(false, 2)),
+            "the baseline must stay unchanged"
+        );
+    }
+
+    // Intent: a missing-device cause without `still_missing` commits nothing
+    //   and is reported back, so ack can warn that the alert may fire again.
+    // Why it exists: the flag is cleared when the monitor saw the devid come
+    //   back, or when a membership command handed the devid to another disk.
+    //   Setting `missing_acked` then would silence the next absence of that
+    //   devid -- a new disk dropping out of a degraded pool -- for as long as
+    //   it stays gone.
+    // Scenario: `braid replace --missing-id 2` handed devid 2 to a new disk
+    //   while MissingDevice{2} stayed latched; the operator then acks.
+    #[test]
+    fn commit_latched_evidence_skips_missing_device_no_longer_missing() {
+        let mut acked = AckedStats(BTreeMap::from([("2".to_owned(), acked_disk(false, 5))]));
+
+        let unbacked = commit_latched_evidence(
+            &mut acked,
+            &[AlertCause::MissingDevice {
+                devid: Devid::new(2),
+                still_missing: false,
+            }],
+        );
+
+        assert_eq!(unbacked, vec![UnbackedCause::MissingDevice(Devid::new(2))]);
+        assert_eq!(
+            acked.0.get("2"),
+            Some(&acked_disk(false, 5)),
+            "missing_acked must stay false"
+        );
     }
 
     #[test]
@@ -1813,7 +2163,7 @@ mod tests {
             "1".to_owned(),
             AckedDisk {
                 missing_acked: false,
-                device_stats: AckedDeviceCounters {
+                device_stats: DeviceErrorCounters {
                     read_io_errs: 3,
                     ..Default::default()
                 },
@@ -1919,7 +2269,8 @@ mod tests {
         assert_eq!(
             alert,
             vec![AlertCause::MissingDevice {
-                devid: Devid::new(2)
+                devid: Devid::new(2),
+                still_missing: true
             }]
         );
     }
@@ -1949,43 +2300,17 @@ mod tests {
         assert_eq!(
             alert[0],
             AlertCause::MissingDevice {
-                devid: Devid::new(2)
+                devid: Devid::new(2),
+                still_missing: true
             }
         );
-    }
-
-    // Intent: a missing devid's stats row is still snapshotted by devid while
-    //   the missing flag is layered on top from `missing_devids`.
-    // Why it exists: ack baselines must preserve counters for missing or
-    //   null-underlying rows so a returning member does not re-alert on old
-    //   counts.
-    // Scenario: degraded pool, devid 2 missing, btrfs reports persisted
-    //   counters for devid 2 in its stats row.
-    #[test]
-    fn missing_devid_row_snapshotted_and_marked_missing_acked() {
-        let mut dev = zero_device(Devid::new(2));
-        dev.read_io_errs = 3;
-        let stats = make_stats(vec![zero_device(Devid::new(1)), dev]);
-        let snapshot = snapshot_current(
-            &stats,
-            &AlertDevids {
-                recognized: BTreeSet::from([Devid::new(1), Devid::new(2)]),
-                missing: BTreeSet::from([Devid::new(2)]),
-            },
-        );
-        assert!(snapshot.0.contains_key("1"));
-        let disk2 = snapshot.0.get("2").unwrap();
-        assert!(disk2.missing_acked);
-        assert_eq!(disk2.device_stats.read_io_errs, 3);
     }
 
     // --- merge_into_latch tests ---
 
     #[test]
     fn merge_live_causes_appended() {
-        let live = vec![AlertCause::BtrfsDeviceErrors {
-            devid: Devid::new(1),
-        }];
+        let live = vec![device_errors(1, 3)];
         let merged = merge_into_latch(None, &live, test_now());
         assert!(merged.active());
         assert_eq!(merged.causes.len(), 1);
@@ -1994,27 +2319,33 @@ mod tests {
     #[test]
     fn merge_no_new_causes_carries_forward_latched() {
         let existing = AlertState {
-            causes: vec![latched(AlertCause::BtrfsDeviceErrors {
-                devid: Devid::new(1),
-            })],
+            causes: vec![latched(device_errors(1, 3))],
         };
         let merged = merge_into_latch(Some(&existing), &[], test_now());
         assert!(merged.active());
         assert_eq!(merged.causes.len(), 1);
     }
 
+    // Intent: re-detecting device errors on a latched devid replaces the
+    //   latched counters with the newer ones in the same slot.
+    // Why it exists: ack commits the latched counters as the baseline, so they
+    //   must be the newest counts a monitor cycle saw. Stale lower counts would
+    //   only make the alert fire again; a second slot per devid would make ack
+    //   commit whichever came last.
+    // Scenario: cycle 1 latches devid 1 at 3 read errors; cycle 2 sees 5.
     #[test]
-    fn merge_live_same_devid_replaces_latched() {
+    fn merge_live_same_devid_replaces_latched_evidence() {
         let existing = AlertState {
-            causes: vec![latched(AlertCause::BtrfsDeviceErrors {
-                devid: Devid::new(1),
-            })],
+            causes: vec![latched(device_errors(1, 3))],
         };
-        let live = vec![AlertCause::BtrfsDeviceErrors {
-            devid: Devid::new(1),
-        }];
+        let live = vec![device_errors(1, 5)];
         let merged = merge_into_latch(Some(&existing), &live, test_now());
         assert_eq!(merged.causes.len(), 1);
+        assert_eq!(
+            merged.causes[0].cause,
+            device_errors(1, 5),
+            "the refresh must carry the newer counters"
+        );
     }
 
     #[test]
@@ -2023,21 +2354,86 @@ mod tests {
         // even when live causes no longer include devid 1.
         let existing = AlertState {
             causes: vec![
-                latched(AlertCause::BtrfsDeviceErrors {
-                    devid: Devid::new(1),
-                }),
+                latched(device_errors(1, 3)),
                 latched(AlertCause::MissingDevice {
                     devid: Devid::new(2),
+                    still_missing: true,
                 }),
             ],
         };
         // Live sources only detect devid 2 this cycle (devid 1 resolved)
         let live = vec![AlertCause::MissingDevice {
             devid: Devid::new(2),
+            still_missing: true,
         }];
         let merged = merge_into_latch(Some(&existing), &live, test_now());
         assert_eq!(merged.causes.len(), 2);
         assert!(merged.active());
+    }
+
+    // Intent: a cycle that sees a latched missing devid missing again
+    //   refreshes the cause with fresh `still_missing` evidence.
+    // Why it exists: the monitor withdraws the evidence when a devid comes
+    //   back. If the disk drops out again, the refresh must restore it, or ack
+    //   would leave a disk the operator saw missing unacknowledged and it
+    //   would beep again on every cycle after the ack.
+    // Scenario: devid 2 dropped, came back (evidence withdrawn), and dropped
+    //   again before the operator acked.
+    #[test]
+    fn merge_live_missing_device_restores_withdrawn_evidence() {
+        let existing = AlertState {
+            causes: vec![latched(AlertCause::MissingDevice {
+                devid: Devid::new(2),
+                still_missing: false,
+            })],
+        };
+        let live = vec![AlertCause::MissingDevice {
+            devid: Devid::new(2),
+            still_missing: true,
+        }];
+
+        let merged = merge_into_latch(Some(&existing), &live, test_now());
+
+        assert_eq!(merged.causes, vec![latched(live[0].clone())]);
+    }
+
+    // Intent: withdraw_returned_missing clears `still_missing` on exactly the
+    //   latched missing-device causes whose devid is outside this cycle's
+    //   missing set, and touches no other cause.
+    // Why it exists: ack marks a devid missing_acked only while the monitor
+    //   last saw it missing. Once the disk is back, committing the flag would
+    //   silence its next absence: reconcile clears missing_acked only while
+    //   the devid is present, so a disk that drops again before the next
+    //   cycle would stay unalerted for as long as it is gone.
+    // Scenario: devids 2 and 3 were latched missing. Devid 2 came back, devid
+    //   3 is still missing, and devid 1 has latched device errors.
+    #[test]
+    fn withdraw_returned_missing_clears_only_devids_outside_missing_set() {
+        let missing = |devid| AlertCause::MissingDevice {
+            devid: Devid::new(devid),
+            still_missing: true,
+        };
+        let mut state = AlertState {
+            causes: vec![
+                latched(missing(2)),
+                latched(missing(3)),
+                latched(device_errors(1, 3)),
+            ],
+        };
+
+        withdraw_returned_missing(&mut state, &BTreeSet::from([Devid::new(3)]));
+
+        assert_eq!(
+            state.causes,
+            vec![
+                latched(AlertCause::MissingDevice {
+                    devid: Devid::new(2),
+                    still_missing: false,
+                }),
+                latched(missing(3)),
+                latched(device_errors(1, 3)),
+            ]
+        );
     }
 
     // Intent: merge_into_latch stamps detected_at with the injected clock on a
@@ -2050,6 +2446,7 @@ mod tests {
     fn merge_into_latch_stamps_detected_at_on_first_append() {
         let live = vec![AlertCause::MissingDevice {
             devid: Devid::new(2),
+            still_missing: true,
         }];
         let merged = merge_into_latch(None, &live, test_now());
         assert_eq!(merged.causes.len(), 1);
@@ -2115,40 +2512,40 @@ mod tests {
 
     #[test]
     fn same_cause_key_btrfs_device_errors() {
+        assert!(
+            same_cause_key(&device_errors(1, 3), &device_errors(1, 5)),
+            "the key is the devid; counters are evidence, not identity"
+        );
         assert!(same_cause_key(
+            &device_errors(1, 3),
             &AlertCause::BtrfsDeviceErrors {
-                devid: Devid::new(1)
-            },
-            &AlertCause::BtrfsDeviceErrors {
-                devid: Devid::new(1)
-            },
-        ));
-        assert!(!same_cause_key(
-            &AlertCause::BtrfsDeviceErrors {
-                devid: Devid::new(1)
-            },
-            &AlertCause::BtrfsDeviceErrors {
-                devid: Devid::new(2)
+                devid: Devid::new(1),
+                counters: None,
             },
         ));
+        assert!(!same_cause_key(&device_errors(1, 3), &device_errors(2, 3)));
     }
 
     #[test]
     fn same_cause_key_missing_device() {
         assert!(same_cause_key(
             &AlertCause::MissingDevice {
-                devid: Devid::new(1)
+                devid: Devid::new(1),
+                still_missing: true
             },
             &AlertCause::MissingDevice {
-                devid: Devid::new(1)
+                devid: Devid::new(1),
+                still_missing: true
             },
         ));
         assert!(!same_cause_key(
             &AlertCause::MissingDevice {
-                devid: Devid::new(1)
+                devid: Devid::new(1),
+                still_missing: true
             },
             &AlertCause::MissingDevice {
-                devid: Devid::new(2)
+                devid: Devid::new(2),
+                still_missing: true
             },
         ));
     }
@@ -2172,18 +2569,15 @@ mod tests {
     #[test]
     fn same_cause_key_cross_variant_never_matches() {
         assert!(!same_cause_key(
-            &AlertCause::BtrfsDeviceErrors {
-                devid: Devid::new(1)
-            },
+            &device_errors(1, 3),
             &AlertCause::MissingDevice {
-                devid: Devid::new(1)
+                devid: Devid::new(1),
+                still_missing: true
             },
         ));
         assert!(!same_cause_key(
             &AlertCause::SmartdAlert,
-            &AlertCause::BtrfsDeviceErrors {
-                devid: Devid::new(1)
-            },
+            &device_errors(1, 3)
         ));
     }
 
@@ -2197,7 +2591,7 @@ mod tests {
             "1".to_owned(),
             AckedDisk {
                 missing_acked: false,
-                device_stats: AckedDeviceCounters {
+                device_stats: DeviceErrorCounters {
                     read_io_errs: 7,
                     ..Default::default()
                 },
@@ -2212,7 +2606,7 @@ mod tests {
     fn acked_disk(missing_acked: bool, read_io_errs: u64) -> AckedDisk {
         AckedDisk {
             missing_acked,
-            device_stats: AckedDeviceCounters {
+            device_stats: DeviceErrorCounters {
                 read_io_errs,
                 ..Default::default()
             },
@@ -2220,27 +2614,49 @@ mod tests {
     }
 
     /*
-     * Intent: drop_ghost_acked_for_devids removes only the requested devid
-     * entries and persists the rewritten acked-stats file.
+     * Intent: drop_ghost_alert_state_for_devids removes only the requested
+     * devids' acked entries and strips only their latched evidence (error
+     * counts and `still_missing`), leaving every cause latched with its
+     * first-detection time.
      *
-     * Why it exists: add/remove cleanup must not rebuild ack state from live
-     * counters or disturb unrelated acknowledgments. It only invalidates
-     * baselines for devids whose pool ownership just changed.
+     * Why it exists: add/remove/replace cleanup must not rebuild ack state
+     * from live counters or disturb unrelated acknowledgments. It only
+     * invalidates state for devids whose pool ownership just changed. The
+     * latched evidence belongs to the old disk too: left in place, the next
+     * ack would commit the old counts as the new disk's baseline, or mark the
+     * new disk missing_acked so its own absence never alerts.
      *
-     * Scenario: a pool has acked baselines for devid 2 and 3, then `braid add`
-     * learns btrfs assigned devid 2 to a fresh disk. The stale devid 2 entry
-     * is deleted, while devid 3 stays acknowledged.
+     * Scenario: a pool has acked baselines, latched device errors, and
+     * latched missing-device causes for devids 2 and 3, then `braid add`
+     * learns btrfs assigned devid 2 to a fresh disk. Devid 2 loses its
+     * baseline and its latched evidence; devid 3 keeps all of it.
      */
     #[test]
-    fn drop_ghost_acked_for_devids_removes_targets_only() {
+    fn drop_ghost_alert_state_for_devids_removes_targets_only() {
         let dir = tempfile::tempdir().unwrap();
         let paths = StatePaths::custom(dir.path().into());
         let mut map = BTreeMap::new();
         map.insert("2".to_owned(), acked_disk(true, 7));
         map.insert("3".to_owned(), acked_disk(false, 11));
         save_acked_stats(&AckedStats(map), &paths).unwrap();
+        let missing = |devid, still_missing| AlertCause::MissingDevice {
+            devid: Devid::new(devid),
+            still_missing,
+        };
+        save_alert_latch(
+            &AlertState {
+                causes: vec![
+                    latched(device_errors(2, 9)),
+                    latched(device_errors(3, 12)),
+                    latched(missing(2, true)),
+                    latched(missing(3, true)),
+                ],
+            },
+            &paths,
+        )
+        .unwrap();
 
-        let changed = drop_ghost_acked_for_devids(&paths, &[Devid::new(2)]).unwrap();
+        let changed = drop_ghost_alert_state_for_devids(&paths, &[Devid::new(2)]).unwrap();
 
         assert!(changed, "targeted cleanup must report a change");
         let reloaded = load_acked_stats(&paths);
@@ -2253,10 +2669,67 @@ mod tests {
             Some(&acked_disk(false, 11)),
             "unrelated acked entry must survive"
         );
+        let latch = load_alert_latch(&paths).unwrap().unwrap();
+        assert_eq!(
+            latch.causes,
+            vec![
+                latched(AlertCause::BtrfsDeviceErrors {
+                    devid: Devid::new(2),
+                    counters: None,
+                }),
+                latched(device_errors(3, 12)),
+                latched(missing(2, false)),
+                latched(missing(3, true)),
+            ],
+            "only the target devid's evidence is stripped; every cause stays latched"
+        );
+    }
+
+    // Intent: stripping latched evidence leaves an unparseable latch
+    //   byte-identical and does not fail the caller.
+    // Why it exists: ack commits nothing from a latch it cannot parse, and the
+    //   monitor owns quarantining it. Failing add/replace over it would block a
+    //   mutation for no safety gain; rewriting it would destroy the forensic
+    //   bytes the monitor preserves.
+    // Scenario: alert-latch.json holds garbage when `braid add` drops the
+    //   ghost state of a reused devid.
+    #[test]
+    fn drop_ghost_alert_state_leaves_unparseable_latch_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(dir.path().into());
+        std::fs::write(paths.alert_latch_json(), b"not json").unwrap();
+
+        let changed = drop_ghost_alert_state_for_devids(&paths, &[Devid::new(2)]).unwrap();
+
+        assert!(!changed);
+        assert_eq!(
+            std::fs::read(paths.alert_latch_json()).unwrap(),
+            b"not json"
+        );
+    }
+
+    // Intent: a latch read failure fails the strip instead of passing as "no
+    //   evidence", so add, replace, and recover fail closed.
+    // Why it exists: a latch that is unreadable now may read fine at the next
+    //   ack, which would then commit the old disk's counts as the new disk's
+    //   baseline.
+    // Scenario: a directory sits where alert-latch.json should be.
+    #[test]
+    fn drop_ghost_alert_state_propagates_latch_read_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(dir.path().into());
+        std::fs::create_dir(paths.alert_latch_json()).unwrap();
+
+        let err = drop_ghost_alert_state_for_devids(&paths, &[Devid::new(2)]).unwrap_err();
+
+        assert!(
+            err.to_string().starts_with("alert latch:"),
+            "the error must name the latch, got {err}"
+        );
     }
 
     /*
-     * Intent: drop_ghost_acked_for_devids returns Ok(false) without reading
+     * Intent: drop_ghost_alert_state_for_devids returns Ok(false) without reading
      * the file when called with an empty devid list.
      *
      * Why it exists: command paths may have no newly assigned devids in edge
@@ -2269,12 +2742,12 @@ mod tests {
      * the helper does nothing.
      */
     #[test]
-    fn drop_ghost_acked_for_empty_devid_list_does_not_read_file() {
+    fn drop_ghost_alert_state_for_empty_devid_list_does_not_read_file() {
         let dir = tempfile::tempdir().unwrap();
         let paths = StatePaths::custom(dir.path().into());
         std::fs::write(paths.acked_stats_json(), "not json").unwrap();
 
-        let changed = drop_ghost_acked_for_devids(&paths, &[]).unwrap();
+        let changed = drop_ghost_alert_state_for_devids(&paths, &[]).unwrap();
 
         assert!(!changed);
         assert_eq!(
@@ -2284,7 +2757,7 @@ mod tests {
     }
 
     /*
-     * Intent: drop_ghost_acked_for_devids returns Ok(false) for a non-empty
+     * Intent: drop_ghost_alert_state_for_devids returns Ok(false) for a non-empty
      * devid list when acked-stats.json does not exist, and does not create
      * the file.
      *
@@ -2297,11 +2770,11 @@ mod tests {
      * a clean no-op.
      */
     #[test]
-    fn drop_ghost_acked_for_devids_missing_file_is_noop() {
+    fn drop_ghost_alert_state_for_devids_missing_file_is_noop() {
         let dir = tempfile::tempdir().unwrap();
         let paths = StatePaths::custom(dir.path().into());
 
-        let changed = drop_ghost_acked_for_devids(&paths, &[Devid::new(2)]).unwrap();
+        let changed = drop_ghost_alert_state_for_devids(&paths, &[Devid::new(2)]).unwrap();
 
         assert!(!changed, "missing file means no ack entry was dropped");
         assert!(
@@ -2311,7 +2784,7 @@ mod tests {
     }
 
     /*
-     * Intent: drop_ghost_acked_for_devids returns Ok(false) and leaves the
+     * Intent: drop_ghost_alert_state_for_devids returns Ok(false) and leaves the
      * file byte-identical when none of the requested devids are present.
      *
      * Why it exists: command cleanup must be narrowly scoped to the devids
@@ -2322,7 +2795,7 @@ mod tests {
      * contains devid 2 from an unrelated earlier acknowledgment.
      */
     #[test]
-    fn drop_ghost_acked_for_devids_no_match_preserves_file_bytes() {
+    fn drop_ghost_alert_state_for_devids_no_match_preserves_file_bytes() {
         let dir = tempfile::tempdir().unwrap();
         let paths = StatePaths::custom(dir.path().into());
         let original = br#"{
@@ -2341,7 +2814,7 @@ mod tests {
         .to_vec();
         std::fs::write(paths.acked_stats_json(), &original).unwrap();
 
-        let changed = drop_ghost_acked_for_devids(&paths, &[Devid::new(9)]).unwrap();
+        let changed = drop_ghost_alert_state_for_devids(&paths, &[Devid::new(9)]).unwrap();
 
         assert!(!changed, "no matching key means no persisted change");
         let after = std::fs::read(paths.acked_stats_json()).unwrap();
@@ -2349,7 +2822,7 @@ mod tests {
     }
 
     /*
-     * Intent: drop_ghost_acked_for_devids propagates corrupt acked-stats JSON
+     * Intent: drop_ghost_alert_state_for_devids propagates corrupt acked-stats JSON
      * instead of treating it as empty state.
      *
      * Why it exists: `load_acked_stats` intentionally swallows corrupt files
@@ -2362,38 +2835,128 @@ mod tests {
      * must fail the command.
      */
     #[test]
-    fn drop_ghost_acked_for_devids_rejects_corrupt_file() {
+    fn drop_ghost_alert_state_for_devids_rejects_corrupt_file() {
         let dir = tempfile::tempdir().unwrap();
         let paths = StatePaths::custom(dir.path().into());
         std::fs::write(paths.acked_stats_json(), "not json").unwrap();
 
-        let err = drop_ghost_acked_for_devids(&paths, &[Devid::new(2)]).unwrap_err();
+        let err = drop_ghost_alert_state_for_devids(&paths, &[Devid::new(2)]).unwrap_err();
 
         assert_eq!(err.kind(), std::io::ErrorKind::Other);
     }
 
     /*
-     * Intent: remove_acked_stats deletes acked-stats.json and treats a missing
-     * file as success.
+     * Intent: drop_all_ghost_alert_state deletes acked-stats.json, strips the
+     * evidence from every latched device-error and missing-device cause, and
+     * treats missing files as success.
      *
      * Why it exists: bootstrap creates a new pool identity, making every
-     * pre-existing acked baseline stale. The cleanup primitive must support
-     * both upgrades from old state and fresh state directories.
+     * pre-existing acked baseline and every piece of latched evidence stale.
+     * A missing devid of the old pool left committable would mark the new
+     * pool's disk on that devid missing_acked at the next ack. The cleanup
+     * primitive must support both upgrades from old state and fresh state
+     * directories.
      *
      * Scenario: `braid add` bootstraps a new pool once with an old
-     * acked-stats.json present, and later on a system where the file was never
-     * created. Both paths should continue after cleanup.
+     * acked-stats.json, a latched device error, and a latched missing device
+     * present, and later on a system where neither file was ever created.
+     * Both paths should continue after cleanup.
      */
     #[test]
-    fn remove_acked_stats_deletes_file_and_allows_missing() {
+    fn drop_all_ghost_alert_state_clears_baselines_and_evidence() {
         let dir = tempfile::tempdir().unwrap();
         let paths = StatePaths::custom(dir.path().into());
         std::fs::write(paths.acked_stats_json(), "{}").unwrap();
+        save_alert_latch(
+            &AlertState {
+                causes: vec![
+                    latched(device_errors(1, 3)),
+                    latched(device_errors(4, 2)),
+                    latched(AlertCause::MissingDevice {
+                        devid: Devid::new(2),
+                        still_missing: true,
+                    }),
+                ],
+            },
+            &paths,
+        )
+        .unwrap();
 
-        remove_acked_stats(&paths).unwrap();
+        drop_all_ghost_alert_state(&paths).unwrap();
         assert!(!paths.acked_stats_json().exists());
+        let latch = load_alert_latch(&paths).unwrap().unwrap();
+        assert!(
+            latch.causes.iter().all(|c| matches!(
+                c.cause,
+                AlertCause::BtrfsDeviceErrors { counters: None, .. }
+                    | AlertCause::MissingDevice {
+                        still_missing: false,
+                        ..
+                    }
+            )),
+            "all latched evidence must be stripped, got {:?}",
+            latch.causes
+        );
+        assert_eq!(latch.causes.len(), 3, "the causes stay latched until ack");
 
-        remove_acked_stats(&paths).unwrap();
+        std::fs::remove_file(paths.alert_latch_json()).unwrap();
+        drop_all_ghost_alert_state(&paths).unwrap();
+    }
+
+    // Intent: ack's acked-stats loader moves an unparseable file to the
+    //   sidecar and returns an empty baseline plus a detail to warn with.
+    // Why it exists: ack's read-modify-write cannot keep entries it cannot
+    //   parse. Failing would wedge recovery from the monitor's "acked-stats
+    //   unreadable" ComputationError; an empty baseline fires again instead
+    //   of burying, and the sidecar keeps the bytes for forensics.
+    // Scenario: acked-stats.json holds garbage when the operator runs ack.
+    #[test]
+    fn load_acked_stats_or_quarantine_moves_corrupt_file_aside() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(dir.path().into());
+        std::fs::write(paths.acked_stats_json(), b"not json").unwrap();
+
+        let (acked, detail) = load_acked_stats_or_quarantine(&paths).unwrap();
+
+        assert_eq!(acked, AckedStats::default());
+        let detail = detail.expect("a corrupt file must report a quarantine detail");
+        assert!(
+            detail.contains("acked-stats.json.corrupt"),
+            "the detail must name the sidecar, got {detail}"
+        );
+        assert!(!paths.acked_stats_json().exists());
+        assert_eq!(
+            std::fs::read(paths.acked_stats_corrupt()).unwrap(),
+            b"not json"
+        );
+    }
+
+    // Intent: a second corruption keeps the first sidecar's bytes and still
+    //   returns an empty baseline, leaving the caller to overwrite the live file.
+    // Why it exists: the hard-link no-clobber step is what protects the first
+    //   forensic copy; the caller's save is what keeps the corrupt live file
+    //   from wedging every later monitor cycle.
+    // Scenario: an earlier ack already quarantined acked-stats once, and the
+    //   file is corrupt again.
+    #[test]
+    fn load_acked_stats_or_quarantine_preserves_first_sidecar() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = StatePaths::custom(dir.path().into());
+        std::fs::write(paths.acked_stats_corrupt(), b"first").unwrap();
+        std::fs::write(paths.acked_stats_json(), b"second").unwrap();
+
+        let (acked, detail) = load_acked_stats_or_quarantine(&paths).unwrap();
+
+        assert_eq!(acked, AckedStats::default());
+        assert!(
+            detail
+                .unwrap()
+                .contains("prior acked-stats.json.corrupt sidecar exists")
+        );
+        assert_eq!(
+            std::fs::read(paths.acked_stats_corrupt()).unwrap(),
+            b"first"
+        );
     }
 
     /*
@@ -2449,9 +3012,23 @@ mod tests {
             causes: vec![
                 latched(AlertCause::MissingDevice {
                     devid: Devid::new(7),
+                    still_missing: true,
+                }),
+                latched(AlertCause::MissingDevice {
+                    devid: Devid::new(8),
+                    still_missing: false,
                 }),
                 latched(AlertCause::BtrfsDeviceErrors {
                     devid: Devid::new(2),
+                    counters: Some(DeviceErrorCounters {
+                        read_io_errs: 3,
+                        corruption_errs: 1,
+                        ..Default::default()
+                    }),
+                }),
+                latched(AlertCause::BtrfsDeviceErrors {
+                    devid: Devid::new(5),
+                    counters: None,
                 }),
             ],
         };
@@ -2460,15 +3037,27 @@ mod tests {
 
         assert!(
             json.contains(
-                r#"{"detected_at":"2023-11-14T22:13:20Z","type":"missing_device","devid":7}"#
+                r#"{"detected_at":"2023-11-14T22:13:20Z","type":"missing_device","devid":7,"still_missing":true}"#
             ),
-            "MissingDevice latched cause must serialize flat with a bare-integer devid; got: {json}"
+            "MissingDevice latched cause must serialize flat with a bare-integer devid and its evidence; got: {json}"
         );
         assert!(
             json.contains(
-                r#"{"detected_at":"2023-11-14T22:13:20Z","type":"btrfs_device_errors","devid":2}"#
+                r#"{"detected_at":"2023-11-14T22:13:20Z","type":"missing_device","devid":8}"#
             ),
-            "BtrfsDeviceErrors latched cause must serialize flat with a bare-integer devid; got: {json}"
+            "a MissingDevice cause without evidence must omit still_missing; got: {json}"
+        );
+        assert!(
+            json.contains(
+                r#"{"detected_at":"2023-11-14T22:13:20Z","type":"btrfs_device_errors","devid":2,"counters":{"read_io_errs":3,"write_io_errs":0,"flush_io_errs":0,"corruption_errs":1,"generation_errs":0}}"#
+            ),
+            "BtrfsDeviceErrors latched cause must serialize flat with a bare-integer devid and its counters; got: {json}"
+        );
+        assert!(
+            json.contains(
+                r#"{"detected_at":"2023-11-14T22:13:20Z","type":"btrfs_device_errors","devid":5}"#
+            ),
+            "an evidence-less BtrfsDeviceErrors cause must omit counters; got: {json}"
         );
         assert!(
             !json.contains(r#""cause""#),
@@ -2508,7 +3097,8 @@ mod tests {
         assert_eq!(
             alert[0],
             AlertCause::MissingDevice {
-                devid: Devid::new(2)
+                devid: Devid::new(2),
+                still_missing: true
             }
         );
     }
@@ -2584,6 +3174,7 @@ mod tests {
                 }),
                 latched(AlertCause::MissingDevice {
                     devid: Devid::new(2),
+                    still_missing: true,
                 }),
             ],
         };
@@ -2915,11 +3506,10 @@ mod tests {
     fn status_docs_list_every_alert_cause_discriminator() {
         let status_docs = include_str!("../../docs/commands/status.md");
         let causes = [
-            AlertCause::BtrfsDeviceErrors {
-                devid: Devid::new(1),
-            },
+            device_errors(1, 3),
             AlertCause::MissingDevice {
                 devid: Devid::new(2),
+                still_missing: true,
             },
             AlertCause::SmartdAlert,
             AlertCause::ScrubFailed,
@@ -2937,12 +3527,16 @@ mod tests {
         // `alert_causes` cause list.
         for cause in causes {
             let serialized = match cause {
-                AlertCause::BtrfsDeviceErrors { devid } => {
-                    serde_json::to_value(AlertCause::BtrfsDeviceErrors { devid })
+                AlertCause::BtrfsDeviceErrors { devid, counters } => {
+                    serde_json::to_value(AlertCause::BtrfsDeviceErrors { devid, counters })
                 }
-                AlertCause::MissingDevice { devid } => {
-                    serde_json::to_value(AlertCause::MissingDevice { devid })
-                }
+                AlertCause::MissingDevice {
+                    devid,
+                    still_missing,
+                } => serde_json::to_value(AlertCause::MissingDevice {
+                    devid,
+                    still_missing,
+                }),
                 AlertCause::SmartdAlert => serde_json::to_value(AlertCause::SmartdAlert),
                 AlertCause::ScrubFailed => serde_json::to_value(AlertCause::ScrubFailed),
                 AlertCause::ComputationError { detail } => {

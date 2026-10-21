@@ -93,7 +93,7 @@ sudo braid replace --old toshiba1 --new toshiba4=/dev/disk/by-id/ata-TOSHIBA_MN0
 **Then, for all replacements:**
 
 5. Runs `btrfs replace start` to copy data from the old device (or its mirrors) to the new device
-6. Writes committed UUID-keyed membership to `pool.json` and advances the journal to post-replace maintenance
+6. Writes committed UUID-keyed membership to `pool.json`, advances the journal to post-replace maintenance, and forgets the old disk's alert state on the devid the new disk inherits: its acknowledged baseline and the evidence in any latched alert (the error counts, and the record that the old disk was missing). A latched alert for the old disk stays visible until `braid ack`, but ack will not apply the old disk's counts to the new one or mark the new one as acknowledged-missing, so the new disk dropping out still alerts. If this cleanup fails, replace stops with the journal kept, and `braid recover` retries it
 7. For live replacements: closes the old disk's LUKS mapper
 8. Resizes the new device to use its full capacity (important when the new disk is larger)
 9. For missing-disk replacements that clear the last missing device: runs a soft RAID1 balance to restore redundancy on any single-profile chunks

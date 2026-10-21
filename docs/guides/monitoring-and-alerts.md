@@ -131,7 +131,7 @@ Once you have investigated and resolved (or accepted) the issue:
 sudo braid ack
 ```
 
-This silences the beep and resets the device-error baseline; new errors after ack trigger a fresh alert. A capacity (ENOSPC) warning is instead *snoozed* for a reminder interval -- ack does not resolve it, and `braid status` keeps showing it until you add capacity or free space.
+This silences the beep and sets each alerting drive's error baseline to the counts `braid status` showed you; new errors after ack trigger a fresh alert. Ack acknowledges only what the monitor latched, so an error or a missing drive that appeared since the last monitor cycle still alerts on the next one. It works the same with the pool locked. A capacity (ENOSPC) warning is instead *snoozed* for a reminder interval -- ack does not resolve it, and `braid status` keeps showing it until you add capacity or free space.
 
 ## Checking monitor status
 

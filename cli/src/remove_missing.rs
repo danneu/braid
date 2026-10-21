@@ -302,8 +302,10 @@ impl RemoveMissingPlan {
         // Hygiene only -- failure is non-fatal because `cmd_add` is the
         // fail-closed correctness boundary for reused devids. See
         // docs/design/decisions/014-alerts.md "Acked-stats hygiene".
-        if let Err(e) = alert::drop_ghost_acked_for_devids(params.paths, &[work_plan.missing_id]) {
-            eprintln!("Warning: failed to update acked stats: {e}");
+        if let Err(e) =
+            alert::drop_ghost_alert_state_for_devids(params.paths, &[work_plan.missing_id])
+        {
+            eprintln!("Warning: failed to update alert baselines: {e}");
         }
 
         eprintln!("Done. Missing device removed from pool.");
@@ -892,7 +894,7 @@ mod tests {
     fn acked_disk(missing_acked: bool, read_io_errs: u64) -> alert::AckedDisk {
         alert::AckedDisk {
             missing_acked,
-            device_stats: alert::AckedDeviceCounters {
+            device_stats: alert::DeviceErrorCounters {
                 read_io_errs,
                 ..Default::default()
             },

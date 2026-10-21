@@ -1608,6 +1608,7 @@ pub(crate) mod tests {
         (
             AlertCause::MissingDevice {
                 devid: Devid::new(2),
+                still_missing: true,
             },
             Some("2026-02-24T06:12:00Z".to_owned()),
         )
@@ -1937,6 +1938,7 @@ pub(crate) mod tests {
         for causes in [
             vec![AlertCause::MissingDevice {
                 devid: Devid::new(2),
+                still_missing: true,
             }],
             vec![
                 AlertCause::EnospcRisk {
@@ -1946,6 +1948,7 @@ pub(crate) mod tests {
                 },
                 AlertCause::MissingDevice {
                     devid: Devid::new(2),
+                    still_missing: true,
                 },
             ],
         ] {

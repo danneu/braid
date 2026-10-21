@@ -5467,6 +5467,7 @@ mod tests {
                 causes: vec![alert::LatchedCause::new(
                     AlertCause::MissingDevice {
                         devid: Devid::new(3),
+                        still_missing: true,
                     },
                     "2023-11-14T22:13:20Z".to_owned(),
                 )],
@@ -6911,6 +6912,7 @@ mod tests {
             disks,
             vec![AlertCause::MissingDevice {
                 devid: Devid::new(3),
+                still_missing: true,
             }],
         );
         let devid_names = std::collections::HashMap::from([(Devid::new(3), "toshiba3".to_owned())]);
@@ -6923,10 +6925,13 @@ mod tests {
 
     #[test]
     fn alert_btrfs_errors_shows_name() {
-        // Intent: a btrfs device-error alert names the matching present disk.
+        // Intent: a btrfs device-error alert names the matching present disk
+        // and shows the nonzero error counts the monitor latched.
         // Why it exists: alert causes are keyed by devid, but operators need
-        // the display name in the banner.
-        // Scenario: devid 1 has an entry in the status-built devid name map.
+        // the display name in the banner. The counts are what `braid ack`
+        // commits as the baseline, so the operator sees what they accept.
+        // Scenario: devid 1 has an entry in the status-built devid name map
+        // and its latched cause carries 3 read and 1 corruption errors.
         let disks = vec![
             status_disk_report_named("aaa", Devid::new(1)),
             status_disk_report_named("bbb", Devid::new(2)),
@@ -6935,6 +6940,11 @@ mod tests {
             disks,
             vec![AlertCause::BtrfsDeviceErrors {
                 devid: Devid::new(1),
+                counters: Some(crate::alert::DeviceErrorCounters {
+                    read_io_errs: 3,
+                    corruption_errs: 1,
+                    ..Default::default()
+                }),
             }],
         );
         let devid_names = std::collections::HashMap::from([
@@ -6943,8 +6953,8 @@ mod tests {
         ]);
         let human = format_status_human(&report, None, None, Some(&devid_names), human_now());
         assert!(
-            human.contains("btrfs device errors on aaa (devid 1)"),
-            "expected device name in alert, got:\n{human}"
+            human.contains("btrfs device errors on aaa (devid 1): read 3, corruption 1"),
+            "expected device name and latched counts in alert, got:\n{human}"
         );
     }
 
@@ -6961,6 +6971,7 @@ mod tests {
             disks,
             vec![AlertCause::MissingDevice {
                 devid: Devid::new(99),
+                still_missing: true,
             }],
         );
         let devid_names = std::collections::HashMap::new();
@@ -6998,6 +7009,7 @@ mod tests {
             vec![status_disk_report_named("foreign-live", Devid::new(1))],
             vec![AlertCause::BtrfsDeviceErrors {
                 devid: Devid::new(1),
+                counters: None,
             }],
         );
 
@@ -7056,6 +7068,7 @@ mod tests {
             vec![],
             vec![AlertCause::BtrfsDeviceErrors {
                 devid: Devid::new(1),
+                counters: None,
             }],
         );
 
@@ -7115,6 +7128,7 @@ mod tests {
                 },
                 AlertCause::MissingDevice {
                     devid: Devid::new(2),
+                    still_missing: true,
                 },
             ],
         );
@@ -8116,6 +8130,7 @@ mod tests {
             alert_causes: vec![AlertCauseReport {
                 cause: AlertCause::MissingDevice {
                     devid: Devid::new(2),
+                    still_missing: true,
                 },
                 first_detected,
             }],

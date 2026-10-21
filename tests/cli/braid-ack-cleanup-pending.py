@@ -19,8 +19,8 @@
 # Scenario: Healthy 2-disk RAID1 pool. A smartd flag makes a mounted ack
 #   reach cleanup; alert-latch.json.corrupt is poisoned as a directory so
 #   remove_alert_latch_corrupt fails with EISDIR *after* the sentinel was
-#   marked and the smartd flag removed. ack exits 1 with the sentinel and
-#   the persisted baseline surviving. `braid status` reports the
+#   marked and the smartd flag removed. ack exits 1 with the sentinel
+#   surviving and no baseline written. `braid status` reports the
 #   cleanup-pending cause. The operator removes the poison directory and
 #   re-runs `braid ack`, which re-enters cleanup directly and clears the
 #   sentinel.
@@ -54,11 +54,9 @@ with subtest("Healthy pool: no alert banner"):
 
 # Produce: force a cleanup failure after the sentinel is marked. The smartd
 # flag drives a mounted ack past the `no active alerts` no-op into the
-# save-baseline + cleanup path; the poison directory at
-# alert-latch.json.corrupt makes remove_alert_latch_corrupt fail with EISDIR.
-# This is the persist-before-maintenance invariant: save_acked_stats and the
-# smartd-flag removal both run before the forced failure, and the sentinel
-# survives.
+# cleanup path; the poison directory at alert-latch.json.corrupt makes
+# remove_alert_latch_corrupt fail with EISDIR. The smartd-flag removal runs
+# before the forced failure, and the sentinel survives.
 with subtest("ack fails mid-cleanup, leaving the sentinel"):
     machine.succeed("touch /var/lib/braid/smartd-alert")
     machine.succeed("mkdir /var/lib/braid/alert-latch.json.corrupt")
@@ -77,8 +75,8 @@ with subtest("ack fails mid-cleanup, leaving the sentinel"):
 
     # Sentinel produced before the failed maintenance step.
     machine.succeed("test -f /var/lib/braid/alert-cleanup-pending")
-    # Baseline persisted before cleanup ran (save_acked_stats precedes it).
-    machine.succeed("test -f /var/lib/braid/acked-stats.json")
+    # A smartd flag carries no device evidence, so ack commits no baseline.
+    machine.fail("test -f /var/lib/braid/acked-stats.json")
     # Cleanup got past the smartd-flag removal, proving the failure is at the
     # later .corrupt step, not earlier.
     machine.fail("test -f /var/lib/braid/smartd-alert")

@@ -179,8 +179,8 @@ pub struct AlertPoolState {
     pub fsid: Option<Fsid>,
 }
 
-/// Named carrier for the two devid sets `compute_alert_state` and
-/// `snapshot_current` require. Grouping the two sets into one named struct
+/// Named carrier for the two devid sets `compute_alert_state` requires.
+/// Grouping the two sets into one named struct
 /// makes the positional `recognized`/`missing` swap an unwritable mistake --
 /// a caller cannot pass `missing` where `recognized` is expected.
 pub struct AlertDevids {
@@ -2127,8 +2127,8 @@ mod tests {
     // Intent: AlertPoolState::alert_devids() groups the three devid origins
     //   (present, btrfs-MISSING, null-underlying) into a carrier whose
     //   `recognized` and `missing` fields have distinct semantics; feeding that
-    //   carrier through both compute_alert_state and snapshot_current routes
-    //   each devid to its correct alert outcome. A backwards builder that swaps
+    //   carrier through compute_alert_state routes each devid to its correct
+    //   alert outcome. A backwards builder that swaps
     //   `recognized` and `missing` would flip every assertion below.
     // Why it exists: the positional two-slice API was replaced by a single
     //   named carrier to make a recognized/missing swap unwritable at the call
@@ -2140,7 +2140,7 @@ mod tests {
     //   null-underlying mapper. All three devid origins are distinct.
     #[test]
     fn alert_devids_carrier_routes_each_origin_correctly() {
-        use crate::alert::{AckedStats, AlertCause, compute_alert_state, snapshot_current};
+        use crate::alert::{AckedStats, AlertCause, compute_alert_state};
 
         // devid 1: present (normal, healthy member)
         // devid 2: btrfs-MISSING (kernel lost sight of the disk entirely)
@@ -2207,57 +2207,31 @@ mod tests {
         let alert = compute_alert_state(&stats, &acked, &devids, false, false);
         assert!(
             alert.contains(&AlertCause::MissingDevice {
-                devid: Devid::new(2)
+                devid: Devid::new(2),
+                still_missing: true
             }),
             "btrfs-MISSING devid must latch MissingDevice"
         );
         assert!(
             alert.contains(&AlertCause::MissingDevice {
-                devid: Devid::new(3)
+                devid: Devid::new(3),
+                still_missing: true
             }),
             "null-underlying devid must latch MissingDevice"
         );
         assert!(
             !alert.iter().any(|c| matches!(
                 c,
-                AlertCause::BtrfsDeviceErrors { devid } if *devid == Devid::new(1)
+                AlertCause::BtrfsDeviceErrors { devid, .. } if *devid == Devid::new(1)
             )),
             "present devid must not produce BtrfsDeviceErrors"
         );
         assert!(
             !alert.iter().any(|c| matches!(
                 c,
-                AlertCause::MissingDevice { devid } if *devid == Devid::new(1)
+                AlertCause::MissingDevice { devid, .. } if *devid == Devid::new(1)
             )),
             "present devid must not produce MissingDevice"
-        );
-
-        // snapshot_current must mark devids 2 and 3 missing_acked and include
-        // devid 1 without the missing flag.
-        let snapshot = snapshot_current(&stats, &devids);
-        let disk1 = snapshot
-            .0
-            .get("1")
-            .expect("present devid must be snapshotted");
-        assert!(
-            !disk1.missing_acked,
-            "present devid must not be missing_acked in snapshot"
-        );
-        let disk2 = snapshot
-            .0
-            .get("2")
-            .expect("btrfs-MISSING devid must be snapshotted");
-        assert!(
-            disk2.missing_acked,
-            "btrfs-MISSING devid must be missing_acked in snapshot"
-        );
-        let disk3 = snapshot
-            .0
-            .get("3")
-            .expect("null-underlying devid must be snapshotted");
-        assert!(
-            disk3.missing_acked,
-            "null-underlying devid must be missing_acked in snapshot"
         );
     }
 

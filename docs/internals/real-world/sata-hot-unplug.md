@@ -139,6 +139,7 @@ The broken LUKS mapper cannot self-heal (see the **Key finding** above: it stays
 2. Close and reopen the mapper:
    - **Disk is back (re-seated or replugged):** `braid lock` then `braid unlock`. Re-plug alone does not help — the mapper is a zombie until closed and reopened — but the by-id reopen rebinds to the disk wherever the kernel re-attached it.
    - **Disk is truly gone:** `braid lock` then `braid unlock --allow-degraded`, which mounts the pool degraded so btrfs promotes the member to MISSING and `braid replace` can target it.
+3. **Disk is back:** expect one more alert. While the member was missing, the monitor reported it only as missing and latched none of its error counts, so the first `braid ack` committed none. Once the member is present again, the next monitor cycle raises the write and flush errors btrfs counted during the unplug (see [btrfs device stats (after errors)](#btrfs-device-stats-after-errors)) as btrfs device errors on that disk. Check that they stop growing, then `braid ack` again to make them the disk's baseline.
 
 `braid unlock` reopens LUKS against `/dev/disk/by-id/`, the same stable-handle reopen a post-reboot `braid unlock` performs — so the re-seat branch above rests on that mechanistic equivalence, not on a separately observed replug-then-`unlock` test. The reboot path is the hardware-validated instance of that reopen:
 
@@ -160,6 +161,6 @@ Changes to these should prompt re-verification of this document:
 
 - `cli/src/probe.rs` -- `probe_pool()` null-underlying detection
 - `cli/src/monitor.rs` -- alert-local missing devids union (`missing_devids ∪ null_underlying` devids)
-- `cli/src/alert.rs` -- `compute_alert_state` / `snapshot_current` (devid-keyed; no path-to-devid map)
+- `cli/src/alert.rs` -- `compute_alert_state` / `commit_latched_evidence` (devid-keyed; no path-to-devid map)
 - `cli/src/parse/btrfs_filesystem_show.rs` -- `parse_devid_line` MISSING device filtering
 - `cli/src/parse/btrfs_device_stats.rs` -- `devid` propagation and `<missing disk>` / `devid:<n>` sentinel handling

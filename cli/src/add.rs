@@ -61,8 +61,9 @@ pub enum AddError {
         advice: String,
     },
     #[error(
-        "pool was modified, but acked-stats cleanup failed at {stage}: {detail}\n\
-         rm /var/lib/braid/acked-stats.json before trusting `braid monitor`."
+        "pool was modified, but alert baseline cleanup failed at {stage}: {detail}\n\
+         rm /var/lib/braid/acked-stats.json and /var/lib/braid/alert-latch.json before \
+         trusting `braid monitor`."
     )]
     AckCleanupFailed { stage: &'static str, detail: String },
     /// Post-mutation, pre-persist failure in the live-pool add loop:
@@ -1475,10 +1476,14 @@ impl AddPlan {
                 );
             }
 
-            // Fresh pool identity: every previous acked baseline is stale.
-            alert::remove_acked_stats(params.paths).map_err(|e| AddError::AckCleanupFailed {
-                stage: "bootstrap",
-                detail: e.to_string(),
+            // Fresh pool identity: every previous acked baseline and all
+            // latched evidence (error counts and still-missing flags) belong
+            // to the old pool.
+            alert::drop_all_ghost_alert_state(params.paths).map_err(|e| {
+                AddError::AckCleanupFailed {
+                    stage: "bootstrap",
+                    detail: e.to_string(),
+                }
             })?;
 
             // Bootstrap post-commit persist: write pool.json after mkfs + mount.
@@ -1517,12 +1522,12 @@ impl AddPlan {
                         detail: format!("{}: not found in pool after add", target.name),
                     }
                 })?;
-                alert::drop_ghost_acked_for_devids(params.paths, &[dev.devid]).map_err(|e| {
-                    AddError::AckCleanupFailed {
+                alert::drop_ghost_alert_state_for_devids(params.paths, &[dev.devid]).map_err(
+                    |e| AddError::AckCleanupFailed {
                         stage: "live-pool add",
                         detail: format!("devid {}: {e}", dev.devid),
-                    }
-                })?;
+                    },
+                )?;
                 pool_after = Some(probe);
             }
 
@@ -5588,7 +5593,7 @@ mod tests {
     fn test_acked_disk(missing_acked: bool, read_io_errs: u64) -> alert::AckedDisk {
         alert::AckedDisk {
             missing_acked,
-            device_stats: alert::AckedDeviceCounters {
+            device_stats: alert::DeviceErrorCounters {
                 read_io_errs,
                 ..Default::default()
             },

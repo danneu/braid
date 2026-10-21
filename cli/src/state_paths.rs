@@ -28,6 +28,12 @@ impl StatePaths {
         self.root.join("acked-stats.json")
     }
 
+    /// Forensic sidecar `braid ack` moves an unparseable `acked-stats.json`
+    /// to before it starts from an empty baseline (ADR 014).
+    pub fn acked_stats_corrupt(&self) -> PathBuf {
+        self.root.join("acked-stats.json.corrupt")
+    }
+
     /// Monotonic ENOSPC-risk suppression baseline (`EnospcAck`), separate from
     /// `acked-stats.json` because it keys on pool geometry, not per-device error
     /// counters. Written only by `braid ack`, removed only by the monitor on
@@ -92,6 +98,10 @@ mod tests {
         assert_eq!(
             p.acked_stats_json(),
             PathBuf::from("/var/lib/braid/acked-stats.json")
+        );
+        assert_eq!(
+            p.acked_stats_corrupt(),
+            PathBuf::from("/var/lib/braid/acked-stats.json.corrupt")
         );
         assert_eq!(
             p.enospc_ack_json(),

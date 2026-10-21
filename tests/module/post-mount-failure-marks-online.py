@@ -11,7 +11,7 @@
 #   the lifecycle hole must close (ADR 026).
 # Scenario: single-disk fresh-pool bootstrap-add. Before `braid add`,
 #   pre-create /var/lib/braid/acked-stats.json as a directory so the
-#   post-mount alert::remove_acked_stats fails after pool_bootstrap_mount
+#   post-mount alert::drop_all_ghost_alert_state fails after pool_bootstrap_mount
 #   has committed and BEFORE save_membership runs (so pool.json never
 #   exists). Assert (1) the add exits non-zero, (2) the pool is mounted,
 #   (3) braid-online.service is active, (4) pool.json does not exist,
@@ -49,7 +49,7 @@ with subtest("Bootstrap add fails after mount"):
     print(f"braid add output:\n{output}")
 
     assert exit_code != 0, "bootstrap add should fail after mount"
-    assert "acked-stats cleanup failed at bootstrap" in output, output
+    assert "alert baseline cleanup failed at bootstrap" in output, output
     machine.succeed("mountpoint -q /mnt/storage")
     machine.succeed("systemctl is-active --quiet braid-online.service")
     machine.fail("test -e /var/lib/braid/pool.json")

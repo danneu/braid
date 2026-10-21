@@ -1,3 +1,4 @@
+use crate::alert;
 use crate::btrfs_ioctl::BtrfsDevInfo;
 use crate::cmd::{CmdRequest, CommandRunner, Step};
 use crate::config::{Config, luks_label_for, mapper_name};
@@ -160,6 +161,19 @@ pub enum ReplaceError {
     Parse(#[from] crate::parse::ParseError),
     #[error("membership error: {0}")]
     Membership(#[from] membership::MembershipError),
+    /// `btrfs replace` already handed the devid to the new disk, but dropping
+    /// the old disk's alert state failed: its acked baseline and its latched
+    /// evidence (error counts and the still-missing flag). Fatal so the
+    /// post-replace journal survives and `braid recover` replays the drop. A
+    /// skipped drop would let `braid ack` commit the old disk's counts as the
+    /// new disk's baseline, or mark the present new disk acknowledged-missing
+    /// after `--missing-id` (ADR 014).
+    #[error(
+        "pool was modified, but alert baseline cleanup failed for devid {devid}: {detail}\n\
+         rm /var/lib/braid/acked-stats.json and /var/lib/braid/alert-latch.json before \
+         trusting `braid monitor`."
+    )]
+    AckCleanupFailed { devid: Devid, detail: String },
 }
 
 pub struct ReplaceParams<'a> {
@@ -866,6 +880,21 @@ impl ReplacePlan {
             Some(target_membership.clone()),
         )
         .map_err(|e| ReplaceError::Validation(e.to_string()))?;
+
+        // btrfs replace handed `devid` to the new disk. Drop the old disk's
+        // acked baseline and strip its latched evidence (error counts and the
+        // still-missing flag) so neither monitor nor ack applies them to the
+        // new disk. The flag matters most for `--missing-id`: the old disk's
+        // MissingDevice cause stays latched until ack, and ack must not mark
+        // the present new disk acknowledged-missing. Runs after the
+        // post-replace journal is written, so a failure leaves `braid recover`
+        // to replay it.
+        alert::drop_ghost_alert_state_for_devids(params.paths, &[devid]).map_err(|e| {
+            ReplaceError::AckCleanupFailed {
+                devid,
+                detail: e.to_string(),
+            }
+        })?;
 
         // Live-only: best-effort close of old mapper. Runs BEFORE the resize
         // so a resize failure does not `?` out and strand the old dm slot
@@ -5809,6 +5838,140 @@ mod tests {
         assert_eq!(
             close_calls, 0,
             "missing path has no old LUKS mapper to close -- CryptsetupClose must not be issued"
+        );
+    }
+
+    #[test]
+    // Intent: a successful replace forgets the old disk's alert state on the
+    //   devid it hands to the new disk: the acked baseline is dropped and the
+    //   latched evidence (error counts and `still_missing`) is stripped.
+    //   Other devids keep theirs.
+    //
+    // Why it exists: `btrfs replace` keeps the devid. Without the drop, the
+    //   monitor would compare the new disk against the old disk's baseline,
+    //   and the next ack would commit the old disk's latched counts as the
+    //   new disk's baseline, burying its first real errors. It would also
+    //   mark the new disk missing_acked, so the new disk dropping out of the
+    //   pool would never alert.
+    //
+    // Scenario: disk2 logged read errors, the monitor latched them, and then
+    //   disk2 dropped out. The operator replaces devid 2 with disk3. Devid 1
+    //   also has latched errors that must survive.
+    fn cmd_replace_drops_old_disk_alert_state_for_replaced_devid() {
+        let f = PoolFixture::one_live_one_missing();
+        let counts = |read_io_errs| alert::DeviceErrorCounters {
+            read_io_errs,
+            ..Default::default()
+        };
+        alert::save_acked_stats(
+            &alert::AckedStats(std::collections::BTreeMap::from([
+                (
+                    "1".to_owned(),
+                    alert::AckedDisk {
+                        missing_acked: false,
+                        device_stats: counts(1),
+                    },
+                ),
+                (
+                    "2".to_owned(),
+                    alert::AckedDisk {
+                        missing_acked: true,
+                        device_stats: counts(4),
+                    },
+                ),
+            ])),
+            &f.paths,
+        )
+        .unwrap();
+        let latched = |cause| alert::LatchedCause::new(cause, "2023-11-14T22:13:20Z".to_owned());
+        alert::save_alert_latch(
+            &alert::AlertState {
+                causes: vec![
+                    latched(alert::AlertCause::BtrfsDeviceErrors {
+                        devid: Devid::new(2),
+                        counters: Some(counts(4)),
+                    }),
+                    latched(alert::AlertCause::MissingDevice {
+                        devid: Devid::new(2),
+                        still_missing: true,
+                    }),
+                    latched(alert::AlertCause::BtrfsDeviceErrors {
+                        devid: Devid::new(1),
+                        counters: Some(counts(1)),
+                    }),
+                ],
+            },
+            &f.paths,
+        )
+        .unwrap();
+        let fs = MockFs::storage(vec![
+            "/dev/disk/by-id/virtio-disk3".into(),
+            "/dev/mapper/braid-disk3".into(),
+        ]);
+        let replace_done = Arc::new(AtomicBool::new(false));
+        let runner = ReplacementPool::one_live_one_missing()
+            .install(MockRunner::default(), replace_done.clone())
+            .with_handler({
+                let replace_done = replace_done.clone();
+                move |req| match req {
+                    CmdRequest::BtrfsReplaceStart { .. } => {
+                        replace_done.store(true, std::sync::atomic::Ordering::Relaxed);
+                        Some(Ok(mock_ok("btrfs replace start", "")))
+                    }
+                    CmdRequest::BtrfsFilesystemResize { .. } => {
+                        Some(Ok(mock_ok("btrfs filesystem resize", "")))
+                    }
+                    CmdRequest::BtrfsBalanceRaid1Soft { .. } => {
+                        Some(Ok(mock_ok("btrfs balance raid1 soft", "")))
+                    }
+                    _ => None,
+                }
+            });
+
+        let result = cmd_replace(
+            &runner,
+            &fs,
+            &f.replace_params()
+                .old("disk2")
+                .new_disk("disk3=/dev/disk/by-id/virtio-disk3")
+                .missing_id(Some(Devid::new(2)))
+                .build(),
+        );
+        assert!(
+            matches!(result, Ok(())),
+            "replace must succeed, got: {result:?}"
+        );
+
+        let acked = alert::load_acked_stats_fallible(&f.paths).unwrap();
+        assert_eq!(
+            acked.0.keys().map(String::as_str).collect::<Vec<_>>(),
+            vec!["1"],
+            "replace must drop the replaced devid's baseline and keep the others"
+        );
+        let causes: Vec<_> = alert::load_alert_latch(&f.paths)
+            .unwrap()
+            .expect("the latch stays until ack")
+            .causes
+            .into_iter()
+            .map(|c| c.cause)
+            .collect();
+        assert_eq!(
+            causes,
+            vec![
+                alert::AlertCause::BtrfsDeviceErrors {
+                    devid: Devid::new(2),
+                    counters: None,
+                },
+                alert::AlertCause::MissingDevice {
+                    devid: Devid::new(2),
+                    still_missing: false,
+                },
+                alert::AlertCause::BtrfsDeviceErrors {
+                    devid: Devid::new(1),
+                    counters: Some(counts(1)),
+                },
+            ],
+            "replace must strip only the replaced devid's latched evidence"
         );
     }
 

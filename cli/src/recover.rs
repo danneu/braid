@@ -57,9 +57,9 @@ pub enum RecoverError {
         advice: String,
     },
     #[error(
-        "pool was modified by recovery, but acked-stats cleanup failed at {stage}: {detail}\n\
-         pending-op.json is preserved; rm /var/lib/braid/acked-stats.json before \
-         trusting `braid monitor`."
+        "pool was modified by recovery, but alert baseline cleanup failed at {stage}: {detail}\n\
+         pending-op.json is preserved; rm /var/lib/braid/acked-stats.json and \
+         /var/lib/braid/alert-latch.json before trusting `braid monitor`."
     )]
     AckCleanupFailed { stage: &'static str, detail: String },
     /// Journaled-snapshot corruption: the same `devid` resolves to two or
@@ -1193,9 +1193,11 @@ fn execute_generic_live_pool_recovery<R: CommandRunner + Sync>(
     eprintln!("pool.json written from live pool state.");
 
     if plan.journal.is_bootstrap_add() {
-        alert::remove_acked_stats(params.paths).map_err(|e| RecoverError::AckCleanupFailed {
-            stage: "bootstrap-recovery",
-            detail: e.to_string(),
+        alert::drop_all_ghost_alert_state(params.paths).map_err(|e| {
+            RecoverError::AckCleanupFailed {
+                stage: "bootstrap-recovery",
+                detail: e.to_string(),
+            }
         })?;
     }
 
@@ -1223,9 +1225,9 @@ fn execute_generic_live_pool_recovery<R: CommandRunner + Sync>(
             .pre_membership
             .by_uuid(luks_uuid)
             .and_then(|m| m.devid)
-        && let Err(e) = alert::drop_ghost_acked_for_devids(params.paths, &[devid])
+        && let Err(e) = alert::drop_ghost_alert_state_for_devids(params.paths, &[devid])
     {
-        eprintln!("Warning: failed to update acked stats: {e}");
+        eprintln!("Warning: failed to update alert baselines: {e}");
     }
 
     journal::clear_journal(params.paths).map_err(|e| RecoverError::Journal(e.to_string()))?;
@@ -2644,7 +2646,7 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
                         stage: "live-pool add recovery",
                         detail: format!("{}: not found in pool after replayed add", target.name),
                     })?;
-            alert::drop_ghost_acked_for_devids(params.paths, &[dev.devid]).map_err(|e| {
+            alert::drop_ghost_alert_state_for_devids(params.paths, &[dev.devid]).map_err(|e| {
                 RecoverError::AckCleanupFailed {
                     stage: "live-pool add recovery",
                     detail: format!("devid {}: {e}", dev.devid),
@@ -2717,7 +2719,7 @@ fn sweep_recovered_add_acked_stats(
             })?;
         sweep_devids.push(dev.devid);
     }
-    alert::drop_ghost_acked_for_devids(paths, &sweep_devids).map_err(|e| {
+    alert::drop_ghost_alert_state_for_devids(paths, &sweep_devids).map_err(|e| {
         RecoverError::AckCleanupFailed {
             stage: "live-pool add recovery (target sweep)",
             detail: e.to_string(),
@@ -2852,8 +2854,8 @@ fn execute_remove_missing_post_maintenance_recovery<R: CommandRunner + Sync>(
         )?;
     }
     journal::clear_journal(params.paths).map_err(|e| RecoverError::Journal(e.to_string()))?;
-    if let Err(e) = alert::drop_ghost_acked_for_devids(params.paths, &[devid]) {
-        eprintln!("Warning: failed to update acked stats: {e}");
+    if let Err(e) = alert::drop_ghost_alert_state_for_devids(params.paths, &[devid]) {
+        eprintln!("Warning: failed to update alert baselines: {e}");
     }
     eprintln!("pending-op.json cleared. Recovery complete.");
     Ok(())
@@ -3274,6 +3276,15 @@ where
             new_name
         )));
     };
+    // btrfs handed the replaced devid to the new disk: replay replace's
+    // fail-closed drop of the old disk's alert state, which a crash may have
+    // cut off (ADR 014's acked-stats hygiene).
+    alert::drop_ghost_alert_state_for_devids(params.paths, &[dev.devid]).map_err(|e| {
+        RecoverError::AckCleanupFailed {
+            stage: "replace recovery",
+            detail: format!("devid {}: {e}", dev.devid),
+        }
+    })?;
     eprintln!(
         "Replaying post-replace resize on devid {} (new disk '{}')...",
         dev.devid, new_name
@@ -4893,7 +4904,7 @@ mod tests {
     fn acked_disk(missing_acked: bool, read_io_errs: u64) -> alert::AckedDisk {
         alert::AckedDisk {
             missing_acked,
-            device_stats: alert::AckedDeviceCounters {
+            device_stats: alert::DeviceErrorCounters {
                 read_io_errs,
                 ..Default::default()
             },
@@ -7090,7 +7101,7 @@ mod tests {
 
     // Intent
     // Bootstrap recovery returns a typed ack cleanup error and preserves the
-    // journal when `remove_acked_stats` fails.
+    // journal when `drop_all_ghost_alert_state` fails.
     //
     // Why it exists
     // The bootstrap add boundary must fail closed so a future recover can
@@ -7130,7 +7141,7 @@ mod tests {
 
     // Intent
     // Live-add recovery returns a typed ack cleanup error and preserves the
-    // journal when `drop_ghost_acked_for_devids` fails.
+    // journal when `drop_ghost_alert_state_for_devids` fails.
     //
     // Why it exists
     // Reused-devid cleanup is the add correctness boundary; corrupt
@@ -11457,6 +11468,139 @@ mod tests {
             "restore_raid1_after_commit=false must skip balance probes and replay"
         );
         assert!(!f.paths.pending_op_json().exists());
+    }
+
+    /// Runs `execute_replace_post_maintenance_recovery` for a committed
+    /// missing-path replace of devid 2, with only the resize mocked.
+    fn run_replace_post_maintenance_for_devid2(f: &PoolFixture) -> Result<(), RecoverError> {
+        let journal = replace_post_maintenance_journal(
+            false,
+            journal::ReplaceJournalSource::Missing {
+                old_devid: Devid::new(2),
+            },
+        );
+        journal::write_journal(&f.paths, &journal).unwrap();
+        let runner = MockRunner::default().with_output(
+            CmdRequest::BtrfsFilesystemResize {
+                devid: Devid::new(2),
+                mount_point: MountPoint::new("/mnt/storage".into()),
+            },
+            ok_raw_empty("btrfs filesystem resize"),
+        );
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdc", "virtio-new")]);
+        let params = f
+            .recover_params()
+            .passphrase_file(None)
+            .sleep_inhibitor(&f.inhibitor)
+            .build();
+        let OpKind::Replace { source, .. } = &journal.op else {
+            unreachable!("replace_journal_in_phase returns Replace");
+        };
+        execute_replace_post_maintenance_recovery(
+            &runner,
+            &progress::NoopSleeper,
+            &resolver,
+            &params,
+            &journal,
+            pool_state_disk1_and_new(),
+            &uuid_for_name("new"),
+            &disk_name("new"),
+            source,
+            false,
+            false,
+        )
+    }
+
+    // Intent: replace post-maintenance recovery forgets the old disk's alert
+    //   state on the devid the new disk inherited: its acked baseline is
+    //   dropped and its latched error counts are stripped.
+    // Why it exists: live replace drops that state after writing the
+    //   post-replace journal. A crash before the drop would otherwise leave the
+    //   old disk's baseline and latched counts for the new disk to inherit.
+    // Scenario: the old devid-2 disk had an acked baseline and latched error
+    //   counts; replace committed and crashed before its cleanup; the operator
+    //   runs `braid recover`.
+    #[test]
+    fn replace_post_maintenance_recovery_drops_replaced_devid_alert_state() {
+        let f = PoolFixture::empty();
+        let counts = alert::DeviceErrorCounters {
+            read_io_errs: 4,
+            ..Default::default()
+        };
+        alert::save_acked_stats(
+            &alert::AckedStats(std::collections::BTreeMap::from([(
+                "2".to_owned(),
+                alert::AckedDisk {
+                    missing_acked: false,
+                    device_stats: counts,
+                },
+            )])),
+            &f.paths,
+        )
+        .unwrap();
+        alert::save_alert_latch(
+            &alert::AlertState {
+                causes: vec![alert::LatchedCause::new(
+                    alert::AlertCause::BtrfsDeviceErrors {
+                        devid: Devid::new(2),
+                        counters: Some(counts),
+                    },
+                    "2023-11-14T22:13:20Z".to_owned(),
+                )],
+            },
+            &f.paths,
+        )
+        .unwrap();
+
+        run_replace_post_maintenance_for_devid2(&f).expect("recovery should finish");
+
+        assert!(
+            alert::load_acked_stats_fallible(&f.paths)
+                .unwrap()
+                .0
+                .is_empty(),
+            "recovery must drop the replaced devid's baseline"
+        );
+        let latch = alert::load_alert_latch(&f.paths).unwrap().unwrap();
+        assert_eq!(
+            latch.causes[0].cause,
+            alert::AlertCause::BtrfsDeviceErrors {
+                devid: Devid::new(2),
+                counters: None,
+            },
+            "recovery must strip the old disk's latched counts"
+        );
+    }
+
+    // Intent: replace post-maintenance recovery fails closed when it cannot
+    //   drop the old disk's alert state, and keeps pending-op.json.
+    // Why it exists: carrying on would leave the new disk compared against,
+    //   or acked with, the old disk's counts. Keeping the journal lets a later
+    //   `braid recover` retry the drop.
+    // Scenario: acked-stats.json holds non-JSON bytes when recovery replays
+    //   the post-replace maintenance.
+    #[test]
+    fn replace_post_maintenance_recovery_alert_cleanup_failure_preserves_journal() {
+        let f = PoolFixture::empty();
+        std::fs::write(f.paths.acked_stats_json(), b"corrupt").unwrap();
+
+        let err = run_replace_post_maintenance_for_devid2(&f).unwrap_err();
+
+        assert!(
+            matches!(
+                err,
+                RecoverError::AckCleanupFailed {
+                    stage: "replace recovery",
+                    ..
+                }
+            ),
+            "expected replace-recovery AckCleanupFailed, got {err:?}"
+        );
+        assert!(f.paths.pending_op_json().exists());
+        assert_eq!(
+            std::fs::read(f.paths.acked_stats_json()).unwrap(),
+            b"corrupt"
+        );
     }
 
     // Intent: recover's replace post-maintenance path routes the old-mapper

@@ -14,7 +14,7 @@ use crate::parse::types::BtrfsDeviceUsageEntry;
 use crate::parse::{parse_btrfs_device_stats, parse_btrfs_device_usage};
 use crate::probe::{ProbeError, probe_pool_alerts};
 use crate::state_paths::StatePaths;
-use crate::types::{Fsid, MountPoint};
+use crate::types::{Devid, Fsid, MountPoint};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum MonitorResult {
@@ -41,6 +41,15 @@ fn folded_computation_error_detail(
     }
 }
 
+/// What one monitor pass read from a mounted pool: the live causes, plus the
+/// alert-local missing set. The merge step needs the missing set to withdraw
+/// the `still_missing` evidence of latched missing devices that came back, so
+/// it travels with the causes, and a failed pass has neither.
+struct CycleReading {
+    live_causes: Vec<AlertCause>,
+    missing_now: BTreeSet<Devid>,
+}
+
 /// Headless monitor cycle that latches alert state from live pool probes and
 /// acked baselines; probe uncertainty becomes an alert except for the ENOSPC
 /// risk fail-open carve-out.
@@ -64,7 +73,7 @@ pub fn cmd_monitor_at<R: CommandRunner, F: Filesystem + ?Sized>(
     paths: &StatePaths,
     now: SystemTime,
 ) -> MonitorResult {
-    let classified = (|| -> Result<Option<Vec<AlertCause>>, String> {
+    let classified = (|| -> Result<Option<CycleReading>, String> {
         // 1. Check if pool is mounted.
         //
         // Exhaustive over every ProbeError variant on purpose: a future variant
@@ -154,15 +163,18 @@ pub fn cmd_monitor_at<R: CommandRunner, F: Filesystem + ?Sized>(
             live_causes.push(cause);
         }
 
-        Ok(Some(live_causes))
+        Ok(Some(CycleReading {
+            live_causes,
+            missing_now: devids.missing,
+        }))
     })();
 
-    let (mut live_causes, failure_detail) = match classified {
+    let (mut live_causes, missing_now, failure_detail) = match classified {
         Ok(None) => return MonitorResult::PoolOffline,
-        Ok(Some(causes)) => (causes, None),
+        Ok(Some(reading)) => (reading.live_causes, Some(reading.missing_now), None),
         Err(detail) => {
             eprintln!("braid monitor: {detail}");
-            (Vec::new(), Some(detail))
+            (Vec::new(), None, Some(detail))
         }
     };
 
@@ -179,7 +191,14 @@ pub fn cmd_monitor_at<R: CommandRunner, F: Filesystem + ?Sized>(
     }
 
     // 10. Merge: existing latch + live causes
-    let merged = merge_into_latch(existing_latch.as_ref(), &live_causes, now);
+    let mut merged = merge_into_latch(existing_latch.as_ref(), &live_causes, now);
+
+    // 10b. A latched missing device this cycle saw outside the missing set
+    //      came back or left the pool: ack must no longer mark it
+    //      missing_acked. A failed cycle saw nothing, so it withdraws nothing.
+    if let Some(missing_now) = &missing_now {
+        alert::withdraw_returned_missing(&mut merged, missing_now);
+    }
 
     // 11. If merged state active -> write latch
     if merged.active()
@@ -425,10 +444,23 @@ mod tests {
     fn acked_disk(missing_acked: bool, read_io_errs: u64) -> alert::AckedDisk {
         alert::AckedDisk {
             missing_acked,
-            device_stats: alert::AckedDeviceCounters {
+            device_stats: alert::DeviceErrorCounters {
                 read_io_errs,
                 ..Default::default()
             },
+        }
+    }
+
+    /// The device-error cause a `STATS_DEVID1_ERRORS` payload latches: devid 1
+    /// with the read and corruption counts that fired it.
+    fn devid1_read3_corruption1() -> AlertCause {
+        AlertCause::BtrfsDeviceErrors {
+            devid: Devid::new(1),
+            counters: Some(alert::DeviceErrorCounters {
+                read_io_errs: 3,
+                corruption_errs: 1,
+                ..Default::default()
+            }),
         }
     }
 
@@ -667,7 +699,7 @@ mod tests {
     //   (stale_mapper_row_no_longer_latches_computation_error) only covered
     //   zero-counter stale rows. A non-zero counter row used to flow into
     //   compute_alert_state, latch BtrfsDeviceErrors { devid: stale }, and --
-    //   once the operator ran braid ack -- snapshot_current would write an
+    //   once the operator ran braid ack -- ack's stats snapshot would write an
     //   acked entry that the very next monitor cycle's reconcile_acked_stats
     //   would prune, re-firing the alert forever. Both passes must agree on
     //   which devids matter.
@@ -750,10 +782,8 @@ mod tests {
         let state = alert_state(&result);
         assert_eq!(
             causes_only(state),
-            vec![AlertCause::BtrfsDeviceErrors {
-                devid: Devid::new(1),
-            }],
-            "recognized devid 1 with non-zero counters must latch exactly its btrfs error"
+            vec![devid1_read3_corruption1()],
+            "recognized devid 1 with non-zero counters must latch exactly its btrfs error and the counts that fired it"
         );
 
         // The saved latch must round-trip to the same AlertState -- ack.rs's
@@ -1004,9 +1034,11 @@ mod tests {
     }
 
     // Intent: A stats failure preserves an already-latched non-ComputationError
-    //   cause and adds exactly one ComputationError cause.
+    //   cause, evidence included, and adds exactly one ComputationError cause.
     // Why it exists: the refactor must keep the latch merge path shared while
-    //   preserving latched operator-visible alerts until ack clears them.
+    //   preserving latched operator-visible alerts until ack clears them. A
+    //   failed cycle saw no membership, so it must not withdraw a missing
+    //   device's `still_missing` evidence.
     // Scenario: a prior monitor pass latched MissingDevice, then the next pass
     //   cannot compute fresh btrfs stats. The returned state and saved latch
     //   must both contain MissingDevice plus one fail-closed computation error.
@@ -1016,6 +1048,7 @@ mod tests {
         let existing = alert::AlertState {
             causes: vec![latch_entry(AlertCause::MissingDevice {
                 devid: Devid::new(7),
+                still_missing: true,
             })],
         };
         alert::save_alert_latch(&existing, &paths).unwrap();
@@ -1029,10 +1062,13 @@ mod tests {
             state
                 .causes
                 .iter()
-                .filter(|cause| matches!(&cause.cause, AlertCause::MissingDevice { devid } if *devid == Devid::new(7)))
+                .filter(|cause| matches!(
+                    &cause.cause,
+                    AlertCause::MissingDevice { devid, still_missing: true } if *devid == Devid::new(7)
+                ))
                 .count(),
             1,
-            "original MissingDevice cause must remain latched"
+            "original MissingDevice cause must remain latched with its evidence"
         );
         let computation_details = computation_error_details(state);
         assert_eq!(
@@ -1067,6 +1103,9 @@ mod tests {
     //   branch, or skipped the latch load entirely would compile and pass every
     //   other monitor unit test while silently violating latched-until-ack on a
     //   recovered pool.
+    //   The healthy cycle sees devid 7 outside the missing set, so it also
+    //   withdraws the cause's `still_missing` evidence: ack must not mark a
+    //   devid missing_acked once the monitor has seen it back or gone.
     // Scenario: a prior cycle latched MissingDevice { devid: 7 }, then the next
     //   cycle finds the pool healthy -- btrfs reports the same two members with
     //   zero counters, no smartd flag, no probe failure. monitor must return
@@ -1078,6 +1117,7 @@ mod tests {
         let existing = alert::AlertState {
             causes: vec![latch_entry(AlertCause::MissingDevice {
                 devid: Devid::new(7),
+                still_missing: true,
             })],
         };
         alert::save_alert_latch(&existing, &paths).unwrap();
@@ -1094,8 +1134,9 @@ mod tests {
             causes_only(state),
             vec![AlertCause::MissingDevice {
                 devid: Devid::new(7),
+                still_missing: false,
             }],
-            "healthy cycle must carry forward the latched cause unchanged"
+            "healthy cycle must carry forward the latched cause, its evidence withdrawn"
         );
 
         let saved = alert::load_alert_latch(&paths).unwrap().unwrap();
@@ -1188,6 +1229,7 @@ mod tests {
         let existing = alert::AlertState {
             causes: vec![latch_entry(AlertCause::MissingDevice {
                 devid: Devid::new(7),
+                still_missing: true,
             })],
         };
         alert::save_alert_latch(&existing, &paths).unwrap();
@@ -1535,9 +1577,7 @@ mod tests {
         let state = alert_state(&result);
         assert_eq!(
             causes_only(state),
-            vec![AlertCause::BtrfsDeviceErrors {
-                devid: Devid::new(1)
-            }],
+            vec![devid1_read3_corruption1()],
             "device-error cause survives; no EnospcRisk, no ComputationError folded"
         );
     }

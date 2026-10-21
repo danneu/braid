@@ -82,12 +82,18 @@ causes render the pool-health alert banner:
 
 ```
 CRITICAL alert -- pool health issue detected. Run 'braid ack' to acknowledge and silence.
-  - btrfs device errors on toshiba1 (devid 1) -- first detected 2026-06-25T15:35:54Z (2 hours ago)
+  - btrfs device errors on toshiba1 (devid 1): read 3, corruption 1 -- first detected 2026-06-25T15:35:54Z (2 hours ago)
   - missing device: toshiba2 (devid 2) -- first detected 2026-06-25T15:35:54Z (2 hours ago)
   - SMART health warning -- first detected 2026-06-25T15:35:54Z (2 hours ago)
   - scheduled scrub failed -- check journalctl -u braid-scrub.service
   - alert computation error: <detail>
 ```
+
+A btrfs device-error cause lists the nonzero error counts the monitor saw on
+its latest cycle. Those are the counts `braid ack` commits as the disk's new
+baseline. The counts are absent for a cause latched by an older braid, or after
+a `braid add`, `remove`, `remove-missing`, or `replace` handed the devid to
+another disk or dropped it.
 
 Each latched cause carries the time the monitor *first* latched it, shown inline
 as `-- first detected <RFC3339 UTC> (<relative age>)`. The age degrades to the
@@ -552,10 +558,21 @@ is lost until `pool.json` is rebuilt.
   timestamp (a live SMART/scrub flag not yet latched, the ack cleanup-pending
   sentinel, or an unreadable-latch `computation_error`), so consumers must treat
   it as optional. The discriminated payloads:
-  - `{ "type": "btrfs_device_errors", "devid": <number> }` -- btrfs I/O
-    errors on that device.
-  - `{ "type": "missing_device", "devid": <number> }` -- a device counted
-    as missing.
+  - `{ "type": "btrfs_device_errors", "devid": <number>, "counters": {
+    "read_io_errs": <number>, "write_io_errs": <number>, "flush_io_errs":
+    <number>, "corruption_errs": <number>, "generation_errs": <number> } }` --
+    btrfs I/O errors on that device. `counters` holds the error counts the
+    monitor saw on its latest cycle -- the counts `braid ack` commits as the
+    new baseline. It is omitted when the latch holds no counts for the cause
+    (see the banner notes above), so consumers must treat it as optional.
+  - `{ "type": "missing_device", "devid": <number>, "still_missing": true }`
+    -- a device counted as missing. `still_missing` is true while the
+    monitor's latest cycle saw the device missing; only then does `braid ack`
+    mark it acknowledged. It is omitted once a monitor cycle sees the devid
+    back in the pool or gone from it, once a `braid add`, `remove`,
+    `remove-missing`, or `replace` hands the devid to another disk or drops
+    it, and for a cause latched by an older braid, so consumers must treat it
+    as optional.
   - `{ "type": "smartd_alert" }` -- a SMART health warning from smartd.
   - `{ "type": "scrub_failed" }` -- the scheduled maintenance scrub
     (`braid-scrub.service`) failed to run or complete. No payload fields.

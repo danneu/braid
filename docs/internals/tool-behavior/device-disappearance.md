@@ -40,7 +40,7 @@ authority; status output still uses live btrfs stats for displayed devids.
 
 btrfs has registered the device as missing, but still remembers which mapper path it had. `btrfs filesystem show` appends `MISSING` to the path. The parser puts the devid into `missing_devids` but discards the path. `probe_pool` never processes this device (it only iterates `show.devices`), so it doesn't appear in `pool.devices` or `pool.null_underlying`.
 
-**Handling:** `btrfs device stats` rows always carry a mandatory `devid` field, so the alert pipeline identifies the row by devid regardless of which path string btrfs reports (`[/dev/mapper/X]` or `[devid:N]`). The `MissingDevice` alert is generated independently from `missing_devids`. Rows for alert-local missing devids are skipped for `BtrfsDeviceErrors`, while `braid ack` still snapshots their counters by devid so old counts do not re-alert if the member returns.
+**Handling:** `btrfs device stats` rows always carry a mandatory `devid` field, so the alert pipeline identifies the row by devid regardless of which path string btrfs reports (`[/dev/mapper/X]` or `[devid:N]`). The `MissingDevice` alert is generated independently from `missing_devids`. Rows for alert-local missing devids are skipped for `BtrfsDeviceErrors`, so the monitor latches no counts for them and `braid ack` commits none. If the member returns, the next monitor cycle alerts once on the counts it logged, including the I/O that failed as it went, and the next ack commits them (see [ADR 014](../../design/decisions/014-alerts.md#ack-commits-latched-evidence)).
 
 The same restricted devid fallback applies to membership correlation: when
 btrfs reports a missing device only by devid, braid can resolve the member whose
@@ -75,4 +75,4 @@ The transition from Null-underlying to MISSING with path is the least understood
 - `probe_pool`: `cli/src/probe.rs` -- builds `pool.devices`, `pool.null_underlying`, `pool.missing_devids`
 - `btrfs filesystem show` parser: `cli/src/parse/btrfs_filesystem_show.rs` -- filters MISSING devices from `devices` list
 - `btrfs device stats` parser: `cli/src/parse/btrfs_device_stats.rs` -- propagates `devid` as the btrfs-native stats row key and ignores the display-only device string
-- alert computation: `cli/src/alert.rs` -- `compute_alert_state` and `snapshot_current` key by `dev.devid` from the parsed stats row; `compute_alert_state` skips alert-local missing devids for `BtrfsDeviceErrors`
+- alert computation: `cli/src/alert.rs` -- `compute_alert_state` keys by `dev.devid` from the parsed stats row and skips alert-local missing devids for `BtrfsDeviceErrors`; `commit_latched_evidence` writes ack baselines by the latched cause's devid
