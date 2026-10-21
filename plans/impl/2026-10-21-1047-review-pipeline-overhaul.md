@@ -253,7 +253,7 @@ choosing a solution for each finding:
 
 - [x] C1. feat(findings): add the script-owned finding store with git-derived status
 - [x] C2. feat(just): serialize VM-booting recipe invocations through a host-wide gate
-- [ ] C3. feat(review): add the review workflow and unified reviewer agent
+- [x] C3. feat(review): add the review workflow and unified reviewer agent
 - [ ] C4. feat(review): add the implement workflow with vetting and the local merge queue
 - [ ] C5. feat(review): add /pick-fix to decide pitches and launch implement runs
 - [ ] C6. chore(review): retire the prompt-driven fan-out and document the pipeline
@@ -280,3 +280,21 @@ choosing a solution for each finding:
   `playground`: an open playground makes implement runs wait, which is
   what I8 asks for. A test fails on any ungated `nix build` or `nix run`
   line that isn't a package or nixpkgs tool.
+- C3: PO6 holds. A saved workflow starts in the background with `args`
+  both by path (`Workflow({scriptPath})`) and by name. A workflow or
+  agent file added mid-session registers a few minutes later, so the
+  first run of a brand-new `reviewer` agent type failed; the run logged
+  all three slices as gaps and reported `partial`, which exercised I7.
+- C3: agents record their own results through the script rather than
+  handing JSON to the workflow for a second agent to record. A workflow
+  script cannot run processes, so every script call happens inside an
+  agent anyway; letting the producing agent call it means a refused
+  payload goes straight back to the agent that can fix it. Schema-checked
+  return values give the workflow its coverage accounting.
+- C3: cross-cutting slices are a fixed list of lenses in the workflow and
+  the reviewer brief. Commands and docs pages are discovered per run.
+- C3: PO2 run (`command:ack`, `command:lock`, `docs:commands/ack.md`):
+  14 findings, 2 refuted, 2 merged as duplicates, 12 pitched, `git status`
+  unchanged. It exposed one bug, now fixed: when `new-run` refused a
+  second run in the same minute, the discover agent reused the existing
+  run. It now returns no run and the workflow stops.
