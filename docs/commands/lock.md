@@ -36,7 +36,7 @@ sudo braid lock --dry-run
 ## What happens under the hood
 
 1. Checks if the pool is mounted
-2. Checks that no btrfs exclusive operation (balance, device remove, etc.) is running. Skipped when the pool is not mounted.
+2. Checks that no btrfs exclusive operation (balance, device remove, etc.) is running. Skipped when the pool is not mounted. A paused balance does not block lock: lock prints a `[warn]` note and unmounts, and the balance stays paused on disk. The next `braid unlock` and `braid doctor` report it.
 3. Unmounts the btrfs filesystem, retrying up to 3 times if the device is busy (covers the brief race after stopping SMB/NFS consumers, where the kernel has not yet released the last file descriptors). During systemd shutdown the `ExecStop` path retries far longer -- 60 attempts over roughly 30 seconds -- so a btrfs-progs process that still briefly holds the mount fd after its parent is killed does not strand the pool with LUKS open; see [ADR-018](../design/decisions/018-systemd-lifecycle.md#execstop-bounded-wait-pattern).
 4. After a successful unmount, runs `btrfs device scan --forget` for the planned close-set mappers (member-owned plus any orphaned `braid-*` mappers from a prior crash) that still exist on disk, clearing the kernel's device registry so stale references do not race with mapper close. Skipped when there is nothing left to forget.
 5. Classifies live mappers by LUKS UUID/devid ownership, then closes member-owned observed mapper names, retrying up to 3 times if the device is busy. Because classification is by backing UUID and not by mapper name, a member opened under a drifted name (for example, `braid-WRONG` backed by `disk1`) is still closed -- and its progress row reported -- as that member (`disk1`), not skipped or reconstructed as `braid-disk1`. See [ADR-024](../design/decisions/024-luks-uuid-identity.md#concrete-improvements).
@@ -56,7 +56,7 @@ When braid is installed via the NixOS module, `braid lock` also:
 
 Standalone CLI installs (no NixOS module) skip all three -- there is no `braid-online.service` or scrub unit to stop.
 
-On module installs, lock stops the scrub units and consumers only after every check in steps 1-2 has passed, right before unmount. So a lock that refuses, for example because a balance is running or paused, leaves scrub and your shares running. `braid lock --dry-run` lists these stops as `stop <unit>` steps.
+On module installs, lock stops the scrub units and consumers only after every check in steps 1-2 has passed, right before unmount. So a lock that refuses, for example because a balance is running, leaves scrub and your shares running. `braid lock --dry-run` lists these stops as `stop <unit>` steps.
 
 ## Error handling
 

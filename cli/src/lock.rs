@@ -11,7 +11,7 @@ use crate::online_state::{
 use crate::parse::types::{BackingDevice, CryptsetupStatusOutput};
 use crate::parse::{parse_cryptsetup_luks_uuid, parse_cryptsetup_status};
 use crate::pool_lock::StopCoordinatorGuard;
-use crate::preflight;
+use crate::preflight::{self, LockExclop};
 use crate::preview::{self, PerDiskStyle, Preview, PreviewNote};
 use crate::probe::{ProbeError, probe_fsid, probe_pool};
 use crate::progress::{RealSleeper, Sleeper};
@@ -97,8 +97,10 @@ enum Snapshot {
     Unmounted,
 }
 
-/// Lock planning mode selects the exclusive-operation preflight contract
-/// and the shutdown-only balance pause / umount retry behavior.
+/// Lock planning mode selects what lock does about a running balance (plain
+/// lock refuses it, shutdown pauses it) and the umount retry budget. Both
+/// modes share every other exclusive-op rule; see
+/// `cli/src/preflight.rs#require_lock_preflight`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LockMode {
     User,
@@ -106,18 +108,39 @@ pub enum LockMode {
 }
 
 /// Centralizes the lock-mode policy gate so mounted probe success and mounted
-/// probe fallback cannot drift on whether a running balance is rejected or
-/// paused before teardown.
+/// probe fallback cannot drift on whether a balance is refused, paused before
+/// teardown, or left paused with a note. Returns whether execute must pause a
+/// running balance before unmount.
+///
+/// The mode decides only the running balance. A paused balance proceeds in
+/// both modes, because unmount keeps it paused on disk; see
+/// [`preflight::LockExclop::BalancePaused`].
 fn lock_preflight_pause_decision<F: Filesystem + ?Sized>(
     fs: &F,
     mode: LockMode,
     fsid: &Fsid,
+    notes: &mut Vec<PreviewNote>,
 ) -> Result<bool, String> {
-    match mode {
-        LockMode::User => preflight::require_lock_preflight(fs, fsid).map(|()| false),
-        LockMode::SystemdStop => preflight::systemd_stop_lock_requires_balance_pause(fs, fsid),
+    match preflight::require_lock_preflight(fs, fsid)? {
+        LockExclop::Idle => Ok(false),
+        LockExclop::BalancePaused => {
+            notes.push(PreviewNote::Warn(PAUSED_BALANCE_NOTE.to_owned()));
+            Ok(false)
+        }
+        LockExclop::BalanceRunning => match mode {
+            LockMode::User => Err(preflight::running_balance_lock_refusal()),
+            LockMode::SystemdStop => Ok(true),
+        },
     }
 }
+
+/// Tells the operator that lock proceeds under a paused balance and leaves it
+/// for them to resume or cancel later. It names no resume command: resuming a
+/// crash-paused balance can be unsafe
+/// (`docs/internals/btrfs/balance-soft.md#recover-replay`),
+/// and unlock and doctor already carry the advice.
+const PAUSED_BALANCE_NOTE: &str = "btrfs balance is paused -- lock leaves it paused, \
+                                   and the next braid unlock and braid doctor will report it";
 
 /// A mapper to close at lock execution. `mapper` is the observed name,
 /// while `kind` carries the member/orphan status behavior decided at
@@ -893,7 +916,8 @@ where
         Snapshot::Probed(pool) => {
             if let Some(fsid) = &pool.fsid {
                 pause_balance_before_unmount =
-                    lock_preflight_pause_decision(fs, mode, fsid).map_err(LockError::Failed)?;
+                    lock_preflight_pause_decision(fs, mode, fsid, &mut acc.notes)
+                        .map_err(LockError::Failed)?;
             }
             build_close_sets_full(runner, fs, pool, membership, &mut acc)
         }
@@ -903,7 +927,8 @@ where
                     probe_error,
                 )));
             pause_balance_before_unmount =
-                lock_preflight_pause_decision(fs, mode, fsid).map_err(LockError::Failed)?;
+                lock_preflight_pause_decision(fs, mode, fsid, &mut acc.notes)
+                    .map_err(LockError::Failed)?;
             build_close_sets_uuid_scanned_fallback(runner, fs, membership, &mut acc)
         }
         Snapshot::Unmounted => {
@@ -1125,8 +1150,8 @@ pub fn cmd_lock<R: CommandRunner, F: Filesystem + ?Sized>(
 
 /// Systemd ExecStop lock entry point with shutdown-specific preflight.
 ///
-/// Unlike user-initiated lock, this permits a running or paused balance so
-/// shutdown can persist it as paused before closing LUKS.
+/// Unlike user-initiated lock, this also permits a running balance: it pauses
+/// the balance so shutdown can persist it as paused before closing LUKS.
 pub fn cmd_lock_systemd_stop<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
@@ -1752,9 +1777,8 @@ mod tests {
     //   consumer before plan_lock ran its refusal checks. A refusal then left
     //   the pool mounted and braid-online.service active with shares and the
     //   scrub timer down, and `braid unlock` could not bring them back.
-    // Scenario: on a module install, the shutdown path left a paused balance
-    //   behind. The operator runs `braid lock`, which refuses on that
-    //   exclusive op.
+    // Scenario: on a module install, a balance is running. The operator runs
+    //   `braid lock`, which refuses on that exclusive op.
     #[test]
     fn refused_lock_stops_no_units() {
         let runner = lock_with_fsid_probe_mocks(MockRunner::default().with_output(
@@ -1763,17 +1787,17 @@ mod tests {
             },
             lock_ok_raw("mountpoint -q /mnt/storage"),
         ));
-        let fs = lock_fs(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"])
-            .with_excl_op("balance paused");
+        let fs =
+            lock_fs(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"]).with_excl_op("balance");
         let config = lifecycle_config();
         let membership = lock_test_membership();
 
         let err = cmd_lock_impl(&runner, &fs, &LockNoopSleeper, &config, &membership, false)
-            .expect_err("should refuse -- balance is paused");
+            .expect_err("should refuse -- balance is running");
 
         assert!(
             err.to_string().contains("in progress"),
-            "expected paused-balance refusal, got: {err}"
+            "expected running-balance refusal, got: {err}"
         );
         let requests = runner.requests();
         assert!(
@@ -4166,9 +4190,11 @@ mod tests {
         );
     }
 
-    // Intent: systemd-stop lock proceeds while a balance is paused.
+    // Intent: systemd-stop lock proceeds while a balance is paused, with the
+    //   same paused-balance note as plain lock.
     // Why it exists: a previously-paused balance is still safe for the
-    //   shutdown path because umount persists it for recover to resume.
+    //   shutdown path because umount keeps it paused on disk. Both lock modes
+    //   share one paused-balance rule, so the note must not differ by mode.
     // Scenario: ExecStop observes "balance paused" and must still run the
     //   ordered umount, forget, and LUKS close sequence.
     #[test]
@@ -4179,8 +4205,20 @@ mod tests {
         let config = lock_test_config();
         let membership = lock_test_membership();
 
-        cmd_lock_systemd_stop(&runner, &fs, &config, &membership)
+        let mut result = None;
+        let captured = crate::status_tag::testing::capture_with_color(false, || {
+            result = Some(cmd_lock_systemd_stop(&runner, &fs, &config, &membership));
+        });
+        result
+            .expect("captured systemd-stop result")
             .expect("systemd-stop lock should proceed during paused balance");
+
+        assert!(
+            captured
+                .lines()
+                .any(|line| line == format!("[warn] {PAUSED_BALANCE_NOTE}")),
+            "expected paused-balance note, got:\n{captured}"
+        );
 
         assert_eq!(
             balance_pause_request_count(&runner),
@@ -4383,28 +4421,78 @@ mod tests {
         );
     }
 
+    // Intent: plain `braid lock` proceeds under a paused balance. The dry-run
+    //   preview and the real run both warn that the balance stays paused, and
+    //   the real run issues no pause, unmounts once, and closes every member.
+    // Why it exists: lock used to refuse a paused balance with "Wait for it to
+    //   finish first". A paused balance never finishes on its own, so the
+    //   operator waited forever. Unmount keeps a paused balance paused on disk
+    //   and braid mounts with skip_balance, so the refusal protected nothing.
+    // Scenario: braid's shutdown path paused a balance. After the next unlock,
+    //   the operator runs `braid lock --dry-run`, then `braid lock`.
     #[test]
-    // Intent: lock refuses when a balance is paused.
-    // Why: a paused balance still holds the exclusive lock — unmounting is unsafe.
-    // Scenario: operator paused a balance and forgot, then runs `braid lock`.
-    fn lock_refuses_when_balance_paused() {
-        let runner = lock_with_fsid_probe_mocks(MockRunner::default().with_output(
-            CmdRequest::MountpointCheck {
-                path: MountPoint::new("/mnt/storage".to_owned()).into(),
-            },
-            lock_ok_raw("mountpoint -q /mnt/storage"),
-        ));
+    fn lock_proceeds_on_paused_balance() {
+        const NOTE: &str = "[warn] btrfs balance is paused -- lock leaves it paused, \
+                            and the next braid unlock and braid doctor will report it";
+        let runner = || {
+            lock_mounted_runner()
+                .with_output(
+                    CmdRequest::CryptsetupClose {
+                        mapper: MapperName::from_basename("braid-aaa".into()),
+                    },
+                    lock_ok_raw("cryptsetup close braid-aaa"),
+                )
+                .with_output(
+                    CmdRequest::CryptsetupClose {
+                        mapper: MapperName::from_basename("braid-bbb".into()),
+                    },
+                    lock_ok_raw("cryptsetup close braid-bbb"),
+                )
+        };
         let fs = lock_fs(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"])
             .with_excl_op("balance paused");
         let config = lock_test_config();
         let membership = lock_test_membership();
 
-        let err = cmd_lock_impl(&runner, &fs, &LockNoopSleeper, &config, &membership, false)
-            .expect_err("should refuse — balance is paused");
-        let msg = err.to_string();
+        let preview = plan_lock(&runner(), &fs, &config, &membership, LockMode::User)
+            .expect("dry-run plan should proceed under a paused balance")
+            .preview()
+            .render();
         assert!(
-            msg.contains("in progress"),
-            "expected paused-balance refusal, got: {msg}"
+            preview.lines().any(|line| line == NOTE),
+            "expected paused-balance note in preview, got:\n{preview}"
+        );
+
+        let runner = runner();
+        let mut result = None;
+        let captured = crate::status_tag::testing::capture_with_color(false, || {
+            result = Some(cmd_lock_impl(
+                &runner,
+                &fs,
+                &LockNoopSleeper,
+                &config,
+                &membership,
+                false,
+            ));
+        });
+        result
+            .expect("captured lock result")
+            .expect("lock should proceed under a paused balance");
+
+        assert!(
+            captured.lines().any(|line| line == NOTE),
+            "expected paused-balance note on stderr, got:\n{captured}"
+        );
+        assert_eq!(
+            balance_pause_request_count(&runner),
+            0,
+            "an already-paused balance needs no pause request"
+        );
+        assert_eq!(umount_request_count(&runner), 1, "expected one umount");
+        assert_eq!(
+            cryptsetup_close_request_count(&runner),
+            2,
+            "expected both member mappers to close"
         );
     }
 
