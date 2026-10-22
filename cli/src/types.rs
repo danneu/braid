@@ -386,15 +386,18 @@ const MANAGED_LUKS_FORMAT_LONG_FLAGS: &[&str] = &[
     "--luks2-metadata-size",
     "--luks2-keyslots-size",
     "--sector-size",
+    "--hw-opal",
+    "--hw-opal-only",
 ];
 
 const MANAGED_LUKS_FORMAT_SHORT_FLAGS: &[char] = &['d', 'S', 'M', 'I', 'l', 'o'];
 
 fn is_managed_format_flag(token: &str) -> bool {
-    // These flags either overlap identity fields braid writes itself
-    // (`--uuid`, `--label`) or change the on-disk/passphrase model braid
-    // assumes after format. Names and short aliases come from
-    // reference/cryptsetup/src/cryptsetup_arg_list.h.
+    // These flags either overlap fields braid writes itself (`--uuid`,
+    // `--label`, `--offset`) or change the on-disk/passphrase model braid
+    // assumes after format. The OPAL flags belong here because OPAL picks
+    // its own layout around braid's offset. Names and short aliases come
+    // from reference/cryptsetup/src/cryptsetup_arg_list.h.
     //
     // popt matches long options by full name only -- no getopt_long-style
     // abbreviation (`longOptionStrcmp` requires equal length) -- so exact and
@@ -1656,8 +1659,8 @@ mod tests {
     fn luks_format_extra_opts_rejects_offset() {
         // Intent: `--offset` is rejected before cryptsetup can change
         //   the LUKS2 payload offset.
-        // Why: replace preflight models fresh-LUKS mapper capacity from
-        //   braid's fixed default header size.
+        // Why: braid passes its own `--offset`, which the replace preflight
+        //   models; a later user `--offset` would override it.
         // Scenario: operator attempts to pass a raw offset override.
         assert_luks_format_extra_rejects("--offset");
     }
@@ -1672,10 +1675,11 @@ mod tests {
 
     #[test]
     fn luks_format_extra_opts_rejects_align_payload() {
-        // Intent: `--align-payload` is rejected before it can alter
-        //   payload placement.
-        // Why: fresh-LUKS target capacity must stay derived from the
-        //   cryptsetup LUKS2 default, not user-chosen alignment.
+        // Intent: `--align-payload` is rejected before braid commits to
+        //   the format.
+        // Why: cryptsetup refuses `--align-payload` next to the `--offset`
+        //   braid passes, so luksFormat would fail after braid has
+        //   journaled the format.
         // Scenario: operator tries an alignment override during replace.
         assert_luks_format_extra_rejects("--align-payload");
     }
@@ -1683,8 +1687,10 @@ mod tests {
     #[test]
     fn luks_format_extra_opts_rejects_luks2_metadata_size() {
         // Intent: `--luks2-metadata-size` is rejected.
-        // Why: changing metadata area size changes the space reserved
-        //   before the data segment.
+        // Why: braid owns the LUKS2 header layout inside its pinned data
+        //   offset and keeps cryptsetup's default areas there. The flag
+        //   cannot move that offset; it only takes space from the keyslot
+        //   area.
         // Scenario: operator tries to customize LUKS2 metadata sizing.
         assert_luks_format_extra_rejects("--luks2-metadata-size");
     }
@@ -1692,8 +1698,9 @@ mod tests {
     #[test]
     fn luks_format_extra_opts_rejects_luks2_keyslots_size() {
         // Intent: `--luks2-keyslots-size` is rejected.
-        // Why: changing keyslot area size changes header layout and the
-        //   payload offset braid assumes for fresh targets.
+        // Why: braid owns the LUKS2 header layout inside its pinned data
+        //   offset. The flag cannot move that offset, but a small keyslot
+        //   area can leave no room for the keyslots braid writes.
         // Scenario: operator tries to customize LUKS2 keyslot sizing.
         assert_luks_format_extra_rejects("--luks2-keyslots-size");
     }
@@ -1701,10 +1708,21 @@ mod tests {
     #[test]
     fn luks_format_extra_opts_rejects_sector_size() {
         // Intent: `--sector-size` is rejected conservatively.
-        // Why: sector-size overrides can affect cryptsetup alignment and
-        //   make braid's fresh-LUKS capacity estimate unsafe.
+        // Why: an explicit sector size that does not divide the data area
+        //   makes luksFormat fail after braid has journaled the format.
         // Scenario: operator tries a non-default sector-size override.
         assert_luks_format_extra_rejects("--sector-size");
+    }
+
+    #[test]
+    fn luks_format_extra_opts_rejects_hw_opal() {
+        // Intent: `--hw-opal` and `--hw-opal-only` are rejected.
+        // Why: OPAL aligns the data segment to the drive's locking ranges
+        //   and can refuse or shrink braid's pinned offset layout, so the
+        //   replace preflight's fresh-target capacity would not hold.
+        // Scenario: operator tries hardware OPAL encryption on a new disk.
+        assert_luks_format_extra_rejects("--hw-opal");
+        assert_luks_format_extra_rejects("--hw-opal-only");
     }
 
     #[test]

@@ -1,3 +1,4 @@
+use crate::luks::LUKS_DATA_OFFSET_BYTES;
 use crate::types::{
     Devid, LuksFormatExtraOpts, LuksLabel, LuksUuid, MapperName, MountPoint, MountpointCheckPath,
 };
@@ -504,6 +505,12 @@ fn luks_format_argv(
         uuid_token.to_owned(),
         "--label".into(),
         label.as_str().to_owned(),
+        // Managed layout: the data offset the replace preflight models, in
+        // the 512-byte sectors `--offset` takes. Without it cryptsetup sizes
+        // the offset from the disk's topology hints, which the preflight
+        // cannot see.
+        "--offset".into(),
+        (LUKS_DATA_OFFSET_BYTES / 512).to_string(),
     ];
     for opt in extra_opts.as_slice() {
         args.push(opt.clone());
@@ -3433,7 +3440,7 @@ mod tests {
     // Intent: to_shell_string produces correct output for LUKS format with the
     //   structured uuid/label/extras shape pinned by the LUKS-UUID identity
     //   migration. The argv ordering is `--uuid <uuid> --label <label>
-    //   <extras...> <device>`.
+    //   --offset <sectors> <extras...> <device>`.
     // Why: this is the user-facing dry-run string for the most complex real
     //   command; a reorder regression that lets user extras precede `--label`
     //   would also let user input shadow the journaled identity at the argv
@@ -3451,7 +3458,7 @@ mod tests {
         .to_argv()
         .to_shell_string();
         let expected = format!(
-            "cryptsetup luksFormat --type luks2 --batch-mode '--key-file=-' --uuid {} --label braid-aaa --use-random /dev/disk/by-id/disk1",
+            "cryptsetup luksFormat --type luks2 --batch-mode '--key-file=-' --uuid {} --label braid-aaa --offset 32768 --use-random /dev/disk/by-id/disk1",
             uuid.as_str()
         );
         assert_eq!(s, expected);
@@ -3708,6 +3715,8 @@ mod tests {
                 uuid.as_str(),
                 "--label",
                 "braid-disk1",
+                "--offset",
+                "32768",
                 "/dev/disk/by-id/disk1",
             ]
         );
@@ -3819,8 +3828,8 @@ mod tests {
     // Intent: CryptsetupLuksFormat's argv emits the structured `uuid` and
     //   `label` fields as `--uuid <uuid> --label <label>` BEFORE any user-
     //   supplied extras, and the device is the final positional argument.
-    //   Empty `LuksFormatExtraOpts` leaves zero tokens between `--label
-    //   <label>` and `<device>`.
+    //   Empty `LuksFormatExtraOpts` leaves zero tokens between the managed
+    //   `--offset <sectors>` and `<device>`.
     // Why: this is the LUKS-UUID identity boundary in argv form. A
     //   regression that swapped order (e.g. extras before `--uuid`) would
     //   let user input either shadow the journaled identity or break
@@ -3850,6 +3859,8 @@ mod tests {
                 uuid.as_str(),
                 "--label",
                 "braid-disk1",
+                "--offset",
+                "32768",
                 "/dev/disk/by-id/disk1",
             ],
             "managed --uuid/--label precede extras and device"
@@ -3859,7 +3870,8 @@ mod tests {
     #[test]
     // Intent: a positive non-managed extra (`--use-random`) passes through
     //   the structured `LuksFormatExtraOpts` and reaches argv in the
-    //   pinned position: AFTER `--label <label>` and BEFORE `<device>`.
+    //   pinned position: AFTER the managed `--offset <sectors>` and BEFORE
+    //   `<device>`.
     // Why: this is the positive-extras forwarding regression pinned in
     //   the plan's Test Plan > LUKS format boundary section. A regression
     //   that silently dropped accepted extras passes the rejection suite
@@ -3867,7 +3879,7 @@ mod tests {
     // Scenario: operator passes `--luks-format-arg=--use-random`; the
     //   token survives validation (it is not a managed flag), is stored
     //   inside `LuksFormatExtraOpts`, and renders in argv between
-    //   `--label <label>` and `<device>` unchanged.
+    //   `--offset <sectors>` and `<device>` unchanged.
     fn cryptsetup_luks_format_forwards_non_managed_extras_in_order() {
         let uuid = test_uuid(306);
         let cmd = CmdRequest::CryptsetupLuksFormat {
@@ -3890,6 +3902,8 @@ mod tests {
                 uuid.as_str(),
                 "--label",
                 "braid-disk2",
+                "--offset",
+                "32768",
                 "--use-random",
                 "/dev/disk/by-id/disk2",
             ]
@@ -3900,9 +3914,9 @@ mod tests {
     // Intent: CryptsetupLuksFormatPreview renders the same argv shape as the
     //   real CryptsetupLuksFormat (--uuid before --label before extras before
     //   device), but with the fixed `<generated-at-format-time>` placeholder in
-    //   the --uuid slot. Empty extras leave zero tokens between `--label
-    //   <label>` and `<device>`; a positive non-managed extra lands after
-    //   `--label` and before `<device>`.
+    //   the --uuid slot. Empty extras leave zero tokens between the managed
+    //   `--offset <sectors>` and `<device>`; a positive non-managed extra
+    //   lands after `--offset <sectors>` and before `<device>`.
     // Why: the preview variant is the dry-run-only twin. This pins that its
     //   argv is reproducible and honest (placeholder, not a random UUID that the
     //   real run discards). A regression that minted a real UUID into the
@@ -3929,6 +3943,8 @@ mod tests {
                 "<generated-at-format-time>",
                 "--label",
                 "braid-disk1",
+                "--offset",
+                "32768",
                 "/dev/disk/by-id/disk1",
             ],
             "preview placeholder --uuid/--label precede extras and device"
@@ -3952,6 +3968,8 @@ mod tests {
                 "<generated-at-format-time>",
                 "--label",
                 "braid-disk2",
+                "--offset",
+                "32768",
                 "--use-random",
                 "/dev/disk/by-id/disk2",
             ]
@@ -4009,6 +4027,49 @@ mod tests {
     }
 
     #[test]
+    // Intent: every fresh luksFormat argv, real and preview, pins the LUKS
+    //   data offset with `--offset <sectors>`, and that value is the same
+    //   byte offset the replace capacity preflight subtracts, in 512-byte
+    //   sectors.
+    // Why it exists: without the pin, cryptsetup rounds the offset up to the
+    //   disk's reported optimal I/O size and adds its alignment offset, so
+    //   the preflight overstates a fresh target's capacity. An undersized
+    //   target then passes, braid journals and formats it, and `btrfs replace
+    //   start` refuses it, leaving the pool in recovery mode (finding
+    //   261022-0632-012).
+    // Scenario: a replacement disk reports a 32 MiB optimal I/O size, so
+    //   cryptsetup's own layout would start the data at 32 MiB, not 16 MiB.
+    fn luks_format_pins_data_offset_to_preflight_model() {
+        let expected = (crate::luks::LUKS_DATA_OFFSET_BYTES / 512).to_string();
+        let real = CmdRequest::CryptsetupLuksFormat {
+            device: "/dev/disk/by-id/disk1".to_owned(),
+            uuid: test_uuid(308),
+            label: luks_label("disk1"),
+            extra_opts: empty_extras(),
+        }
+        .to_argv();
+        let preview = CmdRequest::CryptsetupLuksFormatPreview {
+            device: "/dev/disk/by-id/disk1".to_owned(),
+            label: luks_label("disk1"),
+            extra_opts: empty_extras(),
+        }
+        .to_argv();
+        for argv in [real, preview] {
+            let offset_idx = argv
+                .args
+                .iter()
+                .position(|a| a == "--offset")
+                .unwrap_or_else(|| panic!("luksFormat argv must pin --offset: {:?}", argv.args));
+            assert_eq!(
+                argv.args.get(offset_idx + 1),
+                Some(&expected),
+                "--offset must equal the preflight's data offset in 512-byte sectors: {:?}",
+                argv.args
+            );
+        }
+    }
+
+    #[test]
     // Intent: the preview format line's rendered shell-string quotes the
     //   placeholder as `--uuid '<generated-at-format-time>'` (single-quoted by
     //   shell_words::join, like the sibling '--key-file=-').
@@ -4028,7 +4089,7 @@ mod tests {
         .to_shell_string();
         assert_eq!(
             s,
-            "cryptsetup luksFormat --type luks2 --batch-mode '--key-file=-' --uuid '<generated-at-format-time>' --label braid-aaa --use-random /dev/disk/by-id/disk1"
+            "cryptsetup luksFormat --type luks2 --batch-mode '--key-file=-' --uuid '<generated-at-format-time>' --label braid-aaa --offset 32768 --use-random /dev/disk/by-id/disk1"
         );
     }
 

@@ -262,11 +262,15 @@ LUKS targets read LUKS2 segment `offset` and `size` from
 dm-crypt device that way exactly and the kernel rejects, rather than rounds, a
 non-sector_size-multiple mapper, so an existing container's capacity is exact at
 any sector_size. Fixed segments use `segment.size` directly. Fresh targets
-instead assume cryptsetup's default 16 MiB LUKS2 offset, which holds because
-braid rejects `--sector-size` and offset-changing format flags. If any of those
-values cannot be read or parsed, or the computed target capacity is smaller
-than the source `total_bytes`, replace refuses before writing `pending-op.json`,
-formatting a fresh target, or opening the replacement mapper.
+use `raw - offset` with the data offset braid passes to `luksFormat --offset`
+(`cli/src/luks.rs#LUKS_DATA_OFFSET_BYTES`), so the model is the layout braid
+writes. Left to choose, cryptsetup can round its default offset up to the
+disk's optimal I/O size and add the disk's alignment offset, which the
+preflight does not read; braid also rejects `--luks-format-arg` flags that
+would override or reshape that layout. If any of those values cannot be read
+or parsed, or the computed target capacity is smaller than the source
+`total_bytes`, replace refuses before writing `pending-op.json`, formatting a
+fresh target, or opening the replacement mapper.
 
 ## Failed unlock cleanup
 

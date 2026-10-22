@@ -8,7 +8,7 @@ use crate::cmd::CommandRunner;
 use crate::confirm;
 use crate::filesystem::Filesystem;
 use crate::journal;
-use crate::luks::LUKS2_DEFAULT_HDR_SIZE;
+use crate::luks::LUKS_DATA_OFFSET_BYTES;
 use crate::membership::PoolMembership;
 use crate::mount_check::{self, mount_entry_at_via_fs};
 use crate::parse::parse_cryptsetup_luks_dump;
@@ -448,7 +448,7 @@ pub struct ReplaceSourceProbe {
 struct RawDeviceSize(u64);
 
 /// LUKS2 data-segment offset in bytes (real luksDump offset for existing
-/// targets, the default header size for fresh ones). Subtracted from
+/// targets, the offset braid formats with for fresh ones). Subtracted from
 /// `RawDeviceSize` to model mapper capacity; typed apart from it so the
 /// subtraction operands cannot be reversed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -522,7 +522,7 @@ where
             let raw_target = target_raw_size(runner, by_id)?;
             let capacity = mapper_capacity_from_dynamic_segment(
                 raw_target,
-                Luks2SegmentOffset(LUKS2_DEFAULT_HDR_SIZE),
+                Luks2SegmentOffset(LUKS_DATA_OFFSET_BYTES),
                 by_id,
             )?;
             (by_id, capacity)
@@ -563,8 +563,8 @@ fn target_raw_size<R: CommandRunner>(runner: &R, by_id: &str) -> Result<RawDevic
 /// and dm-crypt rejects -- never rounds -- a mapper whose length is not a
 /// sector_size multiple (`crypt_ctr`), so an existing container is exact at
 /// any sector_size. The offset is the caller's: existing LUKS targets pass
-/// their real luksDump segment offset; fresh targets pass the default 16 MiB
-/// offset, which holds because braid rejects offset/sector-size format flags.
+/// their real luksDump segment offset; fresh targets pass
+/// `LUKS_DATA_OFFSET_BYTES`, the offset braid passes to luksFormat itself.
 fn mapper_capacity_from_dynamic_segment(
     raw_target: RawDeviceSize,
     offset: Luks2SegmentOffset,
@@ -833,7 +833,7 @@ mod tests {
     }
 
     #[test]
-    // Intent: fresh replacement targets are refused when the default LUKS2
+    // Intent: fresh replacement targets are refused when braid's pinned LUKS2
     //   data offset leaves less mapper capacity than the source device.
     // Why it exists: protects against formatting an undersized disk before
     //   btrfs's later replace-time size check rejects it.
@@ -860,7 +860,7 @@ mod tests {
     //   equal to or larger than the source device.
     // Why it exists: confirms the check mirrors btrfs's strict
     //   `source > target` refusal instead of requiring extra headroom.
-    // Scenario: 512 MiB raw target after the 16 MiB LUKS2 default offset
+    // Scenario: 512 MiB raw target after braid's pinned 16 MiB LUKS2 offset
     //   equals the source btrfs size, and a larger raw target also passes.
     fn check_replace_target_capacity_fresh_accepts_equal_and_larger() {
         for raw_size in [TARGET_RAW_512_MIB, TARGET_RAW_512_MIB + 1] {

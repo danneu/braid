@@ -48,14 +48,15 @@ Two reasons:
    would pick anyway, while adding a format-time parameter that cannot
    change without re-encrypting the device. There is nothing to gain.
 
-2. **An override could make braid's capacity estimate unsafe.** braid
+2. **An override could fail after braid commits to the format.** braid
    rejects `--sector-size` passed as a `--luks-format-arg` override (see
    `cli/src/types.rs#LuksFormatExtraOpts::parse`); `replace` lists it
    among the
-   [on-disk-layout flags it refuses](../../commands/replace.md#safety-checks--refusal-cases).
-   A non-default sector size can shift the fresh-LUKS payload offset, and
-   braid's capacity check for a **fresh** target assumes cryptsetup's
-   default offset. The scope here is deliberately fresh targets only:
+   [format flags it refuses](../../commands/replace.md#safety-checks--refusal-cases).
+   braid pins the fresh-LUKS data offset, so a sector size cannot move it,
+   but an explicit sector size that does not divide the data area past that
+   offset makes `luksFormat` fail after braid has journaled the format.
+   The scope here is deliberately fresh targets only:
    [the replace-target size preflight](../luks-unlock.md#replace-target-size-preflight)
    covers existing containers, whose capacity is read from the LUKS2
    segment and is exact at any sector size.

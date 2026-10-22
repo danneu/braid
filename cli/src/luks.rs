@@ -32,9 +32,19 @@ pub const KEYFILE_NAME: &str = "braid.key";
 /// Keyfile size in bytes: 4096 bytes of random data from /dev/urandom.
 pub const KEYFILE_SIZE: usize = 4096;
 
-/// Cryptsetup's default LUKS2 data offset, used to model mapper capacity for
-/// fresh targets before braid opens them (`luks2.h:LUKS2_DEFAULT_HDR_SIZE`).
-pub const LUKS2_DEFAULT_HDR_SIZE: u64 = 16_777_216;
+/// LUKS2 data offset in bytes that braid passes to every fresh luksFormat
+/// (`cli/src/cmd.rs#luks_format_argv`) and that the replace preflight
+/// subtracts, so the preflight's model of a fresh target is the real layout.
+/// It equals cryptsetup's default header size (cryptsetup v2.8.6,
+/// lib/luks2/luks2.h, `LUKS2_DEFAULT_HDR_SIZE`), so an ordinary disk keeps the
+/// layout cryptsetup would pick. Pinning it stops cryptsetup from growing it
+/// to fit the disk's optimal I/O size or alignment offset (ADR 015).
+pub const LUKS_DATA_OFFSET_BYTES: u64 = 16 * 1024 * 1024;
+
+// `luksFormat --offset` takes 512-byte sectors and rejects an offset that is
+// not a multiple of 4096 bytes (cryptsetup v2.8.6, lib/setup.c,
+// `crypt_set_data_offset`).
+const _: () = assert!(LUKS_DATA_OFFSET_BYTES.is_multiple_of(4096));
 
 /// Shared user-keyfile boundary so every caller rejects symlinks and
 /// wrong-size files before invoking cryptsetup with the path.

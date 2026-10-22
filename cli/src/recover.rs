@@ -20377,7 +20377,7 @@ mod tests {
         );
         assert!(
             disk2_block.contains(
-                "$ cryptsetup luksFormat --type luks2 --batch-mode '--key-file=-' --uuid 22222222-2222-2222-2222-222222222222 --label braid-disk2 /dev/disk/by-id/virtio-disk2"
+                "$ cryptsetup luksFormat --type luks2 --batch-mode '--key-file=-' --uuid 22222222-2222-2222-2222-222222222222 --label braid-disk2 --offset 32768 /dev/disk/by-id/virtio-disk2"
             ) && disk2_block.contains("$ cryptsetup luksHeaderBackup --header-backup-file")
                 && disk2_block.contains("braid-disk2.luksheader /dev/disk/by-id/virtio-disk2")
                 && disk2_block.contains(

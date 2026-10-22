@@ -25,10 +25,14 @@ Note: braid already handles flash media in its monitoring paths — NVMe SMART p
 
 Defaults are chosen for HDD NAS deployments. Flash media (SSDs, NVMe, USB sticks) may function but are not a validated or optimized target.
 
+Every fresh LUKS container gets the same fixed data offset: braid passes `luksFormat --offset` from `cli/src/luks.rs#LUKS_DATA_OFFSET_BYTES` instead of letting cryptsetup choose. The value is cryptsetup's own default header size, so an ordinary whole disk gets the layout cryptsetup would pick anyway. Left to choose, cryptsetup rounds that offset up to the disk's reported optimal I/O size (when 1 MiB is not a multiple of it) and adds the disk's alignment offset. Those hints come from parity-RAID LUNs, USB bridges, and old jumpered 512e drives, not the whole HDDs braid targets. Honoring them would make the offset depend on the disk, and the `replace` capacity preflight (`cli/src/preflight.rs#check_replace_target_capacity`) models a fresh target before it is formatted. With the offset pinned, that model is the layout braid writes, so a target the preflight accepts cannot be refused later by `btrfs replace start` after the journal and the format.
+
 ## Tradeoffs accepted
 
 - **No TRIM passthrough** — braid pins discard off at the LUKS layer by omitting `--allow-discards` and, by consequence, at the btrfs mount layer because no effective `discard=async` can pass through regardless of kernel default. SSDs used with braid experience increased write amplification and performance degradation over time.
 - **No flash-specific testing** — flash-related issues in LUKS or mount configuration may go unnoticed.
+- **No stripe or alignment-offset alignment** -- a device whose topology hints cryptsetup would honor, such as a parity-RAID LUN with an odd stripe or a jumpered 512e drive with a nonzero alignment offset, gets a data area that is not aligned to them. Writes may pay read-modify-write cycles; no data is at risk. In exchange, a bogus but 4K-aligned optimal I/O size from a USB bridge cannot grow the offset and waste space on every disk.
+- **No OPAL hardware encryption** -- braid refuses `--hw-opal` and `--hw-opal-only` as `--luks-format-arg` values, because OPAL aligns the data segment to the drive's locking ranges and can refuse or shrink the pinned layout.
 
 ## Alternatives considered
 
@@ -46,6 +50,10 @@ Rejected. braid ships no defrag of any kind: no `defrag` command, no periodic de
 
 More decisively, a blanket `btrfs filesystem defrag` unshares reflink and snapshot extents -- it rewrites shared extents into private copies. On a snapshot-capable pool, that unsharing can sharply increase real space usage, turning a routine maintenance pass into an ENOSPC incident. An automatic or periodic defrag would therefore be actively harmful, not merely unnecessary. An operator who hits a genuine fragmentation problem can still defrag a specific path by hand, accepting the one-time unsharing cost for just that path.
 
+### Predict cryptsetup's topology-aligned offset in the preflight
+
+Rejected. The replace preflight could read the target's minimum and optimal I/O size and alignment offset and repeat cryptsetup's alignment rules to predict the offset it would choose. That keeps stripe alignment, but it is a second copy of an internal cryptsetup algorithm that is not a stable contract. Fixture refreshes would not catch a change to it, and a drifted copy brings back the failure it exists to prevent: a target the preflight accepts that `btrfs replace start` refuses after the journal and the format. Pinning the offset removes the second source of truth instead of predicting it.
+
 ## See
 
 - `cli/src/cmd.rs` — `CryptsetupLuksOpen` and `CryptsetupLuksOpenKeyFile` omit `--allow-discards`
@@ -58,3 +66,8 @@ More decisively, a blanket `btrfs filesystem defrag` unshares reflink and snapsh
   the wear grounds above
 - [ADR 031: Drive-wake posture](031-drive-wake-posture.md) -- mounted drives are
   treated as awake; `noatime` is not spindown management.
+- `cli/src/cmd.rs#luks_format_argv` -- passes the pinned data offset to every fresh
+  `luksFormat`; `cli/src/preflight.rs#check_replace_target_capacity` subtracts the same
+  constant.
+- `cli/src/types.rs#MANAGED_LUKS_FORMAT_LONG_FLAGS` -- refuses user flags that would
+  override the pinned layout, the OPAL flags included, or make luksFormat fail against it.
