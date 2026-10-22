@@ -106,7 +106,7 @@ sudo braid recover --dry-run
   - A mount braid cannot identify, for example because `pool.json` is corrupt, the device-mapper entry is unreadable, or the mount source is a `/dev/disk/by-id/...` link or btrfs's `<missing disk>`. Run `sudo braid lock`, which treats the mount as the pool and unmounts it.
 
   Then re-run `braid recover`. With the mount point empty, recover mounts the pool from the journal's membership.
-- Without `--allow-degraded`, refuses to mount if devices are missing (exit code 2 for degraded-refused, distinguishing it from other errors).
+- Without `--allow-degraded`, refuses to mount if devices are missing, and exits 2. Every other recover error exits 1. Argument errors, such as `--passphrase-file` with `--passphrase-stdin`, also exit 2, but clap prints its own diagnostic for them and never the `refusing to mount degraded` text a degraded refusal prints. Read stderr to tell the two exit-2 cases apart.
 - Refuses to recover `Replace::PoolMutation` when the pool is already mounted (admin-mounted, circumventing braid's pending-op preflight on `unlock`). The kernel may have resumed an interrupted `dev_replace` on that mount session, leaving stale in-memory device state that recover cannot scrub without unmounting -- which it will not do on a mount it does not own. Remediation: `sudo braid lock; sudo braid recover`.
 
 ## Related commands
