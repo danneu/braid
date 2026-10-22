@@ -356,11 +356,13 @@ fn device_remove_error(
 /// Hard-convert pool to RAID1 with progress display; `add` uses this so
 /// an already-RAID1 pool rewrites chunks onto the new device. Contrast
 /// `pool_balance_raid1_soft` (see docs/internals/btrfs/balance-soft.md).
+/// Spends a `Raid1Host`, so no hard convert runs without the RAID1 gate.
 pub fn pool_balance_raid1<R: CommandRunner + Sync>(
     runner: &R,
-    mount_point: &MountPoint,
+    host: Raid1Host,
     progress: ProgressOutput,
 ) -> Result<(), PoolError> {
+    let mount_point = &host.mount_point;
     let result = run_with_progress(
         runner,
         &CmdRequest::BtrfsBalanceRaid1 {
@@ -404,12 +406,15 @@ pub fn pool_balance_single<R: CommandRunner + Sync>(
 }
 
 /// Balance pool to RAID1 (soft: only non-RAID1 chunks) with progress display.
-/// Used after degraded operations to restore redundancy for single-profile chunks.
+/// Used after degraded operations to restore redundancy for single-profile
+/// chunks. Spends a `Raid1Host`, so no soft convert runs without the RAID1
+/// gate.
 pub fn pool_balance_raid1_soft<R: CommandRunner + Sync>(
     runner: &R,
-    mount_point: &MountPoint,
+    host: Raid1Host,
     progress: ProgressOutput,
 ) -> Result<(), PoolError> {
+    let mount_point = &host.mount_point;
     let result = run_with_progress(
         runner,
         &CmdRequest::BtrfsBalanceRaid1Soft {
@@ -453,11 +458,88 @@ pub(crate) fn restore_raid1_preview_step(mount_point: &MountPoint) -> Step {
     }
 }
 
-/// Authoritative live-pool predicate for execute-time RAID1 balance gates.
-/// Shared so add's hard grow-balance gate and restore's soft balance gate
-/// cannot drift on the topology required to host RAID1 right now.
-pub(crate) fn pool_can_host_raid1(pool: &PoolState) -> bool {
-    pool.missing_count == 0 && pool.devices.len() >= 2
+/// Proof that `pool_can_host_raid1` found the live pool at `mount_point`
+/// whole, with two or more present devices. Private fields, so only that gate
+/// mints one, and not `Clone`, so each balance spends a check of its own. The
+/// RAID1 convert balances demand one, so none can run without the gate.
+#[derive(Debug)]
+pub struct Raid1Host {
+    mount_point: MountPoint,
+}
+
+/// Why `pool_can_host_raid1` refused, so each caller can pick its skip line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Raid1HostRefusal {
+    /// btrfs counts a member it has no present device for: btrfs-MISSING, or
+    /// hot-unplugged with its mapper still open. btrfs still allocates on a
+    /// hot-unplugged member, so a convert could put copies on a gone disk.
+    Degraded,
+    /// Fewer than two present devices: RAID1 needs two copies.
+    TooFewDevices,
+}
+
+/// The one live-pool gate for RAID1 convert balances: the pool must be whole
+/// and have two or more present devices now. A degraded pool reports
+/// `Degraded` even when it is also short of devices. `missing_count` counts
+/// hot-unplugged members as well as btrfs-MISSING ones, so both refuse.
+pub(crate) fn pool_can_host_raid1(
+    pool: &PoolState,
+    mount_point: &MountPoint,
+) -> Result<Raid1Host, Raid1HostRefusal> {
+    if pool.missing_count > 0 {
+        return Err(Raid1HostRefusal::Degraded);
+    }
+    if pool.devices.len() < 2 {
+        return Err(Raid1HostRefusal::TooFewDevices);
+    }
+    Ok(Raid1Host {
+        mount_point: mount_point.clone(),
+    })
+}
+
+/// What `balance_if_pool_hosts_raid1` did: ran the caller's balance, or
+/// skipped it because the gate refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Raid1BalanceOutcome {
+    Balanced,
+    Skipped(Raid1HostRefusal),
+}
+
+/// Shared gated step for owed RAID1 maintenance: probe the live pool now,
+/// mint a `Raid1Host` from that probe, and spend it on the caller's balance.
+/// The step owns the probe and the gate, so the live restore and recover's
+/// replay check the same thing at the same point. The caller owns the balance
+/// and its status lines, and decides what a skip prints.
+pub(crate) fn balance_if_pool_hosts_raid1<R, F, B>(
+    runner: &R,
+    fs: &F,
+    mount_point: &MountPoint,
+    balance: B,
+) -> Result<Raid1BalanceOutcome, PoolError>
+where
+    R: CommandRunner,
+    F: Filesystem + ?Sized,
+    B: FnOnce(Raid1Host) -> Result<(), PoolError>,
+{
+    let pool = probe_pool(runner, fs, mount_point)
+        .map_err(|e| PoolError::Failed(format!("post-operation pool probe failed: {e}")))?;
+    match pool_can_host_raid1(&pool, mount_point) {
+        Ok(host) => {
+            balance(host)?;
+            Ok(Raid1BalanceOutcome::Balanced)
+        }
+        Err(refusal) => Ok(Raid1BalanceOutcome::Skipped(refusal)),
+    }
+}
+
+/// The skip line the live restore and recover's replay share when the RAID1
+/// gate refuses an owed restore.
+pub(crate) fn emit_raid1_restore_skipped() {
+    emit_status(&status_line(
+        StatusTag::Skip,
+        color_enabled_for_stderr(),
+        "pool: rebalance skipped -- redundancy not restored",
+    ));
 }
 
 /// Run a soft RAID1 rebalance if the operation just transitioned the pool from
@@ -467,9 +549,9 @@ pub(crate) fn pool_can_host_raid1(pool: &PoolState) -> bool {
 /// Post-commit maintenance: it runs in the journal's post phase and never
 /// changes membership. `docs/design/decisions/017-runtime-disk-membership.md#mutation-ordering`
 /// owns where that phase sits. `pre_op_missing_count` must be the missing count
-/// from the pre-op pool probe. The function re-probes the live pool and balances
-/// only if `pool_can_host_raid1` holds now; that live check overrides the
-/// plan-time `should_restore_raid1`.
+/// from the pre-op pool probe; it decides whether a restore is owed at all.
+/// `balance_if_pool_hosts_raid1` then gates the balance on the live pool, which
+/// overrides the plan-time `should_restore_raid1`.
 pub fn maybe_restore_raid1<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
@@ -480,27 +562,23 @@ pub fn maybe_restore_raid1<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     if pre_op_missing_count == 0 {
         return Ok(()); // Pool wasn't degraded -- nothing to restore
     }
-    let pool_after = probe_pool(runner, fs, mount_point)
-        .map_err(|e| PoolError::Failed(format!("post-operation pool probe failed: {e}")))?;
     let color_enabled = color_enabled_for_stderr();
-    if pool_can_host_raid1(&pool_after) {
+    let outcome = balance_if_pool_hosts_raid1(runner, fs, mount_point, |host| {
         emit_status(&status_line(
             StatusTag::Wait,
             color_enabled,
             "pool: restoring RAID1 redundancy...",
         ));
-        pool_balance_raid1_soft(runner, mount_point, progress)?;
+        pool_balance_raid1_soft(runner, host, progress)?;
         emit_status(&status_line(
             StatusTag::Ok,
             color_enabled,
             "pool: RAID1 redundancy restored",
         ));
-    } else {
-        emit_status(&status_line(
-            StatusTag::Skip,
-            color_enabled,
-            "pool: rebalance skipped -- redundancy not restored",
-        ));
+        Ok(())
+    })?;
+    if let Raid1BalanceOutcome::Skipped(_) = outcome {
+        emit_raid1_restore_skipped();
     }
     Ok(())
 }
@@ -1365,6 +1443,43 @@ $ btrfs balance start --enqueue '-dconvert=raid1,soft' '-mconvert=raid1,soft' /m
         assert!(
             err.contains("post-operation pool probe failed"),
             "error should mention probe: {err}"
+        );
+    }
+
+    // Intent: pool_can_host_raid1 reports Degraded ahead of TooFewDevices.
+    // Why it exists: recover prints the restore skip line only for Degraded,
+    // so a 2-disk pool down to one present disk must not read as a whole
+    // one-device pool and skip silently.
+    // Scenario: one disk of a 2-disk pool is unplugged, leaving one present
+    // device and missing_count 1; a whole 1-disk pool has neither.
+    #[test]
+    fn pool_can_host_raid1_reports_degraded_before_too_few_devices() {
+        let degraded = PoolState {
+            mounted: true,
+            devices: vec![crate::types::PoolDevice {
+                mapper: MapperName::from_basename("braid-disk1".into()),
+                luks_uuid: canonical_luks_uuid(1),
+                devid: Devid::new(1),
+                underlying: "/dev/vda".into(),
+            }],
+            missing_count: 1,
+            total_devices: 2,
+            fsid: None,
+            missing_devids: vec![],
+            null_underlying: vec![],
+        };
+        assert_eq!(
+            pool_can_host_raid1(&degraded, &mp()).unwrap_err(),
+            Raid1HostRefusal::Degraded
+        );
+        let whole_single = PoolState {
+            missing_count: 0,
+            total_devices: 1,
+            ..degraded
+        };
+        assert_eq!(
+            pool_can_host_raid1(&whole_single, &mp()).unwrap_err(),
+            Raid1HostRefusal::TooFewDevices
         );
     }
 

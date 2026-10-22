@@ -21,8 +21,8 @@ use crate::membership::{self, DiskMember, LuksUuidMap, PoolMembership};
 use crate::parse::btrfs_filesystem_show::{DeviceBtrfsProbe, classify_btrfs_probe};
 use crate::parse::{parse_btrfs_filesystem_show, parse_cryptsetup_luks_uuid};
 use crate::pool::{
-    pool_add_device, pool_balance_raid1, pool_bootstrap_mount, pool_bootstrap_mount_raid1,
-    pool_can_host_raid1,
+    Raid1HostRefusal, pool_add_device, pool_balance_raid1, pool_bootstrap_mount,
+    pool_bootstrap_mount_raid1, pool_can_host_raid1,
 };
 use crate::preflight;
 use crate::preview::{self, PerDiskStyle, PlanFailure, Preview, PreviewNote};
@@ -1619,28 +1619,33 @@ impl AddPlan {
             // preview step is only a plan-time predictor; this final probe
             // closes the confirmation/passphrase/format/add window where an
             // existing member can go missing or return before the balance.
-            if pool_can_host_raid1(&pool_after) {
-                eprint!(
-                    "{}",
-                    status_line(
-                        StatusTag::Wait,
-                        color_enabled,
-                        "pool: balancing to RAID1...",
-                    )
-                );
-                pool_balance_raid1(runner, mount_point, params.progress)?;
-                eprint!(
-                    "{}",
-                    status_line(StatusTag::Ok, color_enabled, "pool: RAID1 balance complete",)
-                );
-            } else if pool_after.missing_count > 0 {
-                // Live pool is degraded: skip the hard convert and announce it.
-                // The plan-time Skip note was filtered from the replay above,
-                // so this is the one real-run source for the balance-skip line.
-                preview::emit_notes_to_stderr(
-                    &[PreviewNote::Skip(format_add_degraded_balance_skip())],
-                    PerDiskStyle::Bracketed,
-                );
+            match pool_can_host_raid1(&pool_after, mount_point) {
+                Ok(host) => {
+                    eprint!(
+                        "{}",
+                        status_line(
+                            StatusTag::Wait,
+                            color_enabled,
+                            "pool: balancing to RAID1...",
+                        )
+                    );
+                    pool_balance_raid1(runner, host, params.progress)?;
+                    eprint!(
+                        "{}",
+                        status_line(StatusTag::Ok, color_enabled, "pool: RAID1 balance complete",)
+                    );
+                }
+                Err(Raid1HostRefusal::Degraded) => {
+                    // Live pool is degraded: skip the hard convert and announce
+                    // it. The plan-time Skip note was filtered from the replay
+                    // above, so this is the one real-run source for the
+                    // balance-skip line.
+                    preview::emit_notes_to_stderr(
+                        &[PreviewNote::Skip(format_add_degraded_balance_skip())],
+                        PerDiskStyle::Bracketed,
+                    );
+                }
+                Err(Raid1HostRefusal::TooFewDevices) => {}
             }
 
             // Leave the journal until the balance completes; interruption

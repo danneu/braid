@@ -105,9 +105,9 @@ Recover will:
 - Probe the live btrfs topology to determine what actually happened
 - For existing-pool add `PoolMutation`, first open and scan any already-committed journaled add targets that can be reconciled without wiping or adding
 - For add `PoolMutation`, finish only the journaled add targets that are not already live
-- For add `PostAddBalanceRaid1`, skip all disk preparation and btrfs add steps, then run the owed RAID1 balance only when btrfs balance state is idle; preserve `pending-op.json` when a paused, running, or unknown balance state requires manual inspection
+- For add `PostAddBalanceRaid1`, skip all disk preparation and btrfs add steps, then run the owed RAID1 balance only when btrfs balance state is idle and the pool can host RAID1 (skip it while a member is missing or hot-unplugged); preserve `pending-op.json` when a paused, running, or unknown balance state requires manual inspection
 - Rebuild or repair pool.json only when live membership is complete
-- Clear pending-op.json only after required membership and balance work is complete
+- Clear pending-op.json only after required membership and balance work is complete, or the balance was skipped because the pool cannot host RAID1
 
 3. Verify:
 
