@@ -21,14 +21,10 @@ use std::path::Path;
 pub enum UpsError {
     #[error("config error: {0}")]
     Config(#[from] ConfigError),
-    #[error("upsc query failed: {detail}")]
-    QueryFailed { detail: String },
-    /// Runner-level `upsc` failure stays distinct from non-zero UPS query
-    /// exits so wrapper/package breakage is not read as a daemon fault. The
-    /// PATH hint for a missing `upsc` arrives inside `detail`, from
-    /// `CmdError::NotFound`.
-    #[error("upsc invocation failed: {detail}")]
-    InvocationFailed { detail: String },
+    /// Passes the query failure through untagged: its Display is already the
+    /// operator-facing text, so this enum adds no second copy of it.
+    #[error("{0}")]
+    Query(#[from] UpsQueryError),
     #[error("failed to serialize ups status: {0}")]
     Serialize(#[source] serde_json::Error),
 }
@@ -43,16 +39,34 @@ pub enum UpsStatusOutcome {
     JsonErrorReported,
 }
 
+/// The one failure value from a `upsc` query. Its Display is the text
+/// `braid ups status` prints, and `detail` is the `--json` `detail`, so the
+/// two cannot drift. Callers that need their own wording match the variants.
 #[derive(Debug, thiserror::Error)]
 pub enum UpsQueryError {
-    /// Runner-level failure: spawn error, signal-killed child, stdin IO
-    /// failure, or request/mode mismatch.
-    #[error("upsc invocation failed: {0}")]
+    /// The runner could not get an exit code from `upsc`. Kept distinct from
+    /// `QueryFailed` so wrapper or package breakage is not read as a daemon
+    /// fault. The PATH hint for a missing `upsc` arrives inside the
+    /// `CmdError`, from `CmdError::NotFound`.
+    #[error("upsc invocation failed: {}", self.detail())]
     InvocationFailed(#[from] CmdError),
     /// `upsc` exited non-zero. This covers an unreachable upsd daemon, an
     /// unknown UPS name, or another fatal NUT path.
-    #[error("upsc query failed (exit {exit_code}){}", detail_suffix(.stderr))]
+    #[error("upsc query failed: {}", self.detail())]
     QueryFailed { exit_code: i32, stderr: String },
+}
+
+impl UpsQueryError {
+    /// The failure without its `upsc ... failed:` prefix. Both the Display
+    /// and the `--json` `detail` are built from it.
+    fn detail(&self) -> String {
+        match self {
+            Self::InvocationFailed(e) => e.to_string(),
+            Self::QueryFailed { exit_code, stderr } => {
+                format!("exit {exit_code}{}", detail_suffix(stderr))
+            }
+        }
+    }
 }
 
 /// Successful `upsc` query payload so callers share one exit-code gate while
@@ -88,7 +102,7 @@ pub fn query_ups<R: CommandRunner>(runner: &R, name: &str) -> Result<UpscQueried
 #[derive(Debug, serde::Serialize)]
 #[serde(untagged)]
 enum JsonReport<'a> {
-    Error(ErrorReport<'a>),
+    Error(ErrorReport),
     Ok(JsonSuccessReport<'a>),
 }
 
@@ -118,15 +132,17 @@ impl<'a> JsonSuccessReport<'a> {
     }
 }
 
+/// The `error` sentinel bodies scripts key on. `detail` is owned because a
+/// query failure renders it from `UpsQueryError` at report time.
 #[derive(Debug, serde::Serialize)]
 #[serde(tag = "error")]
-enum ErrorReport<'a> {
+enum ErrorReport {
     #[serde(rename = "ups_not_enabled")]
     NotEnabled,
     #[serde(rename = "query_failed")]
-    QueryFailed { detail: &'a str },
+    QueryFailed { detail: String },
     #[serde(rename = "invocation_failed")]
-    InvocationFailed { detail: &'a str },
+    InvocationFailed { detail: String },
 }
 
 /// Entry for `braid ups status`. It takes the writer so main.rs owns process
@@ -142,17 +158,16 @@ pub fn cmd_ups_status<R: CommandRunner>(
         return print_not_enabled(json, out);
     };
     let parsed = match query_ups(runner, ups_cfg.name.as_str()) {
-        Ok(q) => q.parsed,
-        Err(UpsQueryError::InvocationFailed(e)) => {
-            return emit_invocation_failed(json, e, out);
+        Err(e) if json => {
+            let detail = e.detail();
+            let report = match e {
+                UpsQueryError::QueryFailed { .. } => ErrorReport::QueryFailed { detail },
+                UpsQueryError::InvocationFailed(_) => ErrorReport::InvocationFailed { detail },
+            };
+            emit_json(&JsonReport::Error(report), out)?;
+            return Ok(UpsStatusOutcome::JsonErrorReported);
         }
-        Err(UpsQueryError::QueryFailed { exit_code, stderr }) => {
-            return emit_query_failed(
-                json,
-                format!("exit {exit_code}{}", detail_suffix(&stderr)),
-                out,
-            );
-        }
+        queried => queried?.parsed,
     };
     if json {
         emit_json(&JsonReport::success(&parsed), out)?;
@@ -188,39 +203,6 @@ fn print_not_enabled(
         .ok();
     }
     Ok(UpsStatusOutcome::Done)
-}
-
-fn emit_query_failed(
-    json: bool,
-    detail: String,
-    out: &mut dyn std::io::Write,
-) -> Result<UpsStatusOutcome, UpsError> {
-    if json {
-        emit_json(
-            &JsonReport::Error(ErrorReport::QueryFailed { detail: &detail }),
-            out,
-        )?;
-        return Ok(UpsStatusOutcome::JsonErrorReported);
-    }
-    Err(UpsError::QueryFailed { detail })
-}
-
-/// Keep invocation failures distinct in `--json` and human mode while
-/// preserving shared exit-code wiring.
-fn emit_invocation_failed(
-    json: bool,
-    error: CmdError,
-    out: &mut dyn std::io::Write,
-) -> Result<UpsStatusOutcome, UpsError> {
-    let detail = error.to_string();
-    if json {
-        emit_json(
-            &JsonReport::Error(ErrorReport::InvocationFailed { detail: &detail }),
-            out,
-        )?;
-        return Ok(UpsStatusOutcome::JsonErrorReported);
-    }
-    Err(UpsError::InvocationFailed { detail })
 }
 
 fn emit_json(payload: &JsonReport<'_>, out: &mut dyn std::io::Write) -> Result<(), UpsError> {
@@ -756,11 +738,12 @@ mod tests {
     // Intent: query-failed --json surfaces a distinct sentinel with detail.
     // Why: script callers distinguish "unreachable UPS" from "no UPS
     // configured" and can display upsc's own stderr.
-    // Scenario: unit test of `emit_query_failed(true)` via JsonReport.
+    // Scenario: unit test of the `query_failed` body `braid ups status
+    // --json` writes when upsc exits non-zero.
     #[test]
     fn json_query_failed_has_sentinel_error_and_detail() {
         let payload = JsonReport::Error(ErrorReport::QueryFailed {
-            detail: "exit 1: Error: Connection failure: Connection refused",
+            detail: "exit 1: Error: Connection failure: Connection refused".into(),
         });
         let text = serde_json::to_string_pretty(&payload).unwrap();
         assert!(text.contains("\"query_failed\""));
@@ -777,7 +760,7 @@ mod tests {
     #[test]
     fn json_invocation_failed_has_sentinel_error_and_detail() {
         let payload = JsonReport::Error(ErrorReport::InvocationFailed {
-            detail: "command failed: upsc ups: No such file or directory",
+            detail: "command failed: upsc ups: No such file or directory".into(),
         });
         let text = serde_json::to_string_pretty(&payload).unwrap();
         assert!(text.contains("\"invocation_failed\""));
@@ -845,33 +828,6 @@ mod tests {
 
         assert!(out.parsed.status_flags.contains(&UpsStatusFlag::Ol));
         assert_eq!(out.parsed.battery.charge_pct, Some(100));
-    }
-
-    // Intent: UpsQueryError::QueryFailed Display drops the stderr suffix only
-    // when stderr is empty.
-    // Why it exists: the inner query error has a distinct Display surface from
-    // cmd_ups_status' outer UpsError wrapping, so the shared suffix rule needs
-    // a direct pin here.
-    // Scenario: upsc exits 1 with no stderr in a future NUT or wrapper path,
-    // then with the current daemon-down diagnostic.
-    #[test]
-    fn ups_query_error_display_omits_empty_stderr_tail() {
-        assert_eq!(
-            UpsQueryError::QueryFailed {
-                exit_code: 1,
-                stderr: String::new(),
-            }
-            .to_string(),
-            "upsc query failed (exit 1)"
-        );
-        assert_eq!(
-            UpsQueryError::QueryFailed {
-                exit_code: 1,
-                stderr: "boom".into(),
-            }
-            .to_string(),
-            "upsc query failed (exit 1): boom"
-        );
     }
 
     // Intent: cmd_ups_status selects the human or JSON success body from
@@ -1283,7 +1239,7 @@ mod tests {
     #[test]
     fn snapshot_json_query_failed() {
         let payload = JsonReport::Error(ErrorReport::QueryFailed {
-            detail: "exit 1: Error: Connection failure: Connection refused",
+            detail: "exit 1: Error: Connection failure: Connection refused".into(),
         });
         snap_json!(&payload);
     }
@@ -1299,7 +1255,7 @@ mod tests {
     #[test]
     fn snapshot_json_invocation_failed() {
         let payload = JsonReport::Error(ErrorReport::InvocationFailed {
-            detail: "command failed: upsc ups: No such file or directory",
+            detail: "command failed: upsc ups: No such file or directory".into(),
         });
         snap_json!(&payload);
     }

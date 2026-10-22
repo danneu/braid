@@ -1437,8 +1437,8 @@ fn check_ups_daemon_up<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> Chec
         return CheckResult::skip(name, "skipped (braid.ups not enabled)");
     };
     match crate::ups::query_ups(ctx.runner, ups_cfg.name.as_str()) {
-        Err(crate::ups::UpsQueryError::InvocationFailed(e)) => {
-            CheckResult::fail(name, format!("upsc invocation failed: {e}"))
+        Err(e @ crate::ups::UpsQueryError::InvocationFailed(_)) => {
+            CheckResult::fail(name, e.to_string())
         }
         Err(crate::ups::UpsQueryError::QueryFailed { exit_code, stderr }) => CheckResult::warn(
             name,
