@@ -127,10 +127,6 @@ test-rust:
     cargo test
     just test-state-modes
 
-# Run the review-pipeline finding store tests (scripts/findings/findings.py)
-test-findings:
-    python3 -m unittest discover -s scripts/findings
-
 # Run the host-wide VM gate tests, including the check that every VM-booting
 # recipe takes the gate (scripts/vm-gate/vm_gate.py)
 test-vm-gate:

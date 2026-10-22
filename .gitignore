@@ -19,5 +19,5 @@ plans/wip/
 package-changes
 /plans/review
 /plans/todo
-# Review-pipeline finding store (scripts/findings/findings.py)
+# Finding store of the review pipeline hunt replaced; kept as history
 /findings/
