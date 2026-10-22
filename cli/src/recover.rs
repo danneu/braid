@@ -18,6 +18,7 @@ use crate::preview::{self, PerDiskStyle, PlanFailure, Preview, PreviewNote};
 use crate::probe::{self, ProbeError};
 use crate::probe_mapper_uuid::{MapperOwnership, probe_observed_mapper_uuid};
 use crate::progress::{self, ProgressOutput, Sleeper};
+use crate::repair_hint;
 use crate::secret::Passphrase;
 use crate::state_paths::StatePaths;
 use crate::status::{BalanceReport, get_balance_report};
@@ -620,15 +621,15 @@ impl RecoverCompletion {
             Ok(Some(entry)) if mount_check::entry_is_read_only(&entry) => {
                 return Err(RecoverError::Failed(format!(
                     "recovery aborted: pool at {mp} is mounted read-only \
-                     (vfs_options={:?}, fs_options={:?}) -- btrfs may have \
-                     auto-remounted the superblock after an I/O error, or \
-                     an operator may have remounted it. pool.json was not \
-                     written and the pending-op journal is preserved. \
-                     Investigate with `btrfs check` and remount read-write \
-                     with `mount -o remount,rw {mp}`.",
+                     (vfs_options={:?}, fs_options={:?}). pool.json was not \
+                     written and the pending-op journal is preserved.\n{hint}",
                     entry.vfs_options,
                     entry.fs_options,
-                    mp = plan.mount_point
+                    mp = plan.mount_point,
+                    hint = repair_hint::read_only_pool(
+                        &plan.mount_point,
+                        repair_hint::ReopenWith::Recover
+                    ),
                 )));
             }
             Ok(Some(_)) | Ok(None) => {}
@@ -1431,13 +1432,15 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
                     RecoverError::Failed(format!(
                         "recover dry-run: pool at {mp} is mounted read-only \
                          (vfs_options={:?}, fs_options={:?}) -- execute \
-                         would refuse. Investigate with `btrfs check` and \
-                         remount read-write with `mount -o remount,rw {mp}` \
-                         before continuing. pool.json and the \
-                         pending-op journal are unchanged.",
+                         would refuse. pool.json and the pending-op journal \
+                         are unchanged.\n{hint}",
                         entry.vfs_options,
                         entry.fs_options,
-                        mp = mount_point
+                        mp = mount_point,
+                        hint = repair_hint::read_only_pool(
+                            mount_point,
+                            repair_hint::ReopenWith::Recover
+                        ),
                     )),
                 ));
             }
@@ -18305,10 +18308,7 @@ mod tests {
             msg.contains("recovery aborted"),
             "error must identify the real-run completion refusal, not the dry-run wording: {msg}"
         );
-        assert!(
-            msg.contains("remount,rw"),
-            "error must include remount guidance: {msg}"
-        );
+        assert_recover_read_only_hint_has_both_remedies(&msg);
         assert!(
             !f.paths.pool_json().exists(),
             "pool.json must not be written when the pool is read-only"
@@ -18316,6 +18316,34 @@ mod tests {
         assert!(
             f.paths.pending_op_json().exists(),
             "journal must be preserved when the pool is read-only"
+        );
+    }
+
+    /// Both halves of recover's read-only hint: the remount for a pool
+    /// someone remounted, and the fresh mount through `braid recover` for a
+    /// pool btrfs forced read-only. recover always runs with a journal, so
+    /// the hint must not send the operator to `braid unlock`, which refuses
+    /// then, or to `btrfs check`, which refuses a mounted filesystem.
+    fn assert_recover_read_only_hint_has_both_remedies(msg: &str) {
+        assert!(
+            msg.contains("mount -o remount,rw /mnt/storage"),
+            "error must include remount guidance: {msg}"
+        );
+        assert!(
+            msg.contains("\"forced readonly\""),
+            "error must name the kernel-log cue: {msg}"
+        );
+        assert!(
+            msg.contains("`braid lock` and `braid recover`"),
+            "error must give the fresh-mount path through recover: {msg}"
+        );
+        assert!(
+            !msg.contains("braid unlock"),
+            "unlock refuses while the journal exists: {msg}"
+        );
+        assert!(
+            !msg.contains("btrfs check"),
+            "btrfs check refuses a mounted filesystem: {msg}"
         );
     }
 
@@ -18357,10 +18385,7 @@ mod tests {
             msg.contains("recovery aborted"),
             "error must identify the real-run completion refusal, not the dry-run wording: {msg}"
         );
-        assert!(
-            msg.contains("remount,rw"),
-            "error must include remount guidance: {msg}"
-        );
+        assert_recover_read_only_hint_has_both_remedies(&msg);
         assert!(
             !f.paths.pool_json().exists(),
             "pool.json must not be written when the pool is read-only"
@@ -19838,10 +19863,7 @@ mod tests {
             err.contains("recover dry-run"),
             "error must identify the dry-run refusal, got: {err:?}",
         );
-        assert!(
-            err.contains("remount,rw"),
-            "error must include remount guidance, got: {err:?}",
-        );
+        assert_recover_read_only_hint_has_both_remedies(err);
 
         assert_eq!(
             failure.notes.len(),

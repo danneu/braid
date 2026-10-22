@@ -138,6 +138,42 @@ sudo braid remove-missing --missing-id 3
 
 This removes the dead device entry from the btrfs filesystem. No data is rebuilt -- you lose the redundant copy that was on the dead drive. The pool continues as a smaller array. Use this when you do not have a replacement disk available.
 
+## Pool is mounted read-only
+
+**Symptom:** `braid add`, `remove`, `remove-missing`, `replace`, or `recover` refuses with an error saying the pool `is mounted read-only`. Writes to the pool fail with "Read-only file system".
+
+A pool goes read-only in one of two ways, and each has its own fix. braid cannot tell which from the mount options, but the kernel log can. Look for a btrfs `forced readonly` line:
+
+```sh
+sudo journalctl -k --grep 'forced readonly'
+```
+
+**No such line:** an operator or a tool remounted the pool read-only. Remount it read-write, then retry the command:
+
+```sh
+sudo mount -o remount,rw /mnt/storage
+```
+
+**A `forced readonly` line, or the remount fails:** btrfs hit an error (for example a failing disk, or running out of space partway through a device removal) and forced the pool read-only. The kernel then refuses to remount it read-write (`remounting read-write after error is not allowed`). btrfs keeps that error only in memory, so a fresh mount clears it. First read the kernel lines just before `forced readonly` to find the cause, and fix it. Then relock the pool and mount it fresh. Which command mounts it depends on whether `/var/lib/braid/pending-op.json` exists (`braid status` shows a pending operation):
+
+- **No `pending-op.json`:** unlock, then retry the command.
+
+  ```sh
+  sudo braid lock
+  sudo braid unlock    # add --allow-degraded if a disk is missing
+  ```
+
+- **`pending-op.json` exists:** a braid command was interrupted, often by this same error. `braid unlock` refuses while the journal exists, so let `braid recover` mount the pool:
+
+  ```sh
+  sudo braid lock      # works with a journal present
+  sudo braid recover   # add --allow-degraded if a disk is missing
+  ```
+
+  This is the same path as [Recover for a replace journal when the pool is already mounted](recovery-scenarios.md#recover-for-a-replace-journal-when-the-pool-is-already-mounted).
+
+If the fresh mount goes read-only again, stop: the cause is still there. Keep the kernel log (`sudo journalctl -k`) for diagnosis instead of relocking again.
+
 ## Auto-unlock fails
 
 **Symptom:** Pool is not unlocked after reboot despite auto-unlock being configured.

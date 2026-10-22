@@ -99,10 +99,7 @@ If a btrfs exclusive operation (a running balance, device add/remove/replace, re
   when more than 1 surviving device exists
 - Refuses on a 2-disk RAID1 pool with one disk missing -- the kernel refuses to drop a RAID1 pool below two devices. Use `braid replace --old <missing-name> --new <new-name>=/dev/disk/by-id/<...>` to repair the dead disk, or `braid add` first and then re-run.
 - Refuses if the pool changed between planning and the journal write (for example, survivor space was used up or another disk dropped out while the prompt waited). Nothing was written, so re-run the command.
-- Refuses if a pending operation journal (`pending-op.json`) exists -- run `braid recover` to reconcile.
-- Refuses if another braid operation is in progress (pool lock `/run/braid-pool.lock` is held) -- retry once it finishes.
-- Refuses if a btrfs balance is *paused* on the pool -- resume or cancel it first. A paused balance holds the exclusive-operation lock indefinitely, so braid cannot wait it out.
-- Refuses when UPS support is enabled and `braid ups status` cannot verify a trusted `OL` (utility-power) state.
+{{#include ../_includes/mutating-command-refusals.md.inc}}
 
 ## Related commands
 

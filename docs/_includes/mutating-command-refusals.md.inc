@@ -1,0 +1,5 @@
+- Refuses if a pending operation journal (`pending-op.json`) exists -- run `braid recover` to reconcile.
+- Refuses if another braid operation is in progress (pool lock `/run/braid-pool.lock` is held) -- retry once it finishes.
+- Refuses if a btrfs balance is *paused* on the pool -- resume or cancel it first. A paused balance holds the exclusive-operation lock indefinitely, so braid cannot wait it out.
+- Refuses if the pool is mounted read-only. If an operator or a tool remounted it, `mount -o remount,rw <mount-point>` fixes that; if btrfs forced it read-only after an error, only a fresh mount does (`braid lock`, then `braid unlock`). See [Pool is mounted read-only](../guides/troubleshooting.md#pool-is-mounted-read-only).
+- Refuses when UPS support is enabled and `braid ups status` cannot verify a trusted `OL` (utility-power) state.

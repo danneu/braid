@@ -303,8 +303,8 @@ fn check_not_read_only<F: Filesystem + ?Sized>(
 
     if mount_check::entry_is_read_only(&entry) {
         return Err(format!(
-            "pool is mounted read-only. Remount read-write first:\n  \
-                 mount -o remount,rw {mount_point}"
+            "pool is mounted read-only.\n{}",
+            repair_hint::read_only_pool(mount_point, repair_hint::ReopenWith::Unlock)
         ));
     }
     Ok(None)
@@ -637,6 +637,11 @@ pub fn check_ups_not_on_battery<R: CommandRunner>(
 }
 
 /// Guard for mutating pool commands (add, remove, remove-missing, replace).
+///
+/// Its refusals, with the recovery gate, the pool lock and the UPS check,
+/// are what these commands share. Operators read that shared list in
+/// `docs/_includes/mutating-command-refusals.md.inc`, which each command page
+/// includes, so a new shared refusal belongs there too.
 ///
 /// Returns accumulated soft-success notes the caller surfaces as
 /// `PreviewNote` entries (dry-run stdout via `Preview::render`, real-run
@@ -1212,9 +1217,29 @@ mod tests {
             .with_mountinfo(&mountinfo_for_target("ro,relatime", "rw,space_cache=v2"));
         let err = check_not_read_only(&fs, &mp()).unwrap_err();
         assert!(err.contains("read-only"), "expected 'read-only' in: {err}");
+        assert_read_only_hint_has_both_remedies(&err);
+    }
+
+    /// Both halves of the mutators' read-only hint: the remount for a pool
+    /// someone remounted, and the fresh mount through `braid unlock` for a
+    /// pool btrfs forced read-only. mountinfo cannot tell the two apart, so
+    /// every ro refusal must carry both.
+    fn assert_read_only_hint_has_both_remedies(err: &str) {
         assert!(
-            err.contains("remount"),
+            err.contains("mount -o remount,rw /mnt/storage"),
             "expected remount guidance in: {err}"
+        );
+        assert!(
+            err.contains("\"forced readonly\""),
+            "expected the kernel-log cue in: {err}"
+        );
+        assert!(
+            err.contains("`braid lock` and `braid unlock`"),
+            "expected fresh-mount guidance through unlock in: {err}"
+        );
+        assert!(
+            !err.contains("braid recover"),
+            "a mutator never runs with a journal, so recover is wrong here: {err}"
         );
     }
 
@@ -1228,10 +1253,7 @@ mod tests {
             .with_mountinfo(&mountinfo_for_target("rw,relatime", "ro,space_cache=v2"));
         let err = check_not_read_only(&fs, &mp()).unwrap_err();
         assert!(err.contains("read-only"), "expected 'read-only' in: {err}");
-        assert!(
-            err.contains("remount"),
-            "expected remount guidance in: {err}"
-        );
+        assert_read_only_hint_has_both_remedies(&err);
     }
 
     #[test]
@@ -2153,6 +2175,7 @@ mod tests {
             .with_mountinfo(&mountinfo_for_target("ro,relatime", "rw,space_cache=v2"));
         let err = require_mutation_preflight(&fs, &fsid(), &mp()).unwrap_err();
         assert!(err.contains("read-only"), "expected 'read-only' in: {err}");
+        assert_read_only_hint_has_both_remedies(&err);
     }
 
     // --- check_pool_unlocked_if_membership_exists ---

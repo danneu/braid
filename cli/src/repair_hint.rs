@@ -1,4 +1,4 @@
-use crate::types::{Devid, DiskName};
+use crate::types::{Devid, DiskName, MountPoint};
 
 const MISSING_NAME_PLACEHOLDER: &str = "<missing-name>";
 const NEW_NAME_PLACEHOLDER: &str = "<new-name>=/dev/disk/by-id/<...>";
@@ -97,6 +97,60 @@ pub(crate) fn hot_unplugged_bystander_not_yet_missing(devids: &[Devid], actor: &
          hot-unplugged disk is truly gone, then relock and re-unlock the pool \
          degraded (`braid lock` then `braid unlock --allow-degraded`) so btrfs \
          promotes {devids}, and retry."
+    )
+}
+
+/// The braid command that opens the fresh mount in `read_only_pool`'s
+/// error branch. Each caller knows whether a pending-op journal can exist
+/// when it refuses, so the hint never names a command that would refuse.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReopenWith {
+    /// The pool mutators that run
+    /// `cli/src/preflight.rs#require_mutation_preflight`.
+    /// `cli/src/main.rs#dispatch_policy` marks them `Gated`, so the recovery
+    /// gate refuses them while a journal exists. None exists here, and
+    /// `braid unlock` can run. The operator then retries the refused command.
+    Unlock,
+    /// recover, which runs only while a journal exists. `braid unlock`
+    /// refuses then, and `braid recover` opens its own fresh mount, so it is
+    /// both the reopen and the retry.
+    Recover,
+}
+
+/// Operator remediation for a pool mounted read-only.
+///
+/// States both causes every time, because mountinfo cannot tell them apart.
+/// An operator or tool remounted the pool read-only, which
+/// `mount -o remount,rw` undoes. Or btrfs forced it read-only after an
+/// error, and then the kernel refuses that remount (linux 6.18.33,
+/// `fs/btrfs/super.c` (`btrfs_remount_rw`): "remounting read-write after
+/// error is not allowed"). btrfs keeps that error only in memory, so a
+/// fresh mount clears it (linux 6.18.33, `fs/btrfs/messages.c`
+/// (`__btrfs_handle_fs_error`): "Today we only save the error info to
+/// memory", then `btrfs_info(fs_info, "forced readonly")`). That kernel log
+/// line tells the operator which case applies; the remount failing covers a
+/// log that has wrapped. The docs owner of the same split is
+/// `docs/guides/troubleshooting.md#pool-is-mounted-read-only`.
+pub(crate) fn read_only_pool(mount_point: &MountPoint, reopen: ReopenWith) -> String {
+    let fresh_mount = match reopen {
+        ReopenWith::Unlock => {
+            "`braid lock` and `braid unlock` (add `--allow-degraded` if a disk \
+             is missing), and retry"
+        }
+        ReopenWith::Recover => {
+            "`braid lock` and `braid recover` (add `--allow-degraded` if a disk \
+             is missing)"
+        }
+    };
+    format!(
+        "Check the kernel log for a btrfs \"forced readonly\" line \
+         (`journalctl -k --grep 'forced readonly'`).\n\
+         No such line: an operator or a tool remounted the pool read-only. \
+         Run `mount -o remount,rw {mount_point}` and retry.\n\
+         A \"forced readonly\" line, or that remount fails: btrfs hit an \
+         error, and only a fresh mount clears it. Fix the cause, then run \
+         {fresh_mount}.\n\
+         See docs/guides/troubleshooting.md#pool-is-mounted-read-only."
     )
 }
 
@@ -276,6 +330,44 @@ mod tests {
             three.contains("MISSING: devids 2, 3 and 5 (")
                 && three.contains("promotes devids 2, 3 and 5,"),
             "{three}"
+        );
+    }
+
+    // Intent: the read-only hint gives both remedies every time and names
+    // the fresh-mount command each caller can actually run.
+    // Why it exists: the old hint offered only `mount -o remount,rw`, which
+    // the kernel refuses once btrfs forced the pool read-only after an error.
+    // The mutators must send the operator to `braid unlock` and a retry,
+    // while recover, which always has a journal, must send them to
+    // `braid recover`, because `braid unlock` refuses with a journal.
+    // Scenario: a degraded pool that btrfs forced read-only refuses
+    // `braid replace`; an interrupted remove leaves recover facing the same
+    // read-only pool.
+    #[test]
+    fn read_only_pool_renders_both_remedies_per_reopen_command() {
+        let mount_point = MountPoint::new("/mnt/storage".into());
+        assert_eq!(
+            read_only_pool(&mount_point, ReopenWith::Unlock),
+            "Check the kernel log for a btrfs \"forced readonly\" line \
+             (`journalctl -k --grep 'forced readonly'`).\n\
+             No such line: an operator or a tool remounted the pool read-only. \
+             Run `mount -o remount,rw /mnt/storage` and retry.\n\
+             A \"forced readonly\" line, or that remount fails: btrfs hit an error, \
+             and only a fresh mount clears it. Fix the cause, then run `braid lock` \
+             and `braid unlock` (add `--allow-degraded` if a disk is missing), and \
+             retry.\n\
+             See docs/guides/troubleshooting.md#pool-is-mounted-read-only."
+        );
+        assert_eq!(
+            read_only_pool(&mount_point, ReopenWith::Recover),
+            "Check the kernel log for a btrfs \"forced readonly\" line \
+             (`journalctl -k --grep 'forced readonly'`).\n\
+             No such line: an operator or a tool remounted the pool read-only. \
+             Run `mount -o remount,rw /mnt/storage` and retry.\n\
+             A \"forced readonly\" line, or that remount fails: btrfs hit an error, \
+             and only a fresh mount clears it. Fix the cause, then run `braid lock` \
+             and `braid recover` (add `--allow-degraded` if a disk is missing).\n\
+             See docs/guides/troubleshooting.md#pool-is-mounted-read-only."
         );
     }
 }

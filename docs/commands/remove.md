@@ -66,10 +66,7 @@ If a btrfs exclusive operation (a running balance, device add/remove/replace, re
 - Refuses if there are missing devices in the pool (resolve those first)
 - Refuses if remaining disks lack space to absorb the removed disk's data (ENOSPC pre-flight)
 - Warns when removal leaves a single disk (no RAID1 redundancy)
-- Refuses if a pending operation journal (`pending-op.json`) exists -- run `braid recover` to reconcile.
-- Refuses if another braid operation is in progress (pool lock `/run/braid-pool.lock` is held) -- retry once it finishes.
-- Refuses if a btrfs balance is *paused* on the pool -- resume or cancel it first. A paused balance holds the exclusive-operation lock indefinitely, so braid cannot wait it out.
-- Refuses when UPS support is enabled and `braid ups status` cannot verify a trusted `OL` (utility-power) state.
+{{#include ../_includes/mutating-command-refusals.md.inc}}
 
 ## Related commands
 
