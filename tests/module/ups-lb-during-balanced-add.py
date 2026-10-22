@@ -13,7 +13,7 @@
 # evidence showed that automatic replay after a crash-paused owed
 # RAID1 balance can underflow btrfs block-group accounting. This test
 # pins both supported outcomes: idle/no-paused recovery still replays
-# the soft balance and clears the journal, while a persisted paused
+# the hard RAID1 convert and clears the journal, while a persisted paused
 # balance fails closed before replay.
 #
 # Scenario: Operator's pool was 1-disk single-profile with data.
@@ -21,7 +21,7 @@
 # RAID1 redundancy. The UPS LB fired during the post-add balance
 # that converts single-profile chunks to RAID1. The next morning
 # they run `braid recover`. If btrfs has no paused balance, recover
-# finishes the soft RAID1 replay; if btrfs persisted a paused balance,
+# finishes the RAID1 balance replay; if btrfs persisted a paused balance,
 # recover leaves `pending-op.json` in place and requires manual
 # inspection before the recovery state is cleared.
 
@@ -191,10 +191,13 @@ with subtest("braid recover handles the post-add balance state"):
     )
 
     if recover_exit == 0:
-        # Idle/no-paused path: recover should replay the idempotent soft balance
-        # and clear recovery mode.
-        assert "replaying post-add RAID1 soft balance" in recover_out, (
-            f"recover did not replay the post-add soft balance:\n{recover_out}"
+        # Idle/no-paused path: recover should replay the hard RAID1 convert
+        # live add runs and clear recovery mode.
+        assert "replaying post-add RAID1 balance" in recover_out, (
+            f"recover did not replay the post-add RAID1 balance:\n{recover_out}"
+        )
+        assert "RAID1 soft balance" not in recover_out, (
+            f"add recovery must replay the hard convert, not soft:\n{recover_out}"
         )
         assert "balance resume" not in recover_out, (
             f"recover must not resume balances automatically:\n{recover_out}"
@@ -215,8 +218,8 @@ with subtest("braid recover handles the post-add balance state"):
         assert "balance cancel" not in recover_out, (
             f"recover must not cancel a crash-paused balance:\n{recover_out}"
         )
-        assert "replaying post-add RAID1 soft balance" not in recover_out, (
-            f"recover must fail before soft RAID1 replay:\n{recover_out}"
+        assert "replaying post-add RAID1" not in recover_out, (
+            f"recover must fail before RAID1 balance replay:\n{recover_out}"
         )
 
 # --- Phase 5: post-recover state assertions. ---

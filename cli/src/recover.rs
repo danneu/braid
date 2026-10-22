@@ -14,7 +14,7 @@ use crate::mount::{self, MountError, OpenPlan};
 use crate::mount_check;
 use crate::parse::btrfs_filesystem_show::{DeviceBtrfsProbe, classify_btrfs_probe};
 use crate::parse::{ReplaceState, parse_btrfs_replace_status};
-use crate::pool::{self, Raid1BalanceOutcome, Raid1HostRefusal};
+use crate::pool::{self, OwedRaid1Balance, Raid1BalanceOutcome, Raid1HostRefusal};
 use crate::pool_mount::{self, MountedAt};
 use crate::preview::{self, PerDiskStyle, PlanFailure, Preview, PreviewNote};
 use crate::probe::{self, ProbeError};
@@ -241,7 +241,7 @@ pub struct RecoverParams<'a> {
     pub allow_degraded: bool,
     pub dry_run: bool,
     /// Progress output for post-mount maintenance that can run for a long time,
-    /// such as replace resize replay or owed RAID1 soft-balance replay.
+    /// such as replace resize replay or owed RAID1 balance replay.
     pub progress: ProgressOutput,
     pub sleep_inhibitor: &'a dyn AcquireSleepInhibitor,
     /// Sleeper seam for transient mapper-close retries and recovery
@@ -296,37 +296,43 @@ enum RecoverWorkAction {
     Complete(RecoverCompletion),
 }
 
+/// How recover finishes the journaled op once the pool is mounted. Each arm
+/// carries the RAID1 balance the op still owes, set once in `plan_recover`,
+/// so the dry-run rows and the replay read one value.
 #[derive(Debug)]
 enum RecoverCompletion {
     AddPoolMutation {
         targets: LuksUuidMap<journal::AddJournalTarget>,
         all_targets_already_live: bool,
         live_uuids: Option<std::collections::BTreeSet<LuksUuid>>,
+        owed_balance: OwedRaid1Balance,
     },
-    AddPostBalance,
+    AddPostBalance {
+        owed_balance: OwedRaid1Balance,
+    },
     RemoveMissingPoolMutation {
         devid: Devid,
-        restore_raid1_after_commit: bool,
+        owed_balance: Option<OwedRaid1Balance>,
     },
     RemoveMissingPostMaintenance {
         devid: Devid,
-        restore_raid1_after_commit: bool,
+        owed_balance: Option<OwedRaid1Balance>,
     },
     ReplacePoolMutation {
         identity: journal::ReplaceIdentity,
         new_name: DiskName,
         new_target: journal::ReplaceJournalTarget,
         source: journal::ReplaceJournalSource,
-        restore_raid1_after_commit: bool,
+        owed_balance: Option<OwedRaid1Balance>,
     },
     ReplacePostMaintenance {
         new_uuid: LuksUuid,
         new_name: DiskName,
         source: journal::ReplaceJournalSource,
-        restore_raid1_after_commit: bool,
+        owed_balance: Option<OwedRaid1Balance>,
     },
     GenericLivePool {
-        replay_raid1_maintenance: bool,
+        owed_balance: Option<OwedRaid1Balance>,
     },
 }
 
@@ -549,6 +555,7 @@ impl RecoverCompletion {
                 targets,
                 all_targets_already_live,
                 live_uuids,
+                owed_balance,
             } => {
                 render_add_pool_mutation_recovery_steps(
                     plan,
@@ -557,24 +564,18 @@ impl RecoverCompletion {
                     *all_targets_already_live,
                     live_uuids.as_ref(),
                 );
-                render_recovery_tail(plan, steps, None, true);
+                render_recovery_tail(plan, steps, None, Some(*owed_balance));
             }
-            RecoverCompletion::AddPostBalance => {
-                render_recovery_tail(plan, steps, None, true);
+            RecoverCompletion::AddPostBalance { owed_balance } => {
+                render_recovery_tail(plan, steps, None, Some(*owed_balance));
             }
-            RecoverCompletion::RemoveMissingPoolMutation {
-                restore_raid1_after_commit,
-                ..
-            }
-            | RecoverCompletion::RemoveMissingPostMaintenance {
-                restore_raid1_after_commit,
-                ..
-            } => {
-                render_recovery_tail(plan, steps, None, *restore_raid1_after_commit);
+            RecoverCompletion::RemoveMissingPoolMutation { owed_balance, .. }
+            | RecoverCompletion::RemoveMissingPostMaintenance { owed_balance, .. } => {
+                render_recovery_tail(plan, steps, None, *owed_balance);
             }
             RecoverCompletion::ReplacePoolMutation {
                 new_name,
-                restore_raid1_after_commit,
+                owed_balance,
                 ..
             } => {
                 render_recovery_tail(
@@ -584,12 +585,12 @@ impl RecoverCompletion {
                         new_name,
                         skipped_if_replacement_not_committed: true,
                     }),
-                    *restore_raid1_after_commit,
+                    *owed_balance,
                 );
             }
             RecoverCompletion::ReplacePostMaintenance {
                 new_name,
-                restore_raid1_after_commit,
+                owed_balance,
                 ..
             } => {
                 render_recovery_tail(
@@ -599,13 +600,11 @@ impl RecoverCompletion {
                         new_name,
                         skipped_if_replacement_not_committed: false,
                     }),
-                    *restore_raid1_after_commit,
+                    *owed_balance,
                 );
             }
-            RecoverCompletion::GenericLivePool {
-                replay_raid1_maintenance,
-            } => {
-                render_recovery_tail(plan, steps, None, *replay_raid1_maintenance);
+            RecoverCompletion::GenericLivePool { owed_balance } => {
+                render_recovery_tail(plan, steps, None, *owed_balance);
             }
         }
     }
@@ -659,34 +658,40 @@ impl RecoverCompletion {
             )));
         }
         match self {
-            RecoverCompletion::AddPoolMutation { targets, .. } => {
-                execute_add_pool_mutation_recovery(
-                    runner,
-                    fs,
-                    by_id_resolver,
-                    params,
-                    AddPoolReplayCtx {
-                        credential: state.credential.as_ref(),
-                        journal: &plan.journal,
-                        union: &plan.admission_membership,
-                        targets,
-                        pool,
-                    },
-                )
-            }
-            RecoverCompletion::AddPostBalance => execute_add_post_balance_recovery(
+            RecoverCompletion::AddPoolMutation {
+                targets,
+                owed_balance,
+                ..
+            } => execute_add_pool_mutation_recovery(
                 runner,
                 fs,
                 by_id_resolver,
                 params,
-                &plan.journal,
-                &plan.admission_membership,
-                pool,
-                false,
+                AddPoolReplayCtx {
+                    credential: state.credential.as_ref(),
+                    journal: &plan.journal,
+                    union: &plan.admission_membership,
+                    targets,
+                    pool,
+                    owed_balance: *owed_balance,
+                },
             ),
+            RecoverCompletion::AddPostBalance { owed_balance } => {
+                execute_add_post_balance_recovery(
+                    runner,
+                    fs,
+                    by_id_resolver,
+                    params,
+                    &plan.journal,
+                    &plan.admission_membership,
+                    pool,
+                    *owed_balance,
+                    false,
+                )
+            }
             RecoverCompletion::RemoveMissingPoolMutation {
                 devid,
-                restore_raid1_after_commit,
+                owed_balance,
             } => execute_remove_missing_pool_mutation_recovery(
                 runner,
                 fs,
@@ -695,11 +700,11 @@ impl RecoverCompletion {
                 &plan.journal,
                 pool,
                 *devid,
-                *restore_raid1_after_commit,
+                *owed_balance,
             ),
             RecoverCompletion::RemoveMissingPostMaintenance {
                 devid,
-                restore_raid1_after_commit,
+                owed_balance,
             } => execute_remove_missing_post_maintenance_recovery(
                 runner,
                 fs,
@@ -709,7 +714,7 @@ impl RecoverCompletion {
                     journal: &plan.journal,
                     pool,
                     devid: *devid,
-                    restore_raid1_after_commit: *restore_raid1_after_commit,
+                    owed_balance: *owed_balance,
                     inhibitor_already_held: false,
                 },
             ),
@@ -718,7 +723,7 @@ impl RecoverCompletion {
                 new_name,
                 new_target,
                 source,
-                restore_raid1_after_commit,
+                owed_balance,
             } => execute_replace_pool_mutation_recovery(
                 runner,
                 fs,
@@ -732,13 +737,13 @@ impl RecoverCompletion {
                 new_name,
                 new_target,
                 source,
-                *restore_raid1_after_commit,
+                *owed_balance,
             ),
             RecoverCompletion::ReplacePostMaintenance {
                 new_uuid,
                 new_name,
                 source,
-                restore_raid1_after_commit,
+                owed_balance,
             } => execute_replace_post_maintenance_recovery(
                 runner,
                 fs,
@@ -750,20 +755,20 @@ impl RecoverCompletion {
                 new_uuid,
                 new_name,
                 source,
-                *restore_raid1_after_commit,
+                *owed_balance,
                 false,
             ),
-            RecoverCompletion::GenericLivePool {
-                replay_raid1_maintenance,
-            } => execute_generic_live_pool_recovery(
-                runner,
-                fs,
-                by_id_resolver,
-                params,
-                plan,
-                pool,
-                *replay_raid1_maintenance,
-            ),
+            RecoverCompletion::GenericLivePool { owed_balance } => {
+                execute_generic_live_pool_recovery(
+                    runner,
+                    fs,
+                    by_id_resolver,
+                    params,
+                    plan,
+                    pool,
+                    *owed_balance,
+                )
+            }
         }
     }
 }
@@ -926,7 +931,7 @@ fn render_recovery_tail(
     plan: &RecoverWorkPlan,
     steps: &mut Vec<Step>,
     resize: Option<ReplaceResizePreview<'_>>,
-    show_raid1_maintenance: bool,
+    owed_balance: Option<OwedRaid1Balance>,
 ) {
     steps.push(Step {
         risk: "safe",
@@ -956,7 +961,7 @@ fn render_recovery_tail(
         });
     }
 
-    if show_raid1_maintenance {
+    if let Some(owed_balance) = owed_balance {
         steps.push(Step {
             risk: "safe",
             description: format!(
@@ -965,15 +970,7 @@ fn render_recovery_tail(
             ),
             commands: vec![],
         });
-        steps.push(Step {
-            risk: "long",
-            description: format!(
-                "btrfs balance -dconvert=raid1,soft -mconvert=raid1,soft {} \
-                     (skipped if the pool is degraded or has <2 devices)",
-                plan.mount_point
-            ),
-            commands: vec![],
-        });
+        steps.push(owed_balance.replay_preview_step(&plan.mount_point, None));
     }
 
     steps.push(Step {
@@ -1119,7 +1116,7 @@ fn execute_generic_live_pool_recovery<R: CommandRunner + Sync, F: Filesystem + ?
     params: &RecoverParams<'_>,
     plan: &RecoverWorkPlan,
     pool: PoolState,
-    replay_raid1_maintenance: bool,
+    owed_balance: Option<OwedRaid1Balance>,
 ) -> Result<(), RecoverError> {
     let prior = membership::load_membership(params.paths).ok();
     let mut recovered = build_membership_from_live_pool(
@@ -1230,7 +1227,7 @@ fn execute_generic_live_pool_recovery<R: CommandRunner + Sync, F: Filesystem + ?
         })?;
     }
 
-    let _guard = if replay_raid1_maintenance {
+    let _guard = if owed_balance.is_some() {
         Some(
             params
                 .sleep_inhibitor
@@ -1243,8 +1240,15 @@ fn execute_generic_live_pool_recovery<R: CommandRunner + Sync, F: Filesystem + ?
         None
     };
 
-    if replay_raid1_maintenance {
-        replay_owed_raid1_maintenance(runner, fs, &plan.mount_point, "add", params.progress)?;
+    if let Some(owed_balance) = owed_balance {
+        replay_owed_raid1_maintenance(
+            runner,
+            fs,
+            &plan.mount_point,
+            owed_balance,
+            "add",
+            params.progress,
+        )?;
     }
 
     if let journal::OpKind::Remove { luks_uuid, .. } = &plan.journal.op
@@ -1534,6 +1538,9 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         }
     }
 
+    // Each arm names the RAID1 balance its op still owes: live add owes the
+    // hard convert it runs after btrfs device add, and remove-missing and
+    // replace owe the soft restore only when their journal records one.
     let completion = match &journal.op {
         journal::OpKind::Add {
             phase: journal::AddPhase::PoolMutation,
@@ -1547,19 +1554,22 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
                 targets: targets.clone(),
                 all_targets_already_live,
                 live_uuids,
+                owed_balance: OwedRaid1Balance::Grow,
             }
         }
         journal::OpKind::Add {
             phase: journal::AddPhase::PostAddBalanceRaid1,
             ..
-        } => RecoverCompletion::AddPostBalance,
+        } => RecoverCompletion::AddPostBalance {
+            owed_balance: OwedRaid1Balance::Grow,
+        },
         journal::OpKind::RemoveMissing {
             phase: journal::RemoveMissingPhase::PoolMutation,
             devid,
             restore_raid1_after_commit,
         } => RecoverCompletion::RemoveMissingPoolMutation {
             devid: *devid,
-            restore_raid1_after_commit: *restore_raid1_after_commit,
+            owed_balance: restore_raid1_after_commit.then_some(OwedRaid1Balance::RestoreSingle),
         },
         journal::OpKind::RemoveMissing {
             phase: journal::RemoveMissingPhase::PostRemoveMissingMaintenance,
@@ -1567,7 +1577,7 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             restore_raid1_after_commit,
         } => RecoverCompletion::RemoveMissingPostMaintenance {
             devid: *devid,
-            restore_raid1_after_commit: *restore_raid1_after_commit,
+            owed_balance: restore_raid1_after_commit.then_some(OwedRaid1Balance::RestoreSingle),
         },
         journal::OpKind::Replace(journal::ReplaceOp {
             phase: journal::ReplacePhase::PoolMutation,
@@ -1582,7 +1592,7 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             new_name: new_name.clone(),
             new_target: new_target.clone(),
             source: source.clone(),
-            restore_raid1_after_commit: *restore_raid1_after_commit,
+            owed_balance: restore_raid1_after_commit.then_some(OwedRaid1Balance::RestoreSingle),
         },
         journal::OpKind::Replace(journal::ReplaceOp {
             phase: journal::ReplacePhase::PostReplaceMaintenance,
@@ -1595,16 +1605,18 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             new_uuid: identity.new_uuid().clone(),
             new_name: new_name.clone(),
             source: source.clone(),
-            restore_raid1_after_commit: *restore_raid1_after_commit,
+            owed_balance: restore_raid1_after_commit.then_some(OwedRaid1Balance::RestoreSingle),
         },
-        journal::OpKind::Add { .. } => RecoverCompletion::GenericLivePool {
+        journal::OpKind::Add { targets, .. } => RecoverCompletion::GenericLivePool {
             // Reached only by bootstrap add -- live PoolMutation routes to
             // AddPoolMutation and PostAddBalanceRaid1 to AddPostBalance, so the
-            // leftover-single-chunk conversion those paths own never applies here.
-            // A 2+-disk bootstrap already ran `mkfs.btrfs -d raid1 -m raid1`, so this
-            // soft replay is an idempotent near-no-op kept as cheap defense-in-depth;
-            // do not assume mkfs leaves zero convertible chunks, and do not drop it.
-            replay_raid1_maintenance: true,
+            // grow convert those paths own never applies here. A 2+-disk
+            // bootstrap already ran `mkfs.btrfs -d raid1 -m raid1`, so this soft
+            // replay is an idempotent near-no-op kept as cheap defense-in-depth;
+            // do not assume mkfs leaves zero convertible chunks, and do not drop
+            // it. A 1-disk bootstrap ran plain mkfs, which cannot make RAID1, so
+            // it owes nothing.
+            owed_balance: (targets.len() >= 2).then_some(OwedRaid1Balance::RestoreSingle),
         },
         journal::OpKind::Remove { .. } => RecoverCompletion::GenericLivePool {
             // No resume, no replay. `braid remove` is the only mutation whose
@@ -1617,7 +1629,7 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             // message directs the operator to re-run `braid remove` instead,
             // which handles every shape (2->1 pre-balance, 3->2 / 4->3 with no
             // pre-balance) correctly.
-            replay_raid1_maintenance: false,
+            owed_balance: None,
         },
     };
     actions.push(RecoverWorkAction::Complete(completion));
@@ -1907,15 +1919,17 @@ fn write_replace_phase(
     .map_err(|e| RecoverError::Journal(e.to_string()))
 }
 
-/// Replay the owed post-`label` RAID1 soft balance. An idle btrfs balance is
-/// a precondition: anything else fails closed with the journal kept. The
-/// balance itself runs behind the live restore's gated step, so recover
-/// balances only when the pool can host RAID1 now, and on a skip the caller
-/// still clears the journal, as the live path does.
+/// Replay the RAID1 balance `owed_balance` that the interrupted `label` op
+/// still owes. An idle btrfs balance is a precondition: anything else fails
+/// closed with the journal kept. The balance itself runs behind the live
+/// restore's gated step, so recover balances only when the pool can host
+/// RAID1 now, and on a skip the caller still clears the journal, as the live
+/// path does.
 fn replay_owed_raid1_maintenance<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
     mount_point: &MountPoint,
+    owed_balance: OwedRaid1Balance,
     label: &str,
     progress: ProgressOutput,
 ) -> Result<(), RecoverError> {
@@ -1948,24 +1962,26 @@ fn replay_owed_raid1_maintenance<R: CommandRunner + Sync, F: Filesystem + ?Sized
         }
     }
 
+    let (balance_name, chunk_rule) = match owed_balance {
+        OwedRaid1Balance::Grow => ("RAID1 balance", "rewrite every chunk"),
+        OwedRaid1Balance::RestoreSingle => ("RAID1 soft balance", "skip already-RAID1 chunks"),
+    };
     let outcome = pool::balance_if_pool_hosts_raid1(runner, fs, mount_point, |host| {
         eprint!(
             "{}",
             status_line(
                 StatusTag::Wait,
                 color_enabled,
-                &format!(
-                    "pool: replaying post-{label} RAID1 soft balance (skip already-RAID1 chunks)..."
-                ),
+                &format!("pool: replaying post-{label} {balance_name} ({chunk_rule})..."),
             )
         );
-        pool::pool_balance_raid1_soft(runner, host, progress)?;
+        owed_balance.run(runner, host, progress)?;
         eprint!(
             "{}",
             status_line(
                 StatusTag::Ok,
                 color_enabled,
-                "pool: RAID1 soft balance replay complete",
+                &format!("pool: {balance_name} replay complete"),
             )
         );
         Ok(())
@@ -1974,7 +1990,7 @@ fn replay_owed_raid1_maintenance<R: CommandRunner + Sync, F: Filesystem + ?Sized
     match outcome {
         Raid1BalanceOutcome::Balanced => {}
         Raid1BalanceOutcome::Skipped(Raid1HostRefusal::Degraded) => {
-            pool::emit_raid1_restore_skipped();
+            owed_balance.emit_skipped();
         }
         // A whole one-device pool has no second disk to mirror onto, so the
         // replay skips it silently.
@@ -2383,6 +2399,7 @@ fn execute_add_post_balance_recovery<R: CommandRunner + Sync, F: Filesystem + ?S
     journal: &Journal,
     union: &PoolMembership,
     pool: PoolState,
+    owed_balance: OwedRaid1Balance,
     inhibitor_already_held: bool,
 ) -> Result<(), RecoverError> {
     let live = live_member_uuids(&pool);
@@ -2425,6 +2442,7 @@ fn execute_add_post_balance_recovery<R: CommandRunner + Sync, F: Filesystem + ?S
         runner,
         fs,
         params.config.mount_point(),
+        owed_balance,
         "add",
         params.progress,
     )?;
@@ -2443,6 +2461,7 @@ struct AddPoolReplayCtx<'a> {
     union: &'a PoolMembership,
     targets: &'a LuksUuidMap<journal::AddJournalTarget>,
     pool: PoolState,
+    owed_balance: OwedRaid1Balance,
 }
 
 fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
@@ -2458,6 +2477,7 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
         union,
         targets,
         mut pool,
+        owed_balance,
     } = ctx;
     validate_live_members_allowed(&pool, union)?;
     let mount_point = params.config.mount_point();
@@ -2757,6 +2777,7 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
             &journal,
             union,
             pool,
+            owed_balance,
             true,
         );
     }
@@ -2779,6 +2800,7 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
         &journal,
         union,
         pool,
+        owed_balance,
         false,
     )
 }
@@ -2824,7 +2846,7 @@ fn execute_remove_missing_pool_mutation_recovery<
     journal: &Journal,
     pool: PoolState,
     devid: Devid,
-    restore_raid1_after_commit: bool,
+    owed_balance: Option<OwedRaid1Balance>,
 ) -> Result<(), RecoverError> {
     if pool.missing_devids.contains(&devid) {
         if !live_pool_matches_membership(&pool, &journal.pre_membership)? {
@@ -2870,7 +2892,7 @@ fn execute_remove_missing_pool_mutation_recovery<
             journal: &journal,
             pool,
             devid,
-            restore_raid1_after_commit,
+            owed_balance,
             inhibitor_already_held: false,
         },
     )
@@ -2883,7 +2905,7 @@ struct RemoveMissingPostCtx<'a> {
     journal: &'a Journal,
     pool: PoolState,
     devid: Devid,
-    restore_raid1_after_commit: bool,
+    owed_balance: Option<OwedRaid1Balance>,
     inhibitor_already_held: bool,
 }
 
@@ -2901,7 +2923,7 @@ fn execute_remove_missing_post_maintenance_recovery<
         journal,
         pool,
         devid,
-        restore_raid1_after_commit,
+        owed_balance,
         inhibitor_already_held,
     } = ctx;
     if pool.missing_devids.contains(&devid) {
@@ -2926,7 +2948,7 @@ fn execute_remove_missing_post_maintenance_recovery<
     membership::save_membership(&recovered, params.paths)?;
     eprintln!("pool.json written from committed remove-missing membership.");
 
-    let _guard = if inhibitor_already_held || !restore_raid1_after_commit {
+    let _guard = if inhibitor_already_held || owed_balance.is_none() {
         None
     } else {
         Some(
@@ -2938,11 +2960,12 @@ fn execute_remove_missing_post_maintenance_recovery<
                 })?,
         )
     };
-    if restore_raid1_after_commit {
+    if let Some(owed_balance) = owed_balance {
         replay_owed_raid1_maintenance(
             runner,
             fs,
             params.config.mount_point(),
+            owed_balance,
             "remove-missing",
             params.progress,
         )?;
@@ -3189,7 +3212,7 @@ fn execute_replace_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem
     new_name: &DiskName,
     new_target: &journal::ReplaceJournalTarget,
     source: &journal::ReplaceJournalSource,
-    restore_raid1_after_commit: bool,
+    owed_balance: Option<OwedRaid1Balance>,
 ) -> Result<(), RecoverError> {
     validate_live_members_allowed(&pool, union)?;
     let live = live_member_uuids(&pool);
@@ -3231,7 +3254,7 @@ fn execute_replace_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem
             new_uuid,
             new_name,
             source,
-            restore_raid1_after_commit,
+            owed_balance,
             false,
         );
     }
@@ -3309,7 +3332,7 @@ fn execute_replace_post_maintenance_recovery<R, F, S>(
     new_uuid: &LuksUuid,
     new_name: &DiskName,
     source: &journal::ReplaceJournalSource,
-    restore_raid1_after_commit: bool,
+    owed_balance: Option<OwedRaid1Balance>,
     inhibitor_already_held: bool,
 ) -> Result<(), RecoverError>
 where
@@ -3400,11 +3423,12 @@ where
     crate::pool::pool_resize_device(runner, dev.devid, params.config.mount_point())
         .map_err(|e| RecoverError::Failed(format!("recover replace resize: {e}")))?;
 
-    if restore_raid1_after_commit {
+    if let Some(owed_balance) = owed_balance {
         replay_owed_raid1_maintenance(
             runner,
             fs,
             params.config.mount_point(),
+            owed_balance,
             "replace",
             params.progress,
         )?;
@@ -5076,18 +5100,23 @@ mod tests {
     }
 
     fn bootstrap_pool_mutation_add_journal() -> journal::Journal {
+        bootstrap_pool_mutation_add_journal_for(&["disk1", "disk2"])
+    }
+
+    fn bootstrap_pool_mutation_add_journal_for(names: &[&str]) -> journal::Journal {
         let pre = PoolMembership::empty();
         let target = membership_from(
-            ["disk1", "disk2"]
-                .into_iter()
+            names
+                .iter()
                 .map(|name| {
                     membership_entry(name, &format!("/dev/disk/by-id/virtio-{name}"), None, None)
                 })
                 .collect(),
         );
         let targets = add_targets(
-            ["disk1", "disk2"]
-                .into_iter()
+            names
+                .iter()
+                .copied()
                 .map(|name| {
                     (
                         uuid_for_name(name),
@@ -6049,9 +6078,24 @@ mod tests {
         )
     }
 
-    fn with_balance_replay(runner: MockRunner) -> MockRunner {
+    /// Idle balance plus the soft convert, for replays that owe
+    /// `OwedRaid1Balance::RestoreSingle`. A replay that ran the hard convert
+    /// instead fails on the missing mock.
+    fn with_restore_balance_replay(runner: MockRunner) -> MockRunner {
         with_idle_balance_status(runner).with_output(
             CmdRequest::BtrfsBalanceRaid1Soft {
+                mount_point: MountPoint::new("/mnt/storage".into()),
+            },
+            ok_raw_empty("btrfs balance start"),
+        )
+    }
+
+    /// Idle balance plus the hard convert, for live-add replays that owe
+    /// `OwedRaid1Balance::Grow`. A replay that ran the soft convert instead
+    /// fails on the missing mock.
+    fn with_grow_balance_replay(runner: MockRunner) -> MockRunner {
+        with_idle_balance_status(runner).with_output(
+            CmdRequest::BtrfsBalanceRaid1 {
                 mount_point: MountPoint::new("/mnt/storage".into()),
             },
             ok_raw_empty("btrfs balance start"),
@@ -6081,7 +6125,7 @@ mod tests {
                 (7, acked_disk(false, 77)),
             ],
         );
-        let runner = with_two_disk_pool_probe(with_balance_replay(MockRunner::default()));
+        let runner = with_two_disk_pool_probe(with_restore_balance_replay(MockRunner::default()));
         let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
         let params = f.recover_params().passphrase_file(None).build();
         let plan = recover_work_plan_for_journal(journal);
@@ -6093,7 +6137,7 @@ mod tests {
             &params,
             &plan,
             pool_state_two_disks(),
-            true,
+            Some(OwedRaid1Balance::RestoreSingle),
         )
         .expect("bootstrap recovery should clear acked-stats and finish");
 
@@ -6122,7 +6166,7 @@ mod tests {
         let f = PoolFixture::empty();
         let journal = bootstrap_pool_mutation_add_journal();
         journal::write_journal(&f.paths, &journal).unwrap();
-        let runner = with_two_disk_pool_probe(with_balance_replay(MockRunner::default()));
+        let runner = with_two_disk_pool_probe(with_restore_balance_replay(MockRunner::default()));
         let inhibitor = RequestCountInhibitor::new(runner.clone());
         let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
         let params = f
@@ -6139,7 +6183,7 @@ mod tests {
             &params,
             &plan,
             pool_state_two_disks(),
-            true,
+            Some(OwedRaid1Balance::RestoreSingle),
         )
         .expect("bootstrap recovery should replay owed maintenance under inhibitor");
 
@@ -6210,7 +6254,7 @@ mod tests {
             &params,
             &plan,
             pool_state_two_disks(),
-            false,
+            None,
         )
         .expect("generic remove recovery should finish without inhibitor");
 
@@ -6243,7 +6287,7 @@ mod tests {
         let f = PoolFixture::empty();
         let journal = bootstrap_pool_mutation_add_journal();
         journal::write_journal(&f.paths, &journal).unwrap();
-        let runner = with_balance_replay(MockRunner::default());
+        let runner = with_restore_balance_replay(MockRunner::default());
         let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
         let inhibitor = FailingInhibitor;
         let params = f
@@ -6260,7 +6304,7 @@ mod tests {
             &params,
             &plan,
             pool_state_two_disks(),
-            true,
+            Some(OwedRaid1Balance::RestoreSingle),
         )
         .unwrap_err();
 
@@ -6342,7 +6386,7 @@ mod tests {
     }
 
     fn replay_returned_disk2_runner_for_devid4() -> MockRunner {
-        with_balance_replay(with_disk1_disk2_devid4_pool_probe(
+        with_grow_balance_replay(with_disk1_disk2_devid4_pool_probe(
             replay_returned_disk2_runner_base(),
         ))
     }
@@ -6367,7 +6411,7 @@ mod tests {
     }
 
     fn replay_returned_disk2_runner_for_drifted_devid4() -> MockRunner {
-        with_balance_replay(with_disk1_drifted_disk2_devid4_pool_probe(
+        with_grow_balance_replay(with_disk1_drifted_disk2_devid4_pool_probe(
             replay_returned_disk2_runner_base(),
         ))
     }
@@ -6423,6 +6467,7 @@ mod tests {
                 union: &union,
                 targets,
                 pool: pool_state_one_disk(),
+                owed_balance: OwedRaid1Balance::Grow,
             },
         )
         .expect("live-add replay should finish with one prompt");
@@ -6485,6 +6530,7 @@ mod tests {
                 union: &union,
                 targets,
                 pool: pool_state_one_disk(),
+                owed_balance: OwedRaid1Balance::Grow,
             },
         )
         .expect("live-add replay should finish");
@@ -6548,6 +6594,7 @@ mod tests {
                 union: &union,
                 targets,
                 pool: pool_state_one_disk(),
+                owed_balance: OwedRaid1Balance::Grow,
             },
         )
         .expect("live-add replay should tolerate mapper drift");
@@ -6593,7 +6640,8 @@ mod tests {
             &f.paths,
             &[(1, control.clone()), (4, acked_disk(false, 44))],
         );
-        let runner = with_disk1_disk2_devid4_pool_probe(with_balance_replay(MockRunner::default()));
+        let runner =
+            with_disk1_disk2_devid4_pool_probe(with_grow_balance_replay(MockRunner::default()));
         let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
         let params = f.recover_params().passphrase_file(None).build();
 
@@ -6610,6 +6658,7 @@ mod tests {
                 union: &union,
                 targets,
                 pool: pool_state_disk1_and_disk2_devid4(),
+                owed_balance: OwedRaid1Balance::Grow,
             },
         )
         .expect("all-live add recovery should finish");
@@ -6653,8 +6702,9 @@ mod tests {
             &f.paths,
             &[(1, control.clone()), (4, acked_disk(false, 44))],
         );
-        let runner =
-            with_disk1_drifted_disk2_devid4_pool_probe(with_balance_replay(MockRunner::default()));
+        let runner = with_disk1_drifted_disk2_devid4_pool_probe(with_grow_balance_replay(
+            MockRunner::default(),
+        ));
         let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
         let params = f.recover_params().passphrase_file(None).build();
 
@@ -6671,6 +6721,7 @@ mod tests {
                 union: &union,
                 targets,
                 pool: pool_state_disk1_and_drifted_disk2_devid4(),
+                owed_balance: OwedRaid1Balance::Grow,
             },
         )
         .expect("all-live add recovery should tolerate mapper drift");
@@ -6720,7 +6771,7 @@ mod tests {
                 (5, acked_disk(false, 55)),
             ],
         );
-        let runner = with_balance_replay(with_disk1_disk2_devid4_disk3_devid5_pool_probe(
+        let runner = with_grow_balance_replay(with_disk1_disk2_devid4_disk3_devid5_pool_probe(
             MockRunner::default()
                 .with_output(
                     CmdRequest::CryptsetupLuksUuid {
@@ -6806,6 +6857,7 @@ mod tests {
                 union: &union,
                 targets,
                 pool: pool_state_disk1_and_disk2_devid4(),
+                owed_balance: OwedRaid1Balance::Grow,
             },
         )
         .expect("mixed add recovery should finish");
@@ -7010,6 +7062,7 @@ mod tests {
                 union: &union,
                 targets,
                 pool: pool_state_one_disk(),
+                owed_balance: OwedRaid1Balance::Grow,
             },
         )
         .unwrap_err();
@@ -7074,7 +7127,7 @@ mod tests {
             &params,
             &plan,
             pool_state_one_disk(),
-            false,
+            None,
         )
         .expect("committed remove recovery should finish");
 
@@ -7113,7 +7166,7 @@ mod tests {
             &params,
             &plan,
             pool_state_disk1_with_null_underlying_disk2(),
-            false,
+            None,
         )
         .expect("uncommitted remove recovery should finish");
 
@@ -7151,7 +7204,7 @@ mod tests {
             &params,
             &plan,
             pool_state_one_disk(),
-            false,
+            None,
         )
         .expect("remove recovery should tolerate missing target devid");
 
@@ -7186,7 +7239,7 @@ mod tests {
             &params,
             &plan,
             pool_state_one_disk(),
-            false,
+            None,
         )
         .expect("corrupt acked-stats should warn, not fail remove recovery");
 
@@ -7235,7 +7288,7 @@ mod tests {
                 journal: &journal,
                 pool: pool_state_one_disk(),
                 devid: Devid::new(2),
-                restore_raid1_after_commit: false,
+                owed_balance: None,
                 inhibitor_already_held: false,
             },
         )
@@ -7280,7 +7333,7 @@ mod tests {
                 journal: &journal,
                 pool: pool_state_one_disk(),
                 devid: Devid::new(2),
-                restore_raid1_after_commit: false,
+                owed_balance: None,
                 inhibitor_already_held: false,
             },
         )
@@ -7320,7 +7373,7 @@ mod tests {
             &params,
             &plan,
             pool_state_two_disks(),
-            true,
+            Some(OwedRaid1Balance::RestoreSingle),
         )
         .unwrap_err();
 
@@ -7373,6 +7426,7 @@ mod tests {
                 union: &union,
                 targets,
                 pool: pool_state_one_disk(),
+                owed_balance: OwedRaid1Balance::Grow,
             },
         )
         .unwrap_err();
@@ -7433,7 +7487,7 @@ mod tests {
             &journal,
             pool_state_disk1_with_missing_devid2(),
             Devid::new(2),
-            true,
+            Some(OwedRaid1Balance::RestoreSingle),
         )
         .unwrap_err();
 
@@ -7484,7 +7538,7 @@ mod tests {
             &journal,
             pool,
             Devid::new(99),
-            true,
+            Some(OwedRaid1Balance::RestoreSingle),
         )
         .unwrap_err();
 
@@ -8301,6 +8355,7 @@ mod tests {
                 union: &union,
                 targets,
                 pool: pool_state_one_disk(),
+                owed_balance: OwedRaid1Balance::Grow,
             },
         )
         .unwrap_err();
@@ -8373,6 +8428,7 @@ mod tests {
                 union: &union,
                 targets,
                 pool,
+                owed_balance: OwedRaid1Balance::Grow,
             },
         )
         .unwrap_err();
@@ -8442,6 +8498,7 @@ mod tests {
                 union: &union,
                 targets,
                 pool: pool_state_one_disk(),
+                owed_balance: OwedRaid1Balance::Grow,
             },
         )
         .unwrap_err();
@@ -8479,7 +8536,7 @@ mod tests {
         let journal = recoverable_pool_mutation_add_journal();
         journal::write_journal(&f.paths, &journal).unwrap();
 
-        let inner = with_balance_replay(with_two_disk_pool_probe(
+        let inner = with_grow_balance_replay(with_two_disk_pool_probe(
             MockRunner::default()
                 .with_output(mountpoint_fail().0, mountpoint_fail().1)
                 .with_output(
@@ -8612,7 +8669,7 @@ mod tests {
             _ => unreachable!("test journal is Add"),
         };
 
-        let inner = with_balance_replay(with_two_disk_pool_probe(
+        let inner = with_grow_balance_replay(with_two_disk_pool_probe(
             MockRunner::default()
                 .with_output(
                     CmdRequest::CryptsetupLuksUuid {
@@ -8668,6 +8725,7 @@ mod tests {
                 union: &union,
                 targets,
                 pool: pool_state_one_disk(),
+                owed_balance: OwedRaid1Balance::Grow,
             },
         )
         .expect("committed fresh target should be adopted without replay");
@@ -8694,7 +8752,7 @@ mod tests {
         assert!(
             requests
                 .iter()
-                .any(|r| matches!(r, CmdRequest::BtrfsBalanceRaid1Soft { .. })),
+                .any(|r| matches!(r, CmdRequest::BtrfsBalanceRaid1 { .. })),
             "adopted committed target should still run post-add balance replay"
         );
         assert!(!f.paths.pending_op_json().exists());
@@ -8761,7 +8819,7 @@ mod tests {
             _ => unreachable!("test journal is Add"),
         };
 
-        let runner = with_balance_replay(with_two_disk_pool_probe(
+        let runner = with_grow_balance_replay(with_two_disk_pool_probe(
             MockRunner::default()
                 .with_output(
                     CmdRequest::CryptsetupLuksUuid {
@@ -8834,6 +8892,7 @@ mod tests {
                 union: &union,
                 targets,
                 pool: pool_state_one_disk(),
+                owed_balance: OwedRaid1Balance::Grow,
             },
         )
         .expect("returned-disk replay should complete recovery");
@@ -8915,7 +8974,7 @@ mod tests {
             _ => unreachable!("test journal is Add"),
         };
 
-        let runner = with_balance_replay(with_two_disk_pool_probe(
+        let runner = with_grow_balance_replay(with_two_disk_pool_probe(
             MockRunner::default()
                 .with_output(
                     CmdRequest::CryptsetupLuksUuid {
@@ -9017,6 +9076,7 @@ mod tests {
                 union: &union,
                 targets,
                 pool: pool_state_one_disk(),
+                owed_balance: OwedRaid1Balance::Grow,
             },
         )
         .expect("replay with enroll_key_file should complete");
@@ -9268,7 +9328,7 @@ mod tests {
             OpKind::Add { targets, .. } => targets,
             _ => unreachable!("test journal is Add"),
         };
-        let runner = with_balance_replay(with_two_disk_pool_probe(
+        let runner = with_grow_balance_replay(with_two_disk_pool_probe(
             MockRunner::default()
                 .with_output(
                     CmdRequest::CryptsetupLuksUuid {
@@ -9312,6 +9372,7 @@ mod tests {
                 union: &union,
                 targets,
                 pool: pool_state_one_disk(),
+                owed_balance: OwedRaid1Balance::Grow,
             },
         )
         .expect("already-committed target should advance to balance recovery");
@@ -9387,6 +9448,7 @@ mod tests {
                 union: &union,
                 targets,
                 pool: pool_state_three_disks(),
+                owed_balance: OwedRaid1Balance::Grow,
             },
         )
         .unwrap_err();
@@ -9413,7 +9475,9 @@ mod tests {
         assert!(
             !runner.requests().iter().any(|r| matches!(
                 r,
-                CmdRequest::BtrfsBalanceStatus { .. } | CmdRequest::BtrfsBalanceRaid1Soft { .. }
+                CmdRequest::BtrfsBalanceStatus { .. }
+                    | CmdRequest::BtrfsBalanceRaid1 { .. }
+                    | CmdRequest::BtrfsBalanceRaid1Soft { .. }
             )),
             "inhibitor failure must stop before balance commands"
         );
@@ -9510,6 +9574,7 @@ mod tests {
                     union: &union,
                     targets,
                     pool: pool_state_one_disk(),
+                    owed_balance: OwedRaid1Balance::Grow,
                 },
             )
             .unwrap_err();
@@ -9678,7 +9743,7 @@ mod tests {
             _ => unreachable!("test journal is Add"),
         };
 
-        let inner = with_balance_replay(with_two_disk_pool_probe(
+        let inner = with_grow_balance_replay(with_two_disk_pool_probe(
             MockRunner::default()
                 .with_output(
                     CmdRequest::CryptsetupLuksUuid {
@@ -9757,6 +9822,7 @@ mod tests {
                 union: &union,
                 targets,
                 pool: pool_state_one_disk(),
+                owed_balance: OwedRaid1Balance::Grow,
             },
         )
         .expect("fresh replay should use stored format options");
@@ -9824,6 +9890,7 @@ mod tests {
                 union: &union,
                 targets,
                 pool: pool_state_one_disk(),
+                owed_balance: OwedRaid1Balance::Grow,
             },
         )
         .expect_err("a stray braid-disk2 mapper must refuse the fresh replay");
@@ -9863,7 +9930,7 @@ mod tests {
             OpKind::Add { targets, .. } => targets,
             _ => unreachable!("test journal is Add"),
         };
-        let inner = with_balance_replay(with_two_disk_pool_probe(
+        let inner = with_grow_balance_replay(with_two_disk_pool_probe(
             MockRunner::default()
                 .with_output(
                     CmdRequest::CryptsetupLuksUuid {
@@ -9952,6 +10019,7 @@ mod tests {
                 union: &union,
                 targets,
                 pool: pool_state_one_disk(),
+                owed_balance: OwedRaid1Balance::Grow,
             },
         )
         .expect("fresh replay should continue after preexisting LUKS format");
@@ -10152,6 +10220,7 @@ mod tests {
                     union: &union,
                     targets,
                     pool: pool_state_one_disk(),
+                    owed_balance: OwedRaid1Balance::Grow,
                 },
             )
             .unwrap_err();
@@ -10244,6 +10313,7 @@ mod tests {
                 union: &union,
                 targets,
                 pool: pool_state_one_disk(),
+                owed_balance: OwedRaid1Balance::Grow,
             },
         )
         .unwrap_err();
@@ -10283,7 +10353,7 @@ mod tests {
         let journal = committed_two_disk_add_journal();
         journal::write_journal(&f.paths, &journal).unwrap();
         let union = test_recovery_admission_membership(&journal);
-        let runner = with_two_disk_pool_probe(with_balance_replay(MockRunner::default()));
+        let runner = with_two_disk_pool_probe(with_grow_balance_replay(MockRunner::default()));
         let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
         let params = f
             .recover_params()
@@ -10299,6 +10369,7 @@ mod tests {
             &journal,
             &union,
             pool_state_two_disks(),
+            OwedRaid1Balance::Grow,
             false,
         )
         .expect("post-add recovery should only finish balance work");
@@ -10343,6 +10414,7 @@ mod tests {
             &journal,
             &union,
             pool_state_one_disk(),
+            OwedRaid1Balance::Grow,
             false,
         )
         .unwrap_err();
@@ -10385,6 +10457,7 @@ mod tests {
                 union: &union,
                 targets,
                 pool: pool_state_one_disk(),
+                owed_balance: OwedRaid1Balance::Grow,
             },
         )
         .unwrap_err();
@@ -10426,6 +10499,7 @@ mod tests {
             &journal,
             &union,
             pool_state_two_disks(),
+            OwedRaid1Balance::Grow,
             false,
         )
         .unwrap_err();
@@ -10436,11 +10510,79 @@ mod tests {
         assert!(
             !runner.requests().iter().any(|r| matches!(
                 r,
-                CmdRequest::BtrfsBalanceStatus { .. } | CmdRequest::BtrfsBalanceRaid1Soft { .. }
+                CmdRequest::BtrfsBalanceStatus { .. }
+                    | CmdRequest::BtrfsBalanceRaid1 { .. }
+                    | CmdRequest::BtrfsBalanceRaid1Soft { .. }
             )),
             "post-add inhibitor failure must stop before balance"
         );
         assert!(f.paths.pending_op_json().exists());
+    }
+
+    // Intent: recover finishes an interrupted 3rd-disk add with the hard
+    //   RAID1 convert live add runs, not the soft one.
+    // Why it exists: on an already-RAID1 pool every chunk is raid1, so a
+    //   soft convert skips them all and leaves the new disk empty. Recover
+    //   then cleared the journal as if the add had finished, and a nearly
+    //   full pool kept failing writes (hunt finding 261022-1230-008).
+    // Scenario: a 2-disk pool grows to 3 disks. btrfs device add committed
+    //   disk3, then the post-add balance was cut off. The pool is mounted
+    //   and its balance is idle when the operator runs recover.
+    #[test]
+    fn cmd_recover_post_add_replays_hard_convert_onto_third_disk() {
+        let f = PoolFixture::empty();
+        let journal = two_disk_journal();
+        journal::write_journal(&f.paths, &journal).unwrap();
+        let (mp_req, mp_out) = mountpoint_ok();
+        // Both converts are mocked, so the run completes whichever one
+        // recover picks and the assertions below name the one it picked.
+        let runner = with_three_disk_pool_probe(with_idle_balance_status(
+            MockRunner::default().with_output(mp_req, mp_out),
+        ))
+        .with_output(
+            CmdRequest::BtrfsBalanceRaid1 {
+                mount_point: MountPoint::new("/mnt/storage".into()),
+            },
+            ok_raw_empty("btrfs balance start"),
+        )
+        .with_output(
+            CmdRequest::BtrfsBalanceRaid1Soft {
+                mount_point: MountPoint::new("/mnt/storage".into()),
+            },
+            ok_raw_empty("btrfs balance start"),
+        );
+        let fs = MockFs::new(&[])
+            .with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111")
+            .with_luks_dm("braid-disk2", "22222222-2222-2222-2222-222222222222")
+            .with_luks_dm("braid-disk3", "33333333-3333-3333-3333-333333333333");
+        let resolver = resolver_for(&[
+            ("/dev/vda", "virtio-disk1"),
+            ("/dev/vdb", "virtio-disk2"),
+            ("/dev/vdc", "virtio-disk3"),
+        ]);
+
+        cmd_recover(
+            &runner,
+            &fs,
+            &resolver,
+            &f.recover_params().passphrase_file(None).build(),
+        )
+        .expect("post-add recovery should finish the owed balance");
+
+        let requests = runner.requests();
+        assert!(
+            requests
+                .iter()
+                .any(|r| matches!(r, CmdRequest::BtrfsBalanceRaid1 { .. })),
+            "post-add recovery must run the hard RAID1 convert live add runs: {requests:?}"
+        );
+        assert!(
+            !requests
+                .iter()
+                .any(|r| matches!(r, CmdRequest::BtrfsBalanceRaid1Soft { .. })),
+            "a soft convert skips every raid1 chunk and leaves disk3 empty: {requests:?}"
+        );
+        assert!(!f.paths.pending_op_json().exists());
     }
 
     // Intent: RemoveMissing::PoolMutation recovery treats the primary
@@ -10454,7 +10596,7 @@ mod tests {
         let f = PoolFixture::empty();
         let journal = remove_missing_journal_two_survivors();
         journal::write_journal(&f.paths, &journal).unwrap();
-        let runner = with_two_disk_pool_probe(with_balance_replay(MockRunner::default()));
+        let runner = with_two_disk_pool_probe(with_restore_balance_replay(MockRunner::default()));
         let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
         let params = f
             .recover_params()
@@ -10470,7 +10612,7 @@ mod tests {
             &journal,
             pool_state_two_disks(),
             Devid::new(3),
-            true,
+            Some(OwedRaid1Balance::RestoreSingle),
         )
         .expect("committed remove-missing should finish post maintenance");
 
@@ -10524,7 +10666,7 @@ mod tests {
             &journal,
             pool_state_disk1_with_missing_devid2(),
             Devid::new(2),
-            true,
+            Some(OwedRaid1Balance::RestoreSingle),
         )
         .expect("uncommitted remove-missing should clear journal after restoring pre state");
 
@@ -10556,7 +10698,7 @@ mod tests {
             &journal,
             pool_state_two_disks(),
             Devid::new(2),
-            true,
+            Some(OwedRaid1Balance::RestoreSingle),
         )
         .unwrap_err();
 
@@ -10603,7 +10745,7 @@ mod tests {
                 journal: &journal,
                 pool: pool_state_one_disk(),
                 devid: Devid::new(2),
-                restore_raid1_after_commit: false,
+                owed_balance: None,
                 inhibitor_already_held: false,
             },
         )
@@ -10648,7 +10790,7 @@ mod tests {
                 journal: &journal,
                 pool: pool_state_one_disk(),
                 devid: Devid::new(2),
-                restore_raid1_after_commit: true,
+                owed_balance: Some(OwedRaid1Balance::RestoreSingle),
                 inhibitor_already_held: false,
             },
         )
@@ -10718,7 +10860,7 @@ mod tests {
             &disk_name("new"),
             new_target,
             source,
-            false,
+            None,
         )
         .expect("committed replace should finish post maintenance");
 
@@ -10801,7 +10943,7 @@ mod tests {
             &disk_name("new"),
             new_target,
             source,
-            false,
+            None,
         )
         .expect("uncommitted replace should restore pre state and clear journal");
 
@@ -10861,7 +11003,7 @@ mod tests {
             &disk_name("new"),
             new_target,
             source,
-            false,
+            None,
         )
         .unwrap_err();
 
@@ -10980,7 +11122,7 @@ mod tests {
             &disk_name("new"),
             new_target,
             source,
-            false,
+            None,
         )
         .expect("fresh prepared target should be reconciled without replace start");
 
@@ -11087,7 +11229,7 @@ mod tests {
             &disk_name("new"),
             new_target,
             source,
-            false,
+            None,
         )
         .unwrap_err();
 
@@ -11151,7 +11293,7 @@ mod tests {
             &disk_name("new"),
             new_target,
             source,
-            false,
+            None,
         )
         .unwrap_err();
 
@@ -11251,7 +11393,7 @@ mod tests {
             &disk_name("new"),
             new_target,
             source,
-            false,
+            None,
         )
         .unwrap_err();
 
@@ -11373,7 +11515,7 @@ mod tests {
             &disk_name("new"),
             new_target,
             source,
-            false,
+            None,
         )
         .unwrap_err();
 
@@ -11460,7 +11602,7 @@ mod tests {
             &disk_name("new"),
             new_target,
             source,
-            false,
+            None,
         )
         .unwrap_err();
 
@@ -11582,7 +11724,7 @@ mod tests {
             &disk_name("new"),
             new_target,
             source,
-            false,
+            None,
         )
         .unwrap_err();
 
@@ -11720,7 +11862,7 @@ mod tests {
             &disk_name("new"),
             new_target,
             source,
-            false,
+            None,
         )
         .expect("happy path replays enrollment + clears journal");
 
@@ -11790,7 +11932,7 @@ mod tests {
             &uuid_for_name("new"),
             &disk_name("new"),
             source,
-            false,
+            None,
             false,
         )
         .expect("post-replace maintenance should resize and clear");
@@ -11848,7 +11990,7 @@ mod tests {
             &uuid_for_name("new"),
             &disk_name("new"),
             source,
-            false,
+            None,
             false,
         )
     }
@@ -12028,7 +12170,7 @@ mod tests {
                 &uuid_for_name("new"),
                 &disk_name("new"),
                 source,
-                false,
+                None,
                 false,
             )
             .expect("post-replace maintenance should close after retry and resize");
@@ -12140,7 +12282,7 @@ mod tests {
                 &uuid_for_name("new"),
                 &disk_name("new"),
                 source,
-                false,
+                None,
                 false,
             )
             .expect("drifted old mapper should close and finish recovery");
@@ -12222,7 +12364,7 @@ mod tests {
                 &uuid_for_name("new"),
                 &disk_name("new"),
                 source,
-                false,
+                None,
                 false,
             )
             .expect("inactive old mapper should skip close and finish recovery");
@@ -12309,7 +12451,7 @@ mod tests {
                 &uuid_for_name("new"),
                 &disk_name("new"),
                 source,
-                false,
+                None,
                 false,
             )
             .expect("foreign old mapper should skip close and finish recovery");
@@ -12408,7 +12550,7 @@ mod tests {
             &uuid_for_name("new"),
             &disk_name("new"),
             source,
-            false,
+            None,
             false,
         )
         .expect("owned old mapper should close even without a path node");
@@ -12443,7 +12585,7 @@ mod tests {
         );
         journal::write_journal(&f.paths, &journal).unwrap();
         // The replay re-probes the committed pool: disk1 plus new.
-        let runner = with_balance_replay(MockRunner::default())
+        let runner = with_restore_balance_replay(MockRunner::default())
             .with_output(
                 CmdRequest::BtrfsFilesystemResize {
                     devid: Devid::new(2),
@@ -12492,7 +12634,7 @@ mod tests {
             &uuid_for_name("new"),
             &disk_name("new"),
             source,
-            true,
+            Some(OwedRaid1Balance::RestoreSingle),
             false,
         )
         .expect("post-replace maintenance should resize, balance, and clear");
@@ -12879,7 +13021,7 @@ mod tests {
             &uuid_for_name("new"),
             &disk_name("new"),
             source,
-            true,
+            Some(OwedRaid1Balance::RestoreSingle),
             false,
         )
         .unwrap_err();
@@ -13722,7 +13864,7 @@ mod tests {
                 cryptsetup_uuid_ok("/dev/vdb", "22222222-2222-2222-2222-222222222222"),
             )
             // Idle gate + replay: post-Add recovery probes btrfs balance state
-            // before the owed soft RAID1 balance.
+            // before the owed hard RAID1 convert.
             .with_output(
                 CmdRequest::BtrfsBalanceStatus {
                     mount_point: MountPoint::new("/mnt/storage".into()),
@@ -13733,7 +13875,7 @@ mod tests {
                 ),
             )
             .with_output(
-                CmdRequest::BtrfsBalanceRaid1Soft {
+                CmdRequest::BtrfsBalanceRaid1 {
                     mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 ok_raw_empty("btrfs balance start"),
@@ -13883,7 +14025,7 @@ mod tests {
                 cryptsetup_uuid_ok("/dev/vdb", "22222222-2222-2222-2222-222222222222"),
             )
             // Idle gate + replay: post-Add recovery probes btrfs balance state
-            // before the owed soft RAID1 balance.
+            // before the owed hard RAID1 convert.
             .with_output(
                 CmdRequest::BtrfsBalanceStatus {
                     mount_point: MountPoint::new("/mnt/storage".into()),
@@ -13894,7 +14036,7 @@ mod tests {
                 ),
             )
             .with_output(
-                CmdRequest::BtrfsBalanceRaid1Soft {
+                CmdRequest::BtrfsBalanceRaid1 {
                     mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 ok_raw_empty("btrfs balance start"),
@@ -15741,7 +15883,7 @@ mod tests {
                 cryptsetup_uuid_ok("/dev/vdb", "22222222-2222-2222-2222-222222222222"),
             )
             // Idle gate + replay: post-Add recovery probes btrfs balance state
-            // before the owed soft RAID1 balance.
+            // before the owed hard RAID1 convert.
             .with_output(
                 CmdRequest::BtrfsBalanceStatus {
                     mount_point: MountPoint::new("/mnt/storage".into()),
@@ -15752,7 +15894,7 @@ mod tests {
                 ),
             )
             .with_output(
-                CmdRequest::BtrfsBalanceRaid1Soft {
+                CmdRequest::BtrfsBalanceRaid1 {
                     mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 ok_raw_empty("btrfs balance start"),
@@ -16046,7 +16188,7 @@ mod tests {
                 ),
             )
             .with_output(
-                CmdRequest::BtrfsBalanceRaid1Soft {
+                CmdRequest::BtrfsBalanceRaid1 {
                     mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 ok_raw_empty("btrfs balance start"),
@@ -16575,7 +16717,7 @@ mod tests {
                 cryptsetup_uuid_ok("/dev/vdb", "22222222-2222-2222-2222-222222222222"),
             )
             // Idle gate + replay: post-Add recovery probes btrfs balance state
-            // before the owed soft RAID1 balance.
+            // before the owed hard RAID1 convert.
             .with_output(
                 CmdRequest::BtrfsBalanceStatus {
                     mount_point: MountPoint::new("/mnt/storage".into()),
@@ -16586,7 +16728,7 @@ mod tests {
                 ),
             )
             .with_output(
-                CmdRequest::BtrfsBalanceRaid1Soft {
+                CmdRequest::BtrfsBalanceRaid1 {
                     mount_point: MountPoint::new("/mnt/storage".into()),
                 },
                 ok_raw_empty("btrfs balance start"),
@@ -17942,7 +18084,7 @@ mod tests {
 
     // Intent: owed RAID1 recovery fails closed for paused, running, and unknown
     // btrfs balance states.
-    // Why it exists: replaying owed soft RAID1 maintenance on top of a
+    // Why it exists: replaying owed RAID1 maintenance on top of a
     // crash-paused or otherwise non-idle balance can make the kernel underflow
     // block-group accounting, so recover must preserve the journal for manual
     // inspection instead of resuming or starting balance work.
@@ -17995,10 +18137,11 @@ mod tests {
             );
             let requests = runner.requests();
             assert!(
-                !requests
-                    .iter()
-                    .any(|r| matches!(r, CmdRequest::BtrfsBalanceRaid1Soft { .. })),
-                "{state} balance state must fail before soft RAID1 replay: {requests:?}"
+                !requests.iter().any(|r| matches!(
+                    r,
+                    CmdRequest::BtrfsBalanceRaid1 { .. } | CmdRequest::BtrfsBalanceRaid1Soft { .. }
+                )),
+                "{state} balance state must fail before RAID1 replay: {requests:?}"
             );
             assert!(
                 requests
@@ -18177,7 +18320,7 @@ mod tests {
         journal::write_journal(&f.paths, &journal).unwrap();
 
         let (mp_req, mp_out) = mountpoint_ok();
-        let runner = with_balance_replay(
+        let runner = with_restore_balance_replay(
             MockRunner::default()
                 // mountpoint check -> already mounted (skips the mount cycle)
                 .with_output(mp_req, mp_out)
@@ -18259,6 +18402,65 @@ mod tests {
             !f.paths.pending_op_json().exists(),
             "journal must clear after successful maintenance replay"
         );
+    }
+
+    // Intent: a 1-disk bootstrap add owes no RAID1 balance, so recover
+    //   neither previews nor runs one.
+    // Why it exists: plain mkfs on one disk cannot make RAID1. Recover used
+    //   to preview a balance row, take a sleep inhibitor and check the balance
+    //   state for a replay its gate then skipped.
+    // Scenario: a first-ever `braid add` of one disk crashed after mkfs and
+    //   mount. The pool is mounted on that disk when the operator runs
+    //   recover.
+    #[test]
+    fn cmd_recover_one_disk_bootstrap_add_owes_no_balance() {
+        let journal = bootstrap_pool_mutation_add_journal_for(&["disk1"]);
+        let fs =
+            || MockFs::new(&[]).with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111");
+
+        let rendered = render_recover_dry_run(
+            journal.clone(),
+            fs(),
+            already_mounted_one_disk_runner(),
+            false,
+        );
+        assert!(
+            !rendered.contains("check btrfs balance status")
+                && !rendered.contains("-dconvert=raid1"),
+            "a 1-disk bootstrap must preview no balance replay: {rendered:?}"
+        );
+
+        let f = PoolFixture::empty();
+        journal::write_journal(&f.paths, &journal).unwrap();
+        let runner = already_mounted_one_disk_runner();
+        let inhibitor = RequestCountInhibitor::new(runner.clone());
+        cmd_recover(
+            &runner,
+            &fs(),
+            &resolver_for(&[("/dev/vda", "virtio-disk1")]),
+            &f.recover_params()
+                .passphrase_file(None)
+                .sleep_inhibitor(&inhibitor)
+                .build(),
+        )
+        .expect("1-disk bootstrap recovery should finish");
+
+        let requests = runner.requests();
+        assert!(
+            !requests.iter().any(|r| matches!(
+                r,
+                CmdRequest::BtrfsBalanceStatus { .. }
+                    | CmdRequest::BtrfsBalanceRaid1 { .. }
+                    | CmdRequest::BtrfsBalanceRaid1Soft { .. }
+            )),
+            "a 1-disk bootstrap must issue no balance work: {requests:?}"
+        );
+        assert_eq!(
+            inhibitor.acquire_count(),
+            0,
+            "a 1-disk bootstrap with no owed balance must not take a sleep inhibitor"
+        );
+        assert!(!f.paths.pending_op_json().exists());
     }
 
     // Intent
@@ -19162,7 +19364,7 @@ mod tests {
              \tdevid    3 size 0 used 0 path MISSING\n",
         );
         let (mp_req, mp_out) = mountpoint_ok();
-        let runner = with_balance_replay(MockRunner::default())
+        let runner = with_restore_balance_replay(MockRunner::default())
             .with_output(mp_req, mp_out)
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
@@ -19227,7 +19429,7 @@ mod tests {
              \tdevid    3 size 10.00GiB used 2.00GiB path /dev/mapper/braid-disk3\n",
         );
         let (mp_req, mp_out) = mountpoint_ok();
-        let runner = with_balance_replay(MockRunner::default())
+        let runner = with_restore_balance_replay(MockRunner::default())
             .with_output(mp_req, mp_out)
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
@@ -19309,7 +19511,7 @@ mod tests {
     /// whether the owed replay runs. `show` places disk3.
     fn owed_replay_gate_runner(show: RawCommandOutput) -> MockRunner {
         let (mp_req, mp_out) = mountpoint_ok();
-        with_balance_replay(MockRunner::default())
+        with_restore_balance_replay(MockRunner::default())
             .with_output(mp_req, mp_out)
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
@@ -21020,13 +21222,14 @@ mod tests {
 
     /* Intent
      * Verify add dry-run previews post-mutation balance replay as conditional
-     * placeholders without command lines.
+     * placeholders without command lines, naming the hard convert live add
+     * runs.
      *
      * Why it exists
-     * Execution only resumes a paused balance when a post-mount probe finds
-     * one, and only runs the soft RAID1 replay when the live pool has at
-     * least two devices. Dry-run must describe the conditional work without
-     * promising command argv rows.
+     * Execution replays the balance only after an idle balance-status check
+     * and only when the live pool can host RAID1. Dry-run must describe the
+     * conditional work without promising command argv rows, and must name
+     * the same convert the replay runs.
      *
      * Scenario
      * Interrupted add with a not-mounted degraded open plan.
@@ -21049,21 +21252,25 @@ mod tests {
         let status_pos = rendered
             .find("check btrfs balance status /mnt/storage is idle before RAID1 replay")
             .unwrap_or_else(|| panic!("missing balance status placeholder: {rendered:?}"));
-        let soft_pos = rendered
-            .find("btrfs balance -dconvert=raid1,soft -mconvert=raid1,soft /mnt/storage (skipped if the pool is degraded or has <2 devices)")
-            .unwrap_or_else(|| panic!("missing soft balance placeholder: {rendered:?}"));
+        let balance_pos = rendered
+            .find("btrfs balance -dconvert=raid1 -mconvert=raid1 /mnt/storage (skipped if the pool is degraded or has <2 devices)")
+            .unwrap_or_else(|| panic!("missing hard balance placeholder: {rendered:?}"));
         let clear_pos = rendered
             .find("clear pending-op.json")
             .unwrap_or_else(|| panic!("missing clear step: {rendered:?}"));
 
         assert!(
-            write_pos < status_pos && status_pos < soft_pos && soft_pos < clear_pos,
+            write_pos < status_pos && status_pos < balance_pos && balance_pos < clear_pos,
             "post-mutation placeholders must sit between write and clear: {rendered:?}",
         );
         assert!(
             !rendered.contains("$ btrfs balance status")
-                && !rendered.contains("$ btrfs balance start --enqueue -dconvert=raid1,soft"),
+                && !rendered.contains("$ btrfs balance start"),
             "conditional placeholders must not render btrfs balance commands: {rendered:?}",
+        );
+        assert!(
+            !rendered.contains("-dconvert=raid1,soft"),
+            "add recovery must not preview the soft convert: {rendered:?}",
         );
     }
 
@@ -21082,7 +21289,7 @@ mod tests {
         assert!(
             rendered.contains("check btrfs balance status /mnt/storage is idle before RAID1 replay")
                 && rendered.contains(
-                    "btrfs balance -dconvert=raid1,soft -mconvert=raid1,soft /mnt/storage (skipped if the pool is degraded or has <2 devices)"
+                    "btrfs balance -dconvert=raid1 -mconvert=raid1 /mnt/storage (skipped if the pool is degraded or has <2 devices)"
                 ),
             "post-add preview should include only balance completion work: {rendered:?}",
         );
@@ -21127,8 +21334,7 @@ mod tests {
             "conditional resize placeholder must not render a command: {rendered:?}",
         );
         assert!(
-            !rendered.contains("$ btrfs balance status")
-                && !rendered.contains("-dconvert=raid1,soft"),
+            !rendered.contains("$ btrfs balance status") && !rendered.contains("-dconvert=raid1"),
             "live-source replace preview must not include RAID1 balance replay: {rendered:?}",
         );
     }
@@ -21190,7 +21396,7 @@ mod tests {
 
         assert!(
             !rendered.contains("check btrfs balance status")
-                && !rendered.contains("-dconvert=raid1,soft")
+                && !rendered.contains("-dconvert=raid1")
                 && !rendered.contains("btrfs filesystem resize <devid>:max"),
             "remove preview should omit replay placeholders: {rendered:?}",
         );

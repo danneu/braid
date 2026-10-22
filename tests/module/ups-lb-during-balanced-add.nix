@@ -6,7 +6,7 @@
 # 1 to >=2 devices) is in flight, reboots, and asserts that
 # `braid recover` returns the pool to a fully-RAID1 state. The
 # recovery path exercises the M1 remediation in `cli/src/recover.rs`
-# -- replaying the post-Add soft RAID1 balance to drain any chunks
+# -- replaying the post-Add hard RAID1 convert to drain any chunks
 # left non-RAID1 by the cancelled balance worker.
 #
 # This is M6 of plans/impl/2026-04-21-forced-shutdown-recovery-proof.md and is one

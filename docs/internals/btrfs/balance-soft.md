@@ -29,16 +29,19 @@ and soft in another.
 ## Where braid uses hard vs soft
 
 braid issues two different RAID1 convert-balances. The choice of `soft` is
-deliberate in each. Both run behind one live-pool gate:
-`cli/src/pool.rs#pool_can_host_raid1` mints a `Raid1Host` proof only when no
-member is missing or hot-unplugged and two or more devices are present, and
-`pool_balance_raid1` and `pool_balance_raid1_soft` each spend one. No RAID1
+deliberate in each. `cli/src/pool.rs#OwedRaid1Balance` names the one an
+operation owes: `Grow` is the hard convert and `RestoreSingle` the soft one.
+Live add, recover's replay and recover's dry-run all read that one value, so
+they cannot pick different converts for the same operation. Both converts run
+behind one live-pool gate: `cli/src/pool.rs#pool_can_host_raid1` mints a
+`Raid1Host` proof only when no member is missing or hot-unplugged and two or
+more devices are present, and `OwedRaid1Balance::run` spends one. No RAID1
 convert can run without the gate.
 
 ### Hard convert -- growing the pool (`braid add`, 3rd+ device)
 
 `braid add` of a 3rd-or-later device runs a HARD `-dconvert=raid1`
-(`pool_balance_raid1`, emitting `BtrfsBalanceRaid1`). Soft would be wrong here:
+(`OwedRaid1Balance::Grow`, emitting `BtrfsBalanceRaid1`). Soft would be wrong here:
 
 1. Pool has devices A, B -- all chunks are raid1 across A and B.
 2. Add device C.
@@ -50,6 +53,12 @@ A hard rewrite rewrites every chunk, redistributing copies across all three
 devices -- which is the whole point of balancing after a device add. (A 1->2 add
 converts the existing `single` chunks either way, so the distinction only bites
 at the 3rd+ device.)
+
+`braid recover` replays this same hard convert when a live add is cut off after
+`btrfs device add` (see [Recover replay](#recover-replay)). A soft replay would
+skip every chunk, leave device C empty and still clear the journal. On a nearly
+full pool writes would then keep failing with ENOSPC, because RAID1 needs free
+space on two devices.
 
 ### Soft convert -- converting leftover `single` chunks
 
@@ -63,7 +72,7 @@ while fewer than two devices were available.
 
 Once the pool is whole again, those `single` chunks must be converted back to
 `raid1` to restore redundancy. braid runs a SOFT `-dconvert=raid1,soft`
-(`pool_balance_raid1_soft`, emitting `BtrfsBalanceRaid1Soft`): it converts
+(`OwedRaid1Balance::RestoreSingle`, emitting `BtrfsBalanceRaid1Soft`): it converts
 exactly the `single` chunks and skips everything already `raid1`. Because soft
 skips matching chunks, the balance is idempotent and cheap -- a near no-op when
 there is nothing to convert -- so braid runs it as cleanup without first
@@ -78,6 +87,7 @@ caller's balance or reports why it skipped:
   `remove-missing` and by `replace`'s missing path once the operation clears the
   last missing device.
 - **Recover replay** -- `replay_owed_raid1_maintenance` (`cli/src/recover.rs`),
+  for an interrupted `remove-missing` or `replace` and for a bootstrap add,
   described below.
 
 `replace` itself uses `btrfs replace start` (atomic), not add+balance+remove
@@ -145,25 +155,34 @@ maintenance only if `btrfs balance status` reports no active balance:
 > [!WARNING]
 > Replaying a crash-paused RAID1 balance can underflow btrfs block-group accounting and silently halve redundancy. recover preserves `pending-op.json` instead of automating recovery when the balance state is paused, running, or unknown.
 
-On the idle/no-paused path, recover runs the soft balance above through the
-live restore's gated step, to catch `single` chunks an interrupted balance left
-behind. The idempotent `,soft` filter makes this safe even when nothing needs
-converting. The step probes the pool again just before the balance, after any
-replayed resize or old-mapper close. If a member is missing or hot-unplugged,
-recover prints the live restore's
-`[skip] pool: rebalance skipped -- redundancy not restored` line instead; a
-whole one-device pool skips silently. Either way recover then clears the
-journal, which leaves the same deferred-repair state a live restore leaves when
-it skips.
+On the idle/no-paused path, recover runs the balance the interrupted operation
+owes through the live restore's gated step. The step probes the pool again just
+before the balance, after any replayed resize or old-mapper close. If a member
+is missing or hot-unplugged, recover prints the owed balance's `[skip]` line
+instead: live add's degraded-add skip line for the hard convert, or the live
+restore's `[skip] pool: rebalance skipped -- redundancy not restored` line for
+the soft one. A whole one-device pool skips silently. Either way recover then
+clears the journal, which leaves the same deferred-repair state a live
+operation leaves when it skips.
 
-This replay fires for an interrupted `add` when the balance state is idle, and
-for the idle/no-paused owed post-maintenance step of `remove-missing` and
-`replace`. The `add` case covers two shapes: an interrupted post-add balance --
-a live add whose convert left `single` chunks behind, where the new disk is
-already in the pool so re-running `braid add` would refuse and recover finishes
-the job -- and a bootstrap add, where `mkfs.btrfs -d raid1 -m raid1` already
-created the pool as full RAID1, so the soft pass normally has nothing to convert
-(an expected near-no-op) but is still run as defense-in-depth.
+The journaled operation decides which balance is owed:
+
+- **Live add**, in either phase, owes the hard convert above, the one live add
+  runs after `btrfs device add`. An interrupted 1->2 add leaves `single` chunks
+  behind, and an interrupted 3rd+ add leaves the new disk partly or wholly
+  empty; the hard convert finishes both. The new disk is already in the pool, so
+  re-running `braid add` would refuse, and recover finishes the job. If the
+  original balance had already finished before the crash, the replay rewrites
+  every chunk again: hours of disk I/O, with no data at risk.
+- **Bootstrap add** on two or more disks owes the soft convert.
+  `mkfs.btrfs -d raid1 -m raid1` already created the pool as full RAID1, so the
+  soft pass normally has nothing to convert (an expected near-no-op) but is
+  still run as defense-in-depth. A bootstrap add on one disk ran plain
+  `mkfs.btrfs`, which cannot make RAID1, so it owes nothing.
+- **`remove-missing` and `replace`** owe the soft convert when their journal
+  records a restore, to catch `single` chunks written while the pool was
+  degraded. The idempotent `,soft` filter makes this safe even when nothing
+  needs converting.
 
 `braid remove` is deliberately not part of this replay. It is the only mutation
 whose pre-mutation phase can issue a balance -- the RAID1 -> single conversion

@@ -353,11 +353,101 @@ fn device_remove_error(
     }
 }
 
-/// Hard-convert pool to RAID1 with progress display; `add` uses this so
-/// an already-RAID1 pool rewrites chunks onto the new device. Contrast
-/// `pool_balance_raid1_soft` (see docs/internals/btrfs/balance-soft.md).
-/// Spends a `Raid1Host`, so no hard convert runs without the RAID1 gate.
-pub fn pool_balance_raid1<R: CommandRunner + Sync>(
+/// The RAID1 convert balance an operation owes once its membership change
+/// commits. One value picks the btrfs command, the dry-run rows and the skip
+/// line, so live add, recover's replay and recover's preview cannot run or
+/// show different balances for the same op. It owns no gate: every variant
+/// spends a `Raid1Host` from `pool_can_host_raid1`. See
+/// docs/internals/btrfs/balance-soft.md for where each one runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OwedRaid1Balance {
+    /// Hard convert after `btrfs device add`. It rewrites every chunk, so
+    /// copies spread onto the new disk. On an already-RAID1 pool a soft
+    /// convert skips every chunk and leaves a 3rd or later disk empty.
+    Grow,
+    /// Soft convert after a degraded pool is whole again. It converts only
+    /// chunks that are not RAID1 yet, the `single` chunks a pool writes
+    /// while it has fewer than two devices, and skips the rest.
+    RestoreSingle,
+}
+
+impl OwedRaid1Balance {
+    /// The `btrfs balance` request this balance issues, shared by `run` and
+    /// the dry-run rows so preview and execute name one command.
+    pub(crate) fn command(self, mount_point: &MountPoint) -> CmdRequest {
+        let mount_point = mount_point.clone();
+        match self {
+            OwedRaid1Balance::Grow => CmdRequest::BtrfsBalanceRaid1 { mount_point },
+            OwedRaid1Balance::RestoreSingle => CmdRequest::BtrfsBalanceRaid1Soft { mount_point },
+        }
+    }
+
+    /// Run this balance on the pool `host` vouches for. The only way to spend
+    /// a `Raid1Host`, so every RAID1 convert names what it owes.
+    pub(crate) fn run<R: CommandRunner + Sync>(
+        self,
+        runner: &R,
+        host: Raid1Host,
+        progress: ProgressOutput,
+    ) -> Result<(), PoolError> {
+        match self {
+            OwedRaid1Balance::Grow => pool_balance_raid1(runner, host, progress),
+            OwedRaid1Balance::RestoreSingle => pool_balance_raid1_soft(runner, host, progress),
+        }
+    }
+
+    /// The `[skip]` body printed when the gate finds the pool degraded and
+    /// this balance cannot run.
+    pub(crate) fn skip_line(self) -> &'static str {
+        match self {
+            OwedRaid1Balance::Grow => {
+                "pool: RAID1 balance skipped -- pool still has a missing device; redundancy \
+                 not restored. Run `braid remove-missing` or `braid replace` to restore it."
+            }
+            OwedRaid1Balance::RestoreSingle => "pool: rebalance skipped -- redundancy not restored",
+        }
+    }
+
+    /// Print `skip_line` as a `[skip]` status row on stderr.
+    pub(crate) fn emit_skipped(self) {
+        emit_status(&status_line(
+            StatusTag::Skip,
+            color_enabled_for_stderr(),
+            self.skip_line(),
+        ));
+    }
+
+    /// Recover's dry-run row for replaying this balance. It shows no command
+    /// line, because the replay also waits on a live balance-status check,
+    /// and it names the gate's skip condition. `extra_condition` is a further
+    /// "if ..." clause one recovery arm can add ahead of the gate's.
+    pub(crate) fn replay_preview_step(
+        self,
+        mount_point: &MountPoint,
+        extra_condition: Option<&str>,
+    ) -> Step {
+        let filters = match self {
+            OwedRaid1Balance::Grow => "-dconvert=raid1 -mconvert=raid1",
+            OwedRaid1Balance::RestoreSingle => "-dconvert=raid1,soft -mconvert=raid1,soft",
+        };
+        let extra = extra_condition
+            .map(|condition| format!("{condition}, or "))
+            .unwrap_or_default();
+        Step {
+            risk: "long",
+            description: format!(
+                "btrfs balance {filters} {mount_point} \
+                 (skipped {extra}if the pool is degraded or has <2 devices)"
+            ),
+            commands: vec![],
+        }
+    }
+}
+
+/// Hard-convert pool to RAID1 with progress display, for
+/// `OwedRaid1Balance::Grow`. Spends a `Raid1Host`, so no hard convert runs
+/// without the RAID1 gate.
+fn pool_balance_raid1<R: CommandRunner + Sync>(
     runner: &R,
     host: Raid1Host,
     progress: ProgressOutput,
@@ -365,9 +455,7 @@ pub fn pool_balance_raid1<R: CommandRunner + Sync>(
     let mount_point = &host.mount_point;
     let result = run_with_progress(
         runner,
-        &CmdRequest::BtrfsBalanceRaid1 {
-            mount_point: mount_point.clone(),
-        },
+        &OwedRaid1Balance::Grow.command(mount_point),
         mount_point,
         progress,
     )?;
@@ -405,11 +493,10 @@ pub fn pool_balance_single<R: CommandRunner + Sync>(
     Ok(())
 }
 
-/// Balance pool to RAID1 (soft: only non-RAID1 chunks) with progress display.
-/// Used after degraded operations to restore redundancy for single-profile
-/// chunks. Spends a `Raid1Host`, so no soft convert runs without the RAID1
-/// gate.
-pub fn pool_balance_raid1_soft<R: CommandRunner + Sync>(
+/// Balance pool to RAID1 (soft: only non-RAID1 chunks) with progress display,
+/// for `OwedRaid1Balance::RestoreSingle`. Spends a `Raid1Host`, so no soft
+/// convert runs without the RAID1 gate.
+fn pool_balance_raid1_soft<R: CommandRunner + Sync>(
     runner: &R,
     host: Raid1Host,
     progress: ProgressOutput,
@@ -417,9 +504,7 @@ pub fn pool_balance_raid1_soft<R: CommandRunner + Sync>(
     let mount_point = &host.mount_point;
     let result = run_with_progress(
         runner,
-        &CmdRequest::BtrfsBalanceRaid1Soft {
-            mount_point: mount_point.clone(),
-        },
+        &OwedRaid1Balance::RestoreSingle.command(mount_point),
         mount_point,
         progress,
     )?;
@@ -452,16 +537,15 @@ pub(crate) fn restore_raid1_preview_step(mount_point: &MountPoint) -> Step {
         risk: "long",
         description: "btrfs balance -dconvert=raid1,soft -mconvert=raid1,soft (restore redundancy)"
             .into(),
-        commands: vec![CmdRequest::BtrfsBalanceRaid1Soft {
-            mount_point: mount_point.clone(),
-        }],
+        commands: vec![OwedRaid1Balance::RestoreSingle.command(mount_point)],
     }
 }
 
 /// Proof that `pool_can_host_raid1` found the live pool at `mount_point`
 /// whole, with two or more present devices. Private fields, so only that gate
-/// mints one, and not `Clone`, so each balance spends a check of its own. The
-/// RAID1 convert balances demand one, so none can run without the gate.
+/// mints one, and not `Clone`, so each balance spends a check of its own.
+/// `OwedRaid1Balance::run` demands one, so no RAID1 convert runs without the
+/// gate.
 #[derive(Debug)]
 pub struct Raid1Host {
     mount_point: MountPoint,
@@ -508,8 +592,9 @@ pub(crate) enum Raid1BalanceOutcome {
 /// Shared gated step for owed RAID1 maintenance: probe the live pool now,
 /// mint a `Raid1Host` from that probe, and spend it on the caller's balance.
 /// The step owns the probe and the gate, so the live restore and recover's
-/// replay check the same thing at the same point. The caller owns the balance
-/// and its status lines, and decides what a skip prints.
+/// replay check the same thing at the same point. The caller runs its
+/// `OwedRaid1Balance` inside `balance`, prints its own status lines, and
+/// decides what a skip prints.
 pub(crate) fn balance_if_pool_hosts_raid1<R, F, B>(
     runner: &R,
     fs: &F,
@@ -530,16 +615,6 @@ where
         }
         Err(refusal) => Ok(Raid1BalanceOutcome::Skipped(refusal)),
     }
-}
-
-/// The skip line the live restore and recover's replay share when the RAID1
-/// gate refuses an owed restore.
-pub(crate) fn emit_raid1_restore_skipped() {
-    emit_status(&status_line(
-        StatusTag::Skip,
-        color_enabled_for_stderr(),
-        "pool: rebalance skipped -- redundancy not restored",
-    ));
 }
 
 /// Run a soft RAID1 rebalance if the operation just transitioned the pool from
@@ -569,7 +644,7 @@ pub fn maybe_restore_raid1<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             color_enabled,
             "pool: restoring RAID1 redundancy...",
         ));
-        pool_balance_raid1_soft(runner, host, progress)?;
+        OwedRaid1Balance::RestoreSingle.run(runner, host, progress)?;
         emit_status(&status_line(
             StatusTag::Ok,
             color_enabled,
@@ -578,7 +653,7 @@ pub fn maybe_restore_raid1<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         Ok(())
     })?;
     if let Raid1BalanceOutcome::Skipped(_) = outcome {
-        emit_raid1_restore_skipped();
+        OwedRaid1Balance::RestoreSingle.emit_skipped();
     }
     Ok(())
 }

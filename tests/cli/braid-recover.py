@@ -352,16 +352,17 @@ with subtest("braid recover self-mounts and rebuilds pool.json"):
     assert "recover remount cycle" not in err, (
         f"post-add recovery must not run the replace remount cycle, got: {err!r}"
     )
-    # post-{label} RAID1 soft balance replay rows from
-    # replay_owed_raid1_maintenance. Pin the substring shared with module tests
-    # for cross-suite consistency.
-    soft_replay_wait = "replaying post-add RAID1 soft balance"
-    soft_replay_ok = "[ok]   pool: RAID1 soft balance replay complete\n"
-    assert soft_replay_wait in err, (
-        f"post-add soft balance replay wait row missing, got: {err!r}"
+    # post-{label} RAID1 balance replay rows from
+    # replay_owed_raid1_maintenance. An add owes the same hard convert live
+    # add runs, not the soft restore. Pin the substring shared with module
+    # tests for cross-suite consistency.
+    balance_replay_wait = "replaying post-add RAID1 balance"
+    balance_replay_ok = "[ok]   pool: RAID1 balance replay complete\n"
+    assert balance_replay_wait in err, (
+        f"post-add RAID1 balance replay wait row missing, got: {err!r}"
     )
-    assert err.find(soft_replay_wait) < err.find(soft_replay_ok), (
-        f"soft balance replay wait must precede ok row, got: {err!r}"
+    assert err.find(balance_replay_wait) < err.find(balance_replay_ok), (
+        f"RAID1 balance replay wait must precede ok row, got: {err!r}"
     )
 
     # Pool must be mounted

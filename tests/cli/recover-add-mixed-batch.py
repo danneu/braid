@@ -214,13 +214,13 @@ with subtest("Recover mixed-batch add"):
     banner = 'Recovering from interrupted "add" operation (started '
     assert banner in err, "recover banner line missing, got: " + repr(err)
 
-    soft_replay_wait = "replaying post-add RAID1 soft balance"
-    soft_replay_ok = "[ok]   pool: RAID1 soft balance replay complete\n"
-    assert soft_replay_wait in err, (
-        f"post-add soft balance replay wait row missing, got: {err!r}"
+    balance_replay_wait = "replaying post-add RAID1 balance"
+    balance_replay_ok = "[ok]   pool: RAID1 balance replay complete\n"
+    assert balance_replay_wait in err, (
+        f"post-add RAID1 balance replay wait row missing, got: {err!r}"
     )
-    assert err.find(soft_replay_wait) < err.find(soft_replay_ok), (
-        f"soft balance replay wait must precede ok row, got: {err!r}"
+    assert err.find(balance_replay_wait) < err.find(balance_replay_ok), (
+        f"RAID1 balance replay wait must precede ok row, got: {err!r}"
     )
     assert "recover remount cycle" not in err, (
         f"add recovery must not run the replace remount cycle, got: {err!r}"
@@ -240,15 +240,15 @@ with subtest("Recover mixed-batch add"):
 
     cleared_line = "pending-op.json cleared. Recovery complete.\n"
     assert cleared_line in err, "journal-cleared line missing, got: " + repr(err)
-    # Pin the doc's recover skeleton: committed membership, owed soft balance,
-    # then journal clear. The environment-specific open/mount rows stay out of
+    # Pin the doc's recover skeleton: committed membership, owed RAID1
+    # balance, then journal clear. The environment-specific open/mount rows stay out of
     # the doc example and this ordering guard.
     assert (
         err.find(committed_line)
-        < err.find(soft_replay_wait)
-        < err.find(soft_replay_ok)
+        < err.find(balance_replay_wait)
+        < err.find(balance_replay_ok)
         < err.find(cleared_line)
-    ), "expected committed -> soft-balance replay -> journal-cleared order, got: " + repr(err)
+    ), "expected committed -> RAID1 balance replay -> journal-cleared order, got: " + repr(err)
 
     for triple_line in ("pre-operation membership:", "recovered (live pool):"):
         assert triple_line not in err, (

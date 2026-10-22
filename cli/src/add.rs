@@ -21,7 +21,7 @@ use crate::membership::{self, DiskMember, LuksUuidMap, PoolMembership};
 use crate::parse::btrfs_filesystem_show::{DeviceBtrfsProbe, classify_btrfs_probe};
 use crate::parse::{parse_btrfs_filesystem_show, parse_cryptsetup_luks_uuid};
 use crate::pool::{
-    Raid1HostRefusal, pool_add_device, pool_balance_raid1, pool_bootstrap_mount,
+    OwedRaid1Balance, Raid1HostRefusal, pool_add_device, pool_bootstrap_mount,
     pool_bootstrap_mount_raid1, pool_can_host_raid1,
 };
 use crate::preflight;
@@ -865,15 +865,9 @@ impl AddWorkPlan {
                     steps.push(Step {
                         risk: "long",
                         description: "btrfs balance to RAID1".into(),
-                        // HARD convert, not ,soft. When growing an already-RAID1
-                        // pool (3rd+ device), every chunk is already RAID1, so only
-                        // a hard rewrite redistributes copies onto the new device;
-                        // ,soft would skip them all and leave it empty. A 1->2 add
-                        // converts existing single chunks either way. See
-                        // docs/internals/btrfs/balance-soft.md.
-                        commands: vec![CmdRequest::BtrfsBalanceRaid1 {
-                            mount_point: self.mount_point.clone(),
-                        }],
+                        // OwedRaid1Balance::Grow, the hard convert: its doc says
+                        // why a soft one would leave a 3rd+ disk empty.
+                        commands: vec![OwedRaid1Balance::Grow.command(&self.mount_point)],
                     });
                 }
             }
@@ -955,15 +949,6 @@ fn format_add_missing_devices_warning(missing_count: u64) -> String {
         missing_count,
         if missing_count == 1 { "" } else { "s" }
     )
-}
-
-/// Body for the degraded-add balance-skip note, rendered `[skip] <body>` in both
-/// dry-run preview and real-run stderr via `PreviewNote::Skip`. One source so the
-/// two modes never drift (mirrors `format_add_missing_devices_warning`).
-fn format_add_degraded_balance_skip() -> String {
-    "pool: RAID1 balance skipped -- pool still has a missing device; redundancy \
-     not restored. Run `braid remove-missing` or `braid replace` to restore it."
-        .into()
 }
 
 /// Labels the disk set for no-op / done messages. Single-disk returns the
@@ -1630,7 +1615,7 @@ impl AddPlan {
                             "pool: balancing to RAID1...",
                         )
                     );
-                    pool_balance_raid1(runner, host, params.progress)?;
+                    OwedRaid1Balance::Grow.run(runner, host, params.progress)?;
                     eprint!(
                         "{}",
                         status_line(StatusTag::Ok, color_enabled, "pool: RAID1 balance complete",)
@@ -1642,7 +1627,7 @@ impl AddPlan {
                     // above, so this is the one real-run source for the
                     // balance-skip line.
                     preview::emit_notes_to_stderr(
-                        &[PreviewNote::Skip(format_add_degraded_balance_skip())],
+                        &[PreviewNote::Skip(OwedRaid1Balance::Grow.skip_line().into())],
                         PerDiskStyle::Bracketed,
                     );
                 }
@@ -1961,7 +1946,7 @@ pub fn plan_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     if !work_plan.is_noop()
         && work_plan.preview_phase == AddPreviewPhase::LiveAdd(PreviewedBalance::SkipDegraded)
     {
-        notes.push(PreviewNote::Skip(format_add_degraded_balance_skip()));
+        notes.push(PreviewNote::Skip(OwedRaid1Balance::Grow.skip_line().into()));
     }
     // No-op preview: zero steps + Info note naming the already-in-pool
     // target(s). The Info note suppresses `Preview::render`'s
@@ -5154,9 +5139,9 @@ mod tests {
             balance_count, 0,
             "newly degraded add must issue NO RAID1 balance: {requests:?}"
         );
-        let skip_body = format_add_degraded_balance_skip();
+        let skip_body = OwedRaid1Balance::Grow.skip_line();
         assert_eq!(
-            captured.matches(skip_body.as_str()).count(),
+            captured.matches(skip_body).count(),
             1,
             "newly degraded add must emit one balance-skip note; got: {captured:?}"
         );
@@ -5206,7 +5191,7 @@ mod tests {
         plan.notes
             .push(PreviewNote::Warn(format_add_missing_devices_warning(1)));
         plan.notes
-            .push(PreviewNote::Skip(format_add_degraded_balance_skip()));
+            .push(PreviewNote::Skip(OwedRaid1Balance::Grow.skip_line().into()));
         let config = test_config();
 
         let mut result = None;
@@ -5254,9 +5239,9 @@ mod tests {
             device_add_count, 1,
             "member-returned add must still issue the btrfs device add: {requests:?}"
         );
-        let skip_body = format_add_degraded_balance_skip();
+        let skip_body = OwedRaid1Balance::Grow.skip_line();
         assert!(
-            !captured.contains(skip_body.as_str()),
+            !captured.contains(skip_body),
             "member-returned add must suppress stale balance-skip note; got: {captured:?}"
         );
         let warn_body = format_add_missing_devices_warning(1);
@@ -6276,9 +6261,9 @@ mod tests {
             balance_count, 0,
             "plan-degraded add must issue NO RAID1 balance: {requests:?}"
         );
-        let skip_body = format_add_degraded_balance_skip();
+        let skip_body = OwedRaid1Balance::Grow.skip_line();
         assert_eq!(
-            captured.matches(skip_body.as_str()).count(),
+            captured.matches(skip_body).count(),
             1,
             "plan-degraded add must emit one balance-skip note; got: {captured:?}"
         );
@@ -11012,9 +10997,9 @@ mod tests {
             !rendered.contains("btrfs balance to RAID1"),
             "degraded preview must omit the RAID1 balance step; got:\n{rendered}"
         );
-        let skip_body = format_add_degraded_balance_skip();
+        let skip_body = OwedRaid1Balance::Grow.skip_line();
         assert_eq!(
-            rendered.matches(skip_body.as_str()).count(),
+            rendered.matches(skip_body).count(),
             1,
             "degraded preview must surface the balance-skip note exactly once; got:\n{rendered}"
         );
@@ -11097,7 +11082,7 @@ mod tests {
             "degraded no-op must render the no-op Info line; got:\n{rendered}"
         );
         assert!(
-            !rendered.contains(&format_add_degraded_balance_skip()),
+            !rendered.contains(OwedRaid1Balance::Grow.skip_line()),
             "degraded no-op must omit the work-only balance-skip note; got:\n{rendered}"
         );
         assert!(
