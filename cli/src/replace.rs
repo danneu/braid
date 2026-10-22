@@ -141,6 +141,19 @@ pub enum ReplaceError {
         pool_devid: Devid,
         supplied_devid: Devid,
     },
+    /// Operator's `--missing-id` disagrees with the devid btrfs holds the
+    /// old disk's open, diskless mapper at. That mapper's LUKS UUID binds
+    /// `--old` to its devid, so this is the same typo guard as
+    /// `OldDevidMismatch` with the live binding in place of pool.json's.
+    #[error(
+        "--old '{old_name}' still has mapper {mapper} open at devid {mapper_devid}, but --missing-id was {supplied_devid}. --old and --missing-id disagree about which member is being replaced."
+    )]
+    OldMapperDevidMismatch {
+        old_name: String,
+        mapper: MapperName,
+        mapper_devid: Devid,
+        supplied_devid: Devid,
+    },
     /// Old member is being replaced via the missing path but the
     /// persisted membership row has no `devid`. Without a persisted
     /// devid there is no way to confirm the operator and btrfs are
@@ -547,6 +560,7 @@ impl ReplacePlan {
         // the tight pre-open TOCTOU guard.
         verify_existing_luks_new_target_preflight(
             runner,
+            fs,
             &target_prep,
             &new_name,
             &new_mn,
@@ -696,6 +710,7 @@ impl ReplacePlan {
                 // adoption gates at finish-time and recovery replay.
                 ensure_luks_open(
                     runner,
+                    fs,
                     &new_name,
                     &new_by_id,
                     params.backing_path_resolver,
@@ -767,6 +782,7 @@ impl ReplacePlan {
                     probe_existing_luks_new_target_uuid(runner, &new_by_id, &new_uuid)?;
                     ensure_luks_open(
                         runner,
+                        fs,
                         &new_name,
                         &new_by_id,
                         params.backing_path_resolver,
@@ -789,6 +805,7 @@ impl ReplacePlan {
                     // and UUID, which catches cloned LUKS headers.
                     verify_existing_luks_open_mapper_target(
                         runner,
+                        fs,
                         &new_name,
                         &new_mn,
                         &new_by_id,
@@ -916,7 +933,7 @@ impl ReplacePlan {
             ..
         } = &journal.op
         {
-            match probe_observed_mapper_uuid(runner, mapper, journaled_old_uuid) {
+            match probe_observed_mapper_uuid(fs, mapper, journaled_old_uuid) {
                 MapperOwnership::Owned => {
                     if close_mapper_best_effort(
                         runner,
@@ -1050,8 +1067,9 @@ fn probe_existing_luks_new_target_uuid<R: CommandRunner>(
 /// This verifies the configured by-id still backs the mapper and still has
 /// the planned UUID; live-pool duplicate UUIDs are handled by the separate
 /// pre-journal `verify_replace_execute_live_pool_uuid` gate.
-fn verify_existing_luks_open_mapper_target<R: CommandRunner>(
+fn verify_existing_luks_open_mapper_target<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
+    fs: &F,
     new_name: &DiskName,
     new_mapper: &MapperName,
     new_by_id: &ByIdPath,
@@ -1060,6 +1078,7 @@ fn verify_existing_luks_open_mapper_target<R: CommandRunner>(
 ) -> Result<(), ReplaceError> {
     classify_mapper_ownership(
         runner,
+        fs,
         new_name,
         new_mapper,
         new_by_id,
@@ -1095,6 +1114,13 @@ fn verify_existing_luks_open_mapper_target<R: CommandRunner>(
                         .unwrap_or_else(|| "(no backing)".into()),
                 }
             }
+            MapperOwnershipFailure::IdentityUnreadable { detail, .. } => {
+                ReplaceError::NewTargetUuidMismatchAtOpen {
+                    by_id: new_by_id.clone(),
+                    expected: new_uuid.clone(),
+                    observed: format!("probe failed: {detail}"),
+                }
+            }
         },
         OwnershipError::Parse(e) => ReplaceError::Validation(e.to_string()),
         OwnershipError::Cmd(e) => ReplaceError::Validation(e.to_string()),
@@ -1108,8 +1134,10 @@ fn verify_existing_luks_open_mapper_target<R: CommandRunner>(
 /// of stranding pending-op.json. FreshLuks has no pre-existing identity to
 /// probe. The post-journal probe/verify in Step 1 remain as the tight
 /// pre-open guard (two-tier).
-fn verify_existing_luks_new_target_preflight<R: CommandRunner>(
+#[allow(clippy::too_many_arguments)]
+fn verify_existing_luks_new_target_preflight<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
+    fs: &F,
     target_prep: &ReplaceTargetPrep,
     new_name: &DiskName,
     new_mapper: &MapperName,
@@ -1125,6 +1153,7 @@ fn verify_existing_luks_new_target_preflight<R: CommandRunner>(
             mapper_open: true, ..
         } => verify_existing_luks_open_mapper_target(
             runner,
+            fs,
             new_name,
             new_mapper,
             new_by_id,
@@ -1846,9 +1875,14 @@ fn build_replace_journal_target(
 ///     downstream to the post-commit `close_mapper_best_effort` call so
 ///     mapper drift between plan and execute still targets the right
 ///     dm slot.
-///   - Missing arm: cross-check `old_member.devid` against the resolved
-///     btrfs missing devid; reject any disagreement and reject any
-///     `--old` whose persisted member has no devid.
+///   - Hot-unplugged arm: an `--old` whose mapper is still open with no
+///     backing disk binds by its LUKS UUID to the devid btrfs holds that
+///     mapper at, and resolves only once btrfs promotes that devid to
+///     MISSING.
+///   - Missing arm: with no open mapper, cross-check `old_member.devid`
+///     against the btrfs missing devids that no open mapper accounts for;
+///     reject any disagreement and reject any `--old` whose persisted
+///     member has no devid.
 fn resolve_replace_source(
     old_name: &DiskName,
     old_uuid: &LuksUuid,
@@ -1886,7 +1920,36 @@ fn resolve_replace_source(
     }
 
     // Old disk not in pool -- dead/missing path.
-    // Cross-check persisted devid against the resolved btrfs missing devid.
+    //
+    // A hot-unplugged old disk whose mapper is still open keeps its LUKS UUID
+    // in that mapper's dm UUID, so the UUID binds it to the devid btrfs holds
+    // the mapper at; pool.json's devid plays no part (principles 2 and 5).
+    if let Some(null_backed) = pool
+        .null_underlying
+        .iter()
+        .find(|d| d.luks_uuid == *old_uuid)
+    {
+        let devid = null_backed.devid;
+        if let Some(supplied) = missing_id
+            && supplied != devid
+        {
+            return Err(ReplaceError::OldMapperDevidMismatch {
+                old_name: old_name.as_str().to_owned(),
+                mapper: null_backed.mapper.clone(),
+                mapper_devid: devid,
+                supplied_devid: supplied,
+            });
+        }
+        if !pool.missing_devids.contains(&devid) {
+            return Err(ReplaceError::Validation(
+                repair_hint::hot_unplug_not_yet_missing(devid, "braid replace"),
+            ));
+        }
+        return Ok(ReplaceSource::Missing { devid });
+    }
+
+    // No open mapper: --old binds only through its persisted devid, and only
+    // to a btrfs-MISSING devid that no open mapper accounts for.
     let persisted_devid = match old_member.devid {
         Some(d) => d,
         None => {
@@ -1896,32 +1959,42 @@ fn resolve_replace_source(
         }
     };
 
-    let null_underlying_refusal = |devid: Devid| {
-        ReplaceError::Validation(repair_hint::hot_unplug_not_yet_missing(
-            devid,
-            "braid replace",
-        ))
-    };
+    // --missing-id is a typo guard, checked before any btrfs cross-check.
+    if let Some(supplied) = missing_id
+        && supplied != persisted_devid
+    {
+        return Err(ReplaceError::OldDevidMismatch {
+            old_name: old_name.as_str().to_owned(),
+            pool_devid: persisted_devid,
+            supplied_devid: supplied,
+        });
+    }
+
+    // A devid an open mapper holds belongs to that mapper's LUKS UUID, which
+    // is not --old's (that case returned above), so pool.json's devid for
+    // --old is stale.
+    if let Some(holder) = pool
+        .null_underlying
+        .iter()
+        .find(|d| d.devid == persisted_devid)
+    {
+        return Err(ReplaceError::Validation(format!(
+            "disk '{old_name}' records devid {persisted_devid} in pool.json, but btrfs holds \
+             that devid for open mapper {} (LUKS UUID {}), which is another disk. Pool \
+             membership may be out of date; run `braid status` to inspect.",
+            holder.mapper, holder.luks_uuid
+        )));
+    }
 
     let resolved = if let Some(supplied) = missing_id {
-        // --missing-id supplied: must equal persisted devid AND appear
-        // in the btrfs missing set.
-        if supplied != persisted_devid {
-            return Err(ReplaceError::OldDevidMismatch {
-                old_name: old_name.as_str().to_owned(),
-                pool_devid: persisted_devid,
-                supplied_devid: supplied,
-            });
-        }
+        // --missing-id supplied: it equals the persisted devid, which must
+        // appear in the btrfs missing set.
         if pool.devices.iter().any(|d| d.devid == supplied) {
             return Err(ReplaceError::Validation(format!(
                 "devid {supplied} is a live device, not a missing one."
             )));
         }
         if !pool.missing_devids.contains(&supplied) {
-            if pool.null_underlying.iter().any(|d| d.devid == supplied) {
-                return Err(null_underlying_refusal(supplied));
-            }
             return Err(ReplaceError::Validation(format!(
                 "devid {supplied} is not a missing device in this pool. \
                  {}",
@@ -1932,13 +2005,6 @@ fn resolve_replace_source(
     } else {
         // Auto-resolve: the persisted devid must be missing in btrfs.
         if !pool.missing_devids.contains(&persisted_devid) {
-            if pool
-                .null_underlying
-                .iter()
-                .any(|d| d.devid == persisted_devid)
-            {
-                return Err(null_underlying_refusal(persisted_devid));
-            }
             if pool.missing_devids.is_empty() {
                 return Err(ReplaceError::Validation(format!(
                     "disk '{}' not found in pool and no missing devices detected.",
@@ -2412,9 +2478,12 @@ mod tests {
         }
     }
 
+    /// Null-backed `diskN` at devid N, carrying `diskN`'s canonical LUKS UUID
+    /// as its dm UUID records it.
     fn null_underlying_device(devid: Devid) -> NullUnderlyingDevice {
         NullUnderlyingDevice {
             mapper: mapper_name(&disk_name(&format!("disk{}", devid.get()))),
+            luks_uuid: crate::test_fixtures::canonical_luks_uuid(devid.get()),
             devid,
         }
     }
@@ -2800,11 +2869,11 @@ mod tests {
         );
     }
 
-    // Intent: auto-resolve refuses a persisted null-underlying-only devid
+    // Intent: auto-resolve refuses an old disk whose mapper is null-underlying
     // with the hot-unplug diagnostic.
     // Why it exists: no-flag dead-disk replacement must not fall back to the
     // generic no-missing wording when status has already surfaced the devid.
-    // Scenario: pool.json records disk2 as devid 2, that mapper is
+    // Scenario: pool.json records disk2 as devid 2, its mapper is
     // null-underlying, and the operator runs `braid replace` without
     // `--missing-id`.
     #[test]
@@ -2827,6 +2896,33 @@ mod tests {
              btrfs-authoritative MISSING devids. Confirm the disk is truly gone, then \
              relock and re-unlock the pool degraded (`braid lock` then `braid unlock \
              --allow-degraded`) so btrfs promotes devid 2, and retry."
+        );
+    }
+
+    // Intent: auto-resolve finds a null-backed old disk by the LUKS UUID its
+    // mapper records, not by the devid pool.json persisted.
+    // Why it exists: a null-backed mapper keeps its LUKS identity, so a stale
+    // persisted devid must not hide that the old disk is hot-unplugged.
+    // Scenario: pool.json records disk2 at devid 5, but btrfs holds disk2's
+    // null-backed mapper at devid 2 and nothing is MISSING.
+    #[test]
+    fn auto_resolve_null_underlying_found_by_uuid_not_persisted_devid() {
+        let mut pool = two_device_pool();
+        pool.devices.retain(|d| d.mapper.as_str() != "braid-disk2");
+        pool.missing_count = 1;
+        pool.total_devices = 2;
+        pool.null_underlying
+            .push(null_underlying_device(Devid::new(2)));
+        let (uuid, mut member) = disk2_member_for_two_device_pool();
+        member.devid = Some(Devid::new(5));
+
+        let err =
+            resolve_replace_source(&disk_name("disk2"), &uuid, &member, None, &pool).unwrap_err();
+
+        assert!(
+            err.to_string()
+                .starts_with("devid 2 is hot-unplugged but btrfs has not yet promoted it"),
+            "expected the hot-unplug refusal for the mapper's live devid, got: {err}"
         );
     }
 
@@ -2859,6 +2955,116 @@ mod tests {
             matches!(result, Ok(ReplaceSource::Missing { devid }) if devid == Devid::new(2)),
             "expected Missing {{ devid: 2 }}, got: {result:?}"
         );
+    }
+
+    /// disk2 hot-unplugged with its mapper still open at devid 2, beside a
+    /// live disk1; `promoted` says whether btrfs already reports devid 2
+    /// MISSING.
+    fn disk2_null_backed_pool(promoted: bool) -> PoolState {
+        let mut pool = two_device_pool();
+        pool.devices.retain(|d| d.mapper.as_str() != "braid-disk2");
+        pool.missing_count = 1;
+        pool.null_underlying
+            .push(null_underlying_device(Devid::new(2)));
+        if promoted {
+            pool.missing_devids = vec![Devid::new(2)];
+        }
+        pool
+    }
+
+    // Intent: a hot-unplugged old disk resolves through its open mapper's
+    // devid, never through a stale persisted devid that another disk's
+    // MISSING devid happens to match.
+    // Why it exists: replace rebuilds onto the resolved devid. Binding the
+    // null-backed old disk through pool.json's devid would rebuild over a
+    // different disk's slot.
+    // Scenario: disk2's mapper stays open at devid 2 (not yet promoted),
+    // another disk is MISSING at devid 3, and pool.json holds a stale devid
+    // 3 for disk2.
+    #[test]
+    fn null_backed_old_disk_ignores_stale_persisted_missing_devid() {
+        let mut pool = disk2_null_backed_pool(false);
+        pool.missing_count = 2;
+        pool.total_devices = 3;
+        pool.missing_devids = vec![Devid::new(3)];
+        let (uuid, mut member) = disk2_member_for_two_device_pool();
+        member.devid = Some(Devid::new(3));
+
+        for missing_id in [None, Some(Devid::new(3))] {
+            let result =
+                resolve_replace_source(&disk_name("disk2"), &uuid, &member, missing_id, &pool);
+            let err = result.expect_err("must not resolve disk2 to another disk's devid 3");
+            assert!(
+                !matches!(err, ReplaceError::Validation(ref m) if m.contains("devid 3 is")),
+                "the refusal must not treat devid 3 as disk2's: {err}"
+            );
+            if missing_id.is_none() {
+                assert!(
+                    err.to_string()
+                        .starts_with("devid 2 is hot-unplugged but btrfs has not yet promoted it"),
+                    "expected the hot-unplug refusal for disk2's live devid, got: {err}"
+                );
+            } else {
+                assert!(
+                    err.to_string().contains("devid 2") && err.to_string().contains("was 3"),
+                    "expected --missing-id 3 to disagree with disk2's live devid 2, got: {err}"
+                );
+            }
+        }
+    }
+
+    // Intent: once btrfs promotes a hot-unplugged old disk's devid, replace
+    // binds it through the LUKS UUID its open mapper records, with or
+    // without a persisted devid.
+    // Why it exists: the mapper's dm UUID survives the backing disk, so a
+    // missing or stale pool.json devid must not block replacing it.
+    // Scenario: pool.json never recorded disk2's devid; btrfs reports devid
+    // 2 MISSING while disk2's mapper still reports `(null)`.
+    #[test]
+    fn promoted_null_backed_old_disk_binds_live_devid_without_persisted_devid() {
+        let pool = disk2_null_backed_pool(true);
+        let (uuid, mut member) = disk2_member_for_two_device_pool();
+        member.devid = None;
+
+        for missing_id in [None, Some(Devid::new(2))] {
+            let result =
+                resolve_replace_source(&disk_name("disk2"), &uuid, &member, missing_id, &pool);
+            assert!(
+                matches!(result, Ok(ReplaceSource::Missing { devid }) if devid == Devid::new(2)),
+                "expected Missing {{ devid: 2 }} for --missing-id {missing_id:?}, got: {result:?}"
+            );
+        }
+    }
+
+    // Intent: an old disk with no open mapper may not claim, through its
+    // persisted devid, a MISSING devid that another disk's open mapper
+    // holds.
+    // Why it exists: that devid belongs to the mapper's LUKS UUID. Only a
+    // MISSING devid no open mapper accounts for binds by persisted devid.
+    // Scenario: disk2 was unplugged and btrfs promoted its devid 2 while the
+    // mapper stayed open. disk3 is also gone with no mapper, and pool.json
+    // holds a stale devid 2 for disk3.
+    #[test]
+    fn persisted_devid_held_by_other_open_mapper_refused() {
+        let pool = disk2_null_backed_pool(true);
+        let uuid = LuksUuid::parse("33333333-3333-3333-3333-333333333333").unwrap();
+        let member = membership::DiskMember {
+            name: disk_name("disk3"),
+            by_id: ByIdPath::parse("/dev/disk/by-id/virtio-disk3").unwrap(),
+            devid: Some(Devid::new(2)),
+            added_at: None,
+        };
+
+        for missing_id in [None, Some(Devid::new(2))] {
+            let err =
+                resolve_replace_source(&disk_name("disk3"), &uuid, &member, missing_id, &pool)
+                    .expect_err("disk3 must not resolve to disk2's devid");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("braid-disk2") && msg.contains("22222222-2222-2222-2222-222222222222"),
+                "the refusal must name the mapper that holds devid 2, got: {msg}"
+            );
+        }
     }
 
     #[test]
@@ -3232,8 +3438,8 @@ mod tests {
     use crate::cmd::CmdError;
     use crate::membership::{self, PoolMembership};
     use crate::test_fixtures::{
-        MockFs, PoolFixture, ReplacementPool, mock_ok, replace_dev_info_sufficient,
-        with_lsblk_hw_info,
+        MockFs, PoolFixture, ReplacementPool, SwitchingFs, canonical_dm_table, canonical_luks_uuid,
+        mock_ok, replace_dev_info_sufficient, with_lsblk_hw_info,
     };
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -3293,7 +3499,8 @@ mod tests {
         let fs = MockFs::storage(vec![
             "/dev/disk/by-id/virtio-disk3".into(),
             "/dev/mapper/braid-disk3".into(),
-        ]);
+        ])
+        .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner = ReplacementPool::two_disk_healthy()
             .install(MockRunner::default(), replace_done)
@@ -3495,7 +3702,8 @@ mod tests {
         let fs = MockFs::storage(vec![
             "/dev/disk/by-id/virtio-disk3".into(),
             "/dev/mapper/braid-disk3".into(),
-        ]);
+        ])
+        .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner = ReplacementPool::two_disk_healthy()
             .install(MockRunner::default(), replace_done)
@@ -3603,7 +3811,6 @@ mod tests {
 
     fn execute_gate_runner(
         fresh_pool_show: Option<String>,
-        clone_uuid: LuksUuid,
         mock_downstream_success_until_replace: bool,
     ) -> MockRunner {
         let replace_done = Arc::new(AtomicBool::new(false));
@@ -3622,9 +3829,6 @@ mod tests {
                 CmdRequest::CryptsetupStatus { mapper } if mapper.as_str() == "clone-foreign" => {
                     Some(Ok(mock_status_active("clone-foreign", "/dev/vde")))
                 }
-                CmdRequest::CryptsetupLuksUuid { device } if device == "/dev/vde" => Some(Ok(
-                    mock_ok("cryptsetup luksUUID /dev/vde", &format!("{clone_uuid}\n")),
-                )),
                 CmdRequest::CryptsetupLuksFormat { device, .. }
                     if mock_downstream_success_until_replace =>
                 {
@@ -3674,8 +3878,10 @@ mod tests {
             REPLACE_TEST_FSID,
             &[("braid-disk1", 1), ("braid-disk2", 2), ("clone-foreign", 3)],
         );
-        let runner = execute_gate_runner(Some(show), new_uuid.clone(), false);
-        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()]);
+        let runner = execute_gate_runner(Some(show), false);
+        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()])
+            .with_dm(canonical_dm_table())
+            .with_luks_dm("clone-foreign", new_uuid.as_str());
 
         let result = plan.execute(&runner, &fs, &f.replace_params().build());
 
@@ -3713,8 +3919,8 @@ mod tests {
     fn execute_rechecks_live_pool_rejects_unmounted_pool() {
         let f = PoolFixture::two_disk_healthy();
         let new_uuid = LuksUuid::parse("33333333-3333-3333-3333-333333333333").unwrap();
-        let plan = fresh_luks_execute_plan_for_test(&f, new_uuid.clone());
-        let runner = execute_gate_runner(None, new_uuid, false);
+        let plan = fresh_luks_execute_plan_for_test(&f, new_uuid);
+        let runner = execute_gate_runner(None, false);
         let fs = MockFs::unmounted(vec!["/dev/disk/by-id/virtio-disk3".into()]);
 
         let result = plan.execute(&runner, &fs, &f.replace_params().build());
@@ -3749,13 +3955,14 @@ mod tests {
     fn execute_rechecks_live_pool_rejects_fsid_drift() {
         let f = PoolFixture::two_disk_healthy();
         let new_uuid = LuksUuid::parse("33333333-3333-3333-3333-333333333333").unwrap();
-        let plan = fresh_luks_execute_plan_for_test(&f, new_uuid.clone());
+        let plan = fresh_luks_execute_plan_for_test(&f, new_uuid);
         let show = btrfs_show_pool_text(
             "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
             &[("braid-disk1", 1), ("braid-disk2", 2)],
         );
-        let runner = execute_gate_runner(Some(show), new_uuid, false);
-        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()]);
+        let runner = execute_gate_runner(Some(show), false);
+        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()])
+            .with_dm(canonical_dm_table());
 
         let result = plan.execute(&runner, &fs, &f.replace_params().build());
 
@@ -3790,9 +3997,10 @@ mod tests {
     fn execute_rechecks_live_pool_allows_clean_pool_before_journal() {
         let f = PoolFixture::two_disk_healthy();
         let new_uuid = LuksUuid::parse("33333333-3333-3333-3333-333333333333").unwrap();
-        let plan = fresh_luks_execute_plan_for_test(&f, new_uuid.clone());
-        let runner = execute_gate_runner(None, new_uuid, true);
-        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()]);
+        let plan = fresh_luks_execute_plan_for_test(&f, new_uuid);
+        let runner = execute_gate_runner(None, true);
+        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()])
+            .with_dm(canonical_dm_table());
 
         let result = plan.execute(&runner, &fs, &f.replace_params().build());
 
@@ -3836,9 +4044,10 @@ mod tests {
     fn replace_execute_rejects_when_pool_json_drifts_after_planning() {
         let f = PoolFixture::two_disk_healthy();
         let new_uuid = LuksUuid::parse("33333333-3333-3333-3333-333333333333").unwrap();
-        let plan = fresh_luks_execute_plan_for_test(&f, new_uuid.clone());
-        let runner = execute_gate_runner(None, new_uuid, true);
-        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()]);
+        let plan = fresh_luks_execute_plan_for_test(&f, new_uuid);
+        let runner = execute_gate_runner(None, true);
+        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()])
+            .with_dm(canonical_dm_table());
 
         // Drift: rewrite pool.json to drop disk2 (the old member) after the
         // plan was built but before execute re-loads.
@@ -3899,9 +4108,10 @@ mod tests {
     fn replace_execute_rejects_when_pool_json_drift_conflicts_with_new_disk() {
         let f = PoolFixture::two_disk_healthy();
         let new_uuid = LuksUuid::parse("33333333-3333-3333-3333-333333333333").unwrap();
-        let plan = fresh_luks_execute_plan_for_test(&f, new_uuid.clone());
-        let runner = execute_gate_runner(None, new_uuid, true);
-        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()]);
+        let plan = fresh_luks_execute_plan_for_test(&f, new_uuid);
+        let runner = execute_gate_runner(None, true);
+        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()])
+            .with_dm(canonical_dm_table());
 
         // Drift: keep disk1 + disk2 (so the absent-name guard does not
         // short-circuit) and add a foreign member binding the new target's
@@ -3978,7 +4188,8 @@ mod tests {
         let fs = MockFs::storage(vec![
             "/dev/disk/by-id/virtio-disk3".into(),
             "/dev/mapper/braid-disk3".into(),
-        ]);
+        ])
+        .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner = ReplacementPool::two_disk_healthy()
             .install(MockRunner::default(), replace_done)
@@ -4089,7 +4300,8 @@ mod tests {
         let fs = MockFs::storage(vec![
             "/dev/disk/by-id/virtio-disk3".into(),
             "/dev/mapper/braid-disk3".into(),
-        ]);
+        ])
+        .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner = ReplacementPool::two_disk_healthy()
             .install(MockRunner::default(), replace_done)
@@ -4127,7 +4339,8 @@ mod tests {
         let fs = MockFs::storage(vec![
             "/dev/disk/by-id/virtio-disk3".into(),
             "/dev/mapper/braid-disk3".into(),
-        ]);
+        ])
+        .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner = ReplacementPool::two_disk_healthy()
             .install(MockRunner::default(), replace_done.clone())
@@ -4246,7 +4459,8 @@ mod tests {
         let fs = MockFs::storage(vec![
             "/dev/disk/by-id/virtio-disk3".into(),
             "/dev/mapper/braid-disk3".into(),
-        ]);
+        ])
+        .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner = ReplacementPool::two_disk_healthy()
             .install(MockRunner::default(), replace_done.clone())
@@ -4303,7 +4517,8 @@ mod tests {
         let fs = MockFs::storage(vec![
             "/dev/disk/by-id/virtio-disk3".into(),
             "/dev/mapper/braid-disk3".into(),
-        ]);
+        ])
+        .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let close_attempts = Arc::new(AtomicU32::new(0));
         let runner = ReplacementPool::two_disk_healthy()
@@ -4370,10 +4585,14 @@ mod tests {
     #[test]
     fn live_replace_old_close_labels_drifted_mapper_with_disk_name() {
         let f = PoolFixture::two_disk_healthy();
+        // disk2 is open as braid-WRONG; its dm UUID records disk2's UUID.
         let fs = MockFs::storage(vec![
             "/dev/disk/by-id/virtio-disk3".into(),
             "/dev/mapper/braid-disk3".into(),
-        ]);
+        ])
+        .with_luks_dm("braid-disk1", canonical_luks_uuid(1).as_str())
+        .with_luks_dm("braid-WRONG", canonical_luks_uuid(2).as_str())
+        .with_luks_dm("braid-disk3", canonical_luks_uuid(3).as_str());
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner = ReplacementPool::two_disk_healthy()
             .install(MockRunner::default(), replace_done.clone())
@@ -4444,11 +4663,22 @@ mod tests {
     #[test]
     fn live_replace_old_close_inactive_warns_and_skips_close() {
         let f = PoolFixture::two_disk_healthy();
-        let fs = MockFs::storage(vec![
-            "/dev/disk/by-id/virtio-disk3".into(),
-            "/dev/mapper/braid-disk3".into(),
-        ]);
         let replace_done = Arc::new(AtomicBool::new(false));
+        // braid-disk2 leaves the dm table once the replace commits.
+        let fs = SwitchingFs {
+            before: MockFs::storage(vec![
+                "/dev/disk/by-id/virtio-disk3".into(),
+                "/dev/mapper/braid-disk3".into(),
+            ])
+            .with_dm(canonical_dm_table()),
+            after: MockFs::storage(vec![
+                "/dev/disk/by-id/virtio-disk3".into(),
+                "/dev/mapper/braid-disk3".into(),
+            ])
+            .with_luks_dm("braid-disk1", canonical_luks_uuid(1).as_str())
+            .with_luks_dm("braid-disk3", canonical_luks_uuid(3).as_str()),
+            switched: replace_done.clone(),
+        };
         let runner = ReplacementPool::two_disk_healthy()
             .install(MockRunner::default(), replace_done.clone())
             .with_handler({
@@ -4457,17 +4687,6 @@ mod tests {
                     CmdRequest::BtrfsReplaceStart { .. } => {
                         replace_done.store(true, Ordering::Relaxed);
                         Some(Ok(mock_ok("btrfs replace start", "")))
-                    }
-                    CmdRequest::CryptsetupStatus { mapper }
-                        if mapper.as_str() == "braid-disk2"
-                            && replace_done.load(Ordering::Relaxed) =>
-                    {
-                        Some(Ok(RawCommandOutput {
-                            cmd: "cryptsetup status braid-disk2".into(),
-                            stdout: String::new(),
-                            stderr: "/dev/mapper/braid-disk2 is inactive.\n".into(),
-                            exit_status: 4,
-                        }))
                     }
                     CmdRequest::BtrfsFilesystemResize { .. } => {
                         Some(Ok(mock_ok("btrfs filesystem resize", "")))
@@ -4510,16 +4729,26 @@ mod tests {
     //   recover_replace_old_close_foreign_mapper_warns_and_skips); this brings live
     //   replace to parity.
     // Scenario: live replace of disk2 -> disk3 commits; afterwards
-    //   `cryptsetup status braid-disk2` resolves to a foreign backing /dev/vdf whose
-    //   LUKS UUID is U_FOREIGN != the journaled 2222...2222.
+    //   braid-disk2's dm UUID records U_FOREIGN != the journaled 2222...2222.
     #[test]
     fn live_replace_old_close_foreign_mapper_warns_and_skips_close() {
         let f = PoolFixture::two_disk_healthy();
-        let fs = MockFs::storage(vec![
-            "/dev/disk/by-id/virtio-disk3".into(),
-            "/dev/mapper/braid-disk3".into(),
-        ]);
         let replace_done = Arc::new(AtomicBool::new(false));
+        // Post-commit: braid-disk2 now maps a foreign LUKS container.
+        let fs = SwitchingFs {
+            before: MockFs::storage(vec![
+                "/dev/disk/by-id/virtio-disk3".into(),
+                "/dev/mapper/braid-disk3".into(),
+            ])
+            .with_dm(canonical_dm_table()),
+            after: MockFs::storage(vec![
+                "/dev/disk/by-id/virtio-disk3".into(),
+                "/dev/mapper/braid-disk3".into(),
+            ])
+            .with_dm(canonical_dm_table())
+            .with_luks_dm("braid-disk2", "99999999-9999-9999-9999-999999999999"),
+            switched: replace_done.clone(),
+        };
         let runner = ReplacementPool::two_disk_healthy()
             .install(MockRunner::default(), replace_done.clone())
             .with_handler({
@@ -4528,23 +4757,6 @@ mod tests {
                     CmdRequest::BtrfsReplaceStart { .. } => {
                         replace_done.store(true, Ordering::Relaxed);
                         Some(Ok(mock_ok("btrfs replace start", "")))
-                    }
-                    // Post-commit: braid-disk2's mapper now backs a foreign disk.
-                    CmdRequest::CryptsetupStatus { mapper }
-                        if mapper.as_str() == "braid-disk2"
-                            && replace_done.load(Ordering::Relaxed) =>
-                    {
-                        Some(Ok(mock_ok(
-                            "cryptsetup status braid-disk2",
-                            "braid-disk2 is active and is in use.\n  type:    LUKS2\n  \
-                             device:  /dev/vdf\n  mode:    read/write\n",
-                        )))
-                    }
-                    CmdRequest::CryptsetupLuksUuid { device } if device == "/dev/vdf" => {
-                        Some(Ok(mock_ok(
-                            "cryptsetup luksUUID /dev/vdf",
-                            "99999999-9999-9999-9999-999999999999\n",
-                        )))
                     }
                     // A regressed arm would issue this; answer it so the regression
                     // fails on the assertion below, not on a dispatch error.
@@ -4569,17 +4781,6 @@ mod tests {
                 CmdRequest::CryptsetupClose { mapper } if mapper.as_str() == "braid-disk2"
             )),
             "foreign old-mapper probe must skip close: {requests:?}"
-        );
-        // The post-commit probe actually ran against the foreign backing.
-        let foreign_probes = requests
-            .iter()
-            .filter(
-                |r| matches!(r, CmdRequest::CryptsetupLuksUuid { device } if device == "/dev/vdf"),
-            )
-            .count();
-        assert_eq!(
-            foreign_probes, 1,
-            "exactly one post-commit UUID probe against braid-disk2's foreign backing"
         );
         // Execution continues past the skip -- maintenance still replays.
         assert!(
@@ -4623,7 +4824,8 @@ mod tests {
         let fs = MockFs::storage(vec![
             "/dev/disk/by-id/virtio-disk3".into(),
             "/dev/mapper/braid-disk3".into(),
-        ]);
+        ])
+        .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner =
             ReplacementPool::one_live_one_missing().install(MockRunner::default(), replace_done);
@@ -5007,7 +5209,8 @@ mod tests {
         let f = PoolFixture::two_disk_healthy();
         // Only the new disk's by_id exists. /dev/mapper/braid-disk3 is
         // absent because the mapper is closed (with_mapper_closed below).
-        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()]);
+        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()])
+            .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner = ReplacementPool::two_disk_healthy()
             .with_mapper_closed("braid-disk3")
@@ -5193,7 +5396,8 @@ mod tests {
         let fs = MockFs::storage(vec![
             "/dev/disk/by-id/virtio-disk3".into(),
             "/dev/mapper/braid-disk3".into(),
-        ]);
+        ])
+        .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner = ReplacementPool::two_disk_healthy()
             .install(MockRunner::default(), replace_done)
@@ -5263,22 +5467,37 @@ mod tests {
     // Scenario: planning observes a pool row named `braid-disk3` with a
     //   foreign LUKS UUID, then the replacement disk plans as the correct
     //   already-open `braid-disk3`. Before execute reaches the journal, the
-    //   open mapper's backing UUID drifts again; the pre-journal verifier
+    //   open mapper's LUKS UUID drifts again; the pre-journal verifier
     //   catches it.
     fn mapper_name_drift_does_not_skip_open_mapper_verifier() {
         let f = PoolFixture::two_disk_healthy();
-        let fs = MockFs::storage(vec![
-            "/dev/disk/by-id/virtio-disk3".into(),
-            "/dev/mapper/braid-disk3".into(),
-        ]);
         let replace_done = Arc::new(AtomicBool::new(false));
-        let disk3_backing_uuid_calls = Arc::new(AtomicU32::new(0));
         let new_uuid = LuksUuid::parse("33333333-3333-3333-3333-333333333333").unwrap();
         let drifted_pool_uuid = LuksUuid::parse("44444444-4444-4444-4444-444444440001").unwrap();
         let execute_uuid = LuksUuid::parse("55555555-5555-5555-5555-555555550001").unwrap();
-        let new_uuid_for_handler = new_uuid.clone();
-        let drifted_pool_uuid_for_handler = drifted_pool_uuid.clone();
-        let execute_uuid_for_handler = execute_uuid.clone();
+        // braid-disk3's dm UUID moves through three phases: the drifted pool
+        // row at the pool probe, the planned UUID once planning probes the
+        // new disk by its by-id, and a drifted UUID once execution starts
+        // (after the passphrase check).
+        let disk3_open = |uuid: &LuksUuid| {
+            MockFs::storage(vec![
+                "/dev/disk/by-id/virtio-disk3".into(),
+                "/dev/mapper/braid-disk3".into(),
+            ])
+            .with_dm(canonical_dm_table())
+            .with_luks_dm("braid-disk3", uuid.as_str())
+        };
+        let new_disk_probed = Arc::new(AtomicBool::new(false));
+        let executing = Arc::new(AtomicBool::new(false));
+        let fs = SwitchingFs {
+            before: SwitchingFs {
+                before: disk3_open(&drifted_pool_uuid),
+                after: disk3_open(&new_uuid),
+                switched: new_disk_probed.clone(),
+            },
+            after: disk3_open(&execute_uuid),
+            switched: executing.clone(),
+        };
         let drifted_pre_show = "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\
              \tTotal devices 3 FS bytes used 16.17MiB\n\
              \tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\
@@ -5288,7 +5507,6 @@ mod tests {
             .install(MockRunner::default(), replace_done.clone())
             .with_handler({
                 let replace_done = replace_done.clone();
-                let disk3_backing_uuid_calls = disk3_backing_uuid_calls.clone();
                 move |req| match req {
                     CmdRequest::BtrfsFilesystemShow { mount_point }
                         if !replace_done.load(Ordering::Relaxed) =>
@@ -5298,17 +5516,16 @@ mod tests {
                             drifted_pre_show,
                         )))
                     }
-                    CmdRequest::CryptsetupLuksUuid { device } if device == "/dev/vdd" => {
-                        let call = disk3_backing_uuid_calls.fetch_add(1, Ordering::SeqCst);
-                        let observed = match call {
-                            0 => &drifted_pool_uuid_for_handler,
-                            1 => &new_uuid_for_handler,
-                            _ => &execute_uuid_for_handler,
-                        };
-                        Some(Ok(mock_ok(
-                            &format!("cryptsetup luksUUID {device}"),
-                            &format!("{observed}\n"),
-                        )))
+                    // Phase markers only; the installed pool answers both.
+                    CmdRequest::CryptsetupLuksUuid { device }
+                        if device == "/dev/disk/by-id/virtio-disk3" =>
+                    {
+                        new_disk_probed.store(true, Ordering::SeqCst);
+                        None
+                    }
+                    CmdRequest::CryptsetupTestPassphrase { .. } => {
+                        executing.store(true, Ordering::SeqCst);
+                        None
                     }
                     _ => None,
                 }
@@ -5372,10 +5589,6 @@ mod tests {
     //   verify aborts before the pool mutation.
     fn cmd_replace_existing_luks_open_mapper_enroll_post_journal_drift_aborts() {
         let f = PoolFixture::two_disk_healthy();
-        let fs = MockFs::storage(vec![
-            "/dev/disk/by-id/virtio-disk3".into(),
-            "/dev/mapper/braid-disk3".into(),
-        ]);
         let replace_done = Arc::new(AtomicBool::new(false));
 
         let kf_dir = tempfile::tempdir().unwrap();
@@ -5384,14 +5597,25 @@ mod tests {
 
         let u_new = LuksUuid::parse("33333333-3333-3333-3333-333333333333").unwrap();
         let u_foreign = LuksUuid::parse("44444444-4444-4444-4444-444444440769").unwrap();
-        let u_new_h = u_new.clone();
-        let u_foreign_h = u_foreign.clone();
-        // Phase flag (see the closed-arm sibling): the open-arm verify reads the
-        // mapper backing (/dev/vdd). Planning identifies the disk by its by-id
-        // (virtio-disk3, canonical 33 via the install handler); only the backing
-        // reads route through this gate. The post-journal verify is the only
-        // backing read after the AddKey, so gate /dev/vdd on "enroll seen".
+        // Phase flag (see the closed-arm sibling): the open-arm verify reads
+        // braid-disk3's dm UUID. Planning identifies the disk by its by-id
+        // (virtio-disk3, canonical 33 via the install handler). The
+        // post-journal verify is the only mapper read after the AddKey, so
+        // braid-disk3 records U_FOREIGN once the enroll is seen.
         let enrolled = Arc::new(AtomicBool::new(false));
+        let disk3_open = |uuid: &LuksUuid| {
+            MockFs::storage(vec![
+                "/dev/disk/by-id/virtio-disk3".into(),
+                "/dev/mapper/braid-disk3".into(),
+            ])
+            .with_dm(canonical_dm_table())
+            .with_luks_dm("braid-disk3", uuid.as_str())
+        };
+        let fs = SwitchingFs {
+            before: disk3_open(&u_new),
+            after: disk3_open(&u_foreign),
+            switched: enrolled.clone(),
+        };
 
         let runner = ReplacementPool::two_disk_healthy()
             .install(MockRunner::default(), replace_done)
@@ -5419,17 +5643,6 @@ mod tests {
                         &format!("cryptsetup luksHeaderBackup {device}"),
                         "",
                     ))),
-                    CmdRequest::CryptsetupLuksUuid { device } if device == "/dev/vdd" => {
-                        let uuid = if enrolled.load(Ordering::SeqCst) {
-                            &u_foreign_h
-                        } else {
-                            &u_new_h
-                        };
-                        Some(Ok(mock_ok(
-                            &format!("cryptsetup luksUUID {device}"),
-                            &format!("{uuid}\n"),
-                        )))
-                    }
                     _ => None,
                 }
             });
@@ -5509,7 +5722,8 @@ mod tests {
     fn cmd_replace_existing_luks_closed_mapper_open_boundary_swap_aborts() {
         let f = PoolFixture::two_disk_healthy();
         // Mapper closed -> only the by-id exists, not /dev/mapper/braid-disk3.
-        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()]);
+        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()])
+            .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
 
         let u_new = LuksUuid::parse("33333333-3333-3333-3333-333333333333").unwrap();
@@ -5609,7 +5823,8 @@ mod tests {
     fn cmd_replace_existing_luks_closed_mapper_enroll_post_journal_swap_aborts() {
         let f = PoolFixture::two_disk_healthy();
         // Mapper closed -> only the by-id exists, not /dev/mapper/braid-disk3.
-        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()]);
+        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()])
+            .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
 
         let kf_dir = tempfile::tempdir().unwrap();
@@ -5759,7 +5974,8 @@ mod tests {
         let fs = MockFs::storage(vec![
             "/dev/disk/by-id/virtio-disk3".into(),
             "/dev/mapper/braid-disk3".into(),
-        ]);
+        ])
+        .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner = ReplacementPool::one_live_one_missing()
             .install(MockRunner::default(), replace_done.clone())
@@ -5907,7 +6123,8 @@ mod tests {
         let fs = MockFs::storage(vec![
             "/dev/disk/by-id/virtio-disk3".into(),
             "/dev/mapper/braid-disk3".into(),
-        ]);
+        ])
+        .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner = ReplacementPool::one_live_one_missing()
             .install(MockRunner::default(), replace_done.clone())
@@ -5992,7 +6209,8 @@ mod tests {
         let fs = MockFs::storage(vec![
             "/dev/disk/by-id/virtio-disk3".into(),
             "/dev/mapper/braid-disk3".into(),
-        ]);
+        ])
+        .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner = ReplacementPool::one_live_two_missing()
             .install(MockRunner::default(), replace_done.clone())
@@ -6072,7 +6290,8 @@ mod tests {
         let fs = MockFs::storage(vec![
             "/dev/disk/by-id/virtio-disk3".into(),
             "/dev/mapper/braid-disk3".into(),
-        ]);
+        ])
+        .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner = ReplacementPool::one_live_two_missing()
             .install(MockRunner::default(), replace_done.clone())
@@ -6218,7 +6437,8 @@ mod tests {
         // Only disk3's by_id exists; canonical fixture's CryptsetupStatus
         // on braid-disk3 reports inactive (via with_mapper_closed) so
         // `ensure_luks_open` proceeds to issue `LuksOpen`.
-        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()]);
+        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()])
+            .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner = ReplacementPool::one_live_one_missing()
             .with_mapper_closed("braid-disk3")
@@ -6311,7 +6531,8 @@ mod tests {
     #[test]
     fn replace_returns_enriched_error_when_post_format_backup_fails() {
         let f = PoolFixture::one_live_one_missing();
-        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()]);
+        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()])
+            .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner = ReplacementPool::one_live_one_missing()
             .with_mapper_closed("braid-disk3")
@@ -6398,7 +6619,8 @@ mod tests {
         let fs = MockFs::storage(vec![
             "/dev/disk/by-id/virtio-disk3".into(),
             "/dev/mapper/braid-disk3".into(),
-        ]);
+        ])
+        .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner = ReplacementPool::one_live_one_missing()
             .install(MockRunner::default(), replace_done.clone())
@@ -6494,7 +6716,8 @@ mod tests {
         let fs = MockFs::storage(vec![
             "/dev/disk/by-id/virtio-disk3".into(),
             "/dev/mapper/braid-disk3".into(),
-        ]);
+        ])
+        .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner = ReplacementPool::two_disk_healthy()
             .with_post_replace_probe_failure()
@@ -6563,7 +6786,8 @@ mod tests {
         let fs = MockFs::storage(vec![
             "/dev/disk/by-id/virtio-disk3".into(),
             "/dev/mapper/braid-disk3".into(),
-        ]);
+        ])
+        .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let malformed_post_replace_probe_emitted = Arc::new(AtomicBool::new(false));
         let runner = ReplacementPool::two_disk_healthy()
@@ -6652,7 +6876,8 @@ mod tests {
         let fs = MockFs::storage(vec![
             "/dev/disk/by-id/virtio-disk3".into(),
             "/dev/mapper/braid-disk3".into(),
-        ]);
+        ])
+        .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner =
             ReplacementPool::two_disk_healthy().install(MockRunner::default(), replace_done);
@@ -6710,7 +6935,8 @@ mod tests {
         let fs = MockFs::storage(vec![
             "/dev/disk/by-id/virtio-disk3".into(),
             "/dev/mapper/braid-disk3".into(),
-        ]);
+        ])
+        .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner = ReplacementPool::one_live_one_missing()
             .install(MockRunner::default(), replace_done.clone());
@@ -6798,7 +7024,7 @@ mod tests {
         let pre = membership_from(vec![(u_r, member_r), (u_d, member_d)]);
         membership::save_membership(&pre, &f.paths).expect("save decoy membership");
 
-        let fs = MockFs::storage(vec!["/dev/disk/by-id/new".into()]);
+        let fs = MockFs::storage(vec!["/dev/disk/by-id/new".into()]).with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner = ReplacementPool::one_live_one_missing()
             .install(MockRunner::default(), replace_done)
@@ -6867,6 +7093,7 @@ mod tests {
             "/dev/disk/by-id/virtio-disk3".into(),
             "/dev/mapper/braid-disk3".into(),
         ])
+        .with_dm(canonical_dm_table())
         .with_excl_op("device add\n");
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner =
@@ -6908,7 +7135,8 @@ mod tests {
     #[test]
     fn plan_replace_refuses_when_target_smaller_live_fresh() {
         let f = PoolFixture::two_disk_healthy();
-        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()]);
+        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()])
+            .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner = ReplacementPool::two_disk_healthy()
             .install(MockRunner::default(), replace_done)
@@ -6972,7 +7200,8 @@ mod tests {
         let fs = MockFs::storage(vec![
             "/dev/disk/by-id/virtio-disk3".into(),
             "/dev/mapper/braid-disk3".into(),
-        ]);
+        ])
+        .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner =
             ReplacementPool::two_disk_healthy().install(MockRunner::default(), replace_done);
@@ -7016,7 +7245,8 @@ mod tests {
         let fs = MockFs::storage(vec![
             "/dev/disk/by-id/virtio-disk3".into(),
             "/dev/mapper/braid-disk3".into(),
-        ]);
+        ])
+        .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner =
             ReplacementPool::one_live_one_missing().install(MockRunner::default(), replace_done);
@@ -7062,7 +7292,8 @@ mod tests {
         let fs = MockFs::storage(vec![
             "/dev/disk/by-id/virtio-disk3".into(),
             "/dev/mapper/braid-disk3".into(),
-        ]);
+        ])
+        .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner =
             ReplacementPool::two_disk_healthy().install(MockRunner::default(), replace_done);
@@ -7102,7 +7333,9 @@ mod tests {
     #[test]
     fn plan_replace_rejects_absent_new_disk_with_exact_message() {
         let f = PoolFixture::two_disk_healthy();
-        let fs = MockFs::storage(vec![]).with_excl_op("device add\n");
+        let fs = MockFs::storage(vec![])
+            .with_dm(canonical_dm_table())
+            .with_excl_op("device add\n");
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner =
             ReplacementPool::two_disk_healthy().install(MockRunner::default(), replace_done);
@@ -7351,7 +7584,8 @@ mod tests {
     #[test]
     fn plan_replace_keyfile_probe_failure_becomes_warn_notes() {
         let f = PoolFixture::two_disk_healthy();
-        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()]);
+        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()])
+            .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner = ReplacementPool::two_disk_healthy()
             .install(MockRunner::default(), replace_done)
@@ -7399,7 +7633,8 @@ mod tests {
     #[test]
     fn plan_replace_keyfile_asymmetry_suppresses_probe_failure_warning() {
         let f = PoolFixture::two_disk_healthy();
-        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()]);
+        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()])
+            .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner = ReplacementPool::two_disk_healthy()
             .install(MockRunner::default(), replace_done)
@@ -7517,7 +7752,8 @@ mod tests {
     #[test]
     fn plan_replace_keyfile_asymmetry_emits_warn_for_returning_disk_with_empty_slot_1() {
         let f = PoolFixture::two_disk_healthy();
-        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()]);
+        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()])
+            .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner = ReplacementPool::two_disk_healthy()
             .with_mapper_closed("braid-disk3")
@@ -7552,7 +7788,8 @@ mod tests {
     #[test]
     fn plan_replace_keyfile_no_warn_for_returning_disk_with_occupied_slot_1() {
         let f = PoolFixture::two_disk_healthy();
-        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()]);
+        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()])
+            .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner = ReplacementPool::two_disk_healthy()
             .with_mapper_closed("braid-disk3")
@@ -7602,7 +7839,8 @@ mod tests {
     #[test]
     fn plan_replace_keyfile_emits_target_probe_failure_for_returning_disk_dump_error() {
         let f = PoolFixture::two_disk_healthy();
-        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()]);
+        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()])
+            .with_dm(canonical_dm_table());
         let target = ByIdPath::parse("/dev/disk/by-id/virtio-disk3").unwrap();
         let replace_done = Arc::new(AtomicBool::new(false));
         let target_dump_count = Arc::new(AtomicU32::new(0));
@@ -7700,7 +7938,8 @@ mod tests {
         let fs = MockFs::storage(vec![
             "/dev/disk/by-id/virtio-disk3".into(),
             "/dev/mapper/braid-disk3".into(),
-        ]);
+        ])
+        .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner = ReplacementPool::two_disk_healthy()
             .install(MockRunner::default(), replace_done)
@@ -7739,7 +7978,8 @@ mod tests {
         let fs = MockFs::storage(vec![
             "/dev/disk/by-id/virtio-disk3".into(),
             "/dev/mapper/braid-disk3".into(),
-        ]);
+        ])
+        .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner = ReplacementPool::two_disk_healthy()
             .install(MockRunner::default(), replace_done)
@@ -7781,7 +8021,8 @@ mod tests {
         let fs = MockFs::storage(vec![
             "/dev/disk/by-id/virtio-disk3".into(),
             "/dev/mapper/braid-disk3".into(),
-        ]);
+        ])
+        .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner = ReplacementPool::two_disk_healthy()
             .install(MockRunner::default(), replace_done)
@@ -7825,7 +8066,8 @@ mod tests {
         let fs = MockFs::storage(vec![
             "/dev/disk/by-id/virtio-disk3".into(),
             "/dev/mapper/braid-disk3".into(),
-        ]);
+        ])
+        .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner = ReplacementPool::one_live_one_missing()
             .install(MockRunner::default(), replace_done)
@@ -7878,7 +8120,8 @@ mod tests {
         let fs = MockFs::storage(vec![
             "/dev/disk/by-id/virtio-disk3".into(),
             "/dev/mapper/braid-disk3".into(),
-        ]);
+        ])
+        .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner = ReplacementPool::two_disk_healthy()
             .install(MockRunner::default(), replace_done)
@@ -8161,29 +8404,21 @@ mod tests {
         )
     }
 
-    fn runner_with_active_mapper_uuid(
-        mapper: &'static str,
-        backing_device: &'static str,
-        canned: RawCommandOutput,
-    ) -> MockRunner {
-        MockRunner::default()
-            .with_output(
-                CmdRequest::CryptsetupStatus {
-                    mapper: MapperName::from_basename(mapper.to_owned()),
-                },
-                mock_ok(
-                    &format!("cryptsetup status {mapper}"),
-                    &format!(
-                        "{mapper} is active and is in use.\n  type:    LUKS2\n  device:  {backing_device}\n  mode:    read/write\n"
-                    ),
+    /// A `MockRunner` that reports `mapper` active over `backing_device`.
+    /// The mapper's LUKS UUID comes from the dm table the test's `MockFs`
+    /// seeds, not from the runner.
+    fn runner_with_active_mapper(mapper: &'static str, backing_device: &'static str) -> MockRunner {
+        MockRunner::default().with_output(
+            CmdRequest::CryptsetupStatus {
+                mapper: MapperName::from_basename(mapper.to_owned()),
+            },
+            mock_ok(
+                &format!("cryptsetup status {mapper}"),
+                &format!(
+                    "{mapper} is active and is in use.\n  type:    LUKS2\n  device:  {backing_device}\n  mode:    read/write\n"
                 ),
-            )
-            .with_output(
-                CmdRequest::CryptsetupLuksUuid {
-                    device: backing_device.to_owned(),
-                },
-                canned,
-            )
+            ),
+        )
     }
 
     #[test]
@@ -8207,9 +8442,11 @@ mod tests {
             extra_opts: LuksFormatExtraOpts::default(),
             enroll_key_file: None,
         };
+        let fs = MockFs::storage(vec![]);
         let resolver = MockBackingPathResolver::default();
         let result = verify_existing_luks_new_target_preflight(
             &runner,
+            &fs,
             &target_prep,
             &disk_name("disk3"),
             &MapperName::from_basename("braid-disk3".into()),
@@ -8335,21 +8572,14 @@ mod tests {
     fn replace_existing_luks_open_mapper_backing_mismatch_aborts() {
         let u_new = LuksUuid::parse("55555555-5555-5555-5555-555555550632").unwrap();
         let by_id = ByIdPath::parse("/dev/disk/by-id/Y").unwrap();
-        let runner = runner_with_active_mapper_uuid(
-            "braid-disk3",
-            "/dev/vdz",
-            RawCommandOutput {
-                cmd: "cryptsetup luksUUID /dev/vdz".into(),
-                stdout: format!("{u_new}\n"),
-                stderr: String::new(),
-                exit_status: 0,
-            },
-        );
+        let runner = runner_with_active_mapper("braid-disk3", "/dev/vdz");
+        let fs = MockFs::storage(vec![]).with_luks_dm("braid-disk3", u_new.as_str());
         let resolver =
             MockBackingPathResolver::default().with_path("/dev/disk/by-id/Y", "/dev/vdb");
 
         let err = verify_existing_luks_open_mapper_target(
             &runner,
+            &fs,
             &disk_name("disk3"),
             &MapperName::from_basename("braid-disk3".into()),
             &by_id,
@@ -8404,21 +8634,14 @@ mod tests {
     fn replace_existing_luks_open_mapper_backing_match_continues() {
         let u_new = LuksUuid::parse("66666666-6666-6666-6666-666666660633").unwrap();
         let by_id = ByIdPath::parse("/dev/disk/by-id/Y").unwrap();
-        let runner = runner_with_active_mapper_uuid(
-            "braid-disk3",
-            "/dev/vdb",
-            RawCommandOutput {
-                cmd: "cryptsetup luksUUID /dev/vdb".into(),
-                stdout: format!("{u_new}\n"),
-                stderr: String::new(),
-                exit_status: 0,
-            },
-        );
+        let runner = runner_with_active_mapper("braid-disk3", "/dev/vdb");
+        let fs = MockFs::storage(vec![]).with_luks_dm("braid-disk3", u_new.as_str());
         let resolver =
             MockBackingPathResolver::default().with_path("/dev/disk/by-id/Y", "/dev/vdb");
 
         verify_existing_luks_open_mapper_target(
             &runner,
+            &fs,
             &disk_name("disk3"),
             &MapperName::from_basename("braid-disk3".into()),
             &by_id,
@@ -8450,11 +8673,13 @@ mod tests {
                 "braid-disk3 is active and is in use.\n  type:    LUKS2\n  device:  /dev/vdb\n  mode:    read/write\n",
             ),
         );
+        let fs = MockFs::storage(vec![]);
         let resolver = MockBackingPathResolver::default()
             .with_error("/dev/disk/by-id/Y", std::io::ErrorKind::NotFound);
 
         let err = verify_existing_luks_open_mapper_target(
             &runner,
+            &fs,
             &disk_name("disk3"),
             &MapperName::from_basename("braid-disk3".into()),
             &by_id,
@@ -8491,8 +8716,8 @@ mod tests {
 
     /// Seed 635: already-open ExistingLuks replace target UUID-mismatch
     /// arm. When the open mapper's backing kernel path canonicalizes to
-    /// the configured by-id target but the backing device's LUKS UUID
-    /// disagrees with the journaled `new_uuid`, the classifier returns
+    /// the configured by-id target but the mapper's dm UUID records a LUKS
+    /// UUID that disagrees with the journaled `new_uuid`, the classifier returns
     /// `MapperOwnershipFailure::Conflict` and `verify_existing_luks_open_mapper_target`
     /// maps it to `NewTargetUuidMismatchAtOpen` before any
     /// `BtrfsReplaceStart`.
@@ -8505,28 +8730,21 @@ mod tests {
     //   collapsing Conflict into Validation or BackingPathMismatch would
     //   otherwise pass.
     // Scenario: /dev/disk/by-id/Y and the live backing /dev/vdf both
-    //   canonicalize to /dev/vdf (path check passes), but
-    //   cryptsetup luksUUID /dev/vdf returns U_FOREIGN != U_NEW.
+    //   canonicalize to /dev/vdf (path check passes), but braid-disk3's dm
+    //   UUID records U_FOREIGN != U_NEW.
     #[test]
     fn replace_existing_luks_open_mapper_backing_uuid_mismatch_aborts() {
         let u_new = LuksUuid::parse("88888888-8888-8888-8888-888888880635").unwrap();
         let u_foreign = LuksUuid::parse("99999999-9999-9999-9999-999999990636").unwrap();
         let by_id = ByIdPath::parse("/dev/disk/by-id/Y").unwrap();
-        let runner = runner_with_active_mapper_uuid(
-            "braid-disk3",
-            "/dev/vdf",
-            RawCommandOutput {
-                cmd: "cryptsetup luksUUID /dev/vdf".into(),
-                stdout: format!("{u_foreign}\n"),
-                stderr: String::new(),
-                exit_status: 0,
-            },
-        );
+        let runner = runner_with_active_mapper("braid-disk3", "/dev/vdf");
+        let fs = MockFs::storage(vec![]).with_luks_dm("braid-disk3", u_foreign.as_str());
         let resolver =
             MockBackingPathResolver::default().with_path("/dev/disk/by-id/Y", "/dev/vdf");
 
         let err = verify_existing_luks_open_mapper_target(
             &runner,
+            &fs,
             &disk_name("disk3"),
             &MapperName::from_basename("braid-disk3".into()),
             &by_id,
@@ -8808,7 +9026,8 @@ mod tests {
         let fs = MockFs::storage(vec![
             "/dev/disk/by-id/virtio-disk3".into(),
             "/dev/mapper/braid-disk3".into(),
-        ]);
+        ])
+        .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         // Force replace to fail at BtrfsReplaceStart so we don't have to
         // mock the full post-commit chain; the assertion targets the

@@ -349,16 +349,108 @@ impl Sleeper for RecordingSleeper {
 }
 
 // ---------------------------------------------------------------------------
+// MockDmTable
+// ---------------------------------------------------------------------------
+
+/// The dm UUID cryptsetup gives a LUKS2 mapping at activation: `CRYPT-LUKS2-`,
+/// the header UUID without dashes, then the mapper name.
+pub(crate) fn luks2_dm_uuid(luks_uuid: &str, mapper: &str) -> String {
+    format!("CRYPT-LUKS2-{}-{mapper}", luks_uuid.replace('-', ""))
+}
+
+/// The dm table of the canonical fixture pool: `braid-diskN` open with the
+/// dm UUID recording `canonical_luks_uuid(N)`, for disks 1-3. These are the
+/// identities the canonical runner fixtures (`RemovalPool`,
+/// `ReplacementPool`, `RemoveMissingPool`) report for the same mappers, so a
+/// test seeds the filesystem side of that one pool with this table.
+pub(crate) fn canonical_dm_table() -> MockDmTable {
+    (1..=3).fold(MockDmTable::default(), |table, n| {
+        table.with_luks(&format!("braid-disk{n}"), canonical_luks_uuid(n).as_str())
+    })
+}
+
+/// The live device-mapper devices a mock filesystem serves as
+/// `/sys/block/dm-N/dm/{name,uuid}`, numbered in insertion order. Each
+/// mock `Filesystem` embeds one so tests seed a mapper's identity next to the
+/// paths that mock already serves.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct MockDmTable {
+    /// `(name, dm uuid)` per device, `dm-N` at index `N`.
+    devices: Vec<(String, String)>,
+}
+
+impl MockDmTable {
+    /// Add an active LUKS2 mapping whose dm UUID records `luks_uuid`.
+    pub(crate) fn with_luks(self, mapper: &str, luks_uuid: &str) -> Self {
+        let dm_uuid = luks2_dm_uuid(luks_uuid, mapper);
+        self.with_raw(mapper, &dm_uuid)
+    }
+
+    /// Add an active device with an arbitrary dm UUID (plain dm-crypt, LVM,
+    /// or none), for tests of mappings that carry no LUKS identity. Kernel
+    /// dm names are unique, so a name already in the table is replaced in
+    /// place; a per-test override of a seeded table therefore wins.
+    pub(crate) fn with_raw(mut self, mapper: &str, dm_uuid: &str) -> Self {
+        match self.devices.iter_mut().find(|(name, _)| name == mapper) {
+            Some(device) => device.1 = dm_uuid.to_owned(),
+            None => self.devices.push((mapper.to_owned(), dm_uuid.to_owned())),
+        }
+        self
+    }
+
+    /// Add every device of `other`, replacing same-named entries.
+    pub(crate) fn merge(self, other: MockDmTable) -> Self {
+        other
+            .devices
+            .into_iter()
+            .fold(self, |table, (name, dm_uuid)| {
+                table.with_raw(&name, &dm_uuid)
+            })
+    }
+
+    /// Keep only the devices whose name passes `keep`, for mocks that model
+    /// a mapper leaving the table when it closes.
+    pub(crate) fn retain(mut self, keep: impl Fn(&str) -> bool) -> Self {
+        self.devices.retain(|(name, _)| keep(name));
+        self
+    }
+
+    /// Serve `list_dir("/sys/block")`; `None` for every other path.
+    pub(crate) fn list_dir(&self, path: &str) -> Option<Vec<String>> {
+        (path == "/sys/block").then(|| {
+            (0..self.devices.len())
+                .map(|index| format!("dm-{index}"))
+                .collect()
+        })
+    }
+
+    /// Serve `/sys/block/dm-N/dm/{name,uuid}` with the kernel's trailing
+    /// newline; `None` for every other path.
+    pub(crate) fn read_to_string(&self, path: &str) -> Option<String> {
+        let rest = path.strip_prefix("/sys/block/dm-")?;
+        let (index, attr) = rest.split_once("/dm/")?;
+        let (name, dm_uuid) = self.devices.get(index.parse::<usize>().ok()?)?;
+        match attr {
+            "name" => Some(format!("{name}\n")),
+            "uuid" => Some(format!("{dm_uuid}\n")),
+            _ => None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // MockFs
 // ---------------------------------------------------------------------------
 
 /// Generic `Filesystem` mock: configurable existing paths, mountinfo,
-/// sysfs `exclusive_operation`, and `/dev/mapper` listing behavior for
-/// command tests that need filesystem probes without touching the host.
+/// sysfs `exclusive_operation`, live device-mapper identities, and
+/// `/dev/mapper` listing behavior for command tests that need filesystem
+/// probes without touching the host.
 pub(crate) struct MockFs {
     paths: Vec<String>,
     mountinfo: String,
     excl_op: String,
+    dm: MockDmTable,
     dev_mapper: DevMapperListing,
     /// When `Some`, `create_dir_all` fails with this error kind instead of
     /// succeeding, so mount/pool failure tests can exercise the fail-closed
@@ -383,6 +475,7 @@ impl MockFs {
             mountinfo: "36 35 0:32 / /mnt/storage rw shared:1 - btrfs /dev/mapper/braid-disk1 rw\n"
                 .into(),
             excl_op: "none\n".into(),
+            dm: MockDmTable::default(),
             dev_mapper: DevMapperListing::Empty,
             create_dir_error: None,
         }
@@ -396,6 +489,7 @@ impl MockFs {
             paths,
             mountinfo: "26 25 0:23 / / rw shared:1 - ext4 /dev/sda1 rw\n".into(),
             excl_op: "none\n".into(),
+            dm: MockDmTable::default(),
             dev_mapper: DevMapperListing::Empty,
             create_dir_error: None,
         }
@@ -412,6 +506,25 @@ impl MockFs {
     /// preflight's busy-op / paused-balance branches.
     pub(crate) fn with_excl_op(mut self, body: &str) -> Self {
         self.excl_op = body.to_owned();
+        self
+    }
+
+    /// Add an active LUKS2 mapping to the sysfs device-mapper table.
+    pub(crate) fn with_luks_dm(mut self, mapper: &str, luks_uuid: &str) -> Self {
+        self.dm = self.dm.with_luks(mapper, luks_uuid);
+        self
+    }
+
+    /// Add an active device with an arbitrary dm UUID to the sysfs
+    /// device-mapper table.
+    pub(crate) fn with_raw_dm(mut self, mapper: &str, dm_uuid: &str) -> Self {
+        self.dm = self.dm.with_raw(mapper, dm_uuid);
+        self
+    }
+
+    /// Add every device of `table` to the sysfs device-mapper table.
+    pub(crate) fn with_dm(mut self, table: MockDmTable) -> Self {
+        self.dm = self.dm.merge(table);
         self
     }
 
@@ -450,12 +563,16 @@ impl Filesystem for MockFs {
             Ok(self.mountinfo.clone())
         } else if path.ends_with("/exclusive_operation") {
             Ok(self.excl_op.clone())
+        } else if let Some(body) = self.dm.read_to_string(path) {
+            Ok(body)
         } else {
             Err(std::io::Error::new(std::io::ErrorKind::NotFound, "mock"))
         }
     }
     fn list_dir(&self, path: &str) -> Result<Vec<String>, std::io::Error> {
-        if path == "/dev/mapper" || path == "/dev/mapper/" {
+        if let Some(entries) = self.dm.list_dir(path) {
+            Ok(entries)
+        } else if path == "/dev/mapper" || path == "/dev/mapper/" {
             match &self.dev_mapper {
                 DevMapperListing::Empty => Ok(vec![]),
                 DevMapperListing::Entries(entries) => Ok(entries.clone()),
@@ -472,6 +589,49 @@ impl Filesystem for MockFs {
             Some(kind) => Err(std::io::Error::new(kind, "mock create_dir_all failure")),
             None => Ok(()),
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SwitchingFs
+// ---------------------------------------------------------------------------
+
+/// A filesystem that serves `before` until `switched` is set, then `after`.
+/// A runner handler sets the flag when it commits a mutation, so a test can
+/// change what the host shows mid-command, such as a mapper that closes or
+/// reopens over a different container after `btrfs device remove`. Nest one
+/// inside another for more than two phases.
+pub(crate) struct SwitchingFs<B = MockFs, A = MockFs> {
+    pub(crate) before: B,
+    pub(crate) after: A,
+    pub(crate) switched: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl<B: Filesystem, A: Filesystem> SwitchingFs<B, A> {
+    fn current(&self) -> &dyn Filesystem {
+        if self.switched.load(std::sync::atomic::Ordering::SeqCst) {
+            &self.after
+        } else {
+            &self.before
+        }
+    }
+}
+
+impl<B: Filesystem, A: Filesystem> Filesystem for SwitchingFs<B, A> {
+    fn exists(&self, path: &str) -> bool {
+        self.current().exists(path)
+    }
+    fn is_block_device(&self, path: &str) -> bool {
+        self.current().is_block_device(path)
+    }
+    fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
+        self.current().read_to_string(path)
+    }
+    fn list_dir(&self, path: &str) -> Result<Vec<String>, std::io::Error> {
+        self.current().list_dir(path)
+    }
+    fn create_dir_all(&self, path: &str) -> Result<(), std::io::Error> {
+        self.current().create_dir_all(path)
     }
 }
 

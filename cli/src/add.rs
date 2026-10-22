@@ -1166,6 +1166,7 @@ impl AddPlan {
             ));
             if ensure_luks_open(
                 runner,
+                fs,
                 &target.name,
                 &target.by_id,
                 params.backing_path_resolver,
@@ -1382,6 +1383,7 @@ impl AddPlan {
             );
             if ensure_luks_open(
                 runner,
+                fs,
                 name,
                 &target.by_id,
                 params.backing_path_resolver,
@@ -2453,7 +2455,9 @@ mod tests {
     use super::*;
     use crate::luks::{RealTty, ScriptedPassphraseReader};
     use crate::secret::Passphrase;
-    use crate::test_fixtures::{assert_lines_in_order, line_index};
+    use crate::test_fixtures::{
+        MockDmTable, MockFs, assert_lines_in_order, canonical_dm_table, line_index,
+    };
     use std::collections::HashMap;
 
     fn disk(name: &str) -> DiskName {
@@ -3089,22 +3093,25 @@ mod tests {
             },
             btrfs_show_pool(fsid, &show_devices),
         );
-        for (mapper, _, underlying, uuid) in devices {
-            runner = runner
-                .with_output(
-                    CmdRequest::CryptsetupStatus {
-                        mapper: MapperName::from_basename((*mapper).to_owned()),
-                    },
-                    mock_status_active(mapper, underlying),
-                )
-                .with_output(
-                    CmdRequest::CryptsetupLuksUuid {
-                        device: (*underlying).to_owned(),
-                    },
-                    mock_luks_uuid(underlying, uuid),
-                );
+        for (mapper, _, underlying, _) in devices {
+            runner = runner.with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName::from_basename((*mapper).to_owned()),
+                },
+                mock_status_active(mapper, underlying),
+            );
         }
         runner
+    }
+
+    /// The device-mapper table matching `pool_probe_runner`'s devices: each
+    /// mapper open over the LUKS UUID its tuple names.
+    fn pool_probe_dm(devices: &[(&str, u64, &str, &str)]) -> MockDmTable {
+        devices
+            .iter()
+            .fold(MockDmTable::default(), |table, (mapper, _, _, uuid)| {
+                table.with_luks(mapper, uuid)
+            })
     }
 
     #[derive(Default)]
@@ -3158,8 +3165,9 @@ mod tests {
             pool_mounted_with_fsid(POOL_FSID),
         );
         let (_state_tmp, paths, _tmp, pass_path) = execute_fixture();
-        let runner = pool_probe_runner(POOL_FSID, &[("clone-foreign", 2, "/dev/vde", UUID)]);
-        let fs = AddMockFs(vec![BY_ID.into()]);
+        let devices = [("clone-foreign", 2, "/dev/vde", UUID)];
+        let runner = pool_probe_runner(POOL_FSID, &devices);
+        let fs = MockFs::storage(vec![BY_ID.into()]).with_dm(pool_probe_dm(&devices));
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
         let confirm = crate::confirm::RecordingConfirm::new();
         let resolver =
@@ -3238,8 +3246,9 @@ mod tests {
             pool_mounted_with_fsid(POOL_FSID),
         );
         let (_state_tmp, paths, _tmp, pass_path) = execute_fixture();
-        let runner = pool_probe_runner(POOL_FSID, &[("braid-disk2", 2, "/dev/vdc", UUID)]);
-        let fs = AddMockFs(vec![BY_ID.into()]);
+        let devices = [("braid-disk2", 2, "/dev/vdc", UUID)];
+        let runner = pool_probe_runner(POOL_FSID, &devices);
+        let fs = MockFs::storage(vec![BY_ID.into()]).with_dm(pool_probe_dm(&devices));
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
         let confirm = crate::confirm::RecordingConfirm::new();
         let resolver =
@@ -3303,16 +3312,13 @@ mod tests {
             pool_mounted_with_fsid(POOL_FSID),
         );
         let (_state_tmp, paths, _tmp, pass_path) = execute_fixture();
-        let runner = pool_probe_runner(
-            POOL_FSID,
-            &[(
-                "braid-disk1",
-                1,
-                "/dev/vdb",
-                "11111111-1111-1111-1111-111111111111",
-            )],
-        )
-        .with_output(
+        let devices = [(
+            "braid-disk1",
+            1,
+            "/dev/vdb",
+            "11111111-1111-1111-1111-111111111111",
+        )];
+        let runner = pool_probe_runner(POOL_FSID, &devices).with_output(
             CmdRequest::CryptsetupLuksFormat {
                 device: BY_ID.to_owned(),
                 uuid: target.luks_uuid.clone(),
@@ -3326,7 +3332,7 @@ mod tests {
                 exit_status: 9,
             },
         );
-        let fs = AddMockFs(vec![BY_ID.into()]);
+        let fs = MockFs::storage(vec![BY_ID.into()]).with_dm(pool_probe_dm(&devices));
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
         let confirm = crate::confirm::RecordingConfirm::new();
         let resolver = CountingBackingPathResolver::default().with_path(BY_ID, "/dev/vdc");
@@ -3389,7 +3395,7 @@ mod tests {
         );
         let (_state_tmp, paths, _tmp, pass_path) = execute_fixture();
         let runner = MockRunner::default();
-        let fs = AddOfflineMockFs(vec![BY_ID.into()]);
+        let fs = MockFs::unmounted(vec![BY_ID.into()]);
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
         let confirm = crate::confirm::RecordingConfirm::new();
         let resolver = CountingBackingPathResolver::default().with_path(BY_ID, "/dev/vdc");
@@ -3448,16 +3454,14 @@ mod tests {
             pool_unmounted(),
         );
         let (_state_tmp, paths, _tmp, pass_path) = execute_fixture();
-        let runner = RequestRecordingRunner::new(pool_probe_runner(
-            POOL_FSID,
-            &[(
-                "braid-disk1",
-                1,
-                "/dev/vdb",
-                "11111111-1111-1111-1111-111111111111",
-            )],
-        ));
-        let fs = AddMockFs(vec![BY_ID.into()]);
+        let devices = [(
+            "braid-disk1",
+            1,
+            "/dev/vdb",
+            "11111111-1111-1111-1111-111111111111",
+        )];
+        let runner = RequestRecordingRunner::new(pool_probe_runner(POOL_FSID, &devices));
+        let fs = MockFs::storage(vec![BY_ID.into()]).with_dm(pool_probe_dm(&devices));
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
         let confirm = crate::confirm::RecordingConfirm::new();
         let resolver = CountingBackingPathResolver::default().with_path(BY_ID, "/dev/vdc");
@@ -3525,16 +3529,14 @@ mod tests {
             pool_mounted_with_fsid(OLD_FSID),
         );
         let (_state_tmp, paths, _tmp, pass_path) = execute_fixture();
-        let runner = pool_probe_runner(
-            NEW_FSID,
-            &[(
-                "braid-disk1",
-                1,
-                "/dev/vdb",
-                "11111111-1111-1111-1111-111111111111",
-            )],
-        );
-        let fs = AddMockFs(vec![BY_ID.into()]);
+        let devices = [(
+            "braid-disk1",
+            1,
+            "/dev/vdb",
+            "11111111-1111-1111-1111-111111111111",
+        )];
+        let runner = pool_probe_runner(NEW_FSID, &devices);
+        let fs = MockFs::storage(vec![BY_ID.into()]).with_dm(pool_probe_dm(&devices));
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
         let confirm = crate::confirm::RecordingConfirm::new();
         let resolver = CountingBackingPathResolver::default().with_path(BY_ID, "/dev/vdc");
@@ -3874,7 +3876,7 @@ mod tests {
         let confirm = crate::confirm::RecordingConfirm::new();
         plan.execute(
             &runner,
-            &AddMockFs(vec![]),
+            &MockFs::storage(vec![]).with_dm(canonical_dm_table()),
             &AddParams {
                 config: &test_config(),
                 disk_specs: &[],
@@ -4303,6 +4305,7 @@ mod tests {
         // the requested LUKS UUID, then the armed guard drops.
         let by_id = ByIdPath::parse("/dev/disk/by-id/existing").unwrap();
         let uuid = "11111111-1111-1111-1111-111111111111";
+        let fs = crate::test_fixtures::MockFs::storage(vec![]).with_luks_dm("braid-existing", uuid);
         let runner = MockRunner::default()
             .with_mapper_open("braid-existing", "/dev/vdb", uuid)
             .with_output(
@@ -4323,6 +4326,7 @@ mod tests {
             let mut guard = LuksCleanupGuard::new(&runner);
             if ensure_luks_open(
                 &runner,
+                &fs,
                 &disk("existing"),
                 &by_id,
                 &backing_path_resolver,
@@ -4647,7 +4651,8 @@ mod tests {
         // Crucially: /dev/mapper/braid-disk2 is NOT listed, so ensure_luks_open
         // in Pass 1 actually issues the cryptsetup open (rather than seeing an
         // already-existing mapper and short-circuiting).
-        let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
+        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk2".into()])
+            .with_dm(canonical_dm_table());
         // The runner reports only disk1 until BtrfsDeviceAdd succeeds, then
         // reports disk1+disk2 so the execute-time re-check sees the same
         // pre-add pool the planner saw while the post-add probe can enrich
@@ -4770,7 +4775,8 @@ mod tests {
     #[test]
     fn execute_fresh_add_to_mounted_single_device_pool_balances_once() {
         let (_state_tmp, paths, _tmp, pass_path) = execute_fixture();
-        let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
+        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk2".into()])
+            .with_dm(canonical_dm_table());
         let runner = RequestRecordingRunner::new(RecoverableAddRunner::new());
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
         let confirm = crate::confirm::RecordingConfirm::new();
@@ -4848,7 +4854,8 @@ mod tests {
     #[test]
     fn execute_degraded_add_skips_raid1_balance() {
         let (_state_tmp, paths, _tmp, pass_path) = execute_fixture();
-        let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
+        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk2".into()])
+            .with_dm(canonical_dm_table());
         let runner = RequestRecordingRunner::new(RecoverableAddRunner::degraded());
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
         let confirm = crate::confirm::RecordingConfirm::new();
@@ -4935,7 +4942,8 @@ mod tests {
     #[test]
     fn execute_newly_degraded_add_skips_raid1_balance_and_emits_note() {
         let (_state_tmp, paths, _tmp, pass_path) = execute_fixture();
-        let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
+        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk2".into()])
+            .with_dm(canonical_dm_table());
         let runner = RequestRecordingRunner::new(RecoverableAddRunner::degrades_after_add());
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
         let confirm = crate::confirm::RecordingConfirm::new();
@@ -5022,7 +5030,8 @@ mod tests {
     #[test]
     fn execute_member_returned_add_balances_without_stale_skip_note() {
         let (_state_tmp, paths, _tmp, pass_path) = execute_fixture();
-        let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
+        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk2".into()])
+            .with_dm(canonical_dm_table());
         let runner = RequestRecordingRunner::new(RecoverableAddRunner::new());
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
         let confirm = crate::confirm::RecordingConfirm::new();
@@ -5158,7 +5167,7 @@ mod tests {
         let plan = fresh_add_confirm_plan();
         let (_state_tmp, paths, _tmp, pass_path) = execute_fixture();
         let runner = RequestRecordingRunner::new(RecoverableAddRunner::new());
-        let fs = AddMockFs(vec![BY_ID.into()]);
+        let fs = MockFs::storage(vec![BY_ID.into()]);
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
         let confirm = crate::confirm::RecordingConfirm::new();
         confirm.decline();
@@ -5220,7 +5229,7 @@ mod tests {
         let plan = fresh_add_confirm_plan();
         let (_state_tmp, paths, _tmp, pass_path) = execute_fixture();
         let runner = RequestRecordingRunner::new(RecoverableAddRunner::with_hw_info());
-        let fs = AddMockFs(vec![BY_ID.into()]);
+        let fs = MockFs::storage(vec![BY_ID.into()]).with_dm(canonical_dm_table());
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
         let confirm = crate::confirm::RecordingConfirm::new();
         confirm.accept();
@@ -5276,7 +5285,7 @@ mod tests {
         let plan = fresh_add_confirm_plan();
         let (_state_tmp, paths, _tmp, pass_path) = execute_fixture();
         let runner = RequestRecordingRunner::new(RecoverableAddRunner::new());
-        let fs = AddMockFs(vec![BY_ID.into()]);
+        let fs = MockFs::storage(vec![BY_ID.into()]).with_dm(canonical_dm_table());
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
         let confirm = crate::confirm::RecordingConfirm::new();
         confirm.accept();
@@ -5361,59 +5370,6 @@ mod tests {
             stdout: String::new(),
             stderr: format!("/dev/mapper/{mapper} is inactive.\n"),
             exit_status: 4,
-        }
-    }
-
-    struct AddMockFs(Vec<String>);
-    impl crate::filesystem::Filesystem for AddMockFs {
-        fn exists(&self, path: &str) -> bool {
-            self.0.iter().any(|p| p == path)
-        }
-        fn is_block_device(&self, _path: &str) -> bool {
-            false
-        }
-        fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
-            if path == "/proc/self/mountinfo" {
-                Ok(
-                    "36 35 0:32 / /mnt/storage rw shared:1 - btrfs /dev/mapper/braid-disk1 rw\n"
-                        .to_owned(),
-                )
-            } else if path.ends_with("/exclusive_operation") {
-                Ok("none\n".to_owned())
-            } else {
-                Err(std::io::Error::new(std::io::ErrorKind::NotFound, "mock"))
-            }
-        }
-        fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
-            Ok(vec![])
-        }
-        fn create_dir_all(&self, _path: &str) -> Result<(), std::io::Error> {
-            Ok(())
-        }
-    }
-
-    struct AddOfflineMockFs(Vec<String>);
-    impl crate::filesystem::Filesystem for AddOfflineMockFs {
-        fn exists(&self, path: &str) -> bool {
-            self.0.iter().any(|p| p == path)
-        }
-        fn is_block_device(&self, _path: &str) -> bool {
-            false
-        }
-        fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
-            if path == "/proc/self/mountinfo" {
-                Ok("26 25 0:23 / / rw shared:1 - ext4 /dev/sda1 rw\n".to_owned())
-            } else if path.ends_with("/exclusive_operation") {
-                Ok("none\n".to_owned())
-            } else {
-                Err(std::io::Error::new(std::io::ErrorKind::NotFound, "mock"))
-            }
-        }
-        fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
-            Ok(vec![])
-        }
-        fn create_dir_all(&self, _path: &str) -> Result<(), std::io::Error> {
-            Ok(())
         }
     }
 
@@ -5621,6 +5577,9 @@ mod tests {
         mounted: Arc<AtomicBool>,
         added: Mutex<Vec<String>>,
         opened: Mutex<Vec<String>>,
+        /// The live device-mapper table, shared with `fs()` so the sysfs dm
+        /// identities follow the mappers this runner opens.
+        dm: Arc<Mutex<MockDmTable>>,
         formatted_uuids: Mutex<std::collections::BTreeMap<String, String>>,
         fail_bootstrap_post_mount_probe: bool,
         malformed_bootstrap_post_mount_probe: bool,
@@ -5640,6 +5599,10 @@ mod tests {
                 mounted: Arc::new(AtomicBool::new(true)),
                 added: Mutex::new(Vec::new()),
                 opened: Mutex::new(vec!["braid-disk1".to_owned()]),
+                dm: Arc::new(Mutex::new(
+                    MockDmTable::default()
+                        .with_luks("braid-disk1", "11111111-1111-1111-1111-111111111111"),
+                )),
                 formatted_uuids: Mutex::new(std::collections::BTreeMap::new()),
                 fail_bootstrap_post_mount_probe: false,
                 malformed_bootstrap_post_mount_probe: false,
@@ -5658,6 +5621,7 @@ mod tests {
             let runner = Self::live();
             runner.mounted.store(false, Ordering::SeqCst);
             runner.opened.lock().unwrap().clear();
+            *runner.dm.lock().unwrap() = MockDmTable::default();
             runner
         }
 
@@ -5715,7 +5679,23 @@ mod tests {
             AddFullPathFs {
                 paths,
                 mounted: Arc::clone(&self.mounted),
+                dm: Arc::clone(&self.dm),
             }
+        }
+
+        /// Record `mapper` in the dm table over the LUKS UUID its backing
+        /// disk holds, under its drifted name too when the test drifts it.
+        fn record_open_mapper(&self, mapper: &str) {
+            let uuid = self
+                .luks_uuid_for_device(self.mapper_underlying(mapper))
+                .expect("opened mapper backs a LUKS disk");
+            let mut dm = self.dm.lock().unwrap();
+            let mut table = std::mem::take(&mut *dm).with_luks(mapper, &uuid);
+            let drifted = self.probe_mapper_name(mapper);
+            if drifted != mapper {
+                table = table.with_luks(&drifted, &uuid);
+            }
+            *dm = table;
         }
 
         fn added_mappers(&self) -> Vec<String> {
@@ -5840,6 +5820,7 @@ mod tests {
     struct AddFullPathFs {
         paths: Vec<String>,
         mounted: Arc<AtomicBool>,
+        dm: Arc<Mutex<MockDmTable>>,
     }
 
     impl crate::filesystem::Filesystem for AddFullPathFs {
@@ -5861,13 +5842,15 @@ mod tests {
                 }
             } else if path.ends_with("/exclusive_operation") {
                 Ok("none\n".to_owned())
+            } else if let Some(body) = self.dm.lock().unwrap().read_to_string(path) {
+                Ok(body)
             } else {
                 Err(std::io::Error::new(std::io::ErrorKind::NotFound, "mock"))
             }
         }
 
-        fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
-            Ok(vec![])
+        fn list_dir(&self, path: &str) -> Result<Vec<String>, std::io::Error> {
+            Ok(self.dm.lock().unwrap().list_dir(path).unwrap_or_default())
         }
 
         fn create_dir_all(&self, _path: &str) -> Result<(), std::io::Error> {
@@ -5966,6 +5949,7 @@ mod tests {
                 }
                 CmdRequest::CryptsetupLuksOpen { device, mapper } => {
                     self.opened.lock().unwrap().push(mapper.as_str().to_owned());
+                    self.record_open_mapper(mapper.as_str());
                     Ok(mock_ok(
                         &format!("cryptsetup open --type luks {device} {mapper}"),
                         "",
@@ -6043,8 +6027,8 @@ mod tests {
         let name_derived_control = test_acked_disk(false, 22);
         let ghost = test_acked_disk(true, 5);
         save_test_acked(&paths, &[("2", name_derived_control.clone()), ("7", ghost)]);
-        let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
         let runner = AddFullPathRunner::live().with_disk2_devid(7);
+        let fs = runner.fs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
         let confirm = crate::confirm::RecordingConfirm::new();
 
@@ -6161,8 +6145,8 @@ mod tests {
     fn cmd_add_succeeds_when_post_add_mapper_drifted() {
         let (_state_tmp, paths, _tmp, config_path, pass_path) = add_test_setup();
         save_test_acked(&paths, &[("2", test_acked_disk(true, 22))]);
-        let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
         let runner = AddFullPathRunner::live().with_added_mapper_drifted("braid-WRONG");
+        let fs = runner.fs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
         let confirm = crate::confirm::RecordingConfirm::new();
 
@@ -6412,11 +6396,11 @@ mod tests {
         let ghost2 = test_acked_disk(true, 22);
         let ghost3 = test_acked_disk(true, 33);
         save_test_acked(&paths, &[("2", ghost2), ("3", ghost3.clone())]);
-        let fs = AddMockFs(vec![
+        let runner = AddFullPathRunner::live().with_second_add_failure();
+        let fs = runner.fs(vec![
             "/dev/disk/by-id/virtio-disk2".into(),
             "/dev/disk/by-id/virtio-disk3".into(),
         ]);
-        let runner = AddFullPathRunner::live().with_second_add_failure();
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
         let confirm = crate::confirm::RecordingConfirm::new();
 
@@ -6479,11 +6463,11 @@ mod tests {
     #[test]
     fn cmd_add_partial_multi_add_journal_carries_all_targets() {
         let (_state_tmp, paths, _tmp, config_path, pass_path) = add_test_setup();
-        let fs = AddMockFs(vec![
+        let runner = AddFullPathRunner::live().with_second_add_failure();
+        let fs = runner.fs(vec![
             "/dev/disk/by-id/virtio-disk2".into(),
             "/dev/disk/by-id/virtio-disk3".into(),
         ]);
-        let runner = AddFullPathRunner::live().with_second_add_failure();
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
         let confirm = crate::confirm::RecordingConfirm::new();
 
@@ -6573,8 +6557,8 @@ mod tests {
     fn cmd_add_live_pool_acked_cleanup_parse_failure_is_fatal() {
         let (_state_tmp, paths, _tmp, config_path, pass_path) = add_test_setup();
         std::fs::write(paths.acked_stats_json(), "not json").unwrap();
-        let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
         let runner = AddFullPathRunner::live();
+        let fs = runner.fs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
         let confirm = crate::confirm::RecordingConfirm::new();
 
@@ -6708,7 +6692,7 @@ mod tests {
             ),
         ] {
             let (_state_tmp, paths, _tmp, config_path, pass_path) = add_test_setup();
-            let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
+            let fs = runner.fs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
             let inhibitor = crate::inhibit::RecordingInhibitor::new();
             let confirm = crate::confirm::RecordingConfirm::new();
 
@@ -6776,11 +6760,11 @@ mod tests {
     #[test]
     fn cmd_add_earlier_disk_vanishing_before_final_probe_is_fatal() {
         let (_state_tmp, paths, _tmp, config_path, pass_path) = add_test_setup();
-        let fs = AddMockFs(vec![
+        let runner = AddFullPathRunner::live().with_mapper_vanished_after_later_add("braid-disk2");
+        let fs = runner.fs(vec![
             "/dev/disk/by-id/virtio-disk2".into(),
             "/dev/disk/by-id/virtio-disk3".into(),
         ]);
-        let runner = AddFullPathRunner::live().with_mapper_vanished_after_later_add("braid-disk2");
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
         let confirm = crate::confirm::RecordingConfirm::new();
 
@@ -6854,10 +6838,11 @@ mod tests {
     //   The command succeeds as a no-op without ever writing pending-op.json.
     fn no_journal_on_noop_add() {
         let (_state_tmp, paths, _tmp, config_path, pass_path) = add_test_setup();
-        let fs = AddMockFs(vec![
+        let fs = MockFs::storage(vec![
             "/dev/disk/by-id/virtio-disk2".into(),
             "/dev/mapper/braid-disk2".into(),
-        ]);
+        ])
+        .with_dm(canonical_dm_table());
         let runner = AddTestRunner {
             disk_in_pool: true,
             fail_device_add: false,
@@ -6914,10 +6899,11 @@ mod tests {
     //   the pool yet. btrfs device add fails. Journal must persist for recovery.
     fn journal_survives_btrfs_device_add_failure() {
         let (_state_tmp, paths, _tmp, config_path, pass_path) = add_test_setup();
-        let fs = AddMockFs(vec![
+        let fs = MockFs::storage(vec![
             "/dev/disk/by-id/virtio-disk2".into(),
             "/dev/mapper/braid-disk2".into(),
-        ]);
+        ])
+        .with_dm(canonical_dm_table());
         let runner = AddTestRunner {
             disk_in_pool: false,
             fail_device_add: true,
@@ -7069,10 +7055,11 @@ mod tests {
     //   operation happened, so no journal should exist.
     fn no_journal_on_identity_failure() {
         let (_state_tmp, paths, _tmp, config_path, pass_path) = add_test_setup();
-        let fs = AddMockFs(vec![
+        let fs = MockFs::storage(vec![
             "/dev/disk/by-id/virtio-disk2".into(),
             "/dev/mapper/braid-disk2".into(),
-        ]);
+        ])
+        .with_dm(canonical_dm_table());
         let runner = AddTestRunner {
             disk_in_pool: false,
             fail_device_add: false,
@@ -7133,7 +7120,8 @@ mod tests {
     //   open. The command fails as ambiguous identity with no journal.
     fn closed_present_luks_identity_failure_verifies_credentials_before_no_journal() {
         let (_state_tmp, paths, _tmp, config_path, pass_path) = add_test_setup();
-        let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
+        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk2".into()])
+            .with_dm(canonical_dm_table());
         let runner = RequestRecordingRunner::new(ClosedNoBtrfsRunner {
             inner: AddTestRunner {
                 disk_in_pool: false,
@@ -7233,7 +7221,7 @@ mod tests {
     fn duplicate_by_id_rejected() {
         let (_state_tmp, paths, _tmp, config_path, pass_path) = add_test_setup();
         // fs lookups never happen — dedup fires before any filesystem probe.
-        let fs = AddMockFs(vec![]);
+        let fs = MockFs::storage(vec![]);
         // Empty MockRunner: any runner.run() would return MissingMock, which
         // would surface in the returned error rather than a "duplicate by_id"
         // message. Asserting the duplicate error text indirectly pins
@@ -7312,7 +7300,7 @@ mod tests {
     fn add_rejects_name_collision_with_existing_member() {
         let (_state_tmp, paths, _tmp, config_path, _pass_path) = add_test_setup();
         // fs lookups never happen -- the conflict gate fires before any probe.
-        let fs = AddMockFs(vec![]);
+        let fs = MockFs::storage(vec![]);
         // Empty MockRunner: the gate fires before the first runner.run() at
         // probe_pool, so an empty runner never returns MissingMock. Asserting
         // the conflict error text indirectly pins "nothing executed".
@@ -7394,7 +7382,7 @@ mod tests {
     fn add_rejects_by_id_collision_with_existing_member() {
         let (_state_tmp, paths, _tmp, config_path, _pass_path) = add_test_setup();
         // fs lookups never happen -- the conflict gate fires before any probe.
-        let fs = AddMockFs(vec![]);
+        let fs = MockFs::storage(vec![]);
         // Empty MockRunner: the gate fires before the first runner.run() at
         // probe_pool, so an empty runner never returns MissingMock. Asserting
         // the conflict error text indirectly pins "nothing executed".
@@ -7476,7 +7464,7 @@ mod tests {
         // it; that earlier refusal has its own dedicated test
         // (cmd_add_refuses_when_pool_locked_with_membership).
         membership::save_membership(&membership::PoolMembership::empty(), &paths).unwrap();
-        let fs = AddOfflineMockFs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
+        let fs = MockFs::unmounted(vec!["/dev/disk/by-id/virtio-disk2".into()]);
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::CryptsetupLuksUuid {
@@ -7603,7 +7591,7 @@ mod tests {
                 },
                 mock_not_luks("cryptsetup luksUUID /dev/vdz"),
             );
-        let fs = AddOfflineMockFs(vec![by_id.into()]);
+        let fs = MockFs::unmounted(vec![by_id.into()]);
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
         let confirm = crate::confirm::RecordingConfirm::new();
 
@@ -7707,7 +7695,7 @@ mod tests {
                 b"test-passphrase".to_vec(),
                 mock_ok("cryptsetup open --test-passphrase", ""),
             );
-        let fs = AddOfflineMockFs(vec![disk1.into(), disk2.into()]);
+        let fs = MockFs::unmounted(vec![disk1.into(), disk2.into()]);
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
         let confirm = crate::confirm::RecordingConfirm::new();
 
@@ -8800,7 +8788,7 @@ mod tests {
     #[test]
     fn cmd_add_bootstrap_aborts_on_passphrase_mismatch() {
         let (_state_tmp, paths, _tmp, config_path) = confirm_test_setup();
-        let fs = AddOfflineMockFs(vec!["/dev/disk/by-id/virtio-disk1".into()]);
+        let fs = MockFs::unmounted(vec!["/dev/disk/by-id/virtio-disk1".into()]);
         let runner = AddRecordingRunner::new(false);
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
         let confirm = crate::confirm::RecordingConfirm::new();
@@ -8872,7 +8860,7 @@ mod tests {
     #[test]
     fn cmd_add_bootstrap_proceeds_on_passphrase_match() {
         let (_state_tmp, paths, _tmp, config_path) = confirm_test_setup();
-        let fs = AddOfflineMockFs(vec!["/dev/disk/by-id/virtio-disk1".into()]);
+        let fs = MockFs::unmounted(vec!["/dev/disk/by-id/virtio-disk1".into()]);
         let runner = AddRecordingRunner::new(false);
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
         let confirm = crate::confirm::RecordingConfirm::new();
@@ -8922,7 +8910,7 @@ mod tests {
     #[test]
     fn add_returns_enriched_error_when_post_format_backup_fails() {
         let (_state_tmp, paths, _tmp, config_path) = confirm_test_setup();
-        let fs = AddOfflineMockFs(vec!["/dev/disk/by-id/virtio-disk1".into()]);
+        let fs = MockFs::unmounted(vec!["/dev/disk/by-id/virtio-disk1".into()]);
         let runner =
             AddRecordingRunner::new(false).with_backup_failure_stderr("No space left on device");
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
@@ -8991,7 +8979,7 @@ mod tests {
     #[test]
     fn cmd_add_with_keyfile_orders_format_addkey_backup_open() {
         let (_state_tmp, paths, _tmp, config_path) = confirm_test_setup();
-        let fs = AddOfflineMockFs(vec!["/dev/disk/by-id/virtio-disk1".into()]);
+        let fs = MockFs::unmounted(vec!["/dev/disk/by-id/virtio-disk1".into()]);
         let runner = AddRecordingRunner::new(false).with_backup_success();
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
         let confirm = crate::confirm::RecordingConfirm::new();
@@ -9088,7 +9076,7 @@ mod tests {
     #[test]
     fn cmd_add_refuses_when_pool_locked_with_membership() {
         let (_state_tmp, paths, _tmp, config_path, _pass_path) = add_test_setup();
-        let fs = AddOfflineMockFs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
+        let fs = MockFs::unmounted(vec!["/dev/disk/by-id/virtio-disk2".into()]);
         let runner = AddRecordingRunner::new(false);
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
         let confirm = crate::confirm::RecordingConfirm::new();
@@ -9168,11 +9156,12 @@ mod tests {
     #[test]
     fn cmd_add_live_pool_fresh_add_single_prompt() {
         let (_state_tmp, paths, _tmp, config_path, _pass_path) = add_test_setup();
-        let fs = AddMockFs(vec![
+        let fs = MockFs::storage(vec![
             "/dev/disk/by-id/virtio-disk2".into(),
             // /sys/fs/btrfs/<fsid>/exclusive_operation is served by
-            // AddMockFs::read_to_string, not exists(). No entry needed.
-        ]);
+            // MockFs::read_to_string, not exists(). No entry needed.
+        ])
+        .with_luks_dm("braid-disk1", DISK1_UUID);
         let runner = AddRecordingRunner::new(true);
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
         let confirm = crate::confirm::RecordingConfirm::new();
@@ -9229,10 +9218,11 @@ mod tests {
     #[test]
     fn cmd_add_mixed_already_in_pool_and_fresh_verifies_each_disk_once() {
         let (_state_tmp, paths, _tmp, config_path, pass_path) = add_test_setup();
-        let fs = AddMockFs(vec![
+        let fs = MockFs::storage(vec![
             "/dev/disk/by-id/virtio-disk1".into(),
             "/dev/disk/by-id/virtio-disk2".into(),
-        ]);
+        ])
+        .with_luks_dm("braid-disk1", DISK1_UUID);
         let runner = AddRecordingRunner::new(true).with_disk1_present_luks_member();
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
         let confirm = crate::confirm::RecordingConfirm::new();
@@ -9293,7 +9283,7 @@ mod tests {
     //   - preserved-context failure carries accumulated notes on
     //     PlanFailure::notes when planning bails later
     //
-    // Fixtures reuse add_test_setup/AddMockFs and a bespoke runner that
+    // Fixtures reuse add_test_setup/MockFs and a bespoke runner that
     // can toggle `missing_count` on the pool probe.
 
     /// Runner for plan_add boundary tests. Same stubs as AddTestRunner
@@ -9393,6 +9383,33 @@ mod tests {
         fn target_probe_by_index(&self, index: usize) -> Option<AddPlanTargetProbe> {
             let by_id = Self::by_id_for_index(index);
             self.target_probes.get(&by_id).copied()
+        }
+
+        /// The device-mapper table of this runner's world: each pool member
+        /// open over its pool UUID, and each open target over the UUID its
+        /// probe reports. Closed targets have no entry.
+        fn dm_table(&self) -> MockDmTable {
+            let members =
+                (0..self.keyfile_probes.len()).fold(MockDmTable::default(), |table, index| {
+                    table.with_luks(&format!("braid-disk{}", index + 1), &Self::pool_uuid(index))
+                });
+            self.target_probes
+                .iter()
+                .fold(members, |table, (by_id, probe)| {
+                    let index = Self::disk_index_from_by_id(by_id).expect("virtio target by-id");
+                    let mapper = format!("braid-disk{}", index + 1);
+                    match probe {
+                        AddPlanTargetProbe::OpenRecoverableSlot1Empty => {
+                            table.with_luks(&mapper, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+                        }
+                        AddPlanTargetProbe::AlreadyInPoolSlot1Empty => {
+                            table.with_luks(&mapper, &Self::pool_uuid(index))
+                        }
+                        AddPlanTargetProbe::ClosedSlot1Empty
+                        | AddPlanTargetProbe::ClosedSlot1Occupied
+                        | AddPlanTargetProbe::ClosedDumpFails => table,
+                    }
+                })
         }
 
         fn target_probe_for_device(&self, device: &str) -> Option<(usize, AddPlanTargetProbe)> {
@@ -9677,8 +9694,9 @@ mod tests {
     #[test]
     fn plan_add_missing_devices_becomes_single_warn_note() {
         let fixture = plan_add_fixture();
-        let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
         let runner = AddPlanTestRunner::new().with_missing(1);
+        let fs =
+            MockFs::storage(vec!["/dev/disk/by-id/virtio-disk2".into()]).with_dm(runner.dm_table());
 
         let disk_specs = ["disk2=/dev/disk/by-id/virtio-disk2".to_string()];
         let report = plan_add(&runner, &fs, &fixture.params(&disk_specs, true));
@@ -9716,8 +9734,9 @@ mod tests {
     #[test]
     fn plan_add_keyfile_asymmetry_becomes_warn_note() {
         let fixture = plan_add_fixture();
-        let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
         let runner = AddPlanTestRunner::new().with_keyfile();
+        let fs =
+            MockFs::storage(vec!["/dev/disk/by-id/virtio-disk2".into()]).with_dm(runner.dm_table());
 
         let disk_specs = ["disk2=/dev/disk/by-id/virtio-disk2".to_string()];
         let report = plan_add(&runner, &fs, &fixture.params(&disk_specs, true));
@@ -9754,8 +9773,9 @@ mod tests {
     #[test]
     fn plan_add_keyfile_probe_failure_becomes_warn_note() {
         let fixture = plan_add_fixture();
-        let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
         let runner = AddPlanTestRunner::new().with_keyfile_probe_failure();
+        let fs =
+            MockFs::storage(vec!["/dev/disk/by-id/virtio-disk2".into()]).with_dm(runner.dm_table());
 
         let disk_specs = ["disk2=/dev/disk/by-id/virtio-disk2".to_string()];
         let report = plan_add(&runner, &fs, &fixture.params(&disk_specs, true));
@@ -9794,8 +9814,9 @@ mod tests {
     #[test]
     fn plan_add_warn_notes_preserve_missing_before_keyfile_order() {
         let fixture = plan_add_fixture();
-        let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
         let runner = AddPlanTestRunner::new().with_missing(1).with_keyfile();
+        let fs =
+            MockFs::storage(vec!["/dev/disk/by-id/virtio-disk2".into()]).with_dm(runner.dm_table());
 
         let disk_specs = ["disk2=/dev/disk/by-id/virtio-disk2".to_string()];
         let report = plan_add(&runner, &fs, &fixture.params(&disk_specs, true));
@@ -9832,10 +9853,11 @@ mod tests {
     #[test]
     fn plan_add_keyfile_probe_failure_orders_after_missing_warning() {
         let fixture = plan_add_fixture();
-        let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
         let runner = AddPlanTestRunner::new()
             .with_missing(1)
             .with_keyfile_probe_failure();
+        let fs =
+            MockFs::storage(vec!["/dev/disk/by-id/virtio-disk2".into()]).with_dm(runner.dm_table());
 
         let disk_specs = ["disk2=/dev/disk/by-id/virtio-disk2".to_string()];
         let report = plan_add(&runner, &fs, &fixture.params(&disk_specs, true));
@@ -9873,11 +9895,12 @@ mod tests {
     #[test]
     fn plan_add_keyfile_probe_failure_suppressed_when_enrollment_proven() {
         let fixture = plan_add_fixture();
-        let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk3".into()]);
         let runner = AddPlanTestRunner::new().with_keyfile_probes(vec![
             AddPlanKeyfileProbe::Failure,
             AddPlanKeyfileProbe::Occupied,
         ]);
+        let fs =
+            MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()]).with_dm(runner.dm_table());
 
         let disk_specs = ["disk3=/dev/disk/by-id/virtio-disk3".to_string()];
         let report = plan_add(&runner, &fs, &fixture.params(&disk_specs, true));
@@ -9908,11 +9931,12 @@ mod tests {
     #[test]
     fn plan_add_keyfile_asymmetry_emits_warn_for_returning_disk_with_empty_slot_1() {
         let fixture = plan_add_fixture();
-        let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
         let runner = AddPlanTestRunner::new().with_keyfile().with_target_probe(
             "/dev/disk/by-id/virtio-disk2",
             AddPlanTargetProbe::ClosedSlot1Empty,
         );
+        let fs =
+            MockFs::storage(vec!["/dev/disk/by-id/virtio-disk2".into()]).with_dm(runner.dm_table());
 
         let disk_specs = ["disk2=/dev/disk/by-id/virtio-disk2".to_string()];
         let plan = plan_add(&runner, &fs, &fixture.params(&disk_specs, true))
@@ -9939,11 +9963,12 @@ mod tests {
     #[test]
     fn plan_add_keyfile_no_warn_for_returning_disk_with_occupied_slot_1() {
         let fixture = plan_add_fixture();
-        let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
         let runner = AddPlanTestRunner::new().with_keyfile().with_target_probe(
             "/dev/disk/by-id/virtio-disk2",
             AddPlanTargetProbe::ClosedSlot1Occupied,
         );
+        let fs =
+            MockFs::storage(vec!["/dev/disk/by-id/virtio-disk2".into()]).with_dm(runner.dm_table());
 
         let disk_specs = ["disk2=/dev/disk/by-id/virtio-disk2".to_string()];
         let plan = plan_add(&runner, &fs, &fixture.params(&disk_specs, true))
@@ -9970,10 +9995,10 @@ mod tests {
     fn plan_add_keyfile_emits_target_probe_failure_for_returning_disk_dump_error() {
         let fixture = plan_add_fixture();
         let target = ByIdPath::parse("/dev/disk/by-id/virtio-disk2").unwrap();
-        let fs = AddMockFs(vec![target.as_str().to_owned()]);
         let runner = AddPlanTestRunner::new()
             .with_keyfile()
             .with_target_probe(target.as_str(), AddPlanTargetProbe::ClosedDumpFails);
+        let fs = MockFs::storage(vec![target.as_str().to_owned()]).with_dm(runner.dm_table());
 
         let disk_specs = [format!("disk2={target}")];
         let plan = plan_add(&runner, &fs, &fixture.params(&disk_specs, true))
@@ -10006,13 +10031,14 @@ mod tests {
     #[test]
     fn plan_add_keyfile_pool_probe_failure_for_returning_disk_with_empty_slot_1() {
         let fixture = plan_add_fixture();
-        let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
         let runner = AddPlanTestRunner::new()
             .with_keyfile_probe_failure()
             .with_target_probe(
                 "/dev/disk/by-id/virtio-disk2",
                 AddPlanTargetProbe::ClosedSlot1Empty,
             );
+        let fs =
+            MockFs::storage(vec!["/dev/disk/by-id/virtio-disk2".into()]).with_dm(runner.dm_table());
 
         let disk_specs = ["disk2=/dev/disk/by-id/virtio-disk2".to_string()];
         let plan = plan_add(&runner, &fs, &fixture.params(&disk_specs, true))
@@ -10045,7 +10071,6 @@ mod tests {
     #[test]
     fn plan_add_keyfile_no_warn_when_target_already_in_pool_with_empty_slot_1() {
         let fixture = plan_add_fixture();
-        let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
         let runner = AddPlanTestRunner::new()
             .with_keyfile_probes(vec![
                 AddPlanKeyfileProbe::Occupied,
@@ -10055,6 +10080,8 @@ mod tests {
                 "/dev/disk/by-id/virtio-disk2",
                 AddPlanTargetProbe::AlreadyInPoolSlot1Empty,
             );
+        let fs =
+            MockFs::storage(vec!["/dev/disk/by-id/virtio-disk2".into()]).with_dm(runner.dm_table());
 
         let disk_specs = ["disk2=/dev/disk/by-id/virtio-disk2".to_string()];
         let plan = plan_add(&runner, &fs, &fixture.params(&disk_specs, true))
@@ -10093,11 +10120,12 @@ mod tests {
     #[test]
     fn plan_add_keyfile_asymmetry_emits_warn_for_open_returning_disk_with_empty_slot_1() {
         let fixture = plan_add_fixture();
-        let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
         let runner = AddPlanTestRunner::new().with_keyfile().with_target_probe(
             "/dev/disk/by-id/virtio-disk2",
             AddPlanTargetProbe::OpenRecoverableSlot1Empty,
         );
+        let fs =
+            MockFs::storage(vec!["/dev/disk/by-id/virtio-disk2".into()]).with_dm(runner.dm_table());
 
         let disk_specs = ["disk2=/dev/disk/by-id/virtio-disk2".to_string()];
         let plan = plan_add(&runner, &fs, &fixture.params(&disk_specs, true))
@@ -10159,15 +10187,16 @@ mod tests {
      * fallback) instead of the specific per-disk message. Complement is
      * that on the real-run path `no_journal_on_noop_add` still pins the
      * "no journal, no inhibitor" invariants.
-     * Scenario: disk2 is already a pool member (AddMockFs + disk_in_pool).
+     * Scenario: disk2 is already a pool member (MockFs + disk_in_pool).
      */
     #[test]
     fn plan_add_already_in_pool_is_note_only_success() {
         let (_state_tmp, paths, _tmp, config_path, pass_path) = add_test_setup();
-        let fs = AddMockFs(vec![
+        let fs = MockFs::storage(vec![
             "/dev/disk/by-id/virtio-disk2".into(),
             "/dev/mapper/braid-disk2".into(),
-        ]);
+        ])
+        .with_dm(canonical_dm_table());
         let runner = AddTestRunner {
             disk_in_pool: true,
             fail_device_add: false,
@@ -10225,10 +10254,11 @@ mod tests {
     #[test]
     fn plan_add_mixed_already_in_pool_and_fresh_confirms_only_fresh_disk() {
         let (_state_tmp, paths, _tmp, config_path, pass_path) = add_test_setup();
-        let fs = AddMockFs(vec![
+        let fs = MockFs::storage(vec![
             "/dev/disk/by-id/virtio-disk1".into(),
             "/dev/disk/by-id/virtio-disk2".into(),
-        ]);
+        ])
+        .with_luks_dm("braid-disk1", DISK1_UUID);
         let runner = AddRecordingRunner::new(true).with_disk1_present_luks_member();
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
         let confirm = crate::confirm::RecordingConfirm::new();
@@ -10308,7 +10338,7 @@ mod tests {
         )
         .unwrap();
 
-        let fs = AddOfflineMockFs(vec!["/dev/disk/by-id/virtio-disk1".into()]);
+        let fs = MockFs::unmounted(vec!["/dev/disk/by-id/virtio-disk1".into()]);
         // AddRecordingRunner with pool_mounted=false drives plan_add's
         // unmounted-pool branch and simulates disk1 as PresentNotLuks.
         let runner = AddRecordingRunner::new(false);
@@ -10371,8 +10401,9 @@ mod tests {
     #[test]
     fn plan_add_render_emits_warn_above_steps() {
         let fixture = plan_add_fixture();
-        let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
         let runner = AddPlanTestRunner::new().with_missing(1);
+        let fs =
+            MockFs::storage(vec!["/dev/disk/by-id/virtio-disk2".into()]).with_dm(runner.dm_table());
 
         let disk_specs = ["disk2=/dev/disk/by-id/virtio-disk2".to_string()];
         let report = plan_add(&runner, &fs, &fixture.params(&disk_specs, true));
@@ -10439,8 +10470,9 @@ mod tests {
     #[test]
     fn plan_add_degraded_preview_omits_balance_step() {
         let fixture = plan_add_fixture();
-        let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
         let runner = AddPlanTestRunner::new().with_missing(1);
+        let fs =
+            MockFs::storage(vec!["/dev/disk/by-id/virtio-disk2".into()]).with_dm(runner.dm_table());
 
         let disk_specs = ["disk2=/dev/disk/by-id/virtio-disk2".to_string()];
         let report = plan_add(&runner, &fs, &fixture.params(&disk_specs, true));
@@ -10476,7 +10508,6 @@ mod tests {
     #[test]
     fn plan_add_degraded_noop_keeps_missing_warning() {
         let fixture = plan_add_fixture();
-        let fs = AddMockFs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
         let runner = AddPlanTestRunner::new()
             .with_keyfile_probes(vec![
                 AddPlanKeyfileProbe::Occupied,
@@ -10487,6 +10518,8 @@ mod tests {
                 "/dev/disk/by-id/virtio-disk2",
                 AddPlanTargetProbe::AlreadyInPoolSlot1Empty,
             );
+        let fs =
+            MockFs::storage(vec!["/dev/disk/by-id/virtio-disk2".into()]).with_dm(runner.dm_table());
 
         let disk_specs = ["disk2=/dev/disk/by-id/virtio-disk2".to_string()];
         let plan = plan_add(&runner, &fs, &fixture.params(&disk_specs, true))
@@ -10623,10 +10656,11 @@ mod tests {
     #[test]
     fn plan_add_preserves_warn_notes_on_later_failure() {
         let fixture = plan_add_fixture();
-        let fs = AddMockFs(vec![
+        let fs = MockFs::storage(vec![
             "/dev/disk/by-id/virtio-disk2".into(),
             "/dev/mapper/braid-disk2".into(),
-        ]);
+        ])
+        .with_dm(canonical_dm_table());
         // AddTestRunner supports no_btrfs_superblock AND reports the
         // pool with braid-disk1 only. Override by wrapping it with a
         // runner that also synthesizes MISSING rows.
@@ -10686,46 +10720,6 @@ mod tests {
         assert_eq!(warns[0], &format_add_missing_devices_warning(1));
     }
 
-    /// AddMockFs variant with a configurable sysfs exclusive_operation
-    /// body. Drives preflight's busy-op / paused-balance branches from
-    /// the plan_add boundary tests. Existence-probe paths delegate to
-    /// the inner `AddMockFs`.
-    struct AddMockFsWithSysfs {
-        inner: AddMockFs,
-        sysfs_body: String,
-    }
-
-    impl AddMockFsWithSysfs {
-        fn new(paths: Vec<String>, sysfs_body: &str) -> Self {
-            Self {
-                inner: AddMockFs(paths),
-                sysfs_body: sysfs_body.to_owned(),
-            }
-        }
-    }
-
-    impl crate::filesystem::Filesystem for AddMockFsWithSysfs {
-        fn exists(&self, path: &str) -> bool {
-            self.inner.exists(path)
-        }
-        fn is_block_device(&self, path: &str) -> bool {
-            self.inner.is_block_device(path)
-        }
-        fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
-            if path.ends_with("/exclusive_operation") {
-                Ok(self.sysfs_body.clone())
-            } else {
-                self.inner.read_to_string(path)
-            }
-        }
-        fn list_dir(&self, path: &str) -> Result<Vec<String>, std::io::Error> {
-            self.inner.list_dir(path)
-        }
-        fn create_dir_all(&self, path: &str) -> Result<(), std::io::Error> {
-            self.inner.create_dir_all(path)
-        }
-    }
-
     /* Intent: plan_add surfaces an in-flight exclusive op as a single
      * PreviewNote::Info whose body says "waiting for in-flight <op> to
      * finish...", and the rendered preview contains that line above
@@ -10740,9 +10734,10 @@ mod tests {
     #[test]
     fn plan_add_preflight_busy_op_becomes_info_note() {
         let fixture = plan_add_fixture();
-        let fs =
-            AddMockFsWithSysfs::new(vec!["/dev/disk/by-id/virtio-disk2".into()], "device add\n");
         let runner = AddPlanTestRunner::new();
+        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk2".into()])
+            .with_excl_op("device add\n")
+            .with_dm(runner.dm_table());
 
         let disk_specs = ["disk2=/dev/disk/by-id/virtio-disk2".to_string()];
         let report = plan_add(&runner, &fs, &fixture.params(&disk_specs, true));
@@ -10783,8 +10778,6 @@ mod tests {
     #[test]
     fn plan_add_preserves_preflight_notes_on_ups_failure() {
         let fixture = plan_add_fixture();
-        let fs =
-            AddMockFsWithSysfs::new(vec!["/dev/disk/by-id/virtio-disk2".into()], "device add\n");
         // Custom runner: delegates to AddPlanTestRunner for everything
         // except the UPS query, which returns OB. We need the UPS
         // config attached to params; construct a custom config.
@@ -10814,6 +10807,9 @@ mod tests {
         let runner = UpsOnBatteryRunner {
             inner: AddPlanTestRunner::new(),
         };
+        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk2".into()])
+            .with_excl_op("device add\n")
+            .with_dm(runner.inner.dm_table());
 
         // Build a config with a UPS named "ups".
         let config_json = serde_json::json!({
@@ -10863,8 +10859,8 @@ mod tests {
     #[test]
     fn plan_add_rejects_absent_new_disk_with_exact_message() {
         let fixture = plan_add_fixture();
-        let fs = AddMockFs(vec![]);
         let runner = AddPlanTestRunner::new();
+        let fs = MockFs::storage(vec![]).with_dm(runner.dm_table());
 
         let disk_specs = ["disk2=/dev/disk/by-id/virtio-disk2".to_string()];
         let failure = match plan_add(&runner, &fs, &fixture.params(&disk_specs, true)) {
@@ -11495,7 +11491,7 @@ mod tests {
         ] {
             let (_state_tmp, paths, _tmp, config_path, pass_path) = fresh_add_setup();
             let recording = RequestRecordingRunner::new(MockRunner::default());
-            let fs = AddOfflineMockFs(vec!["/dev/disk/by-id/virtio-disk1".into()]);
+            let fs = MockFs::unmounted(vec!["/dev/disk/by-id/virtio-disk1".into()]);
             let inhibitor = crate::inhibit::RecordingInhibitor::new();
             let confirm = crate::confirm::RecordingConfirm::new();
             let extras = vec![token.to_owned()];

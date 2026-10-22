@@ -12,7 +12,7 @@
 //! topology installer; tests compose with `MockRunner::with_handler`
 //! per-call.
 
-use super::shared::{PoolFixture, mock_virtio_backing_path_resolver};
+use super::shared::{MockDmTable, PoolFixture, mock_virtio_backing_path_resolver};
 use crate::cmd::{CmdRequest, CommandRunner, MockRunner, RawCommandOutput};
 use crate::config::Config;
 use crate::filesystem::Filesystem;
@@ -143,9 +143,19 @@ type SharedClosed = Arc<Mutex<HashSet<String>>>;
 /// device-mapper paths disappearing when `cryptsetup close` runs and
 /// reappearing on `CryptsetupLuksOpen`. Used together with
 /// `RemountRunner` for tests that exercise the recover relock cycle on
-/// initially-open mappers.
+/// initially-open mappers. The sysfs dm table serves each seeded mapper
+/// only while the runner has it open.
 pub(crate) struct RemountFs {
     paths: SharedPaths,
+    dm: MockDmTable,
+    closed: SharedClosed,
+}
+
+impl RemountFs {
+    fn open_dm(&self) -> MockDmTable {
+        let closed = self.closed.lock().unwrap();
+        self.dm.clone().retain(|name| !closed.contains(name))
+    }
 }
 
 impl Filesystem for RemountFs {
@@ -162,10 +172,12 @@ impl Filesystem for RemountFs {
                     .to_owned(),
             );
         }
-        Err(std::io::Error::new(std::io::ErrorKind::NotFound, "mock"))
+        self.open_dm()
+            .read_to_string(path)
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "mock"))
     }
-    fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
-        Ok(vec![])
+    fn list_dir(&self, path: &str) -> Result<Vec<String>, std::io::Error> {
+        Ok(self.open_dm().list_dir(path).unwrap_or_default())
     }
     fn create_dir_all(&self, _path: &str) -> Result<(), std::io::Error> {
         Ok(())
@@ -289,6 +301,8 @@ impl RemountHarness {
         Self {
             fs: RemountFs {
                 paths: Arc::clone(&paths),
+                dm: MockDmTable::default(),
+                closed: Arc::clone(&closed),
             },
             runner: RemountRunner {
                 inner,
@@ -307,5 +321,12 @@ impl RemountHarness {
     /// NOT appear, which matches pre-migration behavior.
     pub(crate) fn requests(&self) -> Vec<CmdRequest> {
         self.inner_log.requests()
+    }
+
+    /// Seed `mapper` in the dm table over `luks_uuid`; the filesystem
+    /// serves it while the runner has the mapper open.
+    pub(crate) fn with_luks_dm(mut self, mapper: &str, luks_uuid: &str) -> Self {
+        self.fs.dm = self.fs.dm.with_luks(mapper, luks_uuid);
+        self
     }
 }

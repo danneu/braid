@@ -1432,7 +1432,10 @@ mod tests {
             "/dev/disk/by-id/virtio-disk1",
             "/dev/disk/by-id/virtio-disk2",
             "/dev/disk/by-id/virtio-disk3",
-        ]);
+        ])
+        // The post-mount probe reads each opened mapper's dm UUID; planning
+        // sees the mappers closed and never reads it.
+        .with_dm(crate::test_fixtures::canonical_dm_table());
 
         let mp = MountPoint::new("/mnt/storage".to_owned());
         let (uuid1_req, uuid1_out) = luks_uuid_ok(
@@ -1611,7 +1614,8 @@ Label: none  uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
             "/dev/mapper/braid-disk1",
             "/dev/mapper/braid-disk2",
             "/dev/mapper/braid-disk3",
-        ]);
+        ])
+        .with_dm(crate::test_fixtures::canonical_dm_table());
 
         let mp = MountPoint::new("/mnt/storage".to_owned());
         let (uuid1_req, uuid1_out) = luks_uuid_ok(

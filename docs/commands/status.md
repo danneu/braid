@@ -163,10 +163,17 @@ btrfs `devid`, and its state. A disk not assembled into the live pool --
 missing, offline, or LUKS-mismatched -- shows `-` for its device.
 
 The `devid` column shows `devid=N` only when the live pool currently counts
-that device missing: a btrfs-MISSING device, or a hot-unplugged member whose
-backing device is gone (null-underlying). It falls back to `-` when no live
-devid exists -- a persisted devid the live pool no longer counts missing, or a
-member with no recorded devid.
+that disk missing:
+
+- A hot-unplugged member whose mapper is still open with its backing device
+  gone (null-underlying) shows the devid btrfs holds that mapper at. braid
+  finds the mapper by the LUKS UUID it records, so pool.json's devid plays no
+  part.
+- A btrfs-MISSING device with no open mapper has no observable LUKS UUID, so
+  the member whose recorded devid matches it shows that devid.
+
+Otherwise the column shows `-`: the member has no recorded devid, or its
+recorded devid is not a btrfs-MISSING device without an open mapper.
 
 That devid is the input to the `braid remove-missing --missing-id` and
 `braid replace` workflows. As with the JSON `missing_devids` field, a transient

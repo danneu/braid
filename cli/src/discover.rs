@@ -170,9 +170,9 @@ pub enum DiscoverWriteError {
     /// Existing `pool.json` on disk is already a healthy UUID-keyed
     /// membership. `discover --write` would clobber persisted
     /// `DiskMember.devid` bindings, which are decision 024's authorized
-    /// fallback identity for `null_underlying` mappers and btrfs
-    /// `missing_devids`. The operator must move the file aside;
-    /// `discover` is not the surface for mutating an established pool.
+    /// fallback identity for btrfs `missing_devids`. The operator must move
+    /// the file aside; `discover` is not the surface for mutating an
+    /// established pool.
     #[error(
         "discover refusing to write pool.json: existing file at {path} is already a healthy UUID-keyed membership -- back it up and move it aside before retrying, or use 'braid add' / 'braid remove' / 'braid replace' to mutate membership (see docs/internals/luks-unlock.md)"
     )]
@@ -2320,7 +2320,7 @@ mod tests {
     // Intent: write_discovered_membership rebuilds a corrupt pool.json
     //   and preserves the original bytes in an adjacent sidecar.
     // Why it exists: corrupt state can still carry prior-binding data
-    //   such as devid for null_underlying recovery; overwriting it
+    //   such as devid for missing-device recovery; overwriting it
     //   without a snapshot destroys forensic recovery material.
     // Scenario: a stale value-side luks_uuid makes pool.json off-schema,
     //   but the old entry still carries devid:1.

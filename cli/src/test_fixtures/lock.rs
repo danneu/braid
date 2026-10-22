@@ -116,6 +116,15 @@ pub(crate) fn lock_fs(paths: &[&str]) -> shared::MockFs {
     shared::MockFs::storage(paths).with_dev_mapper(&mapper_entry_refs)
 }
 
+/// `lock_fs` whose device-mapper table holds the two member mappers the
+/// mounted lock runners report open, each recording the LUKS UUID
+/// `lock_test_membership` keys it by.
+pub(crate) fn lock_member_fs(paths: &[&str]) -> shared::MockFs {
+    lock_fs(paths)
+        .with_luks_dm("braid-aaa", "00000000-0000-0000-0000-0000000002bc")
+        .with_luks_dm("braid-bbb", "00000000-0000-0000-0000-0000000002bd")
+}
+
 // ---------------------------------------------------------------------------
 // Pool fixture
 // ---------------------------------------------------------------------------
@@ -150,8 +159,9 @@ pub(crate) fn lock_test_membership() -> PoolMembership {
 // ---------------------------------------------------------------------------
 
 /// Add the mounted-pool probe results. `probe_pool` calls
-/// `BtrfsFilesystemShow` and then a per-device cryptsetup status +
-/// luksUUID pair for each device. The recording-runner fixtures
+/// `BtrfsFilesystemShow` and then `cryptsetup status` for each device; each
+/// device's LUKS UUID comes from the dm table `lock_member_fs` seeds. The
+/// recording-runner fixtures
 /// historically only seeded the probe-failed fallback surface; for the Full
 /// arm to drive UUID-based classification the per-device probes are
 /// also seeded by default. Tests that intentionally trigger the

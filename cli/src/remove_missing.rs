@@ -44,17 +44,33 @@ pub enum RemoveMissingError {
     Pool(#[from] crate::pool::PoolError),
 }
 
-/// Resolve a missing devid to a `(LuksUuid, DiskName)` pair via
-/// `PoolMembership::by_devid`. Returns
-/// `RemoveMissingError::NoMemberForDevid` when no member carries the persisted
-/// devid (so the operator can decide whether enrichment ever ran on the pool).
-/// This is the single point of identity resolution for `remove-missing` --
-/// callers thread the returned UUID straight into the journal and the
+/// Resolve a missing devid to a `(LuksUuid, DiskName)` pair. This is the
+/// single point of identity resolution for `remove-missing` -- callers
+/// thread the returned UUID straight into the journal and the
 /// persisted-member removal.
+///
+/// A devid btrfs promoted to MISSING while the device's mapper stayed open
+/// binds by the LUKS UUID that mapper records, and refuses when no member
+/// has that UUID. Any other missing devid has no observable UUID, so it
+/// binds through `PoolMembership::by_devid` (principles 2 and 5) and returns
+/// `RemoveMissingError::NoMemberForDevid` when no member carries the
+/// persisted devid (so the operator can decide whether enrichment ever ran
+/// on the pool).
 fn resolve_removal_target(
     devid: Devid,
+    pool: &PoolState,
     membership: &membership::PoolMembership,
 ) -> Result<(LuksUuid, DiskName), RemoveMissingError> {
+    if let Some(null_backed) = pool.null_underlying.iter().find(|n| n.devid == devid) {
+        return match membership.by_uuid(&null_backed.luks_uuid) {
+            Some(member) => Ok((null_backed.luks_uuid.clone(), member.name.clone())),
+            None => Err(RemoveMissingError::Validation(format!(
+                "devid {devid} belongs to open mapper {} (LUKS UUID {}), which is not in \
+                 pool.json membership. Run `braid status` to inspect.",
+                null_backed.mapper, null_backed.luks_uuid
+            ))),
+        };
+    }
     match membership.by_devid(devid) {
         Ok(Some((uuid, member))) => Ok((uuid.clone(), member.name.clone())),
         Ok(None) => Err(RemoveMissingError::NoMemberForDevid { devid }),
@@ -466,7 +482,7 @@ pub fn plan_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         }
     };
     let (target_uuid, target_name) =
-        match resolve_removal_target(params.missing_id, &pre_membership) {
+        match resolve_removal_target(params.missing_id, &pool, &pre_membership) {
             Ok(p) => p,
             Err(e) => return Err(PlanFailure::with_notes(notes, e)),
         };
@@ -813,7 +829,8 @@ mod tests {
     use crate::membership::PoolMembership;
     use crate::test_fixtures::{
         DeviceUsageSpec, MockFs, PoolFixture, RemoveMissingPool, assert_exact_lines_in_order,
-        assert_lines_in_order, btrfs_remove_devid_error, device_usage_raw_body, mock_ok,
+        assert_lines_in_order, btrfs_remove_devid_error, canonical_dm_table, device_usage_raw_body,
+        mock_ok,
     };
     use crate::types::{Fsid, NullUnderlyingDevice, PoolDevice};
 
@@ -858,6 +875,7 @@ mod tests {
         let name = DiskName::parse(&format!("disk{devid}")).expect("valid synthetic disk name");
         NullUnderlyingDevice {
             mapper: mapper_name(&name),
+            luks_uuid: crate::test_fixtures::canonical_luks_uuid(devid.get()),
             devid,
         }
     }
@@ -993,7 +1011,7 @@ mod tests {
         f.confirm.decline();
         let (runner, _) =
             RemoveMissingPool::three_disk_one_missing().install(MockRunner::default());
-        let fs = MockFs::storage(vec![]);
+        let fs = MockFs::storage(vec![]).with_dm(canonical_dm_table());
 
         let err = cmd_remove_missing(&runner, &fs, &f.remove_missing_params().yes(false).build())
             .expect_err("declined confirm should abort");
@@ -1023,7 +1041,7 @@ mod tests {
         f.confirm.accept();
         let (runner, _) =
             RemoveMissingPool::three_disk_one_missing().install(MockRunner::default());
-        let fs = MockFs::storage(vec![]);
+        let fs = MockFs::storage(vec![]).with_dm(canonical_dm_table());
 
         cmd_remove_missing(&runner, &fs, &f.remove_missing_params().yes(false).build())
             .expect("accepted confirm should proceed");
@@ -1046,7 +1064,7 @@ mod tests {
         f.confirm.accept();
         let (runner, _) =
             RemoveMissingPool::three_disk_one_missing().install(MockRunner::default());
-        let fs = MockFs::storage(vec![]);
+        let fs = MockFs::storage(vec![]).with_dm(canonical_dm_table());
 
         cmd_remove_missing(&runner, &fs, &f.remove_missing_params().yes(false).build())
             .expect("accepted confirm should proceed");
@@ -1082,7 +1100,11 @@ mod tests {
         let (runner, _remove_done) =
             RemoveMissingPool::two_disk_one_missing().install(MockRunner::default());
         let params = f.remove_missing_params().missing_id(Devid::new(2)).build();
-        let result = cmd_remove_missing(&runner, &MockFs::storage(vec![]), &params);
+        let result = cmd_remove_missing(
+            &runner,
+            &MockFs::storage(vec![]).with_dm(canonical_dm_table()),
+            &params,
+        );
 
         let err = result.expect_err("remove-missing must reject 2-disk RAID1 + 1 missing");
         let msg = match err {
@@ -1155,7 +1177,11 @@ mod tests {
             .missing_id(Devid::new(2))
             .dry_run(true)
             .build();
-        let result = cmd_remove_missing(&runner, &MockFs::storage(vec![]), &params);
+        let result = cmd_remove_missing(
+            &runner,
+            &MockFs::storage(vec![]).with_dm(canonical_dm_table()),
+            &params,
+        );
 
         let err =
             result.expect_err("remove-missing --dry-run must reject 2-disk RAID1 + 1 missing");
@@ -1961,7 +1987,7 @@ mod tests {
             RemoveMissingPool::three_disk_one_missing().install(MockRunner::default());
         cmd_remove_missing(
             &runner,
-            &MockFs::storage(vec![]),
+            &MockFs::storage(vec![]).with_dm(canonical_dm_table()),
             &f.remove_missing_params().build(),
         )
         .expect("remove-missing should succeed");
@@ -2039,7 +2065,7 @@ mod tests {
         };
         let failure = match plan_remove_missing(
             &runner,
-            &MockFs::storage(vec![]),
+            &MockFs::storage(vec![]).with_dm(canonical_dm_table()),
             &f.remove_missing_params()
                 .missing_id(Devid::new(99))
                 .dry_run(true)
@@ -2077,7 +2103,7 @@ mod tests {
             RemoveMissingPool::three_disk_one_missing().install(MockRunner::default());
         cmd_remove_missing(
             &runner,
-            &MockFs::storage(vec![]),
+            &MockFs::storage(vec![]).with_dm(canonical_dm_table()),
             &f.remove_missing_params().build(),
         )
         .expect("remove-missing should succeed");
@@ -2126,7 +2152,7 @@ mod tests {
             .install(MockRunner::default());
         cmd_remove_missing(
             &runner,
-            &MockFs::storage(vec![]),
+            &MockFs::storage(vec![]).with_dm(canonical_dm_table()),
             &f.remove_missing_params().build(),
         )
         .expect("remove-missing should succeed");
@@ -2176,7 +2202,7 @@ mod tests {
             RemoveMissingPool::four_disk_two_missing().install(MockRunner::default());
         cmd_remove_missing(
             &runner,
-            &MockFs::storage(vec![]),
+            &MockFs::storage(vec![]).with_dm(canonical_dm_table()),
             &f.remove_missing_params().build(),
         )
         .expect("remove-missing should succeed");
@@ -2232,7 +2258,7 @@ mod tests {
         });
         let result = cmd_remove_missing(
             &runner,
-            &MockFs::storage(vec![]),
+            &MockFs::storage(vec![]).with_dm(canonical_dm_table()),
             &f.remove_missing_params().build(),
         );
 
@@ -2314,7 +2340,7 @@ mod tests {
 
         cmd_remove_missing(
             &runner,
-            &MockFs::storage(vec![]),
+            &MockFs::storage(vec![]).with_dm(canonical_dm_table()),
             &f.remove_missing_params()
                 .progress(crate::progress::ProgressOutput::Human)
                 .sleeper(&sleeper)
@@ -2364,7 +2390,7 @@ mod tests {
         });
         let result = cmd_remove_missing(
             &runner,
-            &MockFs::storage(vec![]),
+            &MockFs::storage(vec![]).with_dm(canonical_dm_table()),
             &f.remove_missing_params().build(),
         );
 
@@ -2465,7 +2491,7 @@ mod tests {
         });
         let result = cmd_remove_missing(
             &runner,
-            &MockFs::storage(vec![]),
+            &MockFs::storage(vec![]).with_dm(canonical_dm_table()),
             &f.remove_missing_params().build(),
         );
 
@@ -2580,7 +2606,7 @@ mod tests {
 
         let result = cmd_remove_missing(
             &runner,
-            &MockFs::storage(vec![]),
+            &MockFs::storage(vec![]).with_dm(canonical_dm_table()),
             &f.remove_missing_params().build(),
         );
 
@@ -2649,7 +2675,7 @@ mod tests {
         });
         let result = cmd_remove_missing(
             &runner,
-            &MockFs::storage(vec![]),
+            &MockFs::storage(vec![]).with_dm(canonical_dm_table()),
             &f.remove_missing_params().build(),
         );
 
@@ -2734,7 +2760,7 @@ mod tests {
         });
         let result = cmd_remove_missing(
             &runner,
-            &MockFs::storage(vec![]),
+            &MockFs::storage(vec![]).with_dm(canonical_dm_table()),
             &f.remove_missing_params().build(),
         );
 
@@ -2784,7 +2810,8 @@ mod tests {
             None,
         );
         m.insert(uuid, member).expect("fixture insert");
-        let err = resolve_removal_target(Devid::new(99), &m).unwrap_err();
+        let err =
+            resolve_removal_target(Devid::new(99), &missing_only_pool(&[99]), &m).unwrap_err();
         match &err {
             RemoveMissingError::NoMemberForDevid { devid } => assert_eq!(*devid, Devid::new(99)),
             other => panic!("expected NoMemberForDevid, got: {other:?}"),
@@ -2825,7 +2852,8 @@ mod tests {
         let membership =
             PoolMembership::for_corruption_tests(vec![(uuid_a, member_a), (uuid_b, member_b)]);
 
-        let err = resolve_removal_target(Devid::new(3), &membership).unwrap_err();
+        let err = resolve_removal_target(Devid::new(3), &missing_only_pool(&[3]), &membership)
+            .unwrap_err();
         let msg = match &err {
             RemoveMissingError::Validation(msg) => msg,
             other => panic!("expected Validation, got: {other:?}"),
@@ -2837,6 +2865,105 @@ mod tests {
         assert!(
             msg.contains("duplicate devid"),
             "refusal must include the membership duplicate-devid cause; got: {msg}"
+        );
+    }
+
+    /// Mounted pool whose only devices are btrfs-MISSING `missing`, none of
+    /// them with an open mapper.
+    fn missing_only_pool(missing: &[u64]) -> PoolState {
+        PoolState {
+            mounted: true,
+            devices: vec![],
+            missing_count: missing.len() as u64,
+            missing_devids: missing.iter().copied().map(Devid::new).collect(),
+            total_devices: missing.len() as u64,
+            fsid: None,
+            null_underlying: vec![],
+        }
+    }
+
+    /// `missing_only_pool(&[2])` where btrfs promoted devid 2 while its
+    /// mapper `braid-disk2` stayed open recording `uuid`.
+    fn promoted_null_backed_pool(uuid: &LuksUuid) -> PoolState {
+        PoolState {
+            null_underlying: vec![NullUnderlyingDevice {
+                mapper: mapper_name(&DiskName::parse("disk2").unwrap()),
+                luks_uuid: uuid.clone(),
+                devid: Devid::new(2),
+            }],
+            ..missing_only_pool(&[2])
+        }
+    }
+
+    // Intent: a MISSING devid whose mapper is still open resolves to the
+    //   member its LUKS UUID names, not to the member pool.json records the
+    //   devid for.
+    //
+    // Why it exists: remove-missing drops the resolved member from
+    //   pool.json. Binding through a stale persisted devid would drop a disk
+    //   btrfs did not remove and keep the one it did.
+    //
+    // Scenario: disk2 was unplugged and btrfs promoted its devid 2 while its
+    //   mapper stayed open. pool.json never recorded disk2's devid and holds
+    //   a stale devid 2 for disk3.
+    #[test]
+    fn resolve_target_binds_promoted_null_backed_devid_by_mapper_uuid() {
+        let (uuid2, disk2) = crate::test_fixtures::disk_member_with(
+            453,
+            "disk2",
+            "/dev/disk/by-id/virtio-disk2",
+            None,
+            None,
+        );
+        let (uuid3, disk3) = crate::test_fixtures::disk_member_with(
+            454,
+            "disk3",
+            "/dev/disk/by-id/virtio-disk3",
+            Some(Devid::new(2)),
+            None,
+        );
+        let mut m = PoolMembership::empty();
+        m.insert(uuid2.clone(), disk2).expect("fixture insert");
+        m.insert(uuid3, disk3).expect("fixture insert");
+
+        let (uuid, name) =
+            resolve_removal_target(Devid::new(2), &promoted_null_backed_pool(&uuid2), &m)
+                .expect("devid 2 must resolve through its open mapper");
+
+        assert_eq!(uuid, uuid2);
+        assert_eq!(name.as_str(), "disk2");
+    }
+
+    // Intent: a MISSING devid whose open mapper records a LUKS UUID outside
+    //   pool.json refuses, even when pool.json records that devid for a
+    //   member.
+    //
+    // Why it exists: the devid belongs to the mapper's container. Falling
+    //   back to the persisted devid would drop an unrelated member.
+    //
+    // Scenario: btrfs promoted devid 2 while its mapper stayed open, the
+    //   mapper records a container braid never enrolled, and pool.json holds
+    //   a stale devid 2 for disk3.
+    #[test]
+    fn resolve_target_refuses_promoted_null_backed_devid_with_foreign_uuid() {
+        let (uuid3, disk3) = crate::test_fixtures::disk_member_with(
+            455,
+            "disk3",
+            "/dev/disk/by-id/virtio-disk3",
+            Some(Devid::new(2)),
+            None,
+        );
+        let mut m = PoolMembership::empty();
+        m.insert(uuid3, disk3).expect("fixture insert");
+        let foreign = LuksUuid::parse("99999999-9999-9999-9999-999999999999").unwrap();
+
+        let err = resolve_removal_target(Devid::new(2), &promoted_null_backed_pool(&foreign), &m)
+            .expect_err("a foreign mapper's devid must not resolve to disk3");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("braid-disk2") && msg.contains("99999999-9999-9999-9999-999999999999"),
+            "refusal must name the open mapper and its UUID; got: {msg}"
         );
     }
 
@@ -2971,7 +3098,7 @@ mod tests {
         });
         let plan = plan_remove_missing(
             &runner,
-            &MockFs::storage(vec![]),
+            &MockFs::storage(vec![]).with_dm(canonical_dm_table()),
             &f.remove_missing_params().dry_run(true).build(),
         );
         let failure = match plan {
@@ -3021,7 +3148,7 @@ mod tests {
         });
         let report = plan_remove_missing(
             &runner,
-            &MockFs::storage(vec![]),
+            &MockFs::storage(vec![]).with_dm(canonical_dm_table()),
             &f.remove_missing_params().dry_run(true).build(),
         );
         let failure = match report {
@@ -3143,7 +3270,9 @@ mod tests {
             RemoveMissingPool::three_disk_one_missing().install(MockRunner::default());
         let report = plan_remove_missing(
             &runner,
-            &MockFs::storage(vec![]).with_excl_op("device add\n"),
+            &MockFs::storage(vec![])
+                .with_dm(canonical_dm_table())
+                .with_excl_op("device add\n"),
             &f.remove_missing_params().dry_run(true).build(),
         );
         let plan = report.expect("plan_remove_missing should succeed with 1 missing + busy op");
@@ -3195,7 +3324,9 @@ mod tests {
         let runner = HealthyPoolRunner;
         let failure = match plan_remove_missing(
             &runner,
-            &MockFs::storage(vec![]).with_excl_op("device add\n"),
+            &MockFs::storage(vec![])
+                .with_dm(canonical_dm_table())
+                .with_excl_op("device add\n"),
             &f.remove_missing_params()
                 .missing_id(Devid::new(999))
                 .dry_run(true)
@@ -3247,7 +3378,7 @@ mod tests {
         let f = PoolFixture::two_disk_devids_pinned();
         let failure = match plan_remove_missing(
             &HealthyPoolRunner,
-            &MockFs::storage(vec![]),
+            &MockFs::storage(vec![]).with_dm(canonical_dm_table()),
             &f.remove_missing_params()
                 .missing_id(Devid::new(1))
                 .dry_run(true)
@@ -3291,7 +3422,7 @@ mod tests {
         let f = PoolFixture::two_disk_devids_pinned();
         let failure = match plan_remove_missing(
             &NullUnderlyingPoolRunner,
-            &MockFs::storage(vec![]),
+            &MockFs::storage(vec![]).with_dm(canonical_dm_table()),
             &f.remove_missing_params()
                 .missing_id(Devid::new(2))
                 .dry_run(true)
@@ -3435,7 +3566,7 @@ mod tests {
             RemoveMissingPool::three_disk_one_missing().install(MockRunner::default());
         cmd_remove_missing(
             &runner,
-            &MockFs::storage(vec![]),
+            &MockFs::storage(vec![]).with_dm(canonical_dm_table()),
             &f.remove_missing_params().build(),
         )
         .expect("remove-missing should succeed");
@@ -3546,7 +3677,7 @@ mod tests {
             RemoveMissingPool::three_disk_one_missing().install(MockRunner::default());
         cmd_remove_missing(
             &runner,
-            &MockFs::storage(vec![]),
+            &MockFs::storage(vec![]).with_dm(canonical_dm_table()),
             &f.remove_missing_params().missing_id(Devid::new(3)).build(),
         )
         .expect("remove-missing should succeed");
@@ -3621,7 +3752,7 @@ mod tests {
             RemoveMissingPool::three_disk_one_missing().install(MockRunner::default());
         let err = cmd_remove_missing(
             &runner,
-            &MockFs::storage(vec![]),
+            &MockFs::storage(vec![]).with_dm(canonical_dm_table()),
             &f.remove_missing_params().missing_id(Devid::new(3)).build(),
         )
         .unwrap_err();
@@ -3708,7 +3839,7 @@ mod tests {
             RemoveMissingPool::three_disk_one_missing().install(MockRunner::default());
         let err = cmd_remove_missing(
             &runner,
-            &MockFs::storage(vec![]),
+            &MockFs::storage(vec![]).with_dm(canonical_dm_table()),
             &f.remove_missing_params()
                 .missing_id(Devid::new(3))
                 .dry_run(true)
@@ -3809,7 +3940,7 @@ mod tests {
             RemoveMissingPool::three_disk_one_missing().install(MockRunner::default());
         let err = cmd_remove_missing(
             &runner,
-            &MockFs::storage(vec![]),
+            &MockFs::storage(vec![]).with_dm(canonical_dm_table()),
             &f.remove_missing_params().missing_id(Devid::new(3)).build(),
         )
         .unwrap_err();

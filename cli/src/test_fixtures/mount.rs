@@ -44,9 +44,10 @@ use zeroize::Zeroizing;
 ///
 /// Safe to use the shared "unmounted" mountinfo body because
 /// `plan_open_pool_inner` checks pool mountedness via
-/// `runner.run(MountpointCheck)`, never via `fs.read_to_string`. The only
-/// `Filesystem` method called on the mount-test call graph is
-/// `fs.exists` through `probe_config_disk` and `close_opened_mappers`.
+/// `runner.run(MountpointCheck)`, never via `fs.read_to_string`. The table
+/// starts with no dm entries: a test with an open mapper seeds that mapper's
+/// dm UUID (`MockFs::with_luks_dm`) because
+/// `luks.rs#classify_mapper_ownership` reads it from sysfs.
 pub(crate) fn mount_fs(paths: &[&str]) -> shared::MockFs {
     shared::MockFs::unmounted(paths.iter().map(|p| (*p).to_string()).collect())
 }

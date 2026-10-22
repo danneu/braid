@@ -28,13 +28,19 @@ Normal operation. Physical drive is present, LUKS mapper is open and points to t
 
 Hot-unplug while mounted. The LUKS mapper (`/dev/mapper/braid-X`) is still open in device-mapper, but the backing block device has vanished. `cryptsetup status` reports `device: (null)`. btrfs still sees the mapper path — it doesn't know the physical drive is gone until I/O fails.
 
-braid handles this correctly: `probe_pool` detects the `(null)` device, records it in `pool.null_underlying`, and `monitor` includes its devid in the alert-local missing set (`AlertDevids.missing`). The stats row reports both the mapper path and the devid; the alert pipeline pairs by devid directly. `braid doctor`'s `pool_missing_devices` check also keys on `missing_count` (which counts null-underlying members), so it **warns** here rather than reporting a green "no missing devices" — and routes the operator to the re-seat or promote-then-`replace` recovery (`braid replace` and `remove-missing` refuse a null-underlying devid until btrfs promotes it to MISSING).
+braid handles this correctly: `probe_pool` detects the `(null)` device and records it in `pool.null_underlying`. `monitor`'s own probe, `probe_pool_alerts`, records only its devid (`null_underlying_devids`), and `monitor` includes that devid in the alert-local missing set (`AlertDevids.missing`). The stats row reports both the mapper path and the devid; the alert pipeline pairs by devid directly. `braid doctor`'s `pool_missing_devices` check also keys on `missing_count` (which counts null-underlying members), so it **warns** here rather than reporting a green "no missing devices" — and routes the operator to the re-seat or promote-then-`replace` recovery (`braid replace` and `remove-missing` refuse a null-underlying devid until btrfs promotes it to MISSING).
 
-Post-UUID-identity rule: when a mapper is null-underlying, the live LUKS UUID is
-not observable from the missing backing device. braid may bind that live mapper
-back to membership through persisted `DiskMember.devid`, but only for this
-restricted case. The persisted devid is prior-binding state, not display
-authority; status output still uses live btrfs stats for displayed devids.
+Post-UUID-identity rule: when a mapper is null-underlying, the backing disk's
+LUKS header is gone, but the mapper's dm UUID (`/sys/block/dm-N/dm/uuid`) still
+records the LUKS UUID cryptsetup opened it with. braid binds the live mapper back
+to membership by that UUID (`cli/src/dm_identity.rs#mapper_luks_uuid`), as it
+does for a mapper whose disk is present. So status's compact `Drives:` row,
+`replace`, and remove recovery take a null-underlying member's devid from its
+mapper, not from pool.json, which may hold none or a stale one. Persisted
+`DiskMember.devid` binds only a device btrfs reports MISSING with no open
+mapper (`cli/src/types.rs#PoolState::devid_only_missing`); it is prior-binding
+state, not display authority, and status output still uses live btrfs stats
+for displayed devids.
 
 ### MISSING with path
 
@@ -42,8 +48,8 @@ btrfs has registered the device as missing, but still remembers which mapper pat
 
 **Handling:** `btrfs device stats` rows always carry a mandatory `devid` field, so the alert pipeline identifies the row by devid regardless of which path string btrfs reports (`[/dev/mapper/X]` or `[devid:N]`). The `MissingDevice` alert is generated independently from `missing_devids`. Rows for alert-local missing devids are skipped for `BtrfsDeviceErrors`, so the monitor latches no counts for them and `braid ack` commits none. If the member returns, the next monitor cycle alerts once on the counts it logged, including the I/O that failed as it went, and the next ack commits them (see [ADR 014](../../design/decisions/014-alerts.md#ack-commits-latched-evidence)).
 
-The same restricted devid fallback applies to membership correlation: when
-btrfs reports a missing device only by devid, braid can resolve the member whose
+This is the one state where membership correlation falls back to devid: btrfs
+reports the missing device only by devid, so braid resolves the member whose
 persisted `DiskMember.devid` matches. It must not infer membership by parsing a
 mapper name or LUKS label.
 

@@ -388,9 +388,9 @@ impl RemovePlan {
             return Err(absent_from_membership_error(work_plan.name.as_str()));
         }
         // Pin every live member's btrfs devid into the journal. Recovery is
-        // allowed to use persisted devid as the fallback binding for
-        // null-underlying or MISSING btrfs devices, but must not fall back to
-        // mapper-name correlation when the LUKS UUID is no longer observable.
+        // allowed to use persisted devid as the fallback binding for a btrfs
+        // MISSING device, which has no mapper and so no observable LUKS UUID,
+        // but must not fall back to mapper-name correlation.
         let mut pre_membership = pre_membership;
         for identity in work_plan.expected_present_identities.values() {
             if let Some(member) = pre_membership.by_uuid_mut(&identity.luks_uuid) {
@@ -483,7 +483,7 @@ impl RemovePlan {
         // tear down a foreign dm slot that the operator opened under
         // the same mapper between plan and this point. Inactive is a
         // distinct caller-classified outcome.
-        match probe_observed_mapper_uuid(runner, &work_plan.target_mapper, &work_plan.target_uuid) {
+        match probe_observed_mapper_uuid(fs, &work_plan.target_mapper, &work_plan.target_uuid) {
             MapperOwnership::Owned => {
                 close_mapper_best_effort(
                     runner,
@@ -905,11 +905,12 @@ mod tests {
     use crate::membership::PoolMembership;
     use crate::state_paths::StatePaths;
     use crate::test_fixtures::{
-        DeviceUsageSpec, MockFs, PoolFixture, RemovalPool, assert_exact_lines_in_order,
-        btrfs_remove_path_error, canonical_luks_uuid, device_usage_raw_body, mock_ok,
-        overcommitted_survivor_df_json, overcommitted_survivor_usage_stdout, target_device,
-        valid_three_disk_df_json, valid_three_disk_usage_stdout, valid_two_disk_df_json,
-        valid_two_disk_usage_stdout, with_lsblk_hw_info,
+        DeviceUsageSpec, MockFs, PoolFixture, RemovalPool, SwitchingFs,
+        assert_exact_lines_in_order, btrfs_remove_path_error, canonical_dm_table,
+        canonical_luks_uuid, device_usage_raw_body, mock_ok, overcommitted_survivor_df_json,
+        overcommitted_survivor_usage_stdout, target_device, valid_three_disk_df_json,
+        valid_three_disk_usage_stdout, valid_two_disk_df_json, valid_two_disk_usage_stdout,
+        with_lsblk_hw_info,
     };
     use std::collections::BTreeMap;
 
@@ -988,7 +989,7 @@ mod tests {
     fn two_to_one_remove_invokes_survivor_capacity_preflight() {
         let f = PoolFixture::two_disk_healthy();
         let runner = RemovalPool::two_disk().install(MockRunner::default());
-        let fs = MockFs::storage(vec![]);
+        let fs = MockFs::storage(vec![]).with_dm(canonical_dm_table());
         cmd_remove(&runner, &fs, &f.remove_params().build()).expect("remove should succeed");
 
         let calls = runner.requests();
@@ -1028,7 +1029,7 @@ mod tests {
         let f = PoolFixture::two_disk_healthy();
         f.confirm.decline();
         let runner = RemovalPool::two_disk().install(MockRunner::default());
-        let fs = MockFs::storage(vec![]);
+        let fs = MockFs::storage(vec![]).with_dm(canonical_dm_table());
 
         let err = cmd_remove(&runner, &fs, &f.remove_params().yes(false).build())
             .expect_err("declined confirm should abort");
@@ -1071,7 +1072,7 @@ mod tests {
         let f = PoolFixture::two_disk_healthy();
         f.confirm.accept();
         let runner = RemovalPool::two_disk().install(MockRunner::default());
-        let fs = MockFs::storage(vec![]);
+        let fs = MockFs::storage(vec![]).with_dm(canonical_dm_table());
 
         cmd_remove(&runner, &fs, &f.remove_params().yes(false).build())
             .expect("accepted confirm should proceed");
@@ -1131,7 +1132,7 @@ mod tests {
             SERIAL,
             SIZE,
         );
-        let fs = MockFs::storage(vec![]);
+        let fs = MockFs::storage(vec![]).with_dm(canonical_dm_table());
 
         cmd_remove(&runner, &fs, &f.remove_params().yes(false).build())
             .expect("accepted confirm should proceed");
@@ -1165,7 +1166,7 @@ mod tests {
         let f = PoolFixture::three_disk_healthy();
         f.confirm.accept();
         let runner = RemovalPool::three_disk().install(MockRunner::default());
-        let fs = MockFs::storage(vec![]);
+        let fs = MockFs::storage(vec![]).with_dm(canonical_dm_table());
 
         cmd_remove(&runner, &fs, &f.remove_params().yes(false).build())
             .expect("accepted confirm should proceed");
@@ -1207,7 +1208,7 @@ mod tests {
         let f = PoolFixture::two_disk_healthy();
         f.confirm.accept();
         let runner = RemovalPool::two_disk().install(MockRunner::default());
-        let fs = MockFs::storage(vec![]);
+        let fs = MockFs::storage(vec![]).with_dm(canonical_dm_table());
 
         cmd_remove(&runner, &fs, &f.remove_params().yes(false).build())
             .expect("accepted confirm should proceed");
@@ -1244,7 +1245,7 @@ mod tests {
         alert::save_acked_stats(&alert::AckedStats(acked), &f.paths).unwrap();
 
         let runner = RemovalPool::two_disk().install(MockRunner::default());
-        let fs = MockFs::storage(vec![]);
+        let fs = MockFs::storage(vec![]).with_dm(canonical_dm_table());
         cmd_remove(&runner, &fs, &f.remove_params().build()).expect("remove should succeed");
 
         let reloaded = alert::load_acked_stats(&f.paths);
@@ -1289,7 +1290,7 @@ mod tests {
                 })),
                 _ => None,
             });
-        let fs = MockFs::storage(vec![]);
+        let fs = MockFs::storage(vec![]).with_dm(canonical_dm_table());
 
         let result = cmd_remove(&runner, &fs, &f.remove_params().build());
 
@@ -1342,7 +1343,7 @@ mod tests {
         membership::save_membership(&drifted, &f.paths).unwrap();
 
         let runner = RemovalPool::three_disk().install(MockRunner::default());
-        let fs = MockFs::storage(vec![]);
+        let fs = MockFs::storage(vec![]).with_dm(canonical_dm_table());
         let result = cmd_remove(
             &runner,
             &fs,
@@ -1395,7 +1396,7 @@ mod tests {
     fn execute_rejects_when_pool_json_drifts_after_planning() {
         let f = PoolFixture::three_disk_healthy();
         let runner = RemovalPool::three_disk().install(MockRunner::default());
-        let fs = MockFs::storage(vec![]);
+        let fs = MockFs::storage(vec![]).with_dm(canonical_dm_table());
         let params = f.remove_params().name("disk1").yes(true).build();
 
         let plan = plan_remove(&runner, &fs, &params)
@@ -1454,7 +1455,7 @@ mod tests {
     #[test]
     fn execute_rechecks_survivor_capacity_before_journal() {
         let f = PoolFixture::two_disk_healthy();
-        let fs = MockFs::storage(vec![]);
+        let fs = MockFs::storage(vec![]).with_dm(canonical_dm_table());
         let params = f.remove_params().build();
 
         let healthy = RemovalPool::two_disk().install(MockRunner::default());
@@ -1527,7 +1528,7 @@ mod tests {
     #[test]
     fn execute_skips_survivor_capacity_recheck_for_multi_survivor() {
         let f = PoolFixture::three_disk_healthy();
-        let fs = MockFs::storage(vec![]);
+        let fs = MockFs::storage(vec![]).with_dm(canonical_dm_table());
         let params = f.remove_params().build();
 
         let plan_runner = RemovalPool::three_disk().install(MockRunner::default());
@@ -1577,7 +1578,7 @@ mod tests {
     fn remove_two_disk_pool_balances_single_before_device_remove() {
         let f = PoolFixture::two_disk_healthy();
         let runner = RemovalPool::two_disk().install(MockRunner::default());
-        let fs = MockFs::storage(vec![]);
+        let fs = MockFs::storage(vec![]).with_dm(canonical_dm_table());
         cmd_remove(&runner, &fs, &f.remove_params().build()).expect("remove should succeed");
 
         let calls = runner.requests();
@@ -1621,7 +1622,7 @@ mod tests {
                 })),
                 _ => None,
             });
-        let fs = MockFs::storage(vec![]);
+        let fs = MockFs::storage(vec![]).with_dm(canonical_dm_table());
         let result = cmd_remove(&runner, &fs, &f.remove_params().build());
 
         assert!(result.is_err(), "remove should fail when eviction fails");
@@ -1671,7 +1672,7 @@ mod tests {
     fn plan_remove_2to1_preview_omits_confirmation_only_redundancy_warning() {
         let f = PoolFixture::two_disk_healthy();
         let runner = RemovalPool::two_disk().install(MockRunner::default());
-        let fs = MockFs::storage(vec![]);
+        let fs = MockFs::storage(vec![]).with_dm(canonical_dm_table());
         let params = f.remove_params().dry_run(true).build();
         let plan =
             plan_remove(&runner, &fs, &params).expect("plan_remove should succeed on 2->1 fixture");
@@ -1737,7 +1738,7 @@ mod tests {
     fn plan_remove_3to2_preview_omits_balance_step() {
         let f = PoolFixture::three_disk_healthy();
         let runner = RemovalPool::three_disk().install(MockRunner::default());
-        let fs = MockFs::storage(vec![]);
+        let fs = MockFs::storage(vec![]).with_dm(canonical_dm_table());
         let params = f.remove_params().dry_run(true).build(); // removes disk2
         let plan = plan_remove(&runner, &fs, &params).expect("clean 3->2 plan");
 
@@ -1800,9 +1801,8 @@ mod tests {
                      \tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-renamed\n\
                      \tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk2\n",
                 ))),
-                // The renamed mapper resolves to /dev/vdb; the default
-                // RemovalPool handler already maps /dev/vdb -> uuid1 via
-                // luks_uuid_for_device, so CryptsetupLuksUuid needs no override.
+                // The renamed mapper resolves to /dev/vdb; its dm UUID
+                // records uuid1 (seeded on the filesystem below).
                 CmdRequest::CryptsetupStatus { mapper } if mapper.as_str() == "braid-renamed" => {
                     Some(Ok(mock_ok(
                         "cryptsetup status braid-renamed",
@@ -1811,7 +1811,9 @@ mod tests {
                 }
                 _ => None, // everything else falls through to RemovalPool::install
             });
-        let fs = MockFs::storage(vec![]);
+        let fs = MockFs::storage(vec![])
+            .with_luks_dm("braid-renamed", canonical_luks_uuid(1).as_str())
+            .with_luks_dm("braid-disk2", canonical_luks_uuid(2).as_str());
         let params = f.remove_params().name("disk1").dry_run(true).build();
         let plan = plan_remove(&runner, &fs, &params).expect("drift must not block planning");
         let rendered = plan.preview().render();
@@ -1839,7 +1841,9 @@ mod tests {
     fn remove_fails_fast_on_paused_balance() {
         let f = PoolFixture::two_disk_healthy();
         let runner = RemovalPool::two_disk().install(MockRunner::default());
-        let fs = MockFs::storage(vec![]).with_excl_op("balance paused\n");
+        let fs = MockFs::storage(vec![])
+            .with_dm(canonical_dm_table())
+            .with_excl_op("balance paused\n");
         let err = cmd_remove(&runner, &fs, &f.remove_params().name("disk1").build())
             .expect_err("should fail -- balance is paused");
         let msg = err.to_string();
@@ -1864,7 +1868,9 @@ mod tests {
     fn remove_warns_and_proceeds_on_active_op() {
         let f = PoolFixture::three_disk_healthy();
         let runner = RemovalPool::three_disk().install(MockRunner::default());
-        let fs = MockFs::storage(vec![]).with_excl_op("balance\n");
+        let fs = MockFs::storage(vec![])
+            .with_dm(canonical_dm_table())
+            .with_excl_op("balance\n");
         // With an active balance, cmd_remove should NOT error on the preflight --
         // it prints a warning and proceeds.
         let result = cmd_remove(&runner, &fs, &f.remove_params().dry_run(true).build());
@@ -2379,7 +2385,7 @@ mod tests {
                 CmdRequest::BtrfsDeviceUsageRaw { .. } => Some(Err(CmdError::MissingMock)),
                 _ => None,
             });
-        let fs = MockFs::storage(vec![]);
+        let fs = MockFs::storage(vec![]).with_dm(canonical_dm_table());
         let params = f.remove_params().name("disk3").dry_run(true).build();
 
         let plan =
@@ -2438,7 +2444,7 @@ mod tests {
                 ))),
                 _ => None,
             });
-        let fs = MockFs::storage(vec![]);
+        let fs = MockFs::storage(vec![]).with_dm(canonical_dm_table());
         let params = f.remove_params().name("disk3").dry_run(true).build();
 
         let report = plan_remove(&runner, &fs, &params);
@@ -2488,7 +2494,7 @@ mod tests {
                 CmdRequest::BtrfsDeviceUsageRaw { .. } => Some(Err(CmdError::MissingMock)),
                 _ => None,
             });
-        let fs = MockFs::storage(vec![]);
+        let fs = MockFs::storage(vec![]).with_dm(canonical_dm_table());
         let params = f.remove_params().name("disk3").dry_run(true).build();
 
         let plan =
@@ -2559,7 +2565,9 @@ mod tests {
     fn plan_remove_preflight_busy_op_becomes_info_note() {
         let f = PoolFixture::three_disk_healthy();
         let runner = RemovalPool::three_disk().install(MockRunner::default());
-        let fs = MockFs::storage(vec![]).with_excl_op("device add\n");
+        let fs = MockFs::storage(vec![])
+            .with_dm(canonical_dm_table())
+            .with_excl_op("device add\n");
         let params = f.remove_params().dry_run(true).build();
         let report = plan_remove(&runner, &fs, &params);
         let plan = report.expect("plan_remove should succeed on healthy pool + busy op");
@@ -2597,7 +2605,9 @@ mod tests {
     fn plan_remove_preserves_preflight_notes_on_disk_not_found() {
         let f = PoolFixture::three_disk_healthy();
         let runner = RemovalPool::three_disk().install(MockRunner::default());
-        let fs = MockFs::storage(vec![]).with_excl_op("device add\n");
+        let fs = MockFs::storage(vec![])
+            .with_dm(canonical_dm_table())
+            .with_excl_op("device add\n");
         let params = f.remove_params().name("typo-name").dry_run(true).build();
         let failure = match plan_remove(&runner, &fs, &params) {
             Ok(_) => panic!("expected Err(Validation), got Ok(_)"),
@@ -2677,10 +2687,6 @@ mod tests {
                     "braid-disk4 is active and is in use.\n  type:    LUKS2\n  device:  /dev/vde\n  mode:    read/write\n",
                 )))
             }
-            CmdRequest::CryptsetupLuksUuid { device } if device == "/dev/vde" => Some(Ok(mock_ok(
-                "cryptsetup luksUUID /dev/vde",
-                "44444444-4444-4444-4444-444444444444\n",
-            ))),
             _ => None,
         }
     }
@@ -2717,7 +2723,7 @@ mod tests {
                 THREE_DISK_SHOW_BASE,
                 TWO_DISK_DRIFT,
             ]));
-        let fs = MockFs::storage(vec![]);
+        let fs = MockFs::storage(vec![]).with_dm(canonical_dm_table());
 
         let result = cmd_remove(&runner, &fs, &f.remove_params().build());
         let err = result.expect_err("pre-journal drift must fail the command");
@@ -2777,7 +2783,7 @@ mod tests {
                 THREE_DISK_SHOW_BASE,
                 POST_JOURNAL_DRIFT,
             ]));
-        let fs = MockFs::storage(vec![]);
+        let fs = MockFs::storage(vec![]).with_dm(canonical_dm_table());
 
         let result = cmd_remove(&runner, &fs, &f.remove_params().build());
         let err = result.expect_err("post-journal drift must fail the command");
@@ -2829,7 +2835,9 @@ mod tests {
             .install(MockRunner::default())
             .with_handler(show_sequence_handler(vec![THREE_DISK_SHOW_BASE, SWAP_SHOW]))
             .with_handler(extra_disk_handler());
-        let fs = MockFs::storage(vec![]);
+        let fs = MockFs::storage(vec![])
+            .with_dm(canonical_dm_table())
+            .with_luks_dm("braid-disk4", "44444444-4444-4444-4444-444444444444");
 
         let err = cmd_remove(&runner, &fs, &f.remove_params().build())
             .expect_err("same-count swap must be rejected");
@@ -2887,7 +2895,7 @@ mod tests {
                 THREE_DISK_SHOW_BASE,
                 REPLACED_SHOW,
             ]));
-        let fs = MockFs::storage(vec![]);
+        let fs = MockFs::storage(vec![]).with_dm(canonical_dm_table());
 
         let err = cmd_remove(&runner, &fs, &f.remove_params().build())
             .expect_err("same-mapper replacement must be rejected");
@@ -2957,7 +2965,7 @@ mod tests {
                 }
                 _ => None,
             });
-        let fs = MockFs::storage(vec![]);
+        let fs = MockFs::storage(vec![]).with_dm(canonical_dm_table());
 
         let err = cmd_remove(&runner, &fs, &f.remove_params().build())
             .expect_err("pre-journal hot-unplug must fail");
@@ -3030,7 +3038,7 @@ mod tests {
                 }
                 _ => None,
             });
-        let fs = MockFs::storage(vec![]);
+        let fs = MockFs::storage(vec![]).with_dm(canonical_dm_table());
 
         let err = cmd_remove(&runner, &fs, &f.remove_params().build())
             .expect_err("post-journal hot-unplug must fail");
@@ -3134,21 +3142,13 @@ mod tests {
         let m = three_disk_membership_with_pinned_disk2(&u_r);
         membership::save_membership(&m, &f.paths).unwrap();
 
-        // The RemovalPool topology returns canonical UUIDs for disk1/2/3.
-        // Override disk2's UUID probe to return the pinned u_r so the
+        // The canonical dm table records canonical UUIDs for disk1/2/3.
+        // Override braid-disk2's dm UUID to record the pinned u_r so the
         // pool.devices entry matches the membership UUID we just pinned.
-        let runner = RemovalPool::three_disk()
-            .install(MockRunner::default())
-            .with_handler({
-                let u_r = u_r.clone();
-                move |req| match req {
-                    CmdRequest::CryptsetupLuksUuid { device } if device == "/dev/vdc" => Some(Ok(
-                        mock_ok("cryptsetup luksUUID /dev/vdc", &format!("{u_r}\n")),
-                    )),
-                    _ => None,
-                }
-            });
-        let fs = MockFs::storage(vec![]);
+        let runner = RemovalPool::three_disk().install(MockRunner::default());
+        let fs = MockFs::storage(vec![])
+            .with_dm(canonical_dm_table())
+            .with_luks_dm("braid-disk2", u_r.as_str());
 
         // Wedge the journal-write step: force btrfs device remove to
         // fail so the journal survives for our assertion.
@@ -3245,7 +3245,6 @@ mod tests {
              \tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-WRONG\n\
              \tdevid    3 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk3\n"
             .to_string();
-        let u_r_for_probe = u_r.clone();
         let runner = MockRunner::default().with_handler({
             move |req| match req {
                 CmdRequest::BtrfsFilesystemShow { .. } => {
@@ -3265,22 +3264,6 @@ mod tests {
                         ),
                     )))
                 }
-                CmdRequest::CryptsetupLuksUuid { device } => {
-                    let uuid = match device.as_str() {
-                        "/dev/vdb" => "11111111-1111-1111-1111-111111111111",
-                        // /dev/vdc backs braid-WRONG -> U_R
-                        "/dev/vdc" => return Some(Ok(mock_ok(
-                            "cryptsetup luksUUID /dev/vdc",
-                            &format!("{u_r_for_probe}\n"),
-                        ))),
-                        "/dev/vdd" => "33333333-3333-3333-3333-333333333333",
-                        _ => return None,
-                    };
-                    Some(Ok(mock_ok(
-                        &format!("cryptsetup luksUUID {device}"),
-                        &format!("{uuid}\n"),
-                    )))
-                }
                 CmdRequest::BtrfsBalanceStatus { .. } => Some(Ok(mock_ok(
                     "btrfs balance status",
                     "No balance found on '/mnt/storage'\n",
@@ -3298,7 +3281,11 @@ mod tests {
                 _ => None,
             }
         });
-        let fs = MockFs::storage(vec![]);
+        // braid-WRONG's dm UUID records U_R.
+        let fs = MockFs::storage(vec![])
+            .with_luks_dm("braid-disk1", canonical_luks_uuid(1).as_str())
+            .with_luks_dm("braid-WRONG", u_r.as_str())
+            .with_luks_dm("braid-disk3", canonical_luks_uuid(3).as_str());
         let params = f.remove_params().name("disk2").yes(true).build();
 
         // Plan first to assert target_mapper preservation directly.
@@ -3413,10 +3400,7 @@ mod tests {
              \tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\
              \tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-WRONG\n\
              \tdevid    3 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk3\n";
-        let u_r_for_plan = u_r.clone();
-        let u_foreign_for_probe = u_foreign.clone();
         let remove_committed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let remove_committed_for_status = std::sync::Arc::clone(&remove_committed);
         let remove_committed_for_remove = std::sync::Arc::clone(&remove_committed);
         let runner = MockRunner::default().with_handler({
             move |req| match req {
@@ -3426,14 +3410,7 @@ mod tests {
                 CmdRequest::CryptsetupStatus { mapper } => {
                     let dev = match mapper.as_str() {
                         "braid-disk1" => "/dev/vdb",
-                        "braid-WRONG" => {
-                            if remove_committed_for_status.load(std::sync::atomic::Ordering::SeqCst)
-                            {
-                                "/dev/vdf"
-                            } else {
-                                "/dev/vdc"
-                            }
-                        }
+                        "braid-WRONG" => "/dev/vdc",
                         "braid-disk3" => "/dev/vdd",
                         _ => return None,
                     };
@@ -3442,22 +3419,6 @@ mod tests {
                         &format!(
                             "{mapper} is active and is in use.\n  type:    LUKS2\n  device:  {dev}\n  mode:    read/write\n"
                         ),
-                    )))
-                }
-                CmdRequest::CryptsetupLuksUuid { device } => {
-                    let body = match device.as_str() {
-                        "/dev/vdb" => "11111111-1111-1111-1111-111111111111".to_string(),
-                        // planning-time backing probe: U_R is still here
-                        "/dev/vdc" => format!("{u_r_for_plan}"),
-                        "/dev/vdd" => "33333333-3333-3333-3333-333333333333".to_string(),
-                        // Post-commit probe follows braid-WRONG's active
-                        // mapper to the backing disk now holding U_FOREIGN.
-                        "/dev/vdf" => format!("{u_foreign_for_probe}"),
-                        _ => return None,
-                    };
-                    Some(Ok(mock_ok(
-                        &format!("cryptsetup luksUUID {device}"),
-                        &format!("{body}\n"),
                     )))
                 }
                 CmdRequest::BtrfsBalanceStatus { .. } => Some(Ok(mock_ok(
@@ -3480,25 +3441,36 @@ mod tests {
                 _ => None,
             }
         });
-        let fs = MockFs::storage(vec![]);
-        cmd_remove(
-            &runner,
-            &fs,
-            &f.remove_params().name("right").yes(true).build(),
-        )
-        .expect("remove command must complete -- close skip is logged-warning, not error");
-
-        let calls = runner.requests();
-        let probe_for_foreign_backing = calls
-            .iter()
-            .filter(
-                |c| matches!(c, CmdRequest::CryptsetupLuksUuid { device } if device == "/dev/vdf"),
+        // At planning, braid-WRONG records U_R. After the device remove
+        // commits, an operator has reopened braid-WRONG over the disk
+        // holding U_FOREIGN.
+        let mapped = |wrong: &LuksUuid| {
+            MockFs::storage(vec![])
+                .with_luks_dm("braid-disk1", canonical_luks_uuid(1).as_str())
+                .with_luks_dm("braid-WRONG", wrong.as_str())
+                .with_luks_dm("braid-disk3", canonical_luks_uuid(3).as_str())
+        };
+        let fs = SwitchingFs {
+            before: mapped(&u_r),
+            after: mapped(&u_foreign),
+            switched: remove_committed,
+        };
+        let captured = crate::status_tag::testing::capture_with_color(false, || {
+            cmd_remove(
+                &runner,
+                &fs,
+                &f.remove_params().name("right").yes(true).build(),
             )
-            .count();
-        assert_eq!(
-            probe_for_foreign_backing, 1,
-            "exactly one post-commit UUID probe against braid-WRONG's foreign backing device"
+            .expect("remove command must complete -- close skip is logged-warning, not error");
+        });
+
+        assert!(
+            captured.contains(&format!(
+                "Warning: post-commit close skipped for mapper braid-WRONG: expected LUKS UUID {u_r} but observed {u_foreign}\n"
+            )),
+            "post-commit probe must warn with both UUIDs: {captured:?}"
         );
+        let calls = runner.requests();
         let closes_for_wrong = calls
             .iter()
             .filter(
@@ -3533,21 +3505,16 @@ mod tests {
                         remove_committed.store(true, Ordering::SeqCst);
                         Some(Ok(mock_ok("btrfs device remove", "")))
                     }
-                    CmdRequest::CryptsetupStatus { mapper }
-                        if mapper.as_str() == "braid-disk2"
-                            && remove_committed.load(Ordering::SeqCst) =>
-                    {
-                        Some(Ok(RawCommandOutput {
-                            cmd: "cryptsetup status braid-disk2".into(),
-                            stdout: String::new(),
-                            stderr: "/dev/mapper/braid-disk2 is inactive.\n".into(),
-                            exit_status: 4,
-                        }))
-                    }
                     _ => None,
                 }
             });
-        let fs = MockFs::storage(vec![]);
+        // braid-disk2 leaves the dm table once the device remove commits.
+        let fs = SwitchingFs {
+            before: MockFs::storage(vec![]).with_dm(canonical_dm_table()),
+            after: MockFs::storage(vec![])
+                .with_luks_dm("braid-disk1", canonical_luks_uuid(1).as_str()),
+            switched: remove_committed,
+        };
 
         let captured = crate::status_tag::testing::capture_with_color(false, || {
             cmd_remove(&runner, &fs, &f.remove_params().build())

@@ -23,8 +23,8 @@ use crate::state_paths::StatePaths;
 use crate::status::{BalanceReport, get_balance_report};
 use crate::status_tag::{StatusTag, color_enabled_for_stderr, emit_status, status_line};
 use crate::types::{
-    ByIdPath, ConfigDiskState, Devid, DiskName, Fsid, KeyFilePath, LuksUuid, MountPoint,
-    PoolDevice, PoolState, format_uuid_list,
+    ByIdPath, ConfigDiskState, Devid, DiskName, Fsid, KeyFilePath, LuksUuid, MapperName,
+    MountPoint, PoolDevice, PoolState, format_uuid_list,
 };
 use std::path::PathBuf;
 use std::time::Duration;
@@ -737,6 +737,7 @@ impl RecoverCompletion {
                 restore_raid1_after_commit,
             } => execute_replace_post_maintenance_recovery(
                 runner,
+                fs,
                 params.sleeper,
                 by_id_resolver,
                 params,
@@ -1132,22 +1133,44 @@ fn execute_generic_live_pool_recovery<R: CommandRunner + Sync>(
     // (closes the gap where a post-journal validation failure preserved
     // the journal but recover then lost a flapping non-target disk).
     if matches!(&plan.journal.op, journal::OpKind::Remove { .. }) {
+        // A null-backed mapper records its LUKS UUID, so one that no
+        // pre-operation member owns is foreign, as a live device would be.
+        if let Some(foreign) = pool
+            .null_underlying
+            .iter()
+            .find(|n| plan.journal.pre_membership.by_uuid(&n.luks_uuid).is_none())
+        {
+            return Err(RecoverError::Failed(format!(
+                "device {} (LUKS UUID {}) is in the live pool with no backing disk but is not \
+                 part of the pre-operation membership.",
+                foreign.mapper, foreign.luks_uuid
+            )));
+        }
         for (uuid, member) in plan.journal.pre_membership.iter() {
             if recovered.by_uuid(uuid).is_some() {
                 continue;
             }
-            let null_underlying_match = member
-                .devid
-                .and_then(|devid| pool.null_underlying.iter().find(|n| n.devid == devid));
+            // A null-backed mapper binds by the LUKS UUID it records, so the
+            // member records the devid btrfs holds that mapper at, as a
+            // present device does in build_membership_from_live_pool; the
+            // journaled devid may be stale or absent. Only a btrfs-MISSING
+            // device with no open mapper binds by persisted devid.
+            if let Some(null_backed) = pool.null_underlying.iter().find(|n| n.luks_uuid == *uuid) {
+                recovered.insert(
+                    uuid.clone(),
+                    DiskMember {
+                        devid: Some(null_backed.devid),
+                        ..member.clone()
+                    },
+                )?;
+                continue;
+            }
             let in_missing = member
                 .devid
-                .map(|d| pool.missing_devids.contains(&d))
-                .unwrap_or(false);
-            if null_underlying_match.is_some() || in_missing {
+                .is_some_and(|d| pool.devid_only_missing().any(|missing| missing == d));
+            if in_missing {
                 recovered.insert(uuid.clone(), member.clone())?;
-            } else if member.devid.is_none()
-                && (!pool.null_underlying.is_empty() || !pool.missing_devids.is_empty())
-            {
+            } else if member.devid.is_none() && pool.devid_only_missing().next().is_some() {
                 return Err(RecoverError::Failed(format!(
                     "remove recovery cannot safely correlate journaled member '{}' because \
                      pre_membership has no persisted btrfs devid and live btrfs reports \
@@ -1678,16 +1701,20 @@ fn live_pool_matches_membership(
     membership: &PoolMembership,
 ) -> Result<bool, JournaledSnapshotError> {
     let live_uuids = live_member_uuids(pool);
+    // A null-backed mapper still records its LUKS UUID in the kernel's
+    // device-mapper table, so it binds by UUID like a present device.
+    let null_backed_uuids: std::collections::BTreeSet<LuksUuid> = pool
+        .null_underlying
+        .iter()
+        .map(|n| n.luks_uuid.clone())
+        .collect();
     let live_devids: std::collections::BTreeSet<Devid> =
         pool.devices.iter().map(|d| d.devid).collect();
+    let null_backed_devids: std::collections::BTreeSet<Devid> =
+        pool.null_underlying.iter().map(|n| n.devid).collect();
     let mut fallback_uuids = std::collections::BTreeSet::new();
     let mut fallback_devids = std::collections::BTreeSet::new();
-    for devid in pool
-        .missing_devids
-        .iter()
-        .copied()
-        .chain(pool.null_underlying.iter().map(|n| n.devid))
-    {
+    for devid in pool.devid_only_missing() {
         fallback_devids.insert(devid);
         match membership.by_devid(devid) {
             Ok(Some((uuid, _))) => {
@@ -1712,10 +1739,18 @@ fn live_pool_matches_membership(
 
     let expected: std::collections::BTreeSet<LuksUuid> =
         membership.iter().map(|(uuid, _)| uuid.clone()).collect();
-    let union: std::collections::BTreeSet<LuksUuid> =
-        live_uuids.union(&fallback_uuids).cloned().collect();
-    let uuid_disjoint = live_uuids.is_disjoint(&fallback_uuids);
-    let devid_disjoint = live_devids.is_disjoint(&fallback_devids);
+    let union: std::collections::BTreeSet<LuksUuid> = live_uuids
+        .iter()
+        .chain(&null_backed_uuids)
+        .chain(&fallback_uuids)
+        .cloned()
+        .collect();
+    let uuid_disjoint = live_uuids.is_disjoint(&null_backed_uuids)
+        && live_uuids.is_disjoint(&fallback_uuids)
+        && null_backed_uuids.is_disjoint(&fallback_uuids);
+    let devid_disjoint = live_devids.is_disjoint(&null_backed_devids)
+        && live_devids.is_disjoint(&fallback_devids)
+        && null_backed_devids.is_disjoint(&fallback_devids);
     Ok(union == expected && uuid_disjoint && devid_disjoint)
 }
 
@@ -1728,14 +1763,7 @@ fn recover_membership_matching_expected(
     let mut recovered = PoolMembership::empty();
     for dev in &pool.devices {
         let Some(expected_member) = expected.by_uuid(&dev.luks_uuid) else {
-            // Decision 017 uses committed target membership here, so this
-            // wording intentionally differs from the phase-aware admission
-            // paths.
-            return Err(RecoverError::Failed(format!(
-                "device {} (LUKS UUID {}) is in the live pool but is not part of the expected \
-                 committed membership.",
-                dev.mapper, dev.luks_uuid
-            )));
+            return Err(not_in_expected_membership(&dev.mapper, &dev.luks_uuid));
         };
         let by_id = resolve_by_id_for_underlying(by_id_resolver, &dev.underlying)?;
         let added_at = resolve_added_at(prior, expected_member, &dev.luks_uuid);
@@ -1749,22 +1777,31 @@ fn recover_membership_matching_expected(
             },
         )?;
     }
-    // Re-insert any expected member whose live binding is devid-only.
-    // Per principles 2/5, btrfs devid is the authorized fallback when
-    // the LUKS UUID is unobservable -- the two devid-only sources are
-    // pool.missing_devids (btrfs-MISSING sentinels) and
-    // pool.null_underlying (hot-unplugged mappers). The
-    // live_pool_matches_membership gate has already proven every such
-    // devid resolves uniquely through expected; this loop materializes
-    // that resolution in the rebuilt membership. The by_uuid
-    // short-circuit makes the loop idempotent in the rare case the
-    // same devid appears in both sources.
-    for devid in pool
-        .missing_devids
-        .iter()
-        .copied()
-        .chain(pool.null_underlying.iter().map(|n| n.devid))
-    {
+    // A null-backed mapper's backing disk is gone, so there is no live by-id
+    // to resolve; keep the expected member's by-id and record the live devid.
+    for null_backed in &pool.null_underlying {
+        let Some(expected_member) = expected.by_uuid(&null_backed.luks_uuid) else {
+            return Err(not_in_expected_membership(
+                &null_backed.mapper,
+                &null_backed.luks_uuid,
+            ));
+        };
+        let added_at = resolve_added_at(prior, expected_member, &null_backed.luks_uuid);
+        recovered.insert(
+            null_backed.luks_uuid.clone(),
+            DiskMember {
+                devid: Some(null_backed.devid),
+                added_at,
+                ..expected_member.clone()
+            },
+        )?;
+    }
+    // Re-insert any expected member whose live binding is devid-only: a
+    // btrfs-MISSING device with no open mapper (see
+    // `PoolState::devid_only_missing`). The live_pool_matches_membership gate
+    // has already proven every such devid resolves uniquely through expected;
+    // this loop materializes that resolution in the rebuilt membership.
+    for devid in pool.devid_only_missing() {
         match expected.by_devid(devid) {
             Ok(Some((uuid, expected_member))) => {
                 if recovered.by_uuid(uuid).is_some() {
@@ -1796,6 +1833,17 @@ fn recover_membership_matching_expected(
         }
     }
     Ok(recovered)
+}
+
+/// Refusal for a live pool member -- present or null-backed -- whose LUKS UUID
+/// is not in the expected committed membership. Decision 017 uses committed
+/// target membership here, so this wording intentionally differs from the
+/// phase-aware admission paths.
+fn not_in_expected_membership(mapper: &MapperName, uuid: &LuksUuid) -> RecoverError {
+    RecoverError::Failed(format!(
+        "device {mapper} (LUKS UUID {uuid}) is in the live pool but is not part of the expected \
+         committed membership."
+    ))
 }
 
 fn write_remove_missing_phase(
@@ -2150,6 +2198,7 @@ fn discover_add_targets_before_mount<R: CommandRunner, F: Filesystem + ?Sized>(
             )?;
             luks::ensure_luks_open(
                 runner,
+                fs,
                 &target.name,
                 &target.by_id,
                 params.backing_path_resolver,
@@ -2457,6 +2506,7 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
                     .expect("passphrase was resolved above");
                 luks::ensure_luks_open(
                     runner,
+                    fs,
                     &target.name,
                     &target.by_id,
                     params.backing_path_resolver,
@@ -2533,6 +2583,7 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
                     if !mapper_open {
                         luks::ensure_luks_open(
                             runner,
+                            fs,
                             &target.name,
                             &target.by_id,
                             params.backing_path_resolver,
@@ -2630,6 +2681,7 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
                     luks::backup_luks_header(runner, target.by_id.as_str(), &mapper, params.paths)?;
                     luks::ensure_luks_open(
                         runner,
+                        fs,
                         &target.name,
                         &target.by_id,
                         params.backing_path_resolver,
@@ -3126,6 +3178,7 @@ fn execute_replace_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem
         )?;
         return execute_replace_post_maintenance_recovery(
             runner,
+            fs,
             params.sleeper,
             by_id_resolver,
             params,
@@ -3162,21 +3215,23 @@ fn execute_replace_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem
     ))
 }
 
-fn close_old_mapper_best_effort<R, S>(
+fn close_old_mapper_best_effort<R, F, S>(
     runner: &R,
+    fs: &F,
     sleeper: &S,
     mapper: &crate::types::MapperName,
     disk_label: &DiskName,
     old_uuid: &LuksUuid,
 ) where
     R: CommandRunner,
+    F: Filesystem + ?Sized,
     S: Sleeper + ?Sized,
 {
     let color_enabled = color_enabled_for_stderr();
     // Recovery mirrors the execute path's UUID authority. A transient probe
     // failure can leak this old dm slot until `braid lock` or reboot, but it
     // does not block later resize and journal-clear steps.
-    match probe_observed_mapper_uuid(runner, mapper, old_uuid) {
+    match probe_observed_mapper_uuid(fs, mapper, old_uuid) {
         MapperOwnership::Owned => {
             if close_mapper_best_effort(
                 runner,
@@ -3199,8 +3254,9 @@ fn close_old_mapper_best_effort<R, S>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn execute_replace_post_maintenance_recovery<R, S>(
+fn execute_replace_post_maintenance_recovery<R, F, S>(
     runner: &R,
+    fs: &F,
     sleeper: &S,
     by_id_resolver: &dyn ByIdResolver,
     params: &RecoverParams<'_>,
@@ -3214,6 +3270,7 @@ fn execute_replace_post_maintenance_recovery<R, S>(
 ) -> Result<(), RecoverError>
 where
     R: CommandRunner + Sync,
+    F: Filesystem + ?Sized,
     S: Sleeper + ?Sized,
 {
     if !live_pool_matches_membership(&pool, &journal.target_membership)? {
@@ -3267,7 +3324,7 @@ where
         else {
             unreachable!("post-maintenance recovery runs only for Replace journals");
         };
-        close_old_mapper_best_effort(runner, sleeper, old_mapper, old_name, old_uuid);
+        close_old_mapper_best_effort(runner, fs, sleeper, old_mapper, old_name, old_uuid);
     }
 
     let Some(dev) = pool.device_by_uuid(new_uuid) else {
@@ -3759,7 +3816,8 @@ mod tests {
     use crate::mount::MountError;
     use crate::preview::NoteLevel;
     use crate::test_fixtures::{
-        PoolFixture, RecordingSleeper, RemountHarness, TEST_PASSPHRASE_BYTES, test_uuid,
+        MockDmTable, PoolFixture, RecordingSleeper, RemountHarness, TEST_PASSPHRASE_BYTES,
+        test_uuid,
     };
     use crate::types::{
         ByIdPath, DiskName, LuksFormatExtraOpts, LuksUuid, MapperName, MountPoint,
@@ -3801,6 +3859,7 @@ mod tests {
     struct MockFs {
         paths: Vec<String>,
         mountinfo: String,
+        dm: MockDmTable,
     }
 
     impl MockFs {
@@ -3810,6 +3869,7 @@ mod tests {
                 mountinfo:
                     "36 35 0:32 / /mnt/storage rw shared:1 - btrfs /dev/mapper/braid-disk1 rw\n"
                         .to_owned(),
+                dm: MockDmTable::default(),
             }
         }
 
@@ -3817,6 +3877,7 @@ mod tests {
             Self {
                 paths: paths.iter().map(|s| s.to_string()).collect(),
                 mountinfo: "26 25 0:23 / / rw shared:1 - ext4 /dev/sda1 rw\n".to_owned(),
+                dm: MockDmTable::default(),
             }
         }
 
@@ -3826,6 +3887,7 @@ mod tests {
                 mountinfo:
                     "36 35 0:32 / /mnt/storage ro shared:1 - btrfs /dev/mapper/braid-disk1 rw\n"
                         .to_owned(),
+                dm: MockDmTable::default(),
             }
         }
 
@@ -3835,7 +3897,14 @@ mod tests {
                 mountinfo:
                     "36 35 0:32 / /mnt/storage rw shared:1 - btrfs /dev/mapper/braid-disk1 ro,space_cache=v2\n"
                         .to_owned(),
+                dm: MockDmTable::default(),
             }
+        }
+
+        /// Add an active LUKS2 mapping to the sysfs device-mapper table.
+        fn with_luks_dm(mut self, mapper: &str, luks_uuid: &str) -> Self {
+            self.dm = self.dm.with_luks(mapper, luks_uuid);
+            self
         }
     }
 
@@ -3852,11 +3921,13 @@ mod tests {
             if path == "/proc/self/mountinfo" {
                 return Ok(self.mountinfo.clone());
             }
-            Err(std::io::Error::new(std::io::ErrorKind::NotFound, "mock"))
+            self.dm
+                .read_to_string(path)
+                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "mock"))
         }
 
-        fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
-            Ok(vec![])
+        fn list_dir(&self, path: &str) -> Result<Vec<String>, std::io::Error> {
+            Ok(self.dm.list_dir(path).unwrap_or_default())
         }
 
         fn create_dir_all(&self, _path: &str) -> Result<(), std::io::Error> {
@@ -5502,6 +5573,7 @@ mod tests {
         pool.total_devices = 2;
         pool.null_underlying.push(NullUnderlyingDevice {
             mapper: MapperName::from_basename("braid-disk2".into()),
+            luks_uuid: uuid_for_name("disk2"),
             devid: Devid::new(2),
         });
         pool
@@ -6243,7 +6315,9 @@ mod tests {
 
         execute_add_pool_mutation_recovery(
             &runner,
-            &MockFs::new(&["/dev/disk/by-id/virtio-disk2", "/dev/mapper/braid-disk2"]),
+            &MockFs::new(&["/dev/disk/by-id/virtio-disk2", "/dev/mapper/braid-disk2"])
+                .with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111")
+                .with_luks_dm("braid-disk2", "22222222-2222-2222-2222-222222222222"),
             &resolver,
             &params,
             AddPoolReplayCtx {
@@ -6303,7 +6377,9 @@ mod tests {
 
         execute_add_pool_mutation_recovery(
             &runner,
-            &MockFs::new(&["/dev/disk/by-id/virtio-disk2", "/dev/mapper/braid-disk2"]),
+            &MockFs::new(&["/dev/disk/by-id/virtio-disk2", "/dev/mapper/braid-disk2"])
+                .with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111")
+                .with_luks_dm("braid-disk2", "22222222-2222-2222-2222-222222222222"),
             &resolver,
             &params,
             AddPoolReplayCtx {
@@ -6363,7 +6439,10 @@ mod tests {
 
         execute_add_pool_mutation_recovery(
             &runner,
-            &MockFs::new(&["/dev/disk/by-id/virtio-disk2", "/dev/mapper/braid-disk2"]),
+            &MockFs::new(&["/dev/disk/by-id/virtio-disk2", "/dev/mapper/braid-disk2"])
+                .with_luks_dm("braid-disk2", "22222222-2222-2222-2222-222222222222")
+                .with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111")
+                .with_luks_dm("braid-WRONG", "22222222-2222-2222-2222-222222222222"),
             &resolver,
             &params,
             AddPoolReplayCtx {
@@ -6613,7 +6692,10 @@ mod tests {
 
         execute_add_pool_mutation_recovery(
             &runner,
-            &MockFs::new(&["/dev/disk/by-id/virtio-disk3", "/dev/mapper/braid-disk3"]),
+            &MockFs::new(&["/dev/disk/by-id/virtio-disk3", "/dev/mapper/braid-disk3"])
+                .with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111")
+                .with_luks_dm("braid-disk2", "22222222-2222-2222-2222-222222222222")
+                .with_luks_dm("braid-disk3", "33333333-3333-3333-3333-333333333333"),
             &resolver,
             &params,
             AddPoolReplayCtx {
@@ -6813,7 +6895,11 @@ mod tests {
                 "/dev/mapper/braid-disk2",
                 "/dev/disk/by-id/virtio-disk3",
                 "/dev/mapper/braid-disk3",
-            ]),
+            ])
+            .with_luks_dm("braid-disk2", "22222222-2222-2222-2222-222222222222")
+            .with_luks_dm("braid-disk3", "33333333-3333-3333-3333-333333333333")
+            .with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111")
+            .with_luks_dm("luks-foreign", "99999999-9999-9999-9999-999999999999"),
             &resolver,
             &params,
             AddPoolReplayCtx {
@@ -7167,7 +7253,9 @@ mod tests {
 
         let err = execute_add_pool_mutation_recovery(
             &runner,
-            &MockFs::new(&["/dev/disk/by-id/virtio-disk2", "/dev/mapper/braid-disk2"]),
+            &MockFs::new(&["/dev/disk/by-id/virtio-disk2", "/dev/mapper/braid-disk2"])
+                .with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111")
+                .with_luks_dm("braid-disk2", "22222222-2222-2222-2222-222222222222"),
             &resolver,
             &params,
             AddPoolReplayCtx {
@@ -8017,7 +8105,9 @@ mod tests {
     #[test]
     fn add_pool_mutation_replay_verifies_open_journaled_target_passphrase() {
         let f = PoolFixture::empty();
-        let fs = MockFs::new(&["/dev/disk/by-id/virtio-disk2", "/dev/mapper/braid-disk2"]);
+        let fs = MockFs::new(&["/dev/disk/by-id/virtio-disk2", "/dev/mapper/braid-disk2"])
+            .with_luks_dm("braid-disk2", "22222222-2222-2222-2222-222222222222")
+            .with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111");
 
         let journal = recoverable_pool_mutation_add_journal();
         let union = test_recovery_admission_membership(&journal);
@@ -8355,7 +8445,9 @@ mod tests {
             ],
             inner,
             &["braid-disk1", "braid-disk2"],
-        );
+        )
+        .with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111")
+        .with_luks_dm("braid-disk2", "22222222-2222-2222-2222-222222222222");
         let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
         let params = f.recover_params().build();
 
@@ -8448,7 +8540,9 @@ mod tests {
                 ),
         ));
         let harness =
-            RemountHarness::new(&["/dev/disk/by-id/virtio-disk2"], inner, &["braid-disk2"]);
+            RemountHarness::new(&["/dev/disk/by-id/virtio-disk2"], inner, &["braid-disk2"])
+                .with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111")
+                .with_luks_dm("braid-disk2", "22222222-2222-2222-2222-222222222222");
         let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
         let params = f.recover_params().build();
 
@@ -8545,7 +8639,9 @@ mod tests {
     #[test]
     fn add_pool_mutation_replays_returned_disk_after_wipefs_crash() {
         let f = PoolFixture::empty();
-        let fs = MockFs::new(&["/dev/disk/by-id/virtio-disk2", "/dev/mapper/braid-disk2"]);
+        let fs = MockFs::new(&["/dev/disk/by-id/virtio-disk2", "/dev/mapper/braid-disk2"])
+            .with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111")
+            .with_luks_dm("braid-disk2", "22222222-2222-2222-2222-222222222222");
         let journal = recoverable_pool_mutation_add_journal();
         journal::write_journal(&f.paths, &journal).unwrap();
         let union = test_recovery_admission_membership(&journal);
@@ -8695,7 +8791,9 @@ mod tests {
     #[test]
     fn add_pool_mutation_replays_keyfile_enrollment_before_pool_add() {
         let f = PoolFixture::empty();
-        let fs = MockFs::new(&["/dev/disk/by-id/virtio-disk2", "/dev/mapper/braid-disk2"]);
+        let fs = MockFs::new(&["/dev/disk/by-id/virtio-disk2", "/dev/mapper/braid-disk2"])
+            .with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111")
+            .with_luks_dm("braid-disk2", "22222222-2222-2222-2222-222222222222");
         let key_dir = tempfile::TempDir::new().unwrap();
         let key_file = write_valid_keyfile(&key_dir, "braid.key");
         let journal = recoverable_pool_mutation_add_journal_with_enroll(key_file.clone());
@@ -9049,7 +9147,9 @@ mod tests {
     #[test]
     fn add_pool_mutation_committed_target_scans_without_wipe_or_add() {
         let f = PoolFixture::empty();
-        let fs = MockFs::new(&["/dev/disk/by-id/virtio-disk2", "/dev/mapper/braid-disk2"]);
+        let fs = MockFs::new(&["/dev/disk/by-id/virtio-disk2", "/dev/mapper/braid-disk2"])
+            .with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111")
+            .with_luks_dm("braid-disk2", "22222222-2222-2222-2222-222222222222");
         let journal = recoverable_pool_mutation_add_journal();
         journal::write_journal(&f.paths, &journal).unwrap();
         let union = test_recovery_admission_membership(&journal);
@@ -9233,7 +9333,6 @@ mod tests {
     fn returned_replay_wrong_identity_fails_before_wipe_or_add() {
         for wrong_fsid in [false, true] {
             let f = PoolFixture::empty();
-            let fs = MockFs::new(&["/dev/disk/by-id/virtio-disk2", "/dev/mapper/braid-disk2"]);
             let journal = recoverable_pool_mutation_add_journal();
             journal::write_journal(&f.paths, &journal).unwrap();
             let union = test_recovery_admission_membership(&journal);
@@ -9247,6 +9346,9 @@ mod tests {
             } else {
                 "99999999-9999-9999-9999-999999999999"
             };
+            let fs = MockFs::new(&["/dev/disk/by-id/virtio-disk2", "/dev/mapper/braid-disk2"])
+                .with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111")
+                .with_luks_dm("braid-disk2", uuid);
             let mut runner = with_one_disk_pool_probe(MockRunner::default())
                 .with_output(
                     CmdRequest::CryptsetupLuksUuid {
@@ -9333,7 +9435,8 @@ mod tests {
         let fs = MockFs::new(&[
             "/dev/disk/by-id/virtio-disk1",
             "/dev/disk/by-id/virtio-disk2",
-        ]);
+        ])
+        .with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111");
         let journal = recoverable_pool_mutation_add_journal();
         journal::write_journal(&f.paths, &journal).unwrap();
 
@@ -9526,7 +9629,9 @@ mod tests {
                 ),
         ));
         let harness =
-            RemountHarness::new(&["/dev/disk/by-id/virtio-disk2"], inner, &["braid-disk2"]);
+            RemountHarness::new(&["/dev/disk/by-id/virtio-disk2"], inner, &["braid-disk2"])
+                .with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111")
+                .with_luks_dm("braid-disk2", "22222222-2222-2222-2222-222222222222");
         let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
         let params = f.recover_params().build();
 
@@ -9629,7 +9734,9 @@ mod tests {
                 ),
         ));
         let harness =
-            RemountHarness::new(&["/dev/disk/by-id/virtio-disk2"], inner, &["braid-disk2"]);
+            RemountHarness::new(&["/dev/disk/by-id/virtio-disk2"], inner, &["braid-disk2"])
+                .with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111")
+                .with_luks_dm("braid-disk2", "22222222-2222-2222-2222-222222222222");
         let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
         let params = f.recover_params().build();
 
@@ -9861,7 +9968,9 @@ mod tests {
     #[test]
     fn fresh_present_target_rejects_bad_credential_before_pool_json() {
         let f = PoolFixture::empty();
-        let fs = MockFs::new(&["/dev/disk/by-id/virtio-disk2", "/dev/mapper/braid-disk2"]);
+        let fs = MockFs::new(&["/dev/disk/by-id/virtio-disk2", "/dev/mapper/braid-disk2"])
+            .with_luks_dm("braid-disk2", "22222222-2222-2222-2222-222222222222")
+            .with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111");
         let journal =
             fresh_pool_mutation_add_journal(vec!["--label".into(), "braid-disk2".into()], None);
         journal::write_journal(&f.paths, &journal).unwrap();
@@ -11441,6 +11550,7 @@ mod tests {
 
         execute_replace_post_maintenance_recovery(
             &runner,
+            &MockFs::new(&[]),
             &progress::NoopSleeper,
             &resolver,
             &params,
@@ -11498,6 +11608,7 @@ mod tests {
         };
         execute_replace_post_maintenance_recovery(
             &runner,
+            &MockFs::new(&[]),
             &progress::NoopSleeper,
             &resolver,
             &params,
@@ -11677,6 +11788,7 @@ mod tests {
         let captured = crate::status_tag::testing::capture_with_color(false, || {
             execute_replace_post_maintenance_recovery(
                 &runner,
+                &MockFs::new(&[]).with_luks_dm("braid-old", "22222222-2222-2222-2222-222222222222"),
                 &progress::NoopSleeper,
                 &resolver,
                 &params,
@@ -11787,6 +11899,8 @@ mod tests {
         let captured = crate::status_tag::testing::capture_with_color(false, || {
             execute_replace_post_maintenance_recovery(
                 &runner,
+                &MockFs::new(&[])
+                    .with_luks_dm("braid-WRONG", "22222222-2222-2222-2222-222222222222"),
                 &progress::NoopSleeper,
                 &resolver,
                 &params,
@@ -11868,6 +11982,7 @@ mod tests {
         let captured = crate::status_tag::testing::capture_with_color(false, || {
             execute_replace_post_maintenance_recovery(
                 &runner,
+                &MockFs::new(&[]),
                 &progress::NoopSleeper,
                 &resolver,
                 &params,
@@ -11954,6 +12069,7 @@ mod tests {
         let captured = crate::status_tag::testing::capture_with_color(false, || {
             execute_replace_post_maintenance_recovery(
                 &runner,
+                &MockFs::new(&[]).with_luks_dm("braid-old", "99999999-9999-9999-9999-999999999999"),
                 &progress::NoopSleeper,
                 &resolver,
                 &params,
@@ -12052,6 +12168,7 @@ mod tests {
 
         execute_replace_post_maintenance_recovery(
             &runner,
+            &MockFs::new(&[]).with_luks_dm("braid-old", "22222222-2222-2222-2222-222222222222"),
             &progress::NoopSleeper,
             &resolver,
             &params,
@@ -12113,6 +12230,7 @@ mod tests {
 
         execute_replace_post_maintenance_recovery(
             &runner,
+            &MockFs::new(&[]),
             &progress::NoopSleeper,
             &resolver,
             &params,
@@ -12148,7 +12266,10 @@ mod tests {
     #[test]
     fn cmd_recover_replace_post_maintenance_preserves_non_target_null_underlying_disk() {
         let f = PoolFixture::empty();
-        let fs = MockFs::new(&[]);
+        let fs = MockFs::new(&[])
+            .with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111")
+            .with_luks_dm("braid-disk-new", uuid_for_name("disk-new").as_str())
+            .with_luks_dm("braid-disk3", uuid_for_name("disk3").as_str());
         let new_uuid = uuid_for_name("disk-new");
         let new_uuid_text = new_uuid.to_string();
         let pre = membership_from(vec![
@@ -12316,7 +12437,9 @@ mod tests {
     #[test]
     fn cmd_recover_replace_post_maintenance_preserves_non_target_missing_disk() {
         let f = PoolFixture::empty();
-        let fs = MockFs::new(&[]);
+        let fs = MockFs::new(&[])
+            .with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111")
+            .with_luks_dm("braid-disk-new", uuid_for_name("disk-new").as_str());
         let new_uuid = uuid_for_name("disk-new");
         let new_uuid_text = new_uuid.to_string();
         let pre = membership_from(vec![
@@ -12494,6 +12617,7 @@ mod tests {
 
         let err = execute_replace_post_maintenance_recovery(
             &runner,
+            &MockFs::new(&[]),
             &progress::NoopSleeper,
             &resolver,
             &params,
@@ -12646,15 +12770,42 @@ mod tests {
     }
 
     // Intent: live_pool_matches_membership accepts an expected member whose
-    // only live binding is a null-underlying mapper's devid.
-    // Why it exists: phased recovery must use the same authorized devid
-    // fallback for null-underlying mappers that it already uses for btrfs
-    // MISSING sentinels.
+    // mapper is null-underlying, binding it by the LUKS UUID its dm UUID
+    // records.
+    // Why it exists: a null-backed mapper keeps its LUKS identity, so recovery
+    // must not need a persisted devid to recognize it.
     // Scenario: disk1 is fully observable, and disk2's mapper remains open
-    // with `device: (null)` while target membership still carries devid 2.
+    // with `device: (null)` while target membership carries no devid for it.
     #[test]
-    fn live_pool_matches_membership_accepts_null_underlying_devid() {
+    fn live_pool_matches_membership_accepts_null_underlying_by_uuid() {
         let pool = pool_state_disk1_with_null_underlying_disk2();
+        let expected = membership_from(vec![
+            membership_entry(
+                "disk1",
+                "/dev/disk/by-id/virtio-disk1",
+                None,
+                Some(Devid::new(1)),
+            ),
+            membership_entry("disk2", "/dev/disk/by-id/virtio-disk2", None, None),
+        ]);
+
+        let matches = live_pool_matches_membership(&pool, &expected)
+            .expect("a null-backed mapper binds by UUID, not devid");
+
+        assert!(matches);
+    }
+
+    // Intent: live_pool_matches_membership reports a topology mismatch when a
+    // null-underlying mapper's LUKS UUID is not in the expected membership.
+    // Why it exists: a null-backed mapper binds by UUID like a present device,
+    // so a foreign one must fail the gate the same way a foreign live device
+    // does.
+    // Scenario: disk1 is live, but btrfs also reports a null-underlying
+    // mapper whose dm UUID records disk4, which the journal never held.
+    #[test]
+    fn live_pool_matches_membership_rejects_foreign_null_underlying_uuid() {
+        let mut pool = pool_state_disk1_with_null_underlying_disk2();
+        pool.null_underlying[0].luks_uuid = uuid_for_name("disk4");
         let expected = membership_from(vec![
             membership_entry(
                 "disk1",
@@ -12671,60 +12822,27 @@ mod tests {
         ]);
 
         let matches = live_pool_matches_membership(&pool, &expected)
-            .expect("null-underlying devid should resolve through membership");
+            .expect("a foreign null-backed UUID is a topology mismatch, not corruption");
 
-        assert!(matches);
-    }
-
-    // Intent: live_pool_matches_membership fails closed when a
-    // null-underlying mapper's devid has no expected membership binding.
-    // Why it exists: Decision 024 requires recovery to stop when the live
-    // btrfs device has no observable LUKS UUID and the journal has no
-    // persisted devid binding for it.
-    // Scenario: disk1 is live, but btrfs also reports a null-underlying
-    // mapper at devid 99 while the expected membership only has devids 1/2.
-    #[test]
-    fn live_pool_matches_membership_rejects_null_underlying_without_expected_devid() {
-        let mut pool = pool_state_disk1_with_null_underlying_disk2();
-        pool.null_underlying[0].devid = Devid::new(99);
-        let expected = membership_from(vec![
-            membership_entry(
-                "disk1",
-                "/dev/disk/by-id/virtio-disk1",
-                None,
-                Some(Devid::new(1)),
-            ),
-            membership_entry(
-                "disk2",
-                "/dev/disk/by-id/virtio-disk2",
-                None,
-                Some(Devid::new(2)),
-            ),
-        ]);
-
-        match live_pool_matches_membership(&pool, &expected) {
-            Err(JournaledSnapshotError::NoMemberForDevid { devid }) => {
-                assert_eq!(devid, Devid::new(99));
-            }
-            other => panic!("expected NoMemberForDevid for devid 99, got {other:?}"),
-        }
+        assert!(!matches);
     }
 
     // Intent: recover_membership_matching_expected re-inserts a member whose
-    // only live binding is a null-underlying mapper's devid, preserving
-    // added_at precedence.
+    // mapper is null-underlying, bound by its LUKS UUID, recording the live
+    // devid and preserving added_at precedence.
     // Why it exists: the rebuild half must stay in lockstep with the
     // live_pool_matches_membership gate, or recovery can accept a topology but
-    // still drop the unobservable member from pool.json.
+    // still drop the null-backed member from pool.json.
     // Scenario: disk1 and disk2 are fully observable, disk3 is
-    // null-underlying at devid 3, and prior pool.json has disk3's older
-    // added_at value.
+    // null-underlying at devid 3 with no devid in the expected membership,
+    // and prior pool.json has disk3's older added_at value.
     #[test]
     fn recover_membership_matching_expected_reinserts_null_underlying_member() {
         let mut pool = pool_state_two_disks();
         pool.total_devices = 3;
         pool.null_underlying.push(NullUnderlyingDevice {
             mapper: MapperName::from_basename("braid-disk3".into()),
+            luks_uuid: uuid_for_name("disk3"),
             devid: Devid::new(3),
         });
 
@@ -12747,7 +12865,7 @@ mod tests {
                 "disk3",
                 "/dev/disk/by-id/virtio-disk3",
                 Some(expected_added_at),
-                Some(Devid::new(3)),
+                None,
             ),
         ]);
         let prior = membership_from(vec![
@@ -12800,6 +12918,7 @@ mod tests {
         pool.missing_devids = vec![Devid::new(2)];
         pool.null_underlying.push(NullUnderlyingDevice {
             mapper: MapperName::from_basename("braid-disk2".into()),
+            luks_uuid: uuid_for_name("disk2"),
             devid: Devid::new(2),
         });
         let expected = membership_from(vec![
@@ -12830,14 +12949,14 @@ mod tests {
     // Why it exists: the gate must fail closed on devid-level collisions even
     // when UUID set equality and UUID disjointness would otherwise pass.
     // Scenario: live disk2 reports devid 2, while a synthetic
-    // null-underlying mapper also reports devid 2 and resolves through
-    // expected membership to a different UUID.
+    // null-underlying mapper whose dm UUID records disk4 also reports devid 2.
     #[test]
     fn live_pool_matches_membership_rejects_null_underlying_devid_colliding_with_live_devid() {
         let mut pool = pool_state_two_disks();
         pool.total_devices = 3;
         pool.null_underlying.push(NullUnderlyingDevice {
             mapper: MapperName::from_basename("braid-disk4".into()),
+            luks_uuid: uuid_for_name("disk4"),
             devid: Devid::new(2),
         });
         let expected = membership_from(vec![
@@ -12867,44 +12986,32 @@ mod tests {
         assert!(!matches);
     }
 
-    // Intent: live_pool_matches_membership propagates duplicate-devid
-    // corruption reached through a null-underlying mapper.
-    // Why it exists: the widened fallback iterator must preserve the existing
-    // duplicate-devid bridge instead of treating corrupt journal membership as
-    // an ordinary topology mismatch.
-    // Scenario: a null-underlying mapper reports devid 2, and the expected
-    // membership snapshot has two UUIDs with devid 2.
+    // Intent: live_pool_matches_membership rejects a null-underlying mapper
+    // whose LUKS UUID duplicates a present device's UUID.
+    // Why it exists: binding null-backed mappers by UUID must not let one
+    // UUID count twice (a cloned header behind two mappers) and still match.
+    // Scenario: disk1 is live, and a null-backed braid-disk1-clone mapper's
+    // dm UUID also records disk1's UUID.
     #[test]
-    fn live_pool_matches_membership_propagates_duplicate_devid_from_null_underlying() {
-        let pool = pool_state_disk1_with_null_underlying_disk2();
-        let expected = PoolMembership::for_corruption_tests(vec![
-            membership_entry(
-                "disk1",
-                "/dev/disk/by-id/virtio-disk1",
-                None,
-                Some(Devid::new(1)),
-            ),
-            membership_entry(
-                "disk2",
-                "/dev/disk/by-id/virtio-disk2",
-                None,
-                Some(Devid::new(2)),
-            ),
-            membership_entry(
-                "disk4",
-                "/dev/disk/by-id/virtio-disk4",
-                None,
-                Some(Devid::new(2)),
-            ),
-        ]);
+    fn live_pool_matches_membership_rejects_null_underlying_uuid_duplicating_live_uuid() {
+        let mut pool = pool_state_one_disk();
+        pool.total_devices = 2;
+        pool.null_underlying.push(NullUnderlyingDevice {
+            mapper: MapperName::from_basename("braid-disk1-clone".into()),
+            luks_uuid: uuid_for_name("disk1"),
+            devid: Devid::new(2),
+        });
+        let expected = membership_from(vec![membership_entry(
+            "disk1",
+            "/dev/disk/by-id/virtio-disk1",
+            None,
+            Some(Devid::new(1)),
+        )]);
 
-        match live_pool_matches_membership(&pool, &expected) {
-            Err(JournaledSnapshotError::DuplicateDevid { devid, members }) => {
-                assert_eq!(devid, Devid::new(2));
-                assert_eq!(members.len(), 2);
-            }
-            other => panic!("expected DuplicateDevid for devid 2, got {other:?}"),
-        }
+        let matches = live_pool_matches_membership(&pool, &expected)
+            .expect("a duplicated UUID is a topology mismatch, not corruption");
+
+        assert!(!matches);
     }
 
     // Intent: cmd_recover with dry_run = true previews and returns through
@@ -12922,7 +13029,9 @@ mod tests {
     #[test]
     fn recover_dry_run_does_not_acquire_sleep_inhibitor() {
         let f = PoolFixture::empty();
-        let fs = MockFs::new(&[]);
+        let fs = MockFs::new(&[])
+            .with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111")
+            .with_luks_dm("braid-disk-new", uuid_for_name("disk-new").as_str());
         let new_uuid = uuid_for_name("disk-new");
         let new_uuid_text = new_uuid.to_string();
         let pre = membership_from(vec![
@@ -13098,7 +13207,9 @@ mod tests {
     #[test]
     fn recover_fails_when_device_missing_from_both_snapshots() {
         let f = PoolFixture::empty();
-        let fs = MockFs::new(&[]);
+        let fs = MockFs::new(&[])
+            .with_luks_dm("braid-toshiba", "11111111-1111-1111-1111-111111111111")
+            .with_luks_dm("braid-mystery", "22222222-2222-2222-2222-222222222222");
 
         // pre and target both only know about "toshiba"
         let pre = membership_from(vec![membership_entry(
@@ -13389,7 +13500,9 @@ mod tests {
             ],
             inner,
             &["braid-disk1", "braid-disk2"],
-        );
+        )
+        .with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111")
+        .with_luks_dm("braid-disk2", "22222222-2222-2222-2222-222222222222");
 
         let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
         let result = cmd_recover(
@@ -13549,7 +13662,9 @@ mod tests {
             ],
             inner,
             &[],
-        );
+        )
+        .with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111")
+        .with_luks_dm("braid-disk2", "22222222-2222-2222-2222-222222222222");
 
         let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
         let result = cmd_recover(
@@ -13865,7 +13980,10 @@ mod tests {
             ],
             inner,
             &[],
-        );
+        )
+        .with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111")
+        .with_luks_dm("braid-disk2", "22222222-2222-2222-2222-222222222222")
+        .with_luks_dm("braid-disk3", "33333333-3333-3333-3333-333333333333");
 
         let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
 
@@ -14177,7 +14295,10 @@ mod tests {
             ],
             inner,
             &[],
-        );
+        )
+        .with_luks_dm("braid-old", "22222222-2222-2222-2222-222222222222")
+        .with_luks_dm("braid-new", "33333333-3333-3333-3333-333333333333")
+        .with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111");
 
         let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdc", "virtio-new")]);
 
@@ -14430,7 +14551,8 @@ mod tests {
             "/dev/mapper/braid-disk1",
             "/dev/mapper/braid-disk2",
             "/dev/mapper/braid-extra",
-        ]);
+        ])
+        .with_luks_dm("braid-extra", "33333333-3333-3333-3333-333333333333");
         let membership = membership_from(vec![
             membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, None),
             membership_entry("disk2", "/dev/disk/by-id/virtio-disk2", None, None),
@@ -15316,7 +15438,9 @@ mod tests {
     #[test]
     fn recover_skips_mount_when_already_mounted() {
         let f = PoolFixture::empty();
-        let fs = MockFs::new(&[]);
+        let fs = MockFs::new(&[])
+            .with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111")
+            .with_luks_dm("braid-disk2", "22222222-2222-2222-2222-222222222222");
 
         let journal = committed_two_disk_add_journal();
         journal::write_journal(&f.paths, &journal).unwrap();
@@ -15408,7 +15532,8 @@ mod tests {
     #[test]
     fn recover_preserves_added_at_from_current_pool_json() {
         let f = PoolFixture::empty();
-        let fs = MockFs::new(&[]);
+        let fs =
+            MockFs::new(&[]).with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111");
 
         let mut current = PoolMembership::empty();
         current
@@ -15462,7 +15587,8 @@ mod tests {
     #[test]
     fn recover_preserves_added_at_from_journal_when_pool_json_absent() {
         let f = PoolFixture::empty();
-        let fs = MockFs::new(&[]);
+        let fs =
+            MockFs::new(&[]).with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111");
 
         let pre = membership_from(vec![
             membership_entry(
@@ -15525,7 +15651,8 @@ mod tests {
     #[test]
     fn recover_stamps_fresh_added_at_when_no_prior_record() {
         let f = PoolFixture::empty();
-        let fs = MockFs::new(&[]);
+        let fs =
+            MockFs::new(&[]).with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111");
 
         let journal = bootstrap_journal();
         journal::write_journal(&f.paths, &journal).unwrap();
@@ -15570,7 +15697,9 @@ mod tests {
     #[test]
     fn recover_carries_partial_added_at_for_mid_add_crash() {
         let f = PoolFixture::empty();
-        let fs = MockFs::new(&[]);
+        let fs = MockFs::new(&[])
+            .with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111")
+            .with_luks_dm("braid-disk2", "22222222-2222-2222-2222-222222222222");
 
         let mut current = PoolMembership::empty();
         current
@@ -16146,7 +16275,9 @@ mod tests {
     #[test]
     fn recover_uses_live_by_id_when_journal_is_stale() {
         let f = PoolFixture::empty();
-        let fs = MockFs::new(&[]);
+        let fs = MockFs::new(&[])
+            .with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111")
+            .with_luks_dm("braid-disk2", "22222222-2222-2222-2222-222222222222");
 
         let journal = committed_two_disk_add_journal();
         journal::write_journal(&f.paths, &journal).unwrap();
@@ -16269,7 +16400,9 @@ mod tests {
     #[test]
     fn recover_hard_fails_when_underlying_has_no_by_id() {
         let f = PoolFixture::empty();
-        let fs = MockFs::new(&[]);
+        let fs = MockFs::new(&[])
+            .with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111")
+            .with_luks_dm("braid-disk2", "22222222-2222-2222-2222-222222222222");
 
         let journal = committed_two_disk_add_journal();
         journal::write_journal(&f.paths, &journal).unwrap();
@@ -17281,7 +17414,10 @@ mod tests {
             ],
             inner,
             &["braid-disk1", "braid-new", "braid-old"],
-        );
+        )
+        .with_luks_dm("braid-old", "22222222-2222-2222-2222-222222222222")
+        .with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111")
+        .with_luks_dm("braid-new", "33333333-3333-3333-3333-333333333333");
 
         let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdc", "virtio-new")]);
         let result = cmd_recover(
@@ -17564,7 +17700,9 @@ mod tests {
 
         for (state, balance_status) in cases {
             let f = PoolFixture::empty();
-            let fs = MockFs::new(&[]);
+            let fs = MockFs::new(&[])
+                .with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111")
+                .with_luks_dm("braid-disk2", "22222222-2222-2222-2222-222222222222");
             let journal = committed_two_disk_add_journal();
             journal::write_journal(&f.paths, &journal).unwrap();
 
@@ -17664,7 +17802,9 @@ mod tests {
     #[test]
     fn recover_skips_balance_replay_for_remove() {
         let f = PoolFixture::empty();
-        let fs = MockFs::new(&[]);
+        let fs = MockFs::new(&[])
+            .with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111")
+            .with_luks_dm("braid-disk2", "22222222-2222-2222-2222-222222222222");
 
         let journal = remove_2to1_journal();
         journal::write_journal(&f.paths, &journal).unwrap();
@@ -17770,7 +17910,9 @@ mod tests {
     #[test]
     fn cmd_recover_bootstrap_add_replays_owed_raid1_maintenance() {
         let f = PoolFixture::empty();
-        let fs = MockFs::new(&[]);
+        let fs = MockFs::new(&[])
+            .with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111")
+            .with_luks_dm("braid-disk2", "22222222-2222-2222-2222-222222222222");
 
         let journal = bootstrap_pool_mutation_add_journal();
         journal::write_journal(&f.paths, &journal).unwrap();
@@ -17877,7 +18019,9 @@ mod tests {
     #[test]
     fn bootstrap_add_inhibitor_failure_stops_before_balance_and_preserves_journal() {
         let f = PoolFixture::empty();
-        let fs = MockFs::new(&[]);
+        let fs = MockFs::new(&[])
+            .with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111")
+            .with_luks_dm("braid-disk2", "22222222-2222-2222-2222-222222222222");
 
         let journal = bootstrap_pool_mutation_add_journal();
         journal::write_journal(&f.paths, &journal).unwrap();
@@ -18235,7 +18379,9 @@ mod tests {
     #[test]
     fn cmd_recover_remove_with_null_underlying_target_preserves_membership() {
         let f = PoolFixture::empty();
-        let fs = MockFs::new(&[]);
+        let fs = MockFs::new(&[])
+            .with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111")
+            .with_luks_dm("braid-disk2", uuid_for_name("disk2").as_str());
 
         let journal = remove_2to1_journal_with_target_devid();
         journal::write_journal(&f.paths, &journal).unwrap();
@@ -18290,23 +18436,100 @@ mod tests {
         );
     }
 
-    /* Intent: cmd_recover for an interrupted OpKind::Remove fails closed when
-     * a null-underlying member cannot be correlated by journaled btrfs devid.
+    /* Intent: cmd_recover for an interrupted OpKind::Remove binds a
+     * null-underlying target by the LUKS UUID its dm table records, so a
+     * journal without the target's btrfs devid still recovers, and the
+     * rewritten pool.json records the devid btrfs holds the mapper at.
      *
-     * Why it exists: LUKS UUID is the primary identity and persisted btrfs
-     * devid is the only allowed fallback for null-underlying devices. A
-     * journal missing both must not recover by comparing mapper names.
+     * Why it exists: the dm UUID survives the backing disk, so it is the
+     * null-underlying member's identity; devid is no longer a fallback for
+     * mappers. The live devid is recorded so the member still has a binding
+     * once btrfs promotes the device to MISSING and the mapper is gone.
      *
      * Scenario: a hand-built or obsolete pending-op.json lacks disk2's
      * pre-operation devid. Disk2's underlying device hot-unplugged during
      * remove, so btrfs still reports mapper braid-disk2 as devid 2 while
-     * cryptsetup reports `device: (null)`. Recovery must preserve the journal
-     * for manual reconciliation rather than infer identity from braid-disk2.
+     * cryptsetup reports `device: (null)`. The mapper's dm UUID still
+     * records disk2's LUKS UUID.
      */
     #[test]
-    fn cmd_recover_remove_without_devid_refuses_null_underlying_mapper_name_fallback() {
+    fn cmd_recover_remove_without_devid_binds_null_underlying_target_by_dm_uuid() {
         let f = PoolFixture::empty();
-        let fs = MockFs::new(&[]);
+        let fs = MockFs::new(&[])
+            .with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111")
+            .with_luks_dm("braid-disk2", uuid_for_name("disk2").as_str());
+
+        let journal = remove_2to1_journal_without_target_devid();
+        journal::write_journal(&f.paths, &journal).unwrap();
+
+        let (mp_req, mp_out) = mountpoint_ok();
+        let runner = MockRunner::default()
+            .with_output(mp_req, mp_out)
+            .with_output(
+                CmdRequest::BtrfsFilesystemShow {
+                    mount_point: MountPoint::new("/mnt/storage".into()),
+                },
+                btrfs_show_two_disks(),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName::from_basename("braid-disk1".into()),
+                },
+                cryptsetup_status_active("braid-disk1", "/dev/vda"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vda".into(),
+                },
+                cryptsetup_uuid_ok("/dev/vda", "11111111-1111-1111-1111-111111111111"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName::from_basename("braid-disk2".into()),
+                },
+                cryptsetup_status_active("braid-disk2", "(null)"),
+            );
+
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
+        let params = f.recover_params().passphrase_file(None).build();
+        cmd_recover(&runner, &fs, &resolver, &params)
+            .expect("recover should bind the null-underlying target by its dm UUID");
+
+        let recovered = membership::load_membership(&f.paths).unwrap();
+        let (_, disk2) = recovered.by_name(&disk_name("disk2")).unwrap_or_else(|| {
+            panic!(
+                "recovered membership must keep disk2 (null-underlying): {:?}",
+                membership_name_list(&recovered)
+            )
+        });
+        assert_eq!(
+            disk2.devid,
+            Some(Devid::new(2)),
+            "disk2 must record the devid btrfs holds its null-backed mapper at"
+        );
+        assert!(
+            !f.paths.pending_op_json().exists(),
+            "journal must be cleared after live-pool recovery"
+        );
+    }
+
+    /* Intent: cmd_recover for an interrupted OpKind::Remove fails closed
+     * when a null-underlying mapper named for the target records a foreign
+     * LUKS UUID.
+     *
+     * Why it exists: identity comes from the dm UUID, never the mapper
+     * name. A mapper called braid-disk2 that records another container must
+     * not stand in for disk2.
+     *
+     * Scenario: the same unplugged disk2 as the sibling test, but the
+     * braid-disk2 mapper records a container no snapshot knows.
+     */
+    #[test]
+    fn cmd_recover_remove_refuses_null_underlying_mapper_recording_foreign_uuid() {
+        let f = PoolFixture::empty();
+        let fs = MockFs::new(&[])
+            .with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111")
+            .with_luks_dm("braid-disk2", "99999999-9999-9999-9999-999999999999");
 
         let journal = remove_2to1_journal_without_target_devid();
         journal::write_journal(&f.paths, &journal).unwrap();
@@ -18342,11 +18565,12 @@ mod tests {
         let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
         let params = f.recover_params().passphrase_file(None).build();
         let err = cmd_recover(&runner, &fs, &resolver, &params)
-            .expect_err("recover must fail closed without a UUID or devid binding");
+            .expect_err("recover must not bind a foreign null-underlying mapper by name");
 
         assert!(
-            err.to_string().contains("no persisted btrfs devid"),
-            "error should explain the missing fallback binding, got: {err}"
+            err.to_string()
+                .contains("99999999-9999-9999-9999-999999999999"),
+            "error should name the foreign UUID, got: {err}"
         );
         assert!(
             f.paths.pending_op_json().exists(),
@@ -18373,7 +18597,8 @@ mod tests {
     #[test]
     fn cmd_recover_remove_with_missing_target_preserves_membership() {
         let f = PoolFixture::empty();
-        let fs = MockFs::new(&[]);
+        let fs =
+            MockFs::new(&[]).with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111");
 
         let journal = remove_2to1_journal_with_target_devid();
         journal::write_journal(&f.paths, &journal).unwrap();
@@ -18550,7 +18775,9 @@ mod tests {
     #[test]
     fn cmd_recover_remove_preserves_non_target_missing_disk() {
         let f = PoolFixture::empty();
-        let fs = MockFs::new(&[]);
+        let fs = MockFs::new(&[])
+            .with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111")
+            .with_luks_dm("braid-disk2", "22222222-2222-2222-2222-222222222222");
 
         let journal = remove_3to2_journal_with_devids();
         journal::write_journal(&f.paths, &journal).unwrap();
@@ -18631,7 +18858,8 @@ mod tests {
     #[test]
     fn cmd_recover_remove_missing_pool_mutation_preserves_non_target_missing_disk() {
         let f = PoolFixture::empty();
-        let fs = MockFs::new(&[]);
+        let fs =
+            MockFs::new(&[]).with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111");
 
         let journal = remove_missing_3to2_journal_pool_mutation_with_devids();
         journal::write_journal(&f.paths, &journal).unwrap();
@@ -18696,7 +18924,9 @@ mod tests {
     #[test]
     fn cmd_recover_remove_missing_pool_mutation_preserves_non_target_null_underlying_disk() {
         let f = PoolFixture::empty();
-        let fs = MockFs::new(&[]);
+        let fs = MockFs::new(&[])
+            .with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111")
+            .with_luks_dm("braid-disk3", uuid_for_name("disk3").as_str());
 
         let journal = remove_missing_3to2_journal_pool_mutation_with_devids();
         journal::write_journal(&f.paths, &journal).unwrap();
@@ -18767,7 +18997,10 @@ mod tests {
     #[test]
     fn cmd_recover_remove_preserves_non_target_null_underlying_disk() {
         let f = PoolFixture::empty();
-        let fs = MockFs::new(&[]);
+        let fs = MockFs::new(&[])
+            .with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111")
+            .with_luks_dm("braid-disk2", "22222222-2222-2222-2222-222222222222")
+            .with_luks_dm("braid-disk3", uuid_for_name("disk3").as_str());
 
         let journal = remove_3to2_journal_with_devids();
         journal::write_journal(&f.paths, &journal).unwrap();
@@ -18857,7 +19090,9 @@ mod tests {
     #[test]
     fn cmd_recover_remove_does_not_resurrect_genuinely_gone_non_target() {
         let f = PoolFixture::empty();
-        let fs = MockFs::new(&[]);
+        let fs = MockFs::new(&[])
+            .with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111")
+            .with_luks_dm("braid-disk2", "22222222-2222-2222-2222-222222222222");
 
         let journal = remove_3to2_journal_with_devids();
         journal::write_journal(&f.paths, &journal).unwrap();
@@ -18920,7 +19155,8 @@ mod tests {
     #[test]
     fn cmd_recover_remove_with_genuinely_evicted_target_drops_membership() {
         let f = PoolFixture::empty();
-        let fs = MockFs::new(&[]);
+        let fs =
+            MockFs::new(&[]).with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111");
 
         let journal = remove_2to1_journal_with_target_devid();
         journal::write_journal(&f.paths, &journal).unwrap();
@@ -19085,7 +19321,9 @@ mod tests {
     #[test]
     fn plan_recover_dry_run_stepful_already_mounted() {
         let f = PoolFixture::empty();
-        let fs = MockFs::new(&[]);
+        let fs = MockFs::new(&[])
+            .with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111")
+            .with_luks_dm("braid-disk2", "22222222-2222-2222-2222-222222222222");
 
         let journal = two_disk_journal();
         journal::write_journal(&f.paths, &journal).unwrap();
@@ -19169,7 +19407,10 @@ mod tests {
     #[test]
     fn plan_recover_dry_run_already_mounted_rejects_foreign_live_uuid() {
         let f = PoolFixture::empty();
-        let fs = MockFs::new(&[]);
+        let fs = MockFs::new(&[])
+            .with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111")
+            .with_luks_dm("braid-disk2", "22222222-2222-2222-2222-222222222222")
+            .with_luks_dm("luks-foreign", "99999999-9999-9999-9999-999999999999");
 
         let journal = two_disk_journal();
         journal::write_journal(&f.paths, &journal).unwrap();
@@ -19210,7 +19451,9 @@ mod tests {
     #[test]
     fn plan_recover_post_replace_maintenance_accepts_inherited_devid() {
         let f = PoolFixture::empty();
-        let fs = MockFs::new(&[]);
+        let fs = MockFs::new(&[])
+            .with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111")
+            .with_luks_dm("braid-new", "33333333-3333-3333-3333-333333333333");
 
         let journal = replace_post_maintenance_journal(
             false,
@@ -19327,7 +19570,9 @@ mod tests {
     #[test]
     fn plan_recover_post_replace_maintenance_rejects_live_old_uuid() {
         let f = PoolFixture::empty();
-        let fs = MockFs::new(&[]);
+        let fs = MockFs::new(&[])
+            .with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111")
+            .with_luks_dm("braid-old", "22222222-2222-2222-2222-222222222222");
 
         let journal = replace_post_maintenance_journal(
             false,
@@ -19405,7 +19650,10 @@ mod tests {
     #[test]
     fn plan_recover_dry_run_read_only_failure_has_no_foreign_mapper_skip() {
         let f = PoolFixture::empty();
-        let fs = MockFs::with_mounted_pool_ro_fs(&[]);
+        let fs = MockFs::with_mounted_pool_ro_fs(&[])
+            .with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111")
+            .with_luks_dm("braid-disk2", "22222222-2222-2222-2222-222222222222")
+            .with_luks_dm("luks-foreign", "99999999-9999-9999-9999-999999999999");
 
         let journal = two_disk_journal();
         journal::write_journal(&f.paths, &journal).unwrap();
@@ -19607,12 +19855,11 @@ mod tests {
 
     fn render_recover_dry_run(
         journal: journal::Journal,
-        fs_paths: &[&str],
+        fs: MockFs,
         runner: MockRunner,
         allow_degraded: bool,
     ) -> String {
         let f = PoolFixture::empty();
-        let fs = MockFs::new(fs_paths);
         journal::write_journal(&f.paths, &journal).unwrap();
 
         let params = f
@@ -19739,8 +19986,15 @@ mod tests {
         let (mp_req, mp_out) = mountpoint_ok();
         let runner = with_three_disk_pool_probe(MockRunner::default().with_output(mp_req, mp_out));
 
-        let rendered =
-            render_recover_dry_run(mixed_pool_mutation_add_journal(), &[], runner, false);
+        let rendered = render_recover_dry_run(
+            mixed_pool_mutation_add_journal(),
+            MockFs::new(&[])
+                .with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111")
+                .with_luks_dm("braid-disk2", "22222222-2222-2222-2222-222222222222")
+                .with_luks_dm("braid-disk3", "33333333-3333-3333-3333-333333333333"),
+            runner,
+            false,
+        );
 
         assert!(
             rendered.contains(
@@ -19792,7 +20046,9 @@ mod tests {
 
         let rendered = render_recover_dry_run(
             two_target_recoverable_pool_mutation_add_journal(),
-            &[],
+            MockFs::new(&[])
+                .with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111")
+                .with_luks_dm("braid-disk2", "22222222-2222-2222-2222-222222222222"),
             runner,
             false,
         );
@@ -19854,7 +20110,7 @@ mod tests {
     fn plan_recover_dry_run_pool_mutation_not_mounted_fresh_conditional_replay_with_format_row() {
         let rendered = render_recover_dry_run(
             fresh_pool_mutation_add_journal(vec!["--label".into(), "braid-disk2".into()], None),
-            &["/dev/disk/by-id/virtio-disk1"],
+            MockFs::new(&["/dev/disk/by-id/virtio-disk1"]),
             closed_disk1_dry_run_runner(),
             false,
         );
@@ -19919,7 +20175,7 @@ mod tests {
     fn plan_recover_dry_run_includes_remount_cycle_when_not_mounted() {
         let rendered = render_recover_dry_run(
             replace_journal(),
-            &["/dev/disk/by-id/virtio-disk1", "/dev/disk/by-id/virtio-new"],
+            MockFs::new(&["/dev/disk/by-id/virtio-disk1", "/dev/disk/by-id/virtio-new"]),
             closed_replace_dry_run_runner(),
             true,
         );
@@ -20003,7 +20259,14 @@ mod tests {
                 cryptsetup_uuid_ok("/dev/vdb", "22222222-2222-2222-2222-222222222222"),
             );
 
-        let rendered = render_recover_dry_run(two_disk_journal(), &[], runner, false);
+        let rendered = render_recover_dry_run(
+            two_disk_journal(),
+            MockFs::new(&[])
+                .with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111")
+                .with_luks_dm("braid-disk2", "22222222-2222-2222-2222-222222222222"),
+            runner,
+            false,
+        );
 
         assert!(
             !rendered.contains("recover remount cycle"),
@@ -20028,7 +20291,7 @@ mod tests {
     fn plan_recover_dry_run_replace_not_mounted_includes_dev_replace_wait() {
         let rendered = render_recover_dry_run(
             replace_journal(),
-            &["/dev/disk/by-id/virtio-disk1", "/dev/disk/by-id/virtio-new"],
+            MockFs::new(&["/dev/disk/by-id/virtio-disk1", "/dev/disk/by-id/virtio-new"]),
             closed_replace_dry_run_runner(),
             true,
         );
@@ -20059,10 +20322,10 @@ mod tests {
     fn plan_recover_dry_run_add_not_mounted_omits_dev_replace_wait() {
         let rendered = render_recover_dry_run(
             two_disk_journal(),
-            &[
+            MockFs::new(&[
                 "/dev/disk/by-id/virtio-disk1",
                 "/dev/disk/by-id/virtio-disk2",
-            ],
+            ]),
             closed_two_disk_dry_run_runner(),
             true,
         );
@@ -20090,11 +20353,11 @@ mod tests {
     fn plan_recover_dry_run_cycle_close_set_includes_absent_open_mapper() {
         let rendered = render_recover_dry_run(
             replace_journal(),
-            &[
+            MockFs::new(&[
                 "/dev/disk/by-id/virtio-disk1",
                 "/dev/disk/by-id/virtio-new",
                 "/dev/mapper/braid-old",
-            ],
+            ]),
             closed_replace_dry_run_runner(),
             true,
         );
@@ -20152,12 +20415,12 @@ mod tests {
 
         let rendered = render_recover_dry_run(
             replace_journal(),
-            &[
+            MockFs::new(&[
                 "/dev/disk/by-id/virtio-disk1",
                 "/dev/disk/by-id/virtio-new",
                 "/dev/disk/by-id/virtio-old",
                 "/dev/mapper/braid-old",
-            ],
+            ]),
             runner,
             true,
         );
@@ -20227,11 +20490,12 @@ mod tests {
 
         let rendered = render_recover_dry_run(
             replace_journal(),
-            &[
+            MockFs::new(&[
                 "/dev/disk/by-id/virtio-disk1",
                 "/dev/disk/by-id/virtio-new",
                 "/dev/mapper/braid-disk1",
-            ],
+            ])
+            .with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111"),
             runner,
             true,
         );
@@ -20267,10 +20531,10 @@ mod tests {
     fn plan_recover_dry_run_add_post_mutation_placeholders_have_no_commands() {
         let rendered = render_recover_dry_run(
             two_disk_journal(),
-            &[
+            MockFs::new(&[
                 "/dev/disk/by-id/virtio-disk1",
                 "/dev/disk/by-id/virtio-disk2",
-            ],
+            ]),
             closed_two_disk_dry_run_runner(),
             true,
         );
@@ -20303,10 +20567,10 @@ mod tests {
     fn plan_recover_dry_run_post_add_balance_only_has_no_target_replay() {
         let rendered = render_recover_dry_run(
             committed_two_disk_add_journal(),
-            &[
+            MockFs::new(&[
                 "/dev/disk/by-id/virtio-disk1",
                 "/dev/disk/by-id/virtio-disk2",
-            ],
+            ]),
             closed_two_disk_dry_run_runner(),
             false,
         );
@@ -20343,7 +20607,7 @@ mod tests {
     fn plan_recover_dry_run_replace_replay_placeholders_have_no_commands() {
         let rendered = render_recover_dry_run(
             replace_journal(),
-            &["/dev/disk/by-id/virtio-disk1", "/dev/disk/by-id/virtio-new"],
+            MockFs::new(&["/dev/disk/by-id/virtio-disk1", "/dev/disk/by-id/virtio-new"]),
             closed_replace_dry_run_runner(),
             true,
         );
@@ -20381,7 +20645,7 @@ mod tests {
     fn plan_recover_dry_run_remove_missing_post_mutation_placeholders_are_shown() {
         let rendered = render_recover_dry_run(
             remove_missing_journal(),
-            &["/dev/disk/by-id/virtio-disk1"],
+            MockFs::new(&["/dev/disk/by-id/virtio-disk1"]),
             closed_disk1_dry_run_runner(),
             true,
         );
@@ -20415,7 +20679,7 @@ mod tests {
     fn plan_recover_dry_run_remove_post_mutation_replay_rows_omitted() {
         let rendered = render_recover_dry_run(
             interrupted_remove_journal(None),
-            &["/dev/disk/by-id/virtio-disk1"],
+            MockFs::new(&["/dev/disk/by-id/virtio-disk1"]),
             closed_disk1_dry_run_runner(),
             true,
         );

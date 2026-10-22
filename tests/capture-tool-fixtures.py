@@ -97,6 +97,15 @@ machine.succeed(
     f" > {FIXTURE_DIR}/cryptsetup-luks-uuid.txt"
 )
 
+# 8a. Device-mapper UUID of the open braid-vdb mapper (sysfs)
+# cli/src/dm_identity.rs reads it to learn which LUKS container an open
+# mapper is, with or without its backing disk; the golden test checks it
+# records the same UUID as cryptsetup-luks-uuid.txt.
+machine.succeed(
+    f"cat /sys/block/$(basename $(readlink -f /dev/mapper/braid-vdb))/dm/uuid"
+    f" > {FIXTURE_DIR}/dm-uuid-luks2.txt"
+)
+
 # 8b. cryptsetup luksDump --dump-json-metadata
 machine.succeed(
     f"cryptsetup luksDump --dump-json-metadata /dev/vdb"

@@ -968,10 +968,23 @@ impl PoolState {
             .into_iter()
             .collect()
     }
+
+    /// btrfs-MISSING devids that no open mapper accounts for. These are the
+    /// only pool devices with no observable LUKS UUID, so they are the only
+    /// ones a member's persisted devid may bind (principles 2 and 5). A devid
+    /// an open mapper holds belongs to that mapper's UUID, even once btrfs
+    /// promotes it to MISSING, so a stale persisted devid must never claim
+    /// it.
+    pub fn devid_only_missing(&self) -> impl Iterator<Item = Devid> + '_ {
+        self.missing_devids
+            .iter()
+            .copied()
+            .filter(|devid| !self.null_underlying.iter().any(|n| n.devid == *devid))
+    }
 }
 
 /// Live btrfs member observed through `probe_pool`; identity comes from
-/// the LUKS UUID probed from the mapper's backing device.
+/// the LUKS UUID the mapper's dm UUID records (`cli/src/dm_identity.rs`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PoolDevice {
     /// Observed mapper basename from btrfs/probe output; used for command
@@ -987,11 +1000,14 @@ pub struct PoolDevice {
 
 /// A pool device whose LUKS mapper is open but the underlying block device
 /// is gone (hot-unplugged). These are effectively missing for alerting but
-/// not yet confirmed by btrfs as MISSING.
+/// not yet confirmed by btrfs as MISSING. The mapper still carries its LUKS
+/// UUID, so membership binds it by UUID like a present device.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NullUnderlyingDevice {
     /// Observed mapper basename whose backing device is currently `(null)`.
     pub mapper: MapperName,
+    /// LUKS UUID the mapper's dm UUID recorded at activation.
+    pub luks_uuid: LuksUuid,
     /// Btrfs devid still associated with the open mapper.
     pub devid: Devid,
 }
@@ -1817,5 +1833,36 @@ mod tests {
     fn mount_point_round_trip() {
         let mount = MountPoint::new("/mnt/braid".to_owned());
         assert_eq!(mount.as_str(), "/mnt/braid");
+    }
+
+    // Intent: `PoolState::devid_only_missing` yields the btrfs-MISSING
+    // devids that no open mapper holds, and nothing else.
+    // Why it exists: status, the TUI, replace, and recover bind a persisted
+    // devid only to these. A devid an open mapper holds belongs to that
+    // mapper's LUKS UUID, so leaking it here would let a stale pool.json
+    // devid claim another disk.
+    // Scenario: devid 2 is MISSING with no mapper, devid 3 is MISSING while
+    // its mapper still reports `(null)`, and devid 4 is null-backed only.
+    #[test]
+    fn devid_only_missing_skips_devids_open_mappers_hold() {
+        let null_backed = |devid: u64| NullUnderlyingDevice {
+            mapper: MapperName::from_basename(format!("braid-disk{devid}")),
+            luks_uuid: LuksUuid::parse(&format!("00000000-0000-0000-0000-{devid:012x}")).unwrap(),
+            devid: Devid::new(devid),
+        };
+        let pool = PoolState {
+            mounted: true,
+            devices: vec![],
+            missing_count: 3,
+            total_devices: 3,
+            fsid: None,
+            missing_devids: vec![Devid::new(2), Devid::new(3)],
+            null_underlying: vec![null_backed(3), null_backed(4)],
+        };
+
+        assert_eq!(
+            pool.devid_only_missing().collect::<Vec<_>>(),
+            vec![Devid::new(2)]
+        );
     }
 }

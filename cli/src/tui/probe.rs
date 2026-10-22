@@ -196,7 +196,7 @@ pub fn probe_pool_for_tui<R: CommandRunner, F: Filesystem + ?Sized>(
         }
     }
     for device in &domain.null_underlying {
-        if let Some(name) = persisted_devid_to_name.get(&device.devid) {
+        if let Some(name) = uuid_to_name.get(&device.luks_uuid) {
             mounted_classification.insert((*name).to_owned(), (DiskLockState::Unlocked, None));
         }
     }
@@ -237,22 +237,28 @@ pub fn probe_pool_for_tui<R: CommandRunner, F: Filesystem + ?Sized>(
     // Map devid -> disk name from UUID-keyed membership. btrfs device usage may
     // report raw /dev/dm-N paths that do not match braid mapper names.
     //
-    // null_underlying and missing_devids are exactly the cases where btrfs
-    // still reports a device but no live LUKS UUID is observable; bind those
-    // through the persisted prior devid.
+    // A null-underlying mapper still carries its LUKS UUID in the kernel's
+    // device-mapper table, so it binds by UUID like a present device.
+    // btrfs-MISSING devids that no open mapper accounts for are the one case
+    // where btrfs still reports a device but no live LUKS UUID is observable;
+    // bind those through the persisted prior devid. Using
+    // `devid_only_missing` keeps a persisted devid from overwriting a UUID
+    // binding for the same devid.
     let devid_to_name: HashMap<Devid, &str> = domain
         .devices
         .iter()
-        .filter_map(|d| uuid_to_name.get(&d.luks_uuid).map(|name| (d.devid, *name)))
-        .chain(domain.null_underlying.iter().filter_map(|d| {
+        .map(|d| (d.devid, &d.luks_uuid))
+        .chain(
+            domain
+                .null_underlying
+                .iter()
+                .map(|d| (d.devid, &d.luks_uuid)),
+        )
+        .filter_map(|(devid, uuid)| uuid_to_name.get(uuid).map(|name| (devid, *name)))
+        .chain(domain.devid_only_missing().filter_map(|devid| {
             persisted_devid_to_name
-                .get(&d.devid)
-                .map(|name| (d.devid, *name))
-        }))
-        .chain(domain.missing_devids.iter().filter_map(|devid| {
-            persisted_devid_to_name
-                .get(devid)
-                .map(|name| (*devid, *name))
+                .get(&devid)
+                .map(|name| (devid, *name))
         }))
         .collect();
 
@@ -424,18 +430,21 @@ pub fn probe_pool_for_tui<R: CommandRunner, F: Filesystem + ?Sized>(
                 // documented fallback "for disks the unpooled probe couldn't
                 // classify"). Cmd/Parse are environmental (spawn failure, output
                 // drift). BackingPathResolveError fires when braid-<name> is
-                // open but a backing path won't canonicalize, so NO ownership
-                // conflict was ever established: it must not be classified as
-                // MapperHijacked (the red "mapper conflict" cell asserts a
-                // conflict we never confirmed), and its recovery differs --
-                // replug the disk / let udev settle, not close the mapper
-                // (status's config_probe_advisory keeps the same distinction).
+                // open but a backing path won't canonicalize, and
+                // IdentityUnreadable when its dm UUID cannot be read, so NO
+                // ownership conflict was ever established: neither may be
+                // classified as MapperHijacked (the red "mapper conflict" cell
+                // asserts a conflict we never confirmed), and the recovery
+                // differs -- replug the disk / let udev settle / re-run, not
+                // close the mapper (status's config_probe_advisory keeps the
+                // same distinction).
                 Err(
                     ProbeError::Cmd(_)
                     | ProbeError::Parse(_)
-                    | ProbeError::MapperOwnership(MapperOwnershipFailure::BackingPathResolveError {
-                        ..
-                    }),
+                    | ProbeError::MapperOwnership(
+                        MapperOwnershipFailure::BackingPathResolveError { .. }
+                        | MapperOwnershipFailure::IdentityUnreadable { .. },
+                    ),
                 ) => continue,
                 // Unreachable from probe_config_disk today -- these arise only
                 // on the pool-probing paths -- but enumerated so a newly-wired
@@ -879,6 +888,7 @@ mod tests {
     use super::*;
     use crate::cmd::{MockRunner, RawCommandOutput};
     use crate::parse::types::DeviceAllocation;
+    use crate::test_fixtures::MockDmTable;
     use crate::types::MapperName;
 
     fn test_paths() -> (tempfile::TempDir, StatePaths) {
@@ -893,6 +903,7 @@ mod tests {
     struct StubFs {
         present_paths: Vec<String>,
         mountinfo: String,
+        dm: MockDmTable,
     }
 
     impl StubFs {
@@ -902,6 +913,7 @@ mod tests {
                 mountinfo:
                     "36 35 0:32 / /mnt/storage rw shared:1 - btrfs /dev/mapper/braid-disk1 rw\n"
                         .to_owned(),
+                dm: MockDmTable::default(),
             }
         }
 
@@ -916,7 +928,14 @@ mod tests {
             Self {
                 present_paths: paths.iter().map(|s| (*s).to_owned()).collect(),
                 mountinfo: "26 25 0:23 / / rw,noatime shared:1 - ext4 /dev/sda1 rw\n".to_owned(),
+                dm: MockDmTable::default(),
             }
+        }
+
+        /// Add an active LUKS2 mapping to the sysfs device-mapper table.
+        fn with_luks_dm(mut self, mapper: &str, luks_uuid: &str) -> Self {
+            self.dm = self.dm.with_luks(mapper, luks_uuid);
+            self
         }
     }
 
@@ -929,15 +948,17 @@ mod tests {
             false
         }
 
-        fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
-            Ok(vec![])
+        fn list_dir(&self, path: &str) -> Result<Vec<String>, std::io::Error> {
+            Ok(self.dm.list_dir(path).unwrap_or_default())
         }
 
         fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
             if path == "/proc/self/mountinfo" {
                 return Ok(self.mountinfo.clone());
             }
-            Err(std::io::Error::new(std::io::ErrorKind::NotFound, "stub"))
+            self.dm
+                .read_to_string(path)
+                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "stub"))
         }
 
         fn create_dir_all(&self, _path: &str) -> Result<(), std::io::Error> {
@@ -1011,9 +1032,9 @@ mod tests {
                 ),
             ]),
             // Persisted prior devid->name binding. Consumed only by the
-            // null_underlying/missing_devids fallback in probe_pool_for_tui
-            // (live members resolve by LUKS UUID, not this map); pinned by
-            // device_errors_for_{missing_devid,null_underlying}_use_persisted_prior_binding.
+            // missing_devids fallback in probe_pool_for_tui (live and
+            // null-backed members resolve by LUKS UUID, not this map); pinned
+            // by device_errors_for_missing_devid_use_persisted_prior_binding.
             devid: HashMap::from([
                 ("toshiba".to_owned(), Devid::new(1)),
                 ("ironwolf".to_owned(), Devid::new(2)),
@@ -1103,15 +1124,6 @@ mod tests {
                 ),
             )
             .with_output(
-                CmdRequest::CryptsetupLuksUuid {
-                    device: "/dev/vdb".into(),
-                },
-                ok_raw(
-                    "cryptsetup luksUUID",
-                    "11111111-1111-1111-1111-111111111111\n",
-                ),
-            )
-            .with_output(
                 CmdRequest::BtrfsFilesystemDfJson {
                     mount_point: mp.clone(),
                 },
@@ -1152,7 +1164,7 @@ mod tests {
         let pool = expect_pool(
             probe_pool_for_tui(
                 &runner,
-                &StubFs::empty(),
+                &StubFs::empty().with_luks_dm("braid-vdb", "11111111-1111-1111-1111-111111111111"),
                 &mp,
                 &transport_test_disks(),
                 &test_paths().1,
@@ -1276,7 +1288,9 @@ mod tests {
 
         let result = probe_pool_for_tui(
             &runner,
-            &StubFs::empty(),
+            &StubFs::empty()
+                .with_luks_dm("braid-toshiba", "11111111-1111-1111-1111-111111111111")
+                .with_luks_dm("braid-ironwolf", "22222222-2222-2222-2222-222222222222"),
             &MountPoint::new("/mnt/storage".into()),
             &tui_disks(),
             &test_paths().1,
@@ -1420,7 +1434,8 @@ mod tests {
         let pool = expect_pool(
             probe_pool_for_tui(
                 &runner,
-                &StubFs::empty(),
+                &StubFs::empty()
+                    .with_luks_dm("braid-toshiba", "11111111-1111-1111-1111-111111111111"),
                 &MountPoint::new("/mnt/storage".into()),
                 &tui_disks_with_by_id(disk_by_id),
                 &test_paths().1,
@@ -1487,7 +1502,7 @@ mod tests {
 
         let (states, _pool) = probe_pool_for_tui(
             &runner,
-            &StubFs::empty(),
+            &StubFs::empty().with_luks_dm("braid-toshiba", "11111111-1111-1111-1111-111111111111"),
             &MountPoint::new("/mnt/storage".into()),
             &tui_disks_with_by_id(disk_by_id),
             &test_paths().1,
@@ -1601,7 +1616,7 @@ mod tests {
 
         let result = probe_pool_for_tui(
             &runner,
-            &StubFs::empty(),
+            &StubFs::empty().with_luks_dm("braid-toshiba", "11111111-1111-1111-1111-111111111111"),
             &MountPoint::new("/mnt/storage".into()),
             &tui_disks(),
             &test_paths().1,
@@ -1713,7 +1728,8 @@ mod tests {
         let pool = expect_pool(
             probe_pool_for_tui(
                 &runner,
-                &StubFs::empty(),
+                &StubFs::empty()
+                    .with_luks_dm("braid-toshiba", "11111111-1111-1111-1111-111111111111"),
                 &MountPoint::new("/mnt/storage".into()),
                 &tui_disks(),
                 &test_paths().1,
@@ -1735,18 +1751,19 @@ mod tests {
     }
 
     // Intent: a null_underlying member (mapper open, backing hot-unplugged) has
-    //   its btrfs stats row attached to the member by persisted devid, is
-    //   exposed in devid_names, and is classified Unlocked with no live backing
-    //   path.
-    // Why it exists: the null_underlying TUI fallback is the sibling of the
-    //   missing-devid fallback but had zero TUI-level coverage; only the domain
-    //   probe_pool was tested. Both consumer sites -- the devid name join and
-    //   the mounted_classification entry -- must stay pinned.
+    //   its btrfs stats row attached to the member by the LUKS UUID its dm
+    //   table records, is exposed in devid_names, and is classified Unlocked
+    //   with no live backing path.
+    // Why it exists: the dm UUID survives the backing disk, so the member binds
+    //   by identity, not by a persisted devid that may be stale or absent. Both
+    //   consumer sites -- the devid name join and the mounted_classification
+    //   entry -- must stay pinned.
     // Scenario: btrfs reports disk1 live and braid-ironwolf open, but
     //   `cryptsetup status braid-ironwolf` returns device: (null) (backing
-    //   yanked); device stats reports devid 2 with a read error.
+    //   yanked); device stats reports devid 2 with a read error. No devid is
+    //   persisted for ironwolf.
     #[test]
-    fn device_errors_for_null_underlying_use_persisted_prior_binding() {
+    fn device_errors_for_null_underlying_bind_by_dm_uuid() {
         let mp = MountPoint::new("/mnt/storage".to_owned());
 
         let disk_by_id = HashMap::from([
@@ -1793,8 +1810,8 @@ mod tests {
             )
             // The trigger: braid-ironwolf is open but its backing drive was
             // hot-unplugged, so cryptsetup reports device: (null). This routes
-            // devid 2 into null_underlying; the null branch continues before any
-            // luksUUID query, so none is mocked for ironwolf.
+            // devid 2 into null_underlying; its dm UUID (seeded on the
+            // filesystem) still records ironwolf's LUKS UUID.
             .with_output(
                 CmdRequest::CryptsetupStatus {
                     mapper: MapperName::from_basename("braid-ironwolf".into()),
@@ -1861,11 +1878,15 @@ mod tests {
                 ),
             );
 
+        let mut disks = tui_disks_with_by_id(disk_by_id);
+        disks.devid.remove("ironwolf");
         let (states, pool_state) = probe_pool_for_tui(
             &runner,
-            &StubFs::empty(),
+            &StubFs::empty()
+                .with_luks_dm("braid-toshiba", "11111111-1111-1111-1111-111111111111")
+                .with_luks_dm("braid-ironwolf", "22222222-2222-2222-2222-222222222222"),
             &MountPoint::new("/mnt/storage".into()),
-            &tui_disks_with_by_id(disk_by_id),
+            &disks,
             &test_paths().1,
             crate::test_fixtures::mock_virtio_backing_path_resolver(),
         )
@@ -1893,7 +1914,7 @@ mod tests {
         let errors = pool
             .device_errors
             .get("ironwolf")
-            .expect("null-underlying devid 2 must resolve to ironwolf by persisted binding");
+            .expect("null-underlying devid 2 must resolve to ironwolf by its dm UUID");
         assert_eq!(errors.read, 9);
         assert_eq!(
             pool.devid_names.get(&Devid::new(2)).map(String::as_str),
@@ -2024,7 +2045,9 @@ mod tests {
 
         let result = probe_pool_for_tui(
             &runner,
-            &StubFs::empty(),
+            &StubFs::empty()
+                .with_luks_dm("braid-toshiba", "11111111-1111-1111-1111-111111111111")
+                .with_luks_dm("braid-ironwolf", "22222222-2222-2222-2222-222222222222"),
             &MountPoint::new("/mnt/storage".into()),
             &tui_disks(),
             &test_paths().1,
@@ -2425,7 +2448,8 @@ mod tests {
     #[test]
     fn unpooled_disk_absent_classified_as_missing() {
         let runner = one_disk_mounted_pool_runner();
-        let fs = StubFs::with_paths(&["/dev/disk/by-id/braid-toshiba"]);
+        let fs = StubFs::with_paths(&["/dev/disk/by-id/braid-toshiba"])
+            .with_luks_dm("braid-toshiba", "11111111-1111-1111-1111-111111111111");
 
         let disk_by_id = HashMap::from([
             (
@@ -2510,7 +2534,8 @@ mod tests {
         let fs = StubFs::with_paths(&[
             "/dev/disk/by-id/braid-toshiba",
             "/dev/disk/by-id/braid-ironwolf",
-        ]);
+        ])
+        .with_luks_dm("braid-toshiba", "11111111-1111-1111-1111-111111111111");
 
         let disk_by_id = HashMap::from([
             (
@@ -2589,7 +2614,8 @@ mod tests {
         let fs = StubFs::with_paths(&[
             "/dev/disk/by-id/braid-toshiba",
             "/dev/disk/by-id/braid-ironwolf",
-        ]);
+        ])
+        .with_luks_dm("braid-toshiba", "11111111-1111-1111-1111-111111111111");
 
         let disk_by_id = HashMap::from([
             (
@@ -2667,7 +2693,8 @@ mod tests {
         let fs = StubFs::with_paths(&[
             "/dev/disk/by-id/braid-toshiba",
             "/dev/disk/by-id/braid-ironwolf",
-        ]);
+        ])
+        .with_luks_dm("braid-toshiba", "11111111-1111-1111-1111-111111111111");
 
         let disk_by_id = HashMap::from([
             (
@@ -2739,7 +2766,8 @@ mod tests {
         let fs = StubFs::with_paths(&[
             "/dev/disk/by-id/braid-toshiba",
             "/dev/disk/by-id/braid-ironwolf",
-        ]);
+        ])
+        .with_luks_dm("braid-toshiba", "11111111-1111-1111-1111-111111111111");
 
         let disk_by_id = HashMap::from([
             (
@@ -2809,7 +2837,8 @@ mod tests {
         let fs = StubFs::with_paths(&[
             "/dev/disk/by-id/braid-toshiba",
             "/dev/disk/by-id/braid-ironwolf",
-        ]);
+        ])
+        .with_luks_dm("braid-toshiba", "11111111-1111-1111-1111-111111111111");
 
         let disk_by_id = HashMap::from([
             (
@@ -2886,7 +2915,8 @@ mod tests {
         let fs = StubFs::with_paths(&[
             "/dev/disk/by-id/braid-toshiba",
             "/dev/disk/by-id/braid-ironwolf",
-        ]);
+        ])
+        .with_luks_dm("braid-toshiba", "11111111-1111-1111-1111-111111111111");
 
         let disk_by_id = HashMap::from([
             (
@@ -2963,7 +2993,8 @@ mod tests {
         let fs = StubFs::with_paths(&[
             "/dev/disk/by-id/braid-toshiba",
             "/dev/disk/by-id/braid-ironwolf",
-        ]);
+        ])
+        .with_luks_dm("braid-toshiba", "11111111-1111-1111-1111-111111111111");
 
         let disk_by_id = HashMap::from([
             (
@@ -3047,7 +3078,8 @@ mod tests {
         let fs = StubFs::with_paths(&[
             "/dev/disk/by-id/braid-toshiba",
             "/dev/disk/by-id/braid-ironwolf",
-        ]);
+        ])
+        .with_luks_dm("braid-toshiba", "11111111-1111-1111-1111-111111111111");
 
         let disk_by_id = HashMap::from([
             (

@@ -3,8 +3,8 @@
 # Intent: Verify `braid lock` does not print "already closed" for pool
 #   members when an unverified braid-prefixed mapper is skipped.
 #
-# Why it exists: a skipped mapper can be a drifted member whose backing
-#   LUKS UUID could not be read. Reporting every unplanned member as
+# Why it exists: a skipped mapper can be a drifted member whose LUKS
+#   identity could not be read. Reporting every unplanned member as
 #   already closed would contradict the planner's cleanup uncertainty.
 #
 # Scenario: A normal two-disk pool is fully locked, then a bogus

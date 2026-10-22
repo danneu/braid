@@ -1802,10 +1802,11 @@ impl MockRunner {
 
     /// Test helper: stub `cryptsetup status <mapper>` as active with
     /// `underlying` as the backing device, AND stub
-    /// `cryptsetup luksUUID <underlying>` to return `uuid`. Together these
-    /// satisfy `probe_config_disk`'s mapper-backing verification for an
-    /// already-open mapper whose backing LUKS UUID matches the configured
-    /// disk.
+    /// `cryptsetup luksUUID <underlying>` to return `uuid` for callers that
+    /// ask the backing disk itself. The mapper's own LUKS identity comes from
+    /// the sysfs device-mapper table (`dm_identity.rs#mapper_luks_uuid`), so a
+    /// test with an open mapper also seeds that table on its `Filesystem`
+    /// (e.g. `MockFs::with_luks_dm`).
     pub fn with_mapper_open(self, mapper: &str, underlying: &str, uuid: &str) -> Self {
         self.with_output(
             CmdRequest::CryptsetupStatus {

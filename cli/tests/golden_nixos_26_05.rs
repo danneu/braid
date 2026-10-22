@@ -40,3 +40,28 @@ fn golden_smartctl_sata_with_temperature() {
         })
     );
 }
+
+// Intent: a real kernel dm UUID for an open LUKS2 mapper parses to the same
+//   LUKS UUID `cryptsetup luksUUID` reads from that disk's header.
+// Why it exists: braid identifies every open mapper by this sysfs value
+//   (cli/src/dm_identity.rs), including mappers whose disk is gone; a format
+//   drift in cryptsetup's dm UUID would silently turn every mapper into an
+//   unverifiable one.
+// Scenario: capture-tool-fixtures.py opens /dev/vdb as braid-vdb and records
+//   both /sys/block/dm-N/dm/uuid and `cryptsetup luksUUID /dev/vdb` from the
+//   same VM run. Stable-only: the unstable lane has no matching capture.
+#[test]
+fn golden_dm_uuid_luks2_matches_luks_uuid() {
+    let parse::DmUuid::Luks(from_dm) = parse::parse_dm_uuid(&fixture("dm-uuid-luks2.txt")) else {
+        panic!("captured dm UUID must classify as a LUKS mapping");
+    };
+    let raw = RawCommandOutput {
+        cmd: "cryptsetup luksUUID".into(),
+        stdout: fixture("cryptsetup-luks-uuid.txt"),
+        stderr: String::new(),
+        exit_status: 0,
+    };
+    let from_header = parse::cryptsetup_luks_uuid::parse_cryptsetup_luks_uuid(&raw)
+        .expect("captured luksUUID parses");
+    assert_eq!(from_dm, from_header.uuid);
+}

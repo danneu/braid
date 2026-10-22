@@ -591,6 +591,11 @@
               braid = linuxCrane.braid;
             }
           );
+          braid-lock-dead-member = pkgs.testers.nixosTest (
+            import ./tests/cli/braid-lock-dead-member.nix {
+              braid = linuxCrane.braid;
+            }
+          );
           braid-unlock = pkgs.testers.nixosTest (
             import ./tests/cli/braid-unlock.nix {
               braid = linuxCrane.braid;

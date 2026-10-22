@@ -686,6 +686,7 @@ mod tests {
     use crate::cmd::{MockRunner, RawCommandOutput};
     use crate::config::mapper_name;
     use crate::progress::{self, ProgressOutput};
+    use crate::test_fixtures::{MockDmTable, canonical_luks_uuid};
     use crate::types::DiskName;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Condvar, Mutex};
@@ -744,7 +745,7 @@ $ btrfs balance start --enqueue '-dconvert=raid1,soft' '-mconvert=raid1,soft' /m
                 ok_raw(),
             );
 
-        pool_bootstrap_mount(&runner, &RestoreFs, device, &mount_point).unwrap();
+        pool_bootstrap_mount(&runner, &RestoreFs::default(), device, &mount_point).unwrap();
 
         assert_eq!(
             runner.requests(),
@@ -788,7 +789,7 @@ $ btrfs balance start --enqueue '-dconvert=raid1,soft' '-mconvert=raid1,soft' /m
                 ok_raw(),
             );
 
-        pool_bootstrap_mount_raid1(&runner, &RestoreFs, &devices, &mount_point).unwrap();
+        pool_bootstrap_mount_raid1(&runner, &RestoreFs::default(), &devices, &mount_point).unwrap();
 
         assert_eq!(
             runner.requests(),
@@ -1149,6 +1150,19 @@ $ btrfs balance start --enqueue '-dconvert=raid1,soft' '-mconvert=raid1,soft' /m
         fn calls(&self) -> Vec<CmdRequest> {
             self.log.lock().unwrap().clone()
         }
+
+        /// The filesystem matching the post-op probe: each present
+        /// `braid-diskN` open over its canonical LUKS UUID.
+        fn fs(&self) -> RestoreFs {
+            RestoreFs {
+                dm: (1..=self.post_present_count as u64).fold(
+                    MockDmTable::default(),
+                    |table, n| {
+                        table.with_luks(&format!("braid-disk{n}"), canonical_luks_uuid(n).as_str())
+                    },
+                ),
+            }
+        }
     }
 
     impl CommandRunner for RestoreRunner {
@@ -1190,12 +1204,6 @@ $ btrfs balance start --enqueue '-dconvert=raid1,soft' '-mconvert=raid1,soft' /m
                     stderr: String::new(),
                     exit_status: 0,
                 }),
-                CmdRequest::CryptsetupLuksUuid { .. } => Ok(RawCommandOutput {
-                    cmd: String::new(),
-                    stdout: "11111111-1111-1111-1111-111111111111\n".to_owned(),
-                    stderr: String::new(),
-                    exit_status: 0,
-                }),
                 CmdRequest::BtrfsBalanceRaid1Soft { .. } => Ok(ok_raw()),
                 CmdRequest::BtrfsBalanceStatus { .. } => Ok(RawCommandOutput {
                     cmd: String::new(),
@@ -1216,7 +1224,12 @@ $ btrfs balance start --enqueue '-dconvert=raid1,soft' '-mconvert=raid1,soft' /m
         }
     }
 
-    struct RestoreFs;
+    /// Mounted-pool filesystem whose sysfs dm table holds the mappers a
+    /// test runner reports open.
+    #[derive(Default)]
+    struct RestoreFs {
+        dm: MockDmTable,
+    }
 
     impl Filesystem for RestoreFs {
         fn exists(&self, _path: &str) -> bool {
@@ -1234,11 +1247,13 @@ $ btrfs balance start --enqueue '-dconvert=raid1,soft' '-mconvert=raid1,soft' /m
                         .to_string(),
                 );
             }
-            Err(std::io::Error::new(std::io::ErrorKind::NotFound, "mock"))
+            self.dm
+                .read_to_string(path)
+                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "mock"))
         }
 
-        fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
-            Ok(vec![])
+        fn list_dir(&self, path: &str) -> Result<Vec<String>, std::io::Error> {
+            Ok(self.dm.list_dir(path).unwrap_or_default())
         }
 
         fn create_dir_all(&self, _path: &str) -> Result<(), std::io::Error> {
@@ -1254,7 +1269,7 @@ $ btrfs balance start --enqueue '-dconvert=raid1,soft' '-mconvert=raid1,soft' /m
     // (e.g., already cleaned up).
     fn maybe_restore_raid1_noop_when_not_degraded() {
         let runner = RestoreRunner::failing_probe(); // should never be called
-        let result = maybe_restore_raid1(&runner, &RestoreFs, &mp(), 0, ProgressOutput::Off);
+        let result = maybe_restore_raid1(&runner, &runner.fs(), &mp(), 0, ProgressOutput::Off);
         assert!(result.is_ok(), "should be no-op: {result:?}");
         assert!(
             runner.calls().is_empty(),
@@ -1270,7 +1285,7 @@ $ btrfs balance start --enqueue '-dconvert=raid1,soft' '-mconvert=raid1,soft' /m
     // Scenario: 3-disk pool had 1 missing, remove-missing clears it, 2 remain.
     fn maybe_restore_raid1_runs_soft_balance() {
         let runner = RestoreRunner::new(0, 2); // post-op: 0 missing, 2 present
-        let result = maybe_restore_raid1(&runner, &RestoreFs, &mp(), 1, ProgressOutput::Off);
+        let result = maybe_restore_raid1(&runner, &runner.fs(), &mp(), 1, ProgressOutput::Off);
         assert!(result.is_ok(), "should succeed: {result:?}");
         assert!(
             runner
@@ -1294,7 +1309,7 @@ $ btrfs balance start --enqueue '-dconvert=raid1,soft' '-mconvert=raid1,soft' /m
         let captured = crate::status_tag::testing::capture_with_color(false, || {
             result = Some(maybe_restore_raid1(
                 &runner,
-                &RestoreFs,
+                &runner.fs(),
                 &mp(),
                 2,
                 ProgressOutput::Off,
@@ -1321,7 +1336,7 @@ $ btrfs balance start --enqueue '-dconvert=raid1,soft' '-mconvert=raid1,soft' /m
     // Scenario: 2-disk pool, 1 missing, remove-missing leaves 1 survivor.
     fn maybe_restore_raid1_skips_single_device() {
         let runner = RestoreRunner::new(0, 1); // post-op: 0 missing, 1 present
-        let result = maybe_restore_raid1(&runner, &RestoreFs, &mp(), 1, ProgressOutput::Off);
+        let result = maybe_restore_raid1(&runner, &runner.fs(), &mp(), 1, ProgressOutput::Off);
         assert!(result.is_ok(), "should succeed: {result:?}");
         assert!(
             !runner
@@ -1339,7 +1354,7 @@ $ btrfs balance start --enqueue '-dconvert=raid1,soft' '-mconvert=raid1,soft' /m
     // Scenario: btrfs filesystem show fails after remove-missing.
     fn maybe_restore_raid1_propagates_probe_failure() {
         let runner = RestoreRunner::failing_probe();
-        let result = maybe_restore_raid1(&runner, &RestoreFs, &mp(), 1, ProgressOutput::Off);
+        let result = maybe_restore_raid1(&runner, &runner.fs(), &mp(), 1, ProgressOutput::Off);
         assert!(result.is_err(), "should propagate probe failure");
         let err = result.unwrap_err().to_string();
         assert!(
@@ -1865,15 +1880,29 @@ $ btrfs balance start --enqueue '-dconvert=raid1,soft' '-mconvert=raid1,soft' /m
     }
 
     /// Custom runner that emits a configurable `btrfs filesystem show`
-    /// output and the matching `cryptsetup status` / `cryptsetup luksUUID`
-    /// answers so probe_pool returns the topology under test.
+    /// output and the matching `cryptsetup status` answers; `fs()` serves
+    /// the matching dm identities so probe_pool returns the topology under
+    /// test.
     #[derive(Clone)]
     struct ValidateProbeRunner {
         show_stdout: String,
         // mapper -> underlying device path (or "(null)" for null-underlying)
         statuses: std::collections::HashMap<String, String>,
-        // device path -> luks_uuid
-        luks_uuids: std::collections::HashMap<String, String>,
+        // mapper -> LUKS UUID its dm UUID records
+        dm_uuids: std::collections::HashMap<String, String>,
+    }
+
+    impl ValidateProbeRunner {
+        fn fs(&self) -> RestoreFs {
+            RestoreFs {
+                dm: self
+                    .dm_uuids
+                    .iter()
+                    .fold(MockDmTable::default(), |table, (mapper, uuid)| {
+                        table.with_luks(mapper, uuid)
+                    }),
+            }
+        }
     }
 
     impl CommandRunner for ValidateProbeRunner {
@@ -1896,19 +1925,6 @@ $ btrfs balance start --enqueue '-dconvert=raid1,soft' '-mconvert=raid1,soft' /m
                         stdout: format!(
                             "{mapper} is active and is in use.\n  type:    LUKS2\n  device:  {device}\n  mode:    read/write\n"
                         ),
-                        stderr: String::new(),
-                        exit_status: 0,
-                    })
-                }
-                CmdRequest::CryptsetupLuksUuid { device } => {
-                    let uuid = self
-                        .luks_uuids
-                        .get(device)
-                        .cloned()
-                        .unwrap_or_else(|| "00000000-0000-0000-0000-000000000000".into());
-                    Ok(RawCommandOutput {
-                        cmd: String::new(),
-                        stdout: format!("{uuid}\n"),
                         stderr: String::new(),
                         exit_status: 0,
                     })
@@ -1943,13 +1959,12 @@ $ btrfs balance start --enqueue '-dconvert=raid1,soft' '-mconvert=raid1,soft' /m
     fn three_disk_runner() -> ValidateProbeRunner {
         let show = make_show(&[(1, "braid-disk1"), (2, "braid-disk2"), (3, "braid-disk3")]);
         let mut statuses = std::collections::HashMap::new();
-        let mut luks_uuids = std::collections::HashMap::new();
+        let mut dm_uuids = std::collections::HashMap::new();
         for i in 1..=3u64 {
             let mapper = format!("braid-disk{i}");
-            let underlying = format!("/dev/sd{i}");
-            statuses.insert(mapper.clone(), underlying.clone());
-            luks_uuids.insert(
-                underlying,
+            statuses.insert(mapper.clone(), format!("/dev/sd{i}"));
+            dm_uuids.insert(
+                mapper,
                 format!(
                     "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
                     i as u32, i as u16, i as u16, i as u16, i
@@ -1959,7 +1974,7 @@ $ btrfs balance start --enqueue '-dconvert=raid1,soft' '-mconvert=raid1,soft' /m
         ValidateProbeRunner {
             show_stdout: show,
             statuses,
-            luks_uuids,
+            dm_uuids,
         }
     }
 
@@ -1973,7 +1988,7 @@ $ btrfs balance start --enqueue '-dconvert=raid1,soft' '-mconvert=raid1,soft' /m
     fn validate_pool_topology_ok_on_exact_match() {
         let runner = three_disk_runner();
         let expected = three_disk_expected_identities();
-        let result = validate_pool_topology(&runner, &RestoreFs, &mp(), "braid-disk2", &expected);
+        let result = validate_pool_topology(&runner, &runner.fs(), &mp(), "braid-disk2", &expected);
         assert!(result.is_ok(), "exact match must return Ok: {result:?}");
     }
 
@@ -1989,7 +2004,7 @@ $ btrfs balance start --enqueue '-dconvert=raid1,soft' '-mconvert=raid1,soft' /m
         let mut runner = three_disk_runner();
         runner.show_stdout = show;
         let expected = three_disk_expected_identities();
-        let drift = validate_pool_topology(&runner, &RestoreFs, &mp(), "braid-disk2", &expected)
+        let drift = validate_pool_topology(&runner, &runner.fs(), &mp(), "braid-disk2", &expected)
             .expect_err("target absence must surface drift");
         assert!(!drift.target_present);
         assert!(!drift.target_null_underlying);
@@ -2013,7 +2028,7 @@ $ btrfs balance start --enqueue '-dconvert=raid1,soft' '-mconvert=raid1,soft' /m
             .statuses
             .insert("braid-disk2".into(), "(null)".into());
         let expected = three_disk_expected_identities();
-        let drift = validate_pool_topology(&runner, &RestoreFs, &mp(), "braid-disk2", &expected)
+        let drift = validate_pool_topology(&runner, &runner.fs(), &mp(), "braid-disk2", &expected)
             .expect_err("null-underlying must surface drift");
         assert!(drift.is_target_hot_unplug(), "must classify as hot-unplug");
         let detail = drift.detail();
@@ -2041,7 +2056,7 @@ $ btrfs balance start --enqueue '-dconvert=raid1,soft' '-mconvert=raid1,soft' /m
         let mut runner = three_disk_runner();
         runner.show_stdout = s;
         let expected = three_disk_expected_identities();
-        let drift = validate_pool_topology(&runner, &RestoreFs, &mp(), "braid-disk2", &expected)
+        let drift = validate_pool_topology(&runner, &runner.fs(), &mp(), "braid-disk2", &expected)
             .expect_err("non-target MISSING must surface drift");
         assert!(drift.target_present, "target must still be present");
         assert!(drift.observed_missing_count >= 1);
@@ -2069,12 +2084,12 @@ $ btrfs balance start --enqueue '-dconvert=raid1,soft' '-mconvert=raid1,soft' /m
         runner
             .statuses
             .insert("braid-disk4".into(), "/dev/sd4".into());
-        runner.luks_uuids.insert(
-            "/dev/sd4".into(),
+        runner.dm_uuids.insert(
+            "braid-disk4".into(),
             "44444444-4444-4444-4444-444444444444".into(),
         );
         let expected = three_disk_expected_identities();
-        let drift = validate_pool_topology(&runner, &RestoreFs, &mp(), "braid-disk2", &expected)
+        let drift = validate_pool_topology(&runner, &runner.fs(), &mp(), "braid-disk2", &expected)
             .expect_err("extra disk must surface drift");
         assert!(drift.target_present);
         assert_eq!(drift.observed_missing_count, 0);
@@ -2095,12 +2110,12 @@ $ btrfs balance start --enqueue '-dconvert=raid1,soft' '-mconvert=raid1,soft' /m
         let show = make_show(&[(1, "braid-disk1"), (2, "braid-disk2"), (99, "braid-disk3")]);
         let mut runner = three_disk_runner();
         runner.show_stdout = show;
-        runner.luks_uuids.insert(
-            "/dev/sd3".into(),
+        runner.dm_uuids.insert(
+            "braid-disk3".into(),
             "deadbeef-dead-beef-dead-beefdeadbeef".into(),
         );
         let expected = three_disk_expected_identities();
-        let drift = validate_pool_topology(&runner, &RestoreFs, &mp(), "braid-disk2", &expected)
+        let drift = validate_pool_topology(&runner, &runner.fs(), &mp(), "braid-disk2", &expected)
             .expect_err("same-mapper replacement must surface drift");
         assert!(drift.target_present);
         let detail = drift.detail();
@@ -2127,12 +2142,12 @@ $ btrfs balance start --enqueue '-dconvert=raid1,soft' '-mconvert=raid1,soft' /m
         runner
             .statuses
             .insert("braid-disk4".into(), "/dev/sd4".into());
-        runner.luks_uuids.insert(
-            "/dev/sd4".into(),
+        runner.dm_uuids.insert(
+            "braid-disk4".into(),
             "44444444-4444-4444-4444-444444444444".into(),
         );
         let expected = three_disk_expected_identities();
-        let drift = validate_pool_topology(&runner, &RestoreFs, &mp(), "braid-disk2", &expected)
+        let drift = validate_pool_topology(&runner, &runner.fs(), &mp(), "braid-disk2", &expected)
             .expect_err("same-count swap must surface drift");
         let detail = drift.detail();
         assert!(

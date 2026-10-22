@@ -62,7 +62,7 @@ sudo braid remove-missing --missing-id 3 --yes
 
 1. Probes the pool to verify missing devices exist
 2. Validates that the specified devid is actually a missing device (not a live one)
-3. Resolves the btrfs devid to the UUID-keyed pool member whose persisted prior devid matches
+3. Resolves the btrfs devid to the UUID-keyed pool member whose recorded devid matches. braid does not probe a MISSING device through its mapper, so it has no observable LUKS UUID and its recorded devid is the only binding
 4. Shows a confirmation prompt with the disk name, devid, and the resulting disk counts (e.g. `Pool: 2 present + 1 missing -> 2 disks`). This interactive prompt is skipped by `--yes` and not shown in `--dry-run`.
 5. Writes a `PoolMutation` journal and runs `btrfs device remove <devid>` to clear the missing device entry
 6. Updates pool.json to remove the member's UUID entry, then advances the journal to post-remove-missing maintenance

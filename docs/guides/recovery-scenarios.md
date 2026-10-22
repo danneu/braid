@@ -71,7 +71,7 @@ sudo braid unlock
 ### Notes
 
 - For a healthy UUID-keyed `pool.json`, `discover --write` refuses -- use `braid add` / `braid remove` / `braid replace` to mutate membership instead.
-- For a corrupt or off-schema existing `pool.json`, `discover --write` rebuilds in place; no manual remove step is needed. The original bytes are preserved at `pool.json.corrupt-<RFC3339-UTC>` adjacent to the new file in case manual forensic recovery is needed (e.g. extracting a `devid` for a `null_underlying` member). The snapshot is a hard precondition: if it cannot be written (full disk, read-only state directory), `discover --write` refuses rather than destroy the corrupt original; free disk space or fix permissions and retry.
+- For a corrupt or off-schema existing `pool.json`, `discover --write` rebuilds in place; no manual remove step is needed. The original bytes are preserved at `pool.json.corrupt-<RFC3339-UTC>` adjacent to the new file in case manual forensic recovery is needed (e.g. extracting a `devid` for a member btrfs reports missing). The snapshot is a hard precondition: if it cannot be written (full disk, read-only state directory), `discover --write` refuses rather than destroy the corrupt original; free disk space or fix permissions and retry.
 - `discover --write` refuses to run if `pending-op.json` exists. Use `braid recover` instead. (Bare `discover` is read-only and runs regardless.)
 - `discover` only finds LUKS2 devices. LUKS1 devices with braid labels are skipped with a warning.
 - The rebuilt `pool.json` is keyed by LUKS UUID. Disk names are stored in each member value for command input and display.
@@ -175,11 +175,13 @@ Do not force the journal forward. Investigate the foreign reformat or swapped di
 
 See also [Unlock refused by a foreign or mismatched disk](#unlock-refused-by-a-foreign-or-mismatched-disk) for the same identity check on the `braid unlock` path.
 
-## Never-enriched member with null-underlying mapper
+## Null-underlying mapper during recovery
 
-A member can be known to btrfs by devid while its LUKS backing device is gone (`cryptsetup status` reports `device: (null)`). If the member was never enriched with a persisted devid, recovery cannot bind that null-underlying mapper back to a UUID-keyed membership entry.
+A member can stay in the live pool after its LUKS backing device is gone (`cryptsetup status` reports `device: (null)`). Recovery still binds that mapper to its UUID-keyed membership entry, because the kernel keeps the LUKS UUID the mapper was opened with; no persisted devid is needed.
 
-Let `braid recover` complete when it can preserve the member. The next read-side command observes the live devid and `braid remove-missing` becomes available again if the device is truly gone.
+If that UUID belongs to no pre-operation member, recovery of an interrupted `braid remove` refuses with `device <mapper> (LUKS UUID <uuid>) is in the live pool with no backing disk but is not part of the pre-operation membership.` and keeps `pending-op.json`. Find out which disk that mapper belonged to before you re-run `braid recover`.
+
+Once btrfs promotes a gone device to MISSING, `braid remove-missing` or `braid replace` can act on it.
 
 ## Duplicate or missing devid in journal snapshot
 

@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 
 use crate::cmd::{CmdError, CmdRequest, CommandRunner};
 use crate::config::mapper_name;
+use crate::dm_identity::mapper_luks_uuid;
 use crate::filesystem::Filesystem;
 use crate::luks::{
     BackingPathResolver, MapperOwnership, MapperOwnershipFailure, OwnershipError,
@@ -120,7 +121,8 @@ pub fn probe_config_disk<R: CommandRunner, F: Filesystem + ?Sized>(
     let label = parse_cryptsetup_luks_label(&dump_raw)?.label;
 
     let mn = mapper_name(name);
-    let mapper_open = probe_mapper_open(runner, name, &mn, by_id, backing_path_resolver, &uuid)?;
+    let mapper_open =
+        probe_mapper_open(runner, fs, name, &mn, by_id, backing_path_resolver, &uuid)?;
 
     Ok(ConfigDisk {
         name: name.clone(),
@@ -134,26 +136,34 @@ pub fn probe_config_disk<R: CommandRunner, F: Filesystem + ?Sized>(
 }
 
 /// Determine whether `/dev/mapper/<mapper>` is open AND backed by the
-/// configured disk's LUKS container. `cryptsetup status` is the sole
-/// source of truth: a closed mapper is reported inactive, and an active
-/// mapper carries the underlying device that we cross-check by LUKS UUID.
+/// configured disk's LUKS container. `cryptsetup status` decides activity:
+/// a closed mapper is reported inactive, and an active mapper carries the
+/// underlying device that we cross-check against the configured disk before
+/// comparing the LUKS UUID the mapper records.
 ///
-/// Returns `Ok(true)` when the mapper is open and its backing LUKS
-/// container's UUID matches `expected_uuid`. Returns `Ok(false)` when the
-/// mapper is inactive. Returns `ProbeError::MapperOwnership` when the
-/// mapper is active but its backing is missing (stale dm-crypt) or
-/// holds a different LUKS UUID (external mapper aliasing over our name).
-fn probe_mapper_open<R: CommandRunner>(
+/// Returns `Ok(true)` when the mapper is open on the configured disk and
+/// records `expected_uuid`. Returns `Ok(false)` when the mapper is inactive.
+/// Returns `ProbeError::MapperOwnership` when the mapper is active but its
+/// backing is missing (stale dm-crypt) or it records a different LUKS UUID
+/// (external mapper aliasing over our name).
+fn probe_mapper_open<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
+    fs: &F,
     name: &DiskName,
     mapper: &MapperName,
     by_id: &ByIdPath,
     backing_path_resolver: &dyn BackingPathResolver,
     expected_uuid: &LuksUuid,
 ) -> Result<bool, ProbeError> {
-    match classify_mapper_ownership(runner, name, mapper, by_id, backing_path_resolver, || {
-        Ok(expected_uuid.clone())
-    })? {
+    match classify_mapper_ownership(
+        runner,
+        fs,
+        name,
+        mapper,
+        by_id,
+        backing_path_resolver,
+        || Ok(expected_uuid.clone()),
+    )? {
         MapperOwnership::Inactive => Ok(false),
         MapperOwnership::Owned => Ok(true),
     }
@@ -164,14 +174,15 @@ fn probe_mapper_open<R: CommandRunner>(
 // ---------------------------------------------------------------------------
 
 /// Alert-pipeline pool view. Ack and monitor need mount state, live devids,
-/// btrfs-MISSING devids, null-underlying devices, and the optional pool FSID,
+/// btrfs-MISSING devids, null-underlying devids, and the optional pool FSID,
 /// but not per-device LUKS identity or device counts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlertPoolState {
     pub mounted: bool,
     pub present_devids: Vec<Devid>,
     pub missing_devids: Vec<Devid>,
-    pub null_underlying: Vec<NullUnderlyingDevice>,
+    /// Devids of open mappers whose backing disk is gone.
+    pub null_underlying_devids: Vec<Devid>,
     /// Canonical btrfs filesystem UUID, the strongest field of the ENOSPC baseline's
     /// `PoolKey`. `None` only when the probe could not extract it; the monitor
     /// and ack then build no usable `PoolKey` rather than weaken the identity
@@ -205,14 +216,14 @@ impl AlertPoolState {
             .present_devids
             .iter()
             .copied()
-            .chain(self.null_underlying.iter().map(|d| d.devid))
+            .chain(self.null_underlying_devids.iter().copied())
             .chain(self.missing_devids.iter().copied())
             .collect::<BTreeSet<Devid>>();
         let missing = self
             .missing_devids
             .iter()
             .copied()
-            .chain(self.null_underlying.iter().map(|d| d.devid))
+            .chain(self.null_underlying_devids.iter().copied())
             .collect::<BTreeSet<Devid>>();
         AlertDevids {
             recognized,
@@ -237,7 +248,7 @@ pub fn probe_pool_alerts<R: CommandRunner, F: Filesystem + ?Sized>(
                 mounted: false,
                 present_devids: vec![],
                 missing_devids: vec![],
-                null_underlying: vec![],
+                null_underlying_devids: vec![],
                 fsid: None,
             });
         }
@@ -257,7 +268,7 @@ pub fn probe_pool_alerts<R: CommandRunner, F: Filesystem + ?Sized>(
     let fsid = show.uuid;
 
     let mut present_devids = Vec::new();
-    let mut null_underlying = Vec::new();
+    let mut null_underlying_devids = Vec::new();
     for bdev in &show.devices {
         let path = &bdev.path;
 
@@ -285,12 +296,7 @@ pub fn probe_pool_alerts<R: CommandRunner, F: Filesystem + ?Sized>(
             }
             CryptsetupStatusOutput::Active {
                 backing: BackingDevice::Null,
-            } => {
-                null_underlying.push(NullUnderlyingDevice {
-                    mapper: MapperName::from_basename(name),
-                    devid: bdev.devid,
-                });
-            }
+            } => null_underlying_devids.push(bdev.devid),
             CryptsetupStatusOutput::Active {
                 backing: BackingDevice::Path(_),
             } => present_devids.push(bdev.devid),
@@ -301,11 +307,15 @@ pub fn probe_pool_alerts<R: CommandRunner, F: Filesystem + ?Sized>(
         mounted: true,
         present_devids,
         missing_devids: show.missing_devids,
-        null_underlying,
+        null_underlying_devids,
         fsid,
     })
 }
 
+/// Live view of the mounted pool: each btrfs device's mapper, the LUKS UUID
+/// that mapper records, and whether its backing disk is still present. The
+/// UUID comes from the mapper, not the backing disk, so a gone or unreadable
+/// member keeps its identity.
 pub fn probe_pool<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
@@ -362,44 +372,37 @@ pub fn probe_pool<R: CommandRunner, F: Filesystem + ?Sized>(
             .expect("checked above")
             .to_owned();
 
+        let mapper = MapperName::from_basename(name);
         let status_raw = runner.run(&CmdRequest::CryptsetupStatus {
-            mapper: MapperName::from_basename(name.clone()),
+            mapper: mapper.clone(),
         })?;
         // When a backing device is hot-unplugged, cryptsetup reports
         // device: (null). Record these as null-underlying — the mapper
-        // is open but the block device is gone.
-        let underlying = match parse_cryptsetup_status(&status_raw)? {
+        // is open but the block device is gone. Both kinds carry the LUKS
+        // UUID the mapper itself records, which needs no backing device.
+        let backing = match parse_cryptsetup_status(&status_raw)? {
             CryptsetupStatusOutput::Inactive => {
                 return Err(ProbeError::PoolDevice {
-                    mapper: name,
+                    mapper: mapper.as_str().to_owned(),
                     detail: "not active".to_owned(),
                 });
             }
-            CryptsetupStatusOutput::Active {
-                backing: BackingDevice::Null,
-            } => {
-                null_underlying.push(NullUnderlyingDevice {
-                    mapper: MapperName::from_basename(name),
-                    devid: bdev.devid,
-                });
-                continue;
-            }
-            CryptsetupStatusOutput::Active {
-                backing: BackingDevice::Path(d),
-            } => d,
+            CryptsetupStatusOutput::Active { backing } => backing,
         };
-
-        let uuid_raw = runner.run(&CmdRequest::CryptsetupLuksUuid {
-            device: underlying.as_str().to_owned(),
-        })?;
-        let uuid_out = parse_cryptsetup_luks_uuid(&uuid_raw)?;
-
-        devices.push(PoolDevice {
-            mapper: MapperName::from_basename(name),
-            luks_uuid: uuid_out.uuid,
-            devid: bdev.devid,
-            underlying: underlying.as_str().to_owned(),
-        });
+        let luks_uuid = pool_device_luks_uuid(fs, &mapper)?;
+        match backing {
+            BackingDevice::Null => null_underlying.push(NullUnderlyingDevice {
+                mapper,
+                luks_uuid,
+                devid: bdev.devid,
+            }),
+            BackingDevice::Path(underlying) => devices.push(PoolDevice {
+                mapper,
+                luks_uuid,
+                devid: bdev.devid,
+                underlying: underlying.as_str().to_owned(),
+            }),
+        }
     }
 
     let missing_count = show.total_devices.saturating_sub(devices.len() as u64);
@@ -412,6 +415,19 @@ pub fn probe_pool<R: CommandRunner, F: Filesystem + ?Sized>(
         fsid: Some(fsid),
         missing_devids: show.missing_devids,
         null_underlying,
+    })
+}
+
+/// The LUKS UUID a pool device's mapper records. A pool device without a
+/// provable one fails the probe, because every consumer correlates pool
+/// devices with membership by UUID.
+fn pool_device_luks_uuid<F: Filesystem + ?Sized>(
+    fs: &F,
+    mapper: &MapperName,
+) -> Result<LuksUuid, ProbeError> {
+    mapper_luks_uuid(fs, mapper).map_err(|unproven| ProbeError::PoolDevice {
+        mapper: mapper.as_str().to_owned(),
+        detail: unproven.to_string(),
     })
 }
 
@@ -468,12 +484,13 @@ pub fn probe_fsid<R: CommandRunner, F: Filesystem + ?Sized>(
 mod tests {
     use super::*;
     use crate::cmd::{MockRunner, RawCommandOutput};
-    use crate::test_fixtures::MockBackingPathResolver;
+    use crate::test_fixtures::{MockBackingPathResolver, MockDmTable};
 
     struct MockFs {
         paths: Vec<String>,
         block_devices: Vec<String>,
         mountinfo: Option<Result<String, std::io::ErrorKind>>,
+        dm: MockDmTable,
     }
 
     impl MockFs {
@@ -482,6 +499,7 @@ mod tests {
                 paths: paths.iter().map(|s| s.to_string()).collect(),
                 block_devices: vec![],
                 mountinfo: None,
+                dm: MockDmTable::default(),
             }
         }
 
@@ -490,6 +508,7 @@ mod tests {
                 paths: vec![],
                 block_devices: vec![],
                 mountinfo: Some(Ok(body.to_string())),
+                dm: MockDmTable::default(),
             }
         }
 
@@ -498,7 +517,20 @@ mod tests {
                 paths: vec![],
                 block_devices: vec![],
                 mountinfo: Some(Err(kind)),
+                dm: MockDmTable::default(),
             }
+        }
+
+        /// Add an active LUKS2 mapping to the sysfs device-mapper table.
+        fn with_luks_dm(mut self, mapper: &str, luks_uuid: &str) -> Self {
+            self.dm = self.dm.with_luks(mapper, luks_uuid);
+            self
+        }
+
+        /// Add an active device with an arbitrary dm UUID.
+        fn with_raw_dm(mut self, mapper: &str, dm_uuid: &str) -> Self {
+            self.dm = self.dm.with_raw(mapper, dm_uuid);
+            self
         }
     }
 
@@ -522,11 +554,13 @@ mod tests {
                     )),
                 };
             }
-            Err(std::io::Error::new(std::io::ErrorKind::NotFound, "mock"))
+            self.dm
+                .read_to_string(path)
+                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "mock"))
         }
 
-        fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
-            Ok(vec![])
+        fn list_dir(&self, path: &str) -> Result<Vec<String>, std::io::Error> {
+            Ok(self.dm.list_dir(path).unwrap_or_default())
         }
 
         fn create_dir_all(&self, _path: &str) -> Result<(), std::io::Error> {
@@ -777,17 +811,9 @@ mod tests {
                     mapper: MapperName::from_basename("braid-toshiba".into()),
                 },
                 cryptsetup_status_active("braid-toshiba", "/dev/vda"),
-            )
-            .with_output(
-                CmdRequest::CryptsetupLuksUuid {
-                    device: "/dev/vda".into(),
-                },
-                ok_raw(
-                    "cryptsetup luksUUID /dev/vda",
-                    "a1b2c3d4-e5f6-7890-abcd-ef1234567890\n",
-                ),
             );
-        let fs = MockFs::new(&["/dev/disk/by-id/disk-1"]);
+        let fs = MockFs::new(&["/dev/disk/by-id/disk-1"])
+            .with_luks_dm("braid-toshiba", "a1b2c3d4-e5f6-7890-abcd-ef1234567890");
         let d = by_id("/dev/disk/by-id/disk-1");
 
         let resolver =
@@ -841,17 +867,9 @@ mod tests {
                     mapper: MapperName::from_basename("braid-toshiba".into()),
                 },
                 cryptsetup_status_active("braid-toshiba", "/dev/vdz"),
-            )
-            .with_output(
-                CmdRequest::CryptsetupLuksUuid {
-                    device: "/dev/vdz".into(),
-                },
-                ok_raw(
-                    "cryptsetup luksUUID /dev/vdz",
-                    "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb\n",
-                ),
             );
-        let fs = MockFs::new(&["/dev/disk/by-id/disk-1"]);
+        let fs = MockFs::new(&["/dev/disk/by-id/disk-1"])
+            .with_luks_dm("braid-toshiba", "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
         let d = by_id("/dev/disk/by-id/disk-1");
 
         let err = probe_config_disk(
@@ -948,12 +966,12 @@ mod tests {
         );
     }
 
-    // Intent: when an active mapper is backed by a non-LUKS device, the
-    //   probe surfaces ProbeError::MapperOwnership(Conflict) with found=None.
+    // Intent: when an active mapper's dm UUID is not a cryptsetup LUKS one,
+    //   the probe surfaces ProbeError::MapperOwnership(Conflict) with
+    //   found=None.
     // Why it exists: mapper ownership failure should use the same recovery
     //   path as executor-time checks, not a generic parse error.
-    // Scenario: a foreign mapper is aliased over braid's mapper name but its
-    //   backing device no longer reports a LUKS header.
+    // Scenario: a plain dm-crypt mapping has taken braid's mapper name.
     #[test]
     fn probe_config_disk_mapper_backing_non_luks_errors() {
         let runner = MockRunner::default()
@@ -977,18 +995,9 @@ mod tests {
                     mapper: MapperName::from_basename("braid-toshiba".into()),
                 },
                 cryptsetup_status_active("braid-toshiba", "/dev/vdz"),
-            )
-            .with_output(
-                CmdRequest::CryptsetupLuksUuid {
-                    device: "/dev/vdz".into(),
-                },
-                err_raw(
-                    "cryptsetup luksUUID /dev/vdz",
-                    1,
-                    "Device /dev/vdz is not a valid LUKS device.\n",
-                ),
             );
-        let fs = MockFs::new(&["/dev/disk/by-id/disk-1"]);
+        let fs = MockFs::new(&["/dev/disk/by-id/disk-1"])
+            .with_raw_dm("braid-toshiba", "CRYPT-PLAIN-braid-toshiba");
         let d = by_id("/dev/disk/by-id/disk-1");
 
         let resolver =
@@ -1332,13 +1341,6 @@ mod tests {
         )
     }
 
-    fn cryptsetup_uuid_ok(device: &str, uuid: &str) -> RawCommandOutput {
-        ok_raw(
-            &format!("cryptsetup luksUUID {device}"),
-            &format!("{uuid}\n"),
-        )
-    }
-
     #[test]
     fn probe_pool_unmounted() {
         let fs = MockFs::with_mountinfo(&mountinfo_without_target());
@@ -1377,7 +1379,9 @@ mod tests {
 
     #[test]
     fn probe_pool_mounted_2disk() {
-        let fs = MockFs::with_mountinfo(&mountinfo_btrfs());
+        let fs = MockFs::with_mountinfo(&mountinfo_btrfs())
+            .with_luks_dm("braid-toshiba", "11111111-1111-1111-1111-111111111111")
+            .with_luks_dm("braid-ironwolf", "22222222-2222-2222-2222-222222222222");
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
@@ -1392,22 +1396,10 @@ mod tests {
                 cryptsetup_status_active("braid-toshiba", "/dev/vda"),
             )
             .with_output(
-                CmdRequest::CryptsetupLuksUuid {
-                    device: "/dev/vda".into(),
-                },
-                cryptsetup_uuid_ok("/dev/vda", "11111111-1111-1111-1111-111111111111"),
-            )
-            .with_output(
                 CmdRequest::CryptsetupStatus {
                     mapper: MapperName::from_basename("braid-ironwolf".into()),
                 },
                 cryptsetup_status_active("braid-ironwolf", "/dev/vdb"),
-            )
-            .with_output(
-                CmdRequest::CryptsetupLuksUuid {
-                    device: "/dev/vdb".into(),
-                },
-                cryptsetup_uuid_ok("/dev/vdb", "22222222-2222-2222-2222-222222222222"),
             );
 
         let result = probe_pool(&runner, &fs, &mp()).unwrap();
@@ -1437,7 +1429,9 @@ mod tests {
 
     #[test]
     fn probe_pool_mounted_with_missing() {
-        let fs = MockFs::with_mountinfo(&mountinfo_btrfs());
+        let fs = MockFs::with_mountinfo(&mountinfo_btrfs())
+            .with_luks_dm("braid-toshiba", "11111111-1111-1111-1111-111111111111")
+            .with_luks_dm("braid-ironwolf", "22222222-2222-2222-2222-222222222222");
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
@@ -1452,22 +1446,10 @@ mod tests {
                 cryptsetup_status_active("braid-toshiba", "/dev/vda"),
             )
             .with_output(
-                CmdRequest::CryptsetupLuksUuid {
-                    device: "/dev/vda".into(),
-                },
-                cryptsetup_uuid_ok("/dev/vda", "11111111-1111-1111-1111-111111111111"),
-            )
-            .with_output(
                 CmdRequest::CryptsetupStatus {
                     mapper: MapperName::from_basename("braid-ironwolf".into()),
                 },
                 cryptsetup_status_active("braid-ironwolf", "/dev/vdb"),
-            )
-            .with_output(
-                CmdRequest::CryptsetupLuksUuid {
-                    device: "/dev/vdb".into(),
-                },
-                cryptsetup_uuid_ok("/dev/vdb", "22222222-2222-2222-2222-222222222222"),
             );
 
         let result = probe_pool(&runner, &fs, &mp()).unwrap();
@@ -1479,7 +1461,8 @@ mod tests {
 
     #[test]
     fn probe_pool_degraded_missing_sentinel() {
-        let fs = MockFs::with_mountinfo(&mountinfo_btrfs());
+        let fs = MockFs::with_mountinfo(&mountinfo_btrfs())
+            .with_luks_dm("braid-toshiba", "11111111-1111-1111-1111-111111111111");
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
@@ -1499,12 +1482,6 @@ mod tests {
                     mapper: MapperName::from_basename("braid-toshiba".into()),
                 },
                 cryptsetup_status_active("braid-toshiba", "/dev/vda"),
-            )
-            .with_output(
-                CmdRequest::CryptsetupLuksUuid {
-                    device: "/dev/vda".into(),
-                },
-                cryptsetup_uuid_ok("/dev/vda", "11111111-1111-1111-1111-111111111111"),
             );
 
         let result = probe_pool(&runner, &fs, &mp()).unwrap();
@@ -1578,13 +1555,18 @@ mod tests {
         );
     }
 
-    /// Hot-unplugged device: btrfs still lists the mapper path, but
-    /// cryptsetup status reports `device: (null)` because the underlying
-    /// block device is gone. probe_pool must skip this device instead of
-    /// crashing on `cryptsetup luksUUID (null)`.
+    // Intent: probe_pool records a mapper whose backing disk is gone as
+    //   null-underlying, with the LUKS UUID its dm UUID records.
+    // Why it exists: the dead member must keep its identity so lock, status,
+    //   and recover bind it by UUID; reading the gone disk's header would
+    //   fail (`cryptsetup luksUUID (null)`).
+    // Scenario: braid-ironwolf's disk was hot-unplugged; btrfs still lists
+    //   the mapper path and cryptsetup status reports `device: (null)`.
     #[test]
     fn probe_pool_device_null_underlying() {
-        let fs = MockFs::with_mountinfo(&mountinfo_btrfs());
+        let fs = MockFs::with_mountinfo(&mountinfo_btrfs())
+            .with_luks_dm("braid-toshiba", "11111111-1111-1111-1111-111111111111")
+            .with_luks_dm("braid-ironwolf", "22222222-2222-2222-2222-222222222222");
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
@@ -1603,12 +1585,6 @@ mod tests {
                     mapper: MapperName::from_basename("braid-toshiba".into()),
                 },
                 cryptsetup_status_active("braid-toshiba", "/dev/vda"),
-            )
-            .with_output(
-                CmdRequest::CryptsetupLuksUuid {
-                    device: "/dev/vda".into(),
-                },
-                cryptsetup_uuid_ok("/dev/vda", "11111111-1111-1111-1111-111111111111"),
             )
             .with_output(
                 CmdRequest::CryptsetupStatus {
@@ -1646,15 +1622,71 @@ mod tests {
             MapperName::from_basename("braid-ironwolf".into())
         );
         assert_eq!(result.null_underlying[0].devid, Devid::new(2));
+        assert_eq!(
+            result.null_underlying[0].luks_uuid,
+            LuksUuid::parse("22222222-2222-2222-2222-222222222222").unwrap(),
+            "a null-backed mapper keeps the LUKS UUID its dm UUID records"
+        );
+        assert!(
+            !runner
+                .requests()
+                .iter()
+                .any(|request| matches!(request, CmdRequest::CryptsetupLuksUuid { .. })),
+            "probe_pool must not reread any LUKS header"
+        );
 
         // missing_devids stays btrfs-authoritative — null-underlying devids
         // are NOT injected (remove-missing uses this for destructive targets)
         assert!(result.missing_devids.is_empty());
     }
 
+    // Intent: probe_pool fails closed when a pool device's mapper has no
+    //   provable LUKS UUID in the device-mapper table.
+    // Why it exists: every consumer correlates pool devices with membership
+    //   by UUID; a device without one must not be dropped or guessed.
+    // Scenario: btrfs lists braid-toshiba and cryptsetup reports it active,
+    //   but its dm UUID is not a cryptsetup LUKS one.
+    #[test]
+    fn probe_pool_unprovable_dm_identity_fails_closed() {
+        let fs = MockFs::with_mountinfo(&mountinfo_btrfs())
+            .with_raw_dm("braid-toshiba", "CRYPT-PLAIN-braid-toshiba");
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::BtrfsFilesystemShow {
+                    mount_point: MountPoint::new("/mnt/storage".to_owned()),
+                },
+                ok_raw(
+                    "btrfs filesystem show /mnt/storage",
+                    "Label: none  uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
+                     \tTotal devices 1 FS bytes used 1.00GiB\n\
+                     \tdevid    1 size 10.00GiB used 2.00GiB path /dev/mapper/braid-toshiba\n",
+                ),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName::from_basename("braid-toshiba".into()),
+                },
+                cryptsetup_status_active("braid-toshiba", "/dev/vda"),
+            );
+
+        let err = probe_pool(&runner, &fs, &mp()).unwrap_err();
+
+        match err {
+            ProbeError::PoolDevice { mapper, detail } => {
+                assert_eq!(mapper, "braid-toshiba");
+                assert_eq!(
+                    detail,
+                    "device-mapper UUID \"CRYPT-PLAIN-braid-toshiba\" is not a cryptsetup LUKS UUID"
+                );
+            }
+            other => panic!("expected ProbeError::PoolDevice, got: {other:?}"),
+        }
+    }
+
     #[test]
     fn probe_pool_missing_count_saturates() {
-        let fs = MockFs::with_mountinfo(&mountinfo_btrfs());
+        let fs = MockFs::with_mountinfo(&mountinfo_btrfs())
+            .with_luks_dm("braid-toshiba", "11111111-1111-1111-1111-111111111111");
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::BtrfsFilesystemShow {
@@ -1672,12 +1704,6 @@ mod tests {
                     mapper: MapperName::from_basename("braid-toshiba".into()),
                 },
                 cryptsetup_status_active("braid-toshiba", "/dev/vda"),
-            )
-            .with_output(
-                CmdRequest::CryptsetupLuksUuid {
-                    device: "/dev/vda".into(),
-                },
-                cryptsetup_uuid_ok("/dev/vda", "11111111-1111-1111-1111-111111111111"),
             );
 
         let result = probe_pool(&runner, &fs, &mp()).unwrap();
@@ -1770,7 +1796,7 @@ mod tests {
         assert!(!result.mounted);
         assert!(result.present_devids.is_empty());
         assert!(result.missing_devids.is_empty());
-        assert!(result.null_underlying.is_empty());
+        assert!(result.null_underlying_devids.is_empty());
         assert!(runner.requests().is_empty());
     }
 
@@ -1809,7 +1835,7 @@ mod tests {
         assert!(result.mounted);
         assert_eq!(result.present_devids, vec![Devid::new(1), Devid::new(2)]);
         assert!(result.missing_devids.is_empty());
-        assert!(result.null_underlying.is_empty());
+        assert!(result.null_underlying_devids.is_empty());
         assert_eq!(
             result.fsid.as_ref().map(Fsid::as_str),
             Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"),
@@ -1859,7 +1885,7 @@ mod tests {
         assert!(result.mounted);
         assert_eq!(result.present_devids, vec![Devid::new(1)]);
         assert_eq!(result.missing_devids, vec![Devid::new(2)]);
-        assert!(result.null_underlying.is_empty());
+        assert!(result.null_underlying_devids.is_empty());
     }
 
     // Intent: probe_pool_alerts records active mappers whose backing device
@@ -1896,13 +1922,7 @@ mod tests {
         assert!(result.mounted);
         assert_eq!(result.present_devids, vec![Devid::new(1)]);
         assert!(result.missing_devids.is_empty());
-        assert_eq!(
-            result.null_underlying,
-            vec![NullUnderlyingDevice {
-                mapper: MapperName::from_basename("braid-ironwolf".into()),
-                devid: Devid::new(2),
-            }]
-        );
+        assert_eq!(result.null_underlying_devids, vec![Devid::new(2)]);
     }
 
     // Intent: probe_pool_alerts does not reject mounted btrfs-show output
@@ -1945,7 +1965,7 @@ mod tests {
         assert!(result.mounted);
         assert_eq!(result.present_devids, vec![Devid::new(1), Devid::new(2)]);
         assert!(result.missing_devids.is_empty());
-        assert!(result.null_underlying.is_empty());
+        assert!(result.null_underlying_devids.is_empty());
         assert_eq!(
             result.fsid, None,
             "an absent uuid line yields no usable PoolKey identity"
@@ -2073,16 +2093,7 @@ mod tests {
             mounted: true,
             present_devids: vec![Devid::new(1)],
             missing_devids: vec![Devid::new(4), Devid::new(2)],
-            null_underlying: vec![
-                NullUnderlyingDevice {
-                    mapper: MapperName::from_basename("braid-two".into()),
-                    devid: Devid::new(2),
-                },
-                NullUnderlyingDevice {
-                    mapper: MapperName::from_basename("braid-three".into()),
-                    devid: Devid::new(3),
-                },
-            ],
+            null_underlying_devids: vec![Devid::new(2), Devid::new(3)],
             fsid: None,
         };
 
@@ -2105,16 +2116,7 @@ mod tests {
             mounted: true,
             present_devids: vec![Devid::new(4), Devid::new(1)],
             missing_devids: vec![Devid::new(4), Devid::new(2)],
-            null_underlying: vec![
-                NullUnderlyingDevice {
-                    mapper: MapperName::from_basename("braid-two".into()),
-                    devid: Devid::new(2),
-                },
-                NullUnderlyingDevice {
-                    mapper: MapperName::from_basename("braid-three".into()),
-                    devid: Devid::new(3),
-                },
-            ],
+            null_underlying_devids: vec![Devid::new(2), Devid::new(3)],
             fsid: None,
         };
 
@@ -2149,10 +2151,7 @@ mod tests {
             mounted: true,
             present_devids: vec![Devid::new(1)],
             missing_devids: vec![Devid::new(2)],
-            null_underlying: vec![NullUnderlyingDevice {
-                mapper: MapperName::from_basename("braid-three".into()),
-                devid: Devid::new(3),
-            }],
+            null_underlying_devids: vec![Devid::new(3)],
             fsid: None,
         };
 

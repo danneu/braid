@@ -212,7 +212,7 @@ The snapshot is a hard precondition for the rebuild: if it cannot be written
 `failed to snapshot existing corrupt file to ...` so the corrupt original is
 not destroyed; free disk space or fix permissions and retry. The sidecar is
 safe to remove once you have manually copied any still-relevant prior-binding
-bytes (e.g. `devid` for a `null_underlying` member). If you know the expected
+bytes (e.g. `devid` for a member btrfs reports missing). If you know the expected
 member count ahead of time, pass
 `--expect-count <N>` to fail closed against a temporarily detached disk or an
 unrelated braid-labeled disk being silently admitted.
@@ -220,8 +220,8 @@ unrelated braid-labeled disk being silently admitted.
 Note: `braid lock` -- the user-facing command, the `braid-online.service`
 ExecStop path, and `braid lock --dry-run` alike -- does NOT fail under a
 missing or corrupt `pool.json`. It warns and proceeds with empty membership;
-every observed `braid-*` mapper is then verified by its backing LUKS UUID
-before close, so shutdown cleanup stays complete. No lock pathway hard-fails
+every observed `braid-*` mapper is then verified by the LUKS UUID its dm UUID
+records before close, so shutdown cleanup stays complete. No lock pathway hard-fails
 on an unloadable `pool.json`.
 
 For a **healthy UUID-keyed** `pool.json`, do not run `discover --write` at all

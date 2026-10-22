@@ -33,7 +33,7 @@ and the no-flag auto-resolve path refuse the devid with a specific hot-unplug
 diagnostic until that promotion happens. See
 [Hot-unplug while pool is mounted](../guides/recovery-scenarios.md#hot-unplug-while-pool-is-mounted).
 
-Optionally assert which missing devid you expect (braid refuses if it disagrees with pool.json):
+Optionally assert which missing devid you expect (braid refuses if it disagrees with `--old`'s devid):
 
 ```
 sudo braid replace \
@@ -72,7 +72,7 @@ sudo braid replace --old toshiba1 --new toshiba4=/dev/disk/by-id/ata-TOSHIBA_MN0
 |---|---|
 | `--old <name>` | Name of the disk to replace |
 | `--new <name>=<path>` | Name and by-id path of the replacement disk |
-| `--missing-id <devid>` | Optional cross-check for a dead-disk replace: assert the missing btrfs devid. braid refuses if it disagrees with the devid pool.json records for --old. Never required. |
+| `--missing-id <devid>` | Optional cross-check for a dead-disk replace: assert the missing btrfs devid. braid refuses if it disagrees with --old's devid: the one its still-open mapper holds if its disk was hot-unplugged, else the one pool.json records. Never required. |
 | `--enroll <dir>` | Enroll `braid.key` from this directory into LUKS slot 1 on the new disk |
 | `--dry-run` | Show what would happen without executing |
 | `--yes` | Skip interactive confirmation |
@@ -99,7 +99,7 @@ sudo braid replace --old toshiba1 --new toshiba4=/dev/disk/by-id/ata-TOSHIBA_MN0
 9. For missing-disk replacements that clear the last missing device: runs a soft RAID1 balance to restore redundancy on any single-profile chunks
 10. Clears the journal
 
-The step-7 mapper close is best-effort, exactly as in [`braid remove`](remove.md): the btrfs replace is already committed, so a failed close prints a `[warn]` row, and a close-time ownership probe that cannot prove the old mapper is the expected disk -- inactive, a probe failure or null backing device, or a foreign LUKS UUID -- skips the close with a `Warning:` line. Neither fails the replace, and a clean exit does not guarantee the old mapper is closed.
+The step-7 mapper close is best-effort, exactly as in [`braid remove`](remove.md): the btrfs replace is already committed, so a failed close prints a `[warn]` row, and a close-time ownership probe that cannot prove the old mapper is the expected disk -- inactive, a probe failure, or a foreign LUKS UUID -- skips the close with a `Warning:` line. Neither fails the replace, and a clean exit does not guarantee the old mapper is closed. The probe reads the LUKS UUID the kernel recorded when the old mapper was opened, not the disk's header, so the old mapper still closes when the old disk is already gone.
 
 The fresh-disk path always produces a local LUKS header backup in step 3; the existing-LUKS path produces one only when `--enroll` actually adds slot 1, so an already-enrolled disk is a no-op with no new backup. See [Pending LUKS header backups](status.md#pending-luks-header-backups) -- copy each `.luksheader` off-system and delete the local copy.
 
@@ -116,8 +116,9 @@ If a btrfs exclusive operation (a running balance, device add/remove/replace, re
 - Refuses if the new disk's mapper capacity is smaller than the source disk's btrfs `total_bytes` (read via `BTRFS_IOC_DEV_INFO`, the same value `btrfs replace start` compares against). For existing LUKS targets, mapper capacity is derived from the LUKS2 segment `offset` and `size` (`dynamic` means `raw - offset`, fixed means the segment size). For fresh-LUKS targets, braid uses cryptsetup's default 16 MiB offset; offset-affecting `--luks-format-arg` flags (`--offset`/`-o`, `--align-payload`, `--luks2-metadata-size`, `--luks2-keyslots-size`, `--sector-size`) are rejected for this reason.
 - For live replacements: refuses if the pool has missing devices (resolve those first)
 - For missing replacements: refuses if `--missing-id` points to a live device
-- For missing replacements: refuses if `--missing-id` disagrees with the devid pool.json records for `--old` (`--old` already identifies which member to rebuild)
-- For missing replacements: refuses if pool.json has no recorded devid for `--old` -- `--missing-id` cannot substitute, it must match the recorded devid
+- For missing replacements: refuses if `--missing-id` disagrees with `--old`'s devid (`--old` already identifies which member to rebuild). If `--old`'s disk was hot-unplugged and btrfs still lists it through its open mapper (null-underlying, before btrfs promotes it to MISSING), braid finds that mapper by the LUKS UUID it records and uses the devid btrfs holds it at; otherwise it uses the devid pool.json records
+- For missing replacements with no open mapper for `--old`: refuses if pool.json has no recorded devid for `--old` -- `--missing-id` cannot substitute, it must match the recorded devid
+- For missing replacements: refuses if the devid pool.json records for `--old` is held by another disk's open mapper -- pool.json is out of date
 - Verifies the passphrase against an existing pool member before formatting
 - Warns before confirmation and in `--dry-run` if the live source device has I/O errors (informational, does not block)
 - Warns if existing pool drives have a keyfile but `--enroll` was not passed

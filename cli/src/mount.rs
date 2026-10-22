@@ -476,8 +476,9 @@ fn credential_noun(c: Credential<'_>) -> &'static str {
 /// diagnosis -- it lets `explain_open_failure` emit header-damage guidance
 /// instead of a misleading "wrong passphrase". See
 /// `docs/internals/luks-unlock.md`.
-fn open_disks_with_credential<R: CommandRunner>(
+fn open_disks_with_credential<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
+    fs: &F,
     to_unlock: &[(DiskName, ByIdPath)],
     backing_path_resolver: &dyn BackingPathResolver,
     credential: Credential<'_>,
@@ -534,11 +535,16 @@ fn open_disks_with_credential<R: CommandRunner>(
         );
         let outcome = match credential {
             Credential::Passphrase(pp) => {
-                luks::ensure_luks_open(runner, name, by_id, backing_path_resolver, pp)
+                luks::ensure_luks_open(runner, fs, name, by_id, backing_path_resolver, pp)
             }
-            Credential::KeyFile(kf) => {
-                luks::ensure_luks_open_with_key_file(runner, name, by_id, backing_path_resolver, kf)
-            }
+            Credential::KeyFile(kf) => luks::ensure_luks_open_with_key_file(
+                runner,
+                fs,
+                name,
+                by_id,
+                backing_path_resolver,
+                kf,
+            ),
         };
         match outcome {
             Ok(OpenOutcome::Opened) => opened.push(TrackedMapper {
@@ -658,6 +664,7 @@ pub fn execute_unlock_and_mount<R: CommandRunner, F: Filesystem + ?Sized>(
     let cred = credential.as_borrowed();
     open_disks_with_credential(
         runner,
+        fs,
         &plan.to_unlock,
         backing_path_resolver,
         cred,
@@ -1669,7 +1676,9 @@ mod tests {
             "/dev/disk/by-id/virtio-disk2",
             "/dev/mapper/braid-disk1",
             "/dev/mapper/braid-disk2",
-        ]);
+        ])
+        .with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111")
+        .with_luks_dm("braid-disk2", "22222222-2222-2222-2222-222222222222");
 
         let (uuid1_req, uuid1_out) = luks_uuid_ok(
             "/dev/disk/by-id/virtio-disk1",
@@ -1745,7 +1754,9 @@ mod tests {
             "/dev/disk/by-id/virtio-disk3",
             "/dev/mapper/braid-disk2",
             "/dev/mapper/braid-disk3",
-        ]);
+        ])
+        .with_luks_dm("braid-disk2", "22222222-2222-2222-2222-222222222222")
+        .with_luks_dm("braid-disk3", "33333333-3333-3333-3333-333333333333");
 
         let (uuid2_req, uuid2_out) = luks_uuid_ok(
             "/dev/disk/by-id/virtio-disk2",
@@ -2132,7 +2143,9 @@ pool already mounted at /mnt/storage
             "/dev/disk/by-id/virtio-disk3",
             "/dev/mapper/braid-disk2",
             "/dev/mapper/braid-disk3",
-        ]);
+        ])
+        .with_luks_dm("braid-disk2", "22222222-2222-2222-2222-222222222222")
+        .with_luks_dm("braid-disk3", "33333333-3333-3333-3333-333333333333");
 
         let (uuid2_req, uuid2_out) = luks_uuid_ok(
             "/dev/disk/by-id/virtio-disk2",
@@ -2254,7 +2267,8 @@ pool already mounted at /mnt/storage
             "/dev/disk/by-id/virtio-disk1",
             "/dev/disk/by-id/virtio-disk2",
             "/dev/mapper/braid-disk1", // mapper already open
-        ]);
+        ])
+        .with_luks_dm("braid-disk1", "ffffffff-ffff-ffff-ffff-ffffffffffff");
 
         let (uuid1_req, uuid1_out) = luks_uuid_ok(
             "/dev/disk/by-id/virtio-disk1",
@@ -2745,7 +2759,8 @@ pool already mounted at /mnt/storage
     #[test]
     fn already_owned_execute_race_is_filtered_from_cleanup_set() {
         let config = test_config();
-        let fs = direct_two_disk_fs_with_mappers();
+        let fs = direct_two_disk_fs_with_mappers()
+            .with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111");
         let plan = direct_two_disk_plan();
         let runner = MockRunner::default()
             .with_output_stdin(

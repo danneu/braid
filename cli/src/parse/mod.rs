@@ -36,6 +36,7 @@ pub mod cryptsetup_luks_label;
 pub mod cryptsetup_luks_uuid;
 pub mod cryptsetup_luks_version;
 pub mod cryptsetup_status;
+pub mod dm_uuid;
 mod helpers;
 pub mod lsblk;
 pub mod smartctl;
@@ -98,12 +99,10 @@ pub use btrfs_scrub_status_per_device::parse_btrfs_scrub_status_per_device;
 pub use btrfs_subvolume_list::parse_btrfs_subvolume_list;
 pub use cryptsetup_luks_dump::parse_cryptsetup_luks_dump;
 pub use cryptsetup_luks_label::parse_cryptsetup_luks_label;
-pub use cryptsetup_luks_uuid::{
-    cryptsetup_luks_uuid_reports_not_luks, parse_cryptsetup_luks_uuid,
-    parse_cryptsetup_luks_uuid_from_dump,
-};
+pub use cryptsetup_luks_uuid::{parse_cryptsetup_luks_uuid, parse_cryptsetup_luks_uuid_from_dump};
 pub use cryptsetup_luks_version::parse_cryptsetup_luks_version;
 pub use cryptsetup_status::parse_cryptsetup_status;
+pub use dm_uuid::{DmUuid, parse_dm_uuid};
 pub use lsblk::parse_lsblk_json;
 pub use smartctl::{parse_smartctl, parse_smartctl_selftest_log};
 pub use systemctl_list_units::{SystemdUnitRow, parse_systemctl_list_units_json};

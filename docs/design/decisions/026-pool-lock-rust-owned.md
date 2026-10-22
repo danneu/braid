@@ -105,21 +105,20 @@ Membership is advisory for lock, not authoritative -- its only role here is to
 attach friendly member names to status output. What lock closes is decided from
 observed state, not from `pool.json`:
 
-- mappers backing the live mounted pool, proven during the per-device probe by
-  `cryptsetup status` + `cryptsetup luksUUID`;
-- mounted-pool members whose backing device is gone (`device: (null)`), matched
-  by their persisted btrfs device id;
-- otherwise-stranded `/dev/mapper/braid-*` mappers, each confirmed by
-  `cryptsetup status` + `cryptsetup luksUUID` (see
-  [ADR 024](024-luks-uuid-identity.md)) before it is closed.
+- mappers backing the live mounted pool, including members whose backing
+  device is gone (`device: (null)`), each identified during the per-device
+  probe by the LUKS UUID its dm UUID records;
+- otherwise-stranded `/dev/mapper/braid-*` mappers, each confirmed by the LUKS
+  UUID its dm UUID records (see [ADR 024](024-luks-uuid-identity.md)) before it
+  is closed.
 
 With empty membership these mappers classify as unnamed orphans rather than
 named members and are still closed. Fallback scanning is limited to
 `/dev/mapper/braid-*`; mounted-pool cleanup closes only the mapper paths
 reported by the pool mounted at the configured mount point. A candidate that
-fails verification, a `/dev/mapper` scan that fails, or a duplicate-devid
-conflict is skipped with a warning and may leave cleanup incomplete -- the
-operator resolves it by re-running `braid lock` or reconciling `pool.json`.
+fails verification or a `/dev/mapper` scan that fails is skipped with a warning
+and may leave cleanup incomplete -- the operator resolves it by re-running
+`braid lock` or closing the unverified mapper by hand.
 
 This closes the failed-bootstrap-add lifecycle hole without a journal. A
 bootstrap add can mount the pool and open its LUKS mappers, then fail before

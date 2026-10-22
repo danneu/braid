@@ -1,10 +1,9 @@
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, RawCommandOutput, Step};
 use crate::config::mapper_name;
+use crate::dm_identity::{UnprovenMapper, mapper_luks_uuid};
+use crate::filesystem::Filesystem;
 use crate::parse::types::{BackingDevice, CryptsetupStatusOutput};
-use crate::parse::{
-    ParseError, cryptsetup_luks_uuid_reports_not_luks, parse_cryptsetup_luks_uuid,
-    parse_cryptsetup_status,
-};
+use crate::parse::{ParseError, parse_cryptsetup_luks_uuid, parse_cryptsetup_status};
 use crate::secret::Passphrase;
 use crate::state_paths::StatePaths;
 use crate::types::{
@@ -161,6 +160,13 @@ pub enum MapperOwnershipFailure {
         by_id: String,
         source: std::io::Error,
     },
+    #[error(
+        "disk '{name}' mapper '/dev/mapper/braid-{name}' is open but its LUKS \
+         UUID could not be read from the device-mapper table ({detail}). \
+         Re-run; if it persists, close the mapper with \
+         'sudo cryptsetup close braid-{name}' and re-run."
+    )]
+    IdentityUnreadable { name: String, detail: String },
 }
 
 fn mapper_conflict_found_display(found: &Option<LuksUuid>) -> String {
@@ -913,8 +919,9 @@ fn luks_uuid_for_device<R: CommandRunner>(
     Ok(parse_cryptsetup_luks_uuid(&raw)?.uuid)
 }
 
-pub(crate) fn classify_mapper_ownership<R, F>(
+pub(crate) fn classify_mapper_ownership<R, FS, F>(
     runner: &R,
+    fs: &FS,
     name: &DiskName,
     mapper: &MapperName,
     expected_by_id: &ByIdPath,
@@ -923,6 +930,7 @@ pub(crate) fn classify_mapper_ownership<R, F>(
 ) -> Result<MapperOwnership, OwnershipError>
 where
     R: CommandRunner,
+    FS: Filesystem + ?Sized,
     F: FnOnce() -> Result<LuksUuid, OwnershipError>,
 {
     let status_raw = runner.run(&CmdRequest::CryptsetupStatus {
@@ -970,13 +978,12 @@ where
         .into());
     }
 
+    // The path check above ties the mapper to the configured disk; the UUID
+    // the mapper recorded at activation ties it to the expected container.
     let expected = expected_uuid()?;
-    let backing_raw = runner.run(&CmdRequest::CryptsetupLuksUuid {
-        device: underlying.to_owned(),
-    })?;
-    let found = match parse_cryptsetup_luks_uuid(&backing_raw) {
-        Ok(out) => out.uuid,
-        Err(_) if cryptsetup_luks_uuid_reports_not_luks(&backing_raw) => {
+    let found = match mapper_luks_uuid(fs, mapper) {
+        Ok(found) => found,
+        Err(UnprovenMapper::NotLuks { .. }) => {
             return Err(MapperOwnershipFailure::Conflict {
                 name: name.as_str().to_owned(),
                 expected,
@@ -984,7 +991,13 @@ where
             }
             .into());
         }
-        Err(e) => return Err(OwnershipError::Parse(e)),
+        Err(unproven @ (UnprovenMapper::Absent | UnprovenMapper::Unreadable { .. })) => {
+            return Err(MapperOwnershipFailure::IdentityUnreadable {
+                name: name.as_str().to_owned(),
+                detail: unproven.to_string(),
+            }
+            .into());
+        }
     };
 
     if found == expected {
@@ -1000,15 +1013,16 @@ where
 }
 
 /// Open a LUKS device if not already open.
-pub fn ensure_luks_open<R: CommandRunner>(
+pub fn ensure_luks_open<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
+    fs: &F,
     name: &DiskName,
     by_id: &ByIdPath,
     backing_path_resolver: &dyn BackingPathResolver,
     passphrase: &Passphrase,
 ) -> Result<OpenOutcome, LuksError> {
     let mn = mapper_name(name);
-    if classify_mapper_ownership(runner, name, &mn, by_id, backing_path_resolver, || {
+    if classify_mapper_ownership(runner, fs, name, &mn, by_id, backing_path_resolver, || {
         luks_uuid_for_device(runner, by_id.as_str())
     })? == MapperOwnership::Owned
     {
@@ -1036,15 +1050,16 @@ pub fn ensure_luks_open<R: CommandRunner>(
 /// Keyfile counterpart to the stdin-passphrase open: feeds the keyfile
 /// via --key-file/--keyfile-size instead of piping a passphrase. Still a
 /// KDF-stretched keyslot secret, not a raw dm-crypt volume key.
-pub fn ensure_luks_open_with_key_file<R: CommandRunner>(
+pub fn ensure_luks_open_with_key_file<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
+    fs: &F,
     name: &DiskName,
     by_id: &ByIdPath,
     backing_path_resolver: &dyn BackingPathResolver,
     key_file_path: &std::path::Path,
 ) -> Result<OpenOutcome, LuksError> {
     let mn = mapper_name(name);
-    if classify_mapper_ownership(runner, name, &mn, by_id, backing_path_resolver, || {
+    if classify_mapper_ownership(runner, fs, name, &mn, by_id, backing_path_resolver, || {
         luks_uuid_for_device(runner, by_id.as_str())
     })? == MapperOwnership::Owned
     {
@@ -1217,7 +1232,7 @@ pub fn header_backup_advisories(paths: &StatePaths) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::cmd::{CmdRequest, MockRunner, RawCommandOutput};
-    use crate::test_fixtures::MockBackingPathResolver;
+    use crate::test_fixtures::{MockBackingPathResolver, MockFs};
     use crate::types::ByIdPath;
     use std::os::fd::AsFd;
 
@@ -1249,7 +1264,8 @@ mod tests {
     // Why it exists: duplicate LUKS and probe variants previously allowed the
     //   same operator message to drift independently at each boundary.
     // Scenario: an active disk1 mapper has a foreign UUID, no backing device,
-    //   a different canonical backing path, or an unresolvable configured path.
+    //   a different canonical backing path, an unresolvable configured path,
+    //   or a dm UUID braid cannot read.
     #[test]
     fn mapper_ownership_failures_render_identically_through_public_wrappers() {
         let expected_uuid = LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap();
@@ -1283,6 +1299,21 @@ mod tests {
         ];
 
         let expected_messages = [cases[0].1, cases[1].1, cases[2].1];
+
+        let unreadable = || MapperOwnershipFailure::IdentityUnreadable {
+            name: "disk1".into(),
+            detail: "no device-mapper device by that name".into(),
+        };
+        let expected_unreadable = "disk 'disk1' mapper '/dev/mapper/braid-disk1' is open but its LUKS UUID could not be read from the device-mapper table (no device-mapper device by that name). Re-run; if it persists, close the mapper with 'sudo cryptsetup close braid-disk1' and re-run.";
+        assert_eq!(unreadable().to_string(), expected_unreadable);
+        assert_eq!(
+            LuksError::MapperOwnership(unreadable()).to_string(),
+            expected_unreadable
+        );
+        assert_eq!(
+            crate::probe::ProbeError::MapperOwnership(unreadable()).to_string(),
+            expected_unreadable
+        );
         for (failure, expected) in cases {
             assert_eq!(failure.to_string(), expected);
             assert_eq!(LuksError::MapperOwnership(failure).to_string(), expected);
@@ -1932,15 +1963,6 @@ $ cryptsetup luksHeaderBackup --header-backup-file /var/lib/braid/luks-headers/b
         }
     }
 
-    fn luks_uuid_not_luks(device: &str) -> RawCommandOutput {
-        RawCommandOutput {
-            cmd: format!("cryptsetup luksUUID {device}"),
-            stdout: String::new(),
-            stderr: format!("Device {device} is not a valid LUKS device.\n"),
-            exit_status: 1,
-        }
-    }
-
     fn luks_uuid_invalid(device: &str) -> RawCommandOutput {
         RawCommandOutput {
             cmd: format!("cryptsetup luksUUID {device}"),
@@ -1957,6 +1979,7 @@ $ cryptsetup luksHeaderBackup --header-backup-file /var/lib/braid/luks-headers/b
      */
     #[test]
     fn ensure_luks_open_exit_2_mentions_passphrase() {
+        let fs = MockFs::storage(vec![]);
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::CryptsetupStatus {
@@ -1979,6 +2002,7 @@ $ cryptsetup luksHeaderBackup --header-backup-file /var/lib/braid/luks-headers/b
             );
         let err = ensure_luks_open(
             &runner,
+            &fs,
             &disk("testdisk"),
             &ByIdPath::parse("/dev/disk/by-id/test-disk").unwrap(),
             &MockBackingPathResolver::default(),
@@ -2007,6 +2031,7 @@ $ cryptsetup luksHeaderBackup --header-backup-file /var/lib/braid/luks-headers/b
      */
     #[test]
     fn ensure_luks_open_exit_4_mentions_device_not_found() {
+        let fs = MockFs::storage(vec![]);
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::CryptsetupStatus {
@@ -2029,6 +2054,7 @@ $ cryptsetup luksHeaderBackup --header-backup-file /var/lib/braid/luks-headers/b
             );
         let err = ensure_luks_open(
             &runner,
+            &fs,
             &disk("vanished"),
             &ByIdPath::parse("/dev/disk/by-id/vanished-disk").unwrap(),
             &MockBackingPathResolver::default(),
@@ -2054,6 +2080,7 @@ $ cryptsetup luksHeaderBackup --header-backup-file /var/lib/braid/luks-headers/b
      */
     #[test]
     fn ensure_luks_open_with_key_file_exit_2_mentions_passphrase() {
+        let fs = MockFs::storage(vec![]);
         let kf = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(kf.path(), b"badkey").unwrap();
         let runner = MockRunner::default()
@@ -2078,6 +2105,7 @@ $ cryptsetup luksHeaderBackup --header-backup-file /var/lib/braid/luks-headers/b
             );
         let err = ensure_luks_open_with_key_file(
             &runner,
+            &fs,
             &disk("testdisk"),
             &ByIdPath::parse("/dev/disk/by-id/test-disk").unwrap(),
             &MockBackingPathResolver::default(),
@@ -2103,6 +2131,7 @@ $ cryptsetup luksHeaderBackup --header-backup-file /var/lib/braid/luks-headers/b
      */
     #[test]
     fn ensure_luks_open_with_key_file_exit_4_mentions_device_not_found() {
+        let fs = MockFs::storage(vec![]);
         let kf = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(kf.path(), b"key").unwrap();
         let runner = MockRunner::default()
@@ -2127,6 +2156,7 @@ $ cryptsetup luksHeaderBackup --header-backup-file /var/lib/braid/luks-headers/b
             );
         let err = ensure_luks_open_with_key_file(
             &runner,
+            &fs,
             &disk("vanished"),
             &ByIdPath::parse("/dev/disk/by-id/vanished-disk").unwrap(),
             &MockBackingPathResolver::default(),
@@ -2152,6 +2182,7 @@ $ cryptsetup luksHeaderBackup --header-backup-file /var/lib/braid/luks-headers/b
      */
     #[test]
     fn ensure_luks_open_inactive_mapper_runs_open() {
+        let fs = MockFs::storage(vec![]);
         let by_id = ByIdPath::parse("/dev/disk/by-id/disk1").unwrap();
         let runner = MockRunner::default()
             .with_output(
@@ -2176,6 +2207,7 @@ $ cryptsetup luksHeaderBackup --header-backup-file /var/lib/braid/luks-headers/b
 
         ensure_luks_open(
             &runner,
+            &fs,
             &disk("disk1"),
             &by_id,
             &MockBackingPathResolver::default(),
@@ -2208,6 +2240,7 @@ $ cryptsetup luksHeaderBackup --header-backup-file /var/lib/braid/luks-headers/b
     fn ensure_luks_open_active_mapper_matching_uuid_skips_open() {
         let by_id = ByIdPath::parse("/dev/disk/by-id/disk1").unwrap();
         let uuid = "11111111-1111-1111-1111-111111111111";
+        let fs = MockFs::storage(vec![]).with_luks_dm("braid-disk1", uuid);
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::CryptsetupStatus {
@@ -2220,18 +2253,20 @@ $ cryptsetup luksHeaderBackup --header-backup-file /var/lib/braid/luks-headers/b
                     device: by_id.as_str().to_owned(),
                 },
                 luks_uuid_output(by_id.as_str(), uuid),
-            )
-            .with_output(
-                CmdRequest::CryptsetupLuksUuid {
-                    device: "/dev/vdb".into(),
-                },
-                luks_uuid_output("/dev/vdb", uuid),
             );
 
         let resolver =
             MockBackingPathResolver::default().with_path("/dev/disk/by-id/disk1", "/dev/vdb");
 
-        ensure_luks_open(&runner, &disk("disk1"), &by_id, &resolver, &zpass("pass")).unwrap();
+        ensure_luks_open(
+            &runner,
+            &fs,
+            &disk("disk1"),
+            &by_id,
+            &resolver,
+            &zpass("pass"),
+        )
+        .unwrap();
 
         assert_eq!(
             runner.requests(),
@@ -2241,9 +2276,6 @@ $ cryptsetup luksHeaderBackup --header-backup-file /var/lib/braid/luks-headers/b
                 },
                 CmdRequest::CryptsetupLuksUuid {
                     device: by_id.as_str().to_owned()
-                },
-                CmdRequest::CryptsetupLuksUuid {
-                    device: "/dev/vdb".into(),
                 },
             ]
         );
@@ -2260,6 +2292,7 @@ $ cryptsetup luksHeaderBackup --header-backup-file /var/lib/braid/luks-headers/b
      */
     #[test]
     fn classify_mapper_ownership_backing_path_mismatch_errors() {
+        let fs = MockFs::storage(vec![]);
         let by_id = ByIdPath::parse("/dev/disk/by-id/disk1").unwrap();
         let runner = MockRunner::default().with_output(
             CmdRequest::CryptsetupStatus {
@@ -2272,6 +2305,7 @@ $ cryptsetup luksHeaderBackup --header-backup-file /var/lib/braid/luks-headers/b
 
         let err = classify_mapper_ownership(
             &runner,
+            &fs,
             &disk("disk1"),
             &MapperName::from_basename("braid-disk1".into()),
             &by_id,
@@ -2313,24 +2347,19 @@ $ cryptsetup luksHeaderBackup --header-backup-file /var/lib/braid/luks-headers/b
     fn classify_mapper_ownership_backing_path_and_uuid_match_is_owned() {
         let by_id = ByIdPath::parse("/dev/disk/by-id/disk1").unwrap();
         let uuid = "11111111-1111-1111-1111-111111111111";
-        let runner = MockRunner::default()
-            .with_output(
-                CmdRequest::CryptsetupStatus {
-                    mapper: MapperName::from_basename("braid-disk1".into()),
-                },
-                crypt_status_active("braid-disk1", "/dev/vdb"),
-            )
-            .with_output(
-                CmdRequest::CryptsetupLuksUuid {
-                    device: "/dev/vdb".into(),
-                },
-                luks_uuid_output("/dev/vdb", uuid),
-            );
+        let fs = MockFs::storage(vec![]).with_luks_dm("braid-disk1", uuid);
+        let runner = MockRunner::default().with_output(
+            CmdRequest::CryptsetupStatus {
+                mapper: MapperName::from_basename("braid-disk1".into()),
+            },
+            crypt_status_active("braid-disk1", "/dev/vdb"),
+        );
         let resolver =
             MockBackingPathResolver::default().with_path("/dev/disk/by-id/disk1", "/dev/vdb");
 
         let ownership = classify_mapper_ownership(
             &runner,
+            &fs,
             &disk("disk1"),
             &MapperName::from_basename("braid-disk1".into()),
             &by_id,
@@ -2352,6 +2381,7 @@ $ cryptsetup luksHeaderBackup --header-backup-file /var/lib/braid/luks-headers/b
      */
     #[test]
     fn classify_mapper_ownership_expected_path_resolve_error_is_distinct() {
+        let fs = MockFs::storage(vec![]);
         let by_id = ByIdPath::parse("/dev/disk/by-id/disk1").unwrap();
         let runner = MockRunner::default().with_output(
             CmdRequest::CryptsetupStatus {
@@ -2364,6 +2394,7 @@ $ cryptsetup luksHeaderBackup --header-backup-file /var/lib/braid/luks-headers/b
 
         let err = classify_mapper_ownership(
             &runner,
+            &fs,
             &disk("disk1"),
             &MapperName::from_basename("braid-disk1".into()),
             &by_id,
@@ -2396,6 +2427,7 @@ $ cryptsetup luksHeaderBackup --header-backup-file /var/lib/braid/luks-headers/b
      */
     #[test]
     fn classify_mapper_ownership_backing_path_resolve_error_names_backing() {
+        let fs = MockFs::storage(vec![]);
         let by_id = ByIdPath::parse("/dev/disk/by-id/disk1").unwrap();
         let runner = MockRunner::default().with_output(
             CmdRequest::CryptsetupStatus {
@@ -2409,6 +2441,7 @@ $ cryptsetup luksHeaderBackup --header-backup-file /var/lib/braid/luks-headers/b
 
         let err = classify_mapper_ownership(
             &runner,
+            &fs,
             &disk("disk1"),
             &MapperName::from_basename("braid-disk1".into()),
             &by_id,
@@ -2441,6 +2474,7 @@ $ cryptsetup luksHeaderBackup --header-backup-file /var/lib/braid/luks-headers/b
      */
     #[test]
     fn ensure_luks_open_backing_resolve_error_preserves_remediation() {
+        let fs = MockFs::storage(vec![]);
         let by_id = ByIdPath::parse("/dev/disk/by-id/disk1").unwrap();
         let runner = MockRunner::default().with_output(
             CmdRequest::CryptsetupStatus {
@@ -2451,8 +2485,15 @@ $ cryptsetup luksHeaderBackup --header-backup-file /var/lib/braid/luks-headers/b
         let resolver = MockBackingPathResolver::default()
             .with_error("/dev/disk/by-id/disk1", std::io::ErrorKind::NotFound);
 
-        let err = ensure_luks_open(&runner, &disk("disk1"), &by_id, &resolver, &zpass("pass"))
-            .unwrap_err();
+        let err = ensure_luks_open(
+            &runner,
+            &fs,
+            &disk("disk1"),
+            &by_id,
+            &resolver,
+            &zpass("pass"),
+        )
+        .unwrap_err();
         let msg = err.to_string();
 
         match &err {
@@ -2485,6 +2526,7 @@ $ cryptsetup luksHeaderBackup --header-backup-file /var/lib/braid/luks-headers/b
         let by_id = ByIdPath::parse("/dev/disk/by-id/disk1").unwrap();
         let expected_uuid = "11111111-1111-1111-1111-111111111111";
         let found_uuid = "99999999-9999-9999-9999-999999999999";
+        let fs = MockFs::storage(vec![]).with_luks_dm("braid-disk1", found_uuid);
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::CryptsetupStatus {
@@ -2497,19 +2539,20 @@ $ cryptsetup luksHeaderBackup --header-backup-file /var/lib/braid/luks-headers/b
                     device: by_id.as_str().to_owned(),
                 },
                 luks_uuid_output(by_id.as_str(), expected_uuid),
-            )
-            .with_output(
-                CmdRequest::CryptsetupLuksUuid {
-                    device: "/dev/vdz".into(),
-                },
-                luks_uuid_output("/dev/vdz", found_uuid),
             );
 
         let resolver =
             MockBackingPathResolver::default().with_path("/dev/disk/by-id/disk1", "/dev/vdz");
 
-        let err = ensure_luks_open(&runner, &disk("disk1"), &by_id, &resolver, &zpass("pass"))
-            .unwrap_err();
+        let err = ensure_luks_open(
+            &runner,
+            &fs,
+            &disk("disk1"),
+            &by_id,
+            &resolver,
+            &zpass("pass"),
+        )
+        .unwrap_err();
 
         match err {
             LuksError::MapperOwnership(MapperOwnershipFailure::Conflict {
@@ -2544,6 +2587,7 @@ $ cryptsetup luksHeaderBackup --header-backup-file /var/lib/braid/luks-headers/b
      */
     #[test]
     fn ensure_luks_open_active_mapper_null_device_conflicts() {
+        let fs = MockFs::storage(vec![]);
         let by_id = ByIdPath::parse("/dev/disk/by-id/disk1").unwrap();
         let expected_uuid = "11111111-1111-1111-1111-111111111111";
         let runner = MockRunner::default()
@@ -2562,6 +2606,7 @@ $ cryptsetup luksHeaderBackup --header-backup-file /var/lib/braid/luks-headers/b
 
         let err = ensure_luks_open(
             &runner,
+            &fs,
             &disk("disk1"),
             &by_id,
             &MockBackingPathResolver::default(),
@@ -2584,16 +2629,18 @@ $ cryptsetup luksHeaderBackup --header-backup-file /var/lib/braid/luks-headers/b
     }
 
     /*
-     * Intent: an active mapper backed by a non-LUKS device is rejected as a
-     *   mapper conflict with no found UUID.
-     * Why it exists: a mapper name can be aliased to something that no longer
-     *   reports a LUKS header; this is ownership failure, not successful reuse.
-     * Scenario: cryptsetup status names /dev/vdz, but luksUUID says it is not LUKS.
+     * Intent: an active mapper whose dm UUID is not a cryptsetup LUKS one is
+     *   rejected as a mapper conflict with no found UUID.
+     * Why it exists: a mapper name can be taken by a non-LUKS mapping (plain
+     *   dm-crypt, a hand-made dmsetup device); this is ownership failure, not
+     *   successful reuse.
+     * Scenario: braid-disk1 is a plain dm-crypt mapping over /dev/vdz.
      */
     #[test]
     fn ensure_luks_open_active_mapper_non_luks_backing_conflicts() {
         let by_id = ByIdPath::parse("/dev/disk/by-id/disk1").unwrap();
         let expected_uuid = "11111111-1111-1111-1111-111111111111";
+        let fs = MockFs::storage(vec![]).with_raw_dm("braid-disk1", "CRYPT-PLAIN-braid-disk1");
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::CryptsetupStatus {
@@ -2606,19 +2653,20 @@ $ cryptsetup luksHeaderBackup --header-backup-file /var/lib/braid/luks-headers/b
                     device: by_id.as_str().to_owned(),
                 },
                 luks_uuid_output(by_id.as_str(), expected_uuid),
-            )
-            .with_output(
-                CmdRequest::CryptsetupLuksUuid {
-                    device: "/dev/vdz".into(),
-                },
-                luks_uuid_not_luks("/dev/vdz"),
             );
 
         let resolver =
             MockBackingPathResolver::default().with_path("/dev/disk/by-id/disk1", "/dev/vdz");
 
-        let err = ensure_luks_open(&runner, &disk("disk1"), &by_id, &resolver, &zpass("pass"))
-            .unwrap_err();
+        let err = ensure_luks_open(
+            &runner,
+            &fs,
+            &disk("disk1"),
+            &by_id,
+            &resolver,
+            &zpass("pass"),
+        )
+        .unwrap_err();
 
         assert!(matches!(
             err,
@@ -2644,6 +2692,7 @@ $ cryptsetup luksHeaderBackup --header-backup-file /var/lib/braid/luks-headers/b
     fn ensure_luks_open_with_key_file_active_mapper_matching_uuid_skips_open() {
         let by_id = ByIdPath::parse("/dev/disk/by-id/disk1").unwrap();
         let uuid = "11111111-1111-1111-1111-111111111111";
+        let fs = MockFs::storage(vec![]).with_luks_dm("braid-disk1", uuid);
         let kf = tempfile::NamedTempFile::new().unwrap();
         let runner = MockRunner::default()
             .with_output(
@@ -2657,18 +2706,12 @@ $ cryptsetup luksHeaderBackup --header-backup-file /var/lib/braid/luks-headers/b
                     device: by_id.as_str().to_owned(),
                 },
                 luks_uuid_output(by_id.as_str(), uuid),
-            )
-            .with_output(
-                CmdRequest::CryptsetupLuksUuid {
-                    device: "/dev/vdb".into(),
-                },
-                luks_uuid_output("/dev/vdb", uuid),
             );
 
         let resolver =
             MockBackingPathResolver::default().with_path("/dev/disk/by-id/disk1", "/dev/vdb");
 
-        ensure_luks_open_with_key_file(&runner, &disk("disk1"), &by_id, &resolver, kf.path())
+        ensure_luks_open_with_key_file(&runner, &fs, &disk("disk1"), &by_id, &resolver, kf.path())
             .unwrap();
 
         assert!(
@@ -2693,6 +2736,7 @@ $ cryptsetup luksHeaderBackup --header-backup-file /var/lib/braid/luks-headers/b
         let by_id = ByIdPath::parse("/dev/disk/by-id/disk1").unwrap();
         let expected_uuid = "11111111-1111-1111-1111-111111111111";
         let found_uuid = "99999999-9999-9999-9999-999999999999";
+        let fs = MockFs::storage(vec![]).with_luks_dm("braid-disk1", found_uuid);
         let kf = tempfile::NamedTempFile::new().unwrap();
         let runner = MockRunner::default()
             .with_output(
@@ -2706,20 +2750,20 @@ $ cryptsetup luksHeaderBackup --header-backup-file /var/lib/braid/luks-headers/b
                     device: by_id.as_str().to_owned(),
                 },
                 luks_uuid_output(by_id.as_str(), expected_uuid),
-            )
-            .with_output(
-                CmdRequest::CryptsetupLuksUuid {
-                    device: "/dev/vdz".into(),
-                },
-                luks_uuid_output("/dev/vdz", found_uuid),
             );
 
         let resolver =
             MockBackingPathResolver::default().with_path("/dev/disk/by-id/disk1", "/dev/vdz");
 
-        let err =
-            ensure_luks_open_with_key_file(&runner, &disk("disk1"), &by_id, &resolver, kf.path())
-                .unwrap_err();
+        let err = ensure_luks_open_with_key_file(
+            &runner,
+            &fs,
+            &disk("disk1"),
+            &by_id,
+            &resolver,
+            kf.path(),
+        )
+        .unwrap_err();
 
         assert!(matches!(
             err,
@@ -2742,6 +2786,7 @@ $ cryptsetup luksHeaderBackup --header-backup-file /var/lib/braid/luks-headers/b
      */
     #[test]
     fn ensure_luks_open_with_key_file_active_mapper_null_device_conflicts() {
+        let fs = MockFs::storage(vec![]);
         let by_id = ByIdPath::parse("/dev/disk/by-id/disk1").unwrap();
         let expected_uuid = "11111111-1111-1111-1111-111111111111";
         let kf = tempfile::NamedTempFile::new().unwrap();
@@ -2761,6 +2806,7 @@ $ cryptsetup luksHeaderBackup --header-backup-file /var/lib/braid/luks-headers/b
 
         let err = ensure_luks_open_with_key_file(
             &runner,
+            &fs,
             &disk("disk1"),
             &by_id,
             &MockBackingPathResolver::default(),
@@ -2783,6 +2829,7 @@ $ cryptsetup luksHeaderBackup --header-backup-file /var/lib/braid/luks-headers/b
      */
     #[test]
     fn ensure_luks_open_malformed_active_status_returns_parse_error() {
+        let fs = MockFs::storage(vec![]);
         let by_id = ByIdPath::parse("/dev/disk/by-id/disk1").unwrap();
         let runner = MockRunner::default().with_output(
             CmdRequest::CryptsetupStatus {
@@ -2793,6 +2840,7 @@ $ cryptsetup luksHeaderBackup --header-backup-file /var/lib/braid/luks-headers/b
 
         let err = ensure_luks_open(
             &runner,
+            &fs,
             &disk("disk1"),
             &by_id,
             &MockBackingPathResolver::default(),
@@ -2807,16 +2855,18 @@ $ cryptsetup luksHeaderBackup --header-backup-file /var/lib/braid/luks-headers/b
     }
 
     /*
-     * Intent: invalid UUID text from an active backing device propagates as
-     *   LuksError::Parse, not a mapper-ownership failure.
+     * Intent: invalid UUID text from the configured disk's header propagates
+     *   as LuksError::Parse, not a mapper-ownership failure.
      * Why it exists: an exit-0 luksUUID response with malformed text is parser
-     *   drift, while a non-LUKS exit is an ownership conflict.
-     * Scenario: requested by-id UUID parses, but backing luksUUID emits junk.
+     *   drift; it must not read as a conflict with the open mapper.
+     * Scenario: braid-disk1 is open over the configured disk, but luksUUID on
+     *   the by-id path emits junk.
      */
     #[test]
-    fn ensure_luks_open_invalid_backing_uuid_returns_parse_error() {
+    fn ensure_luks_open_invalid_expected_uuid_returns_parse_error() {
         let by_id = ByIdPath::parse("/dev/disk/by-id/disk1").unwrap();
-        let expected_uuid = "11111111-1111-1111-1111-111111111111";
+        let fs = MockFs::storage(vec![])
+            .with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111");
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::CryptsetupStatus {
@@ -2828,25 +2878,86 @@ $ cryptsetup luksHeaderBackup --header-backup-file /var/lib/braid/luks-headers/b
                 CmdRequest::CryptsetupLuksUuid {
                     device: by_id.as_str().to_owned(),
                 },
-                luks_uuid_output(by_id.as_str(), expected_uuid),
-            )
-            .with_output(
-                CmdRequest::CryptsetupLuksUuid {
-                    device: "/dev/vdb".into(),
-                },
-                luks_uuid_invalid("/dev/vdb"),
+                luks_uuid_invalid(by_id.as_str()),
             );
 
         let resolver =
             MockBackingPathResolver::default().with_path("/dev/disk/by-id/disk1", "/dev/vdb");
 
-        let err = ensure_luks_open(&runner, &disk("disk1"), &by_id, &resolver, &zpass("pass"))
-            .unwrap_err();
+        let err = ensure_luks_open(
+            &runner,
+            &fs,
+            &disk("disk1"),
+            &by_id,
+            &resolver,
+            &zpass("pass"),
+        )
+        .unwrap_err();
 
         assert!(matches!(
             err,
             LuksError::Parse(crate::parse::ParseError::InvalidText { .. })
         ));
+    }
+
+    /*
+     * Intent: an open mapper whose dm UUID cannot be read refuses the open
+     *   with IdentityUnreadable instead of reusing or reopening the mapper.
+     * Why it exists: without a readable identity braid can neither prove the
+     *   mapper is the configured container nor prove it is foreign, so it
+     *   must stop rather than guess.
+     * Scenario: cryptsetup status reports braid-disk1 open over the configured
+     *   disk, but the mapper is gone from /sys/block by the time braid reads
+     *   its dm UUID (closed concurrently).
+     */
+    #[test]
+    fn ensure_luks_open_unreadable_dm_identity_refuses_open() {
+        let by_id = ByIdPath::parse("/dev/disk/by-id/disk1").unwrap();
+        let fs = MockFs::storage(vec![]);
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName::from_basename("braid-disk1".into()),
+                },
+                crypt_status_active("braid-disk1", "/dev/vdb"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: by_id.as_str().to_owned(),
+                },
+                luks_uuid_output(by_id.as_str(), "11111111-1111-1111-1111-111111111111"),
+            );
+
+        let resolver =
+            MockBackingPathResolver::default().with_path("/dev/disk/by-id/disk1", "/dev/vdb");
+
+        let err = ensure_luks_open(
+            &runner,
+            &fs,
+            &disk("disk1"),
+            &by_id,
+            &resolver,
+            &zpass("pass"),
+        )
+        .unwrap_err();
+
+        match &err {
+            LuksError::MapperOwnership(MapperOwnershipFailure::IdentityUnreadable {
+                name,
+                detail,
+            }) => {
+                assert_eq!(name, "disk1");
+                assert_eq!(detail, "no device-mapper device by that name");
+            }
+            other => panic!("expected IdentityUnreadable, got {other:?}"),
+        }
+        assert!(
+            !runner
+                .requests()
+                .iter()
+                .any(|request| matches!(request, CmdRequest::CryptsetupLuksOpen { .. })),
+            "must not run cryptsetup open without a proven mapper identity"
+        );
     }
 
     /*

@@ -359,7 +359,7 @@ struct ReplaceArgs {
     /// Disk spec for the replacement disk: NAME=/dev/disk/by-id/... (e.g. wd1=/dev/disk/by-id/ata-WDC_WD120EFBX)
     #[arg(long, value_name = "NAME=/dev/disk/by-id/...")]
     new: String,
-    /// Optional cross-check for a dead disk: assert the missing btrfs devid. braid refuses if it disagrees with the devid pool.json records for --old. Never required.
+    /// Optional cross-check for a dead disk: assert the missing btrfs devid. braid refuses if it disagrees with --old's devid: the one its still-open mapper holds if its disk was hot-unplugged, else the one pool.json records. Never required.
     #[arg(long)]
     missing_id: Option<u64>,
     /// Directory containing braid.key to enroll in the new disk (LUKS slot 1)

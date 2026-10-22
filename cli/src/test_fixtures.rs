@@ -146,10 +146,10 @@ pub(crate) use doctor::{
     cls, config_with_ups_enabled, config_without_ups, device_usage_raw,
     device_usage_three_one_tight, device_usage_three_two_tight, device_usage_two_healthy,
     device_usage_two_tight, df_json, df_json_fail, doctor_btrfs_show,
-    doctor_cryptsetup_status_active, doctor_cryptsetup_uuid_ok, human_options, isolated_paths,
-    mountpoint_fail, mountpoint_ok, parsed_doctor_ctx, pool_state_runner,
-    smart_selftest_runner_for, smartctl_selftest_json, systemctl_show_active_state_output, ups_ctx,
-    valid_config_json, write_temp,
+    doctor_cryptsetup_status_active, human_options, isolated_paths, mountpoint_fail, mountpoint_ok,
+    parsed_doctor_ctx, pool_state_dm, pool_state_runner, smart_selftest_runner_for,
+    smartctl_selftest_json, systemctl_show_active_state_output, ups_ctx, valid_config_json,
+    write_temp,
 };
 pub(crate) use enroll_key_file::{
     enroll_add_keyfile_fail, enroll_add_keyfile_ok, enroll_by_id, enroll_discovery_two_disks,
@@ -166,8 +166,8 @@ pub(crate) use idle::{
 };
 pub(crate) use lock::{
     LockNoopSleeper, RecordingRunner as LockRecordingRunner, lock_count_forget_steps, lock_err_raw,
-    lock_forget_step_devices, lock_fs, lock_mounted_runner, lock_ok_raw, lock_test_config,
-    lock_test_membership, lock_umount_failed_runner, lock_with_fsid_probe_mocks,
+    lock_forget_step_devices, lock_fs, lock_member_fs, lock_mounted_runner, lock_ok_raw,
+    lock_test_config, lock_test_membership, lock_umount_failed_runner, lock_with_fsid_probe_mocks,
 };
 pub(crate) use monitor::{
     BTRFS_SHOW_2DISK_1MISSING, BTRFS_SHOW_2DISK_NO_UUID, MONITOR_FSID, MonitorOverride,
@@ -198,12 +198,12 @@ pub(crate) use scrub::{
     scrub_status_interrupted, scrub_status_never, scrub_status_running, scrub_status_unknown,
 };
 pub(crate) use shared::{
-    DeviceUsageSpec, MockBackingPathResolver, MockFs, PoolFixture, RecordingSleeper,
-    TEST_PASSPHRASE_BYTES, assert_exact_lines_in_order, assert_lines_in_order,
-    btrfs_remove_devid_error, btrfs_remove_path_error, canonical_luks_uuid, device_usage_raw_body,
-    disk_member, disk_member_with, line_index, lsblk_device_json_output, mock_ok,
-    mock_virtio_backing_path_resolver, mock_virtio_offset_backing_path_resolver, read_fixture,
-    read_stable_fixture, test_uuid, with_lsblk_hw_info,
+    DeviceUsageSpec, MockBackingPathResolver, MockDmTable, MockFs, PoolFixture, RecordingSleeper,
+    SwitchingFs, TEST_PASSPHRASE_BYTES, assert_exact_lines_in_order, assert_lines_in_order,
+    btrfs_remove_devid_error, btrfs_remove_path_error, canonical_dm_table, canonical_luks_uuid,
+    device_usage_raw_body, disk_member, disk_member_with, line_index, lsblk_device_json_output,
+    mock_ok, mock_virtio_backing_path_resolver, mock_virtio_offset_backing_path_resolver,
+    read_fixture, read_stable_fixture, test_uuid, with_lsblk_hw_info,
 };
 pub(crate) use status::{
     status_btrfs_device_usage_raw_1disk, status_btrfs_df_single, status_btrfs_scrub_aborted,

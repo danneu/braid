@@ -15,6 +15,9 @@ pub mod credential_verify;
 /// Sibling to `credential_verify` (borrowed-credential verification).
 pub mod credential;
 pub mod discover;
+/// An open mapper's LUKS identity from the kernel's device-mapper table, so a
+/// gone or unreadable backing disk cannot hide which container it maps.
+pub(crate) mod dm_identity;
 pub mod doctor;
 pub mod enroll_key_file;
 pub mod filesystem;

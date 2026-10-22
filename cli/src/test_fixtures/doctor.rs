@@ -10,7 +10,7 @@
 //! constructors" section there); doctor.rs holds the private fields, so this
 //! module cannot field-literal-construct it directly.
 
-use super::shared::{DeviceUsageSpec, device_usage_raw_body};
+use super::shared::{DeviceUsageSpec, MockDmTable, device_usage_raw_body};
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, MockRunner, RawCommandOutput};
 use crate::doctor::{DiskState, DoctorContext, DoctorOptions};
 use crate::filesystem::Filesystem;
@@ -107,10 +107,12 @@ pub(crate) fn ups_ctx<'a, R: CommandRunner>(
 /// gate: a registered block device proceeds to the LUKS probe, a registered
 /// existing-but-not-block path renders `NotBlock`, and an unregistered path
 /// renders `Missing` -- the same two-set idiom as `probe::tests::MockFs`.
+/// `dm` serves the open mappers' LUKS identities under `/sys/block`.
 pub(crate) struct DoctorMockFs {
     mountinfo: String,
     block_devices: Vec<String>,
     existing_paths: Vec<String>,
+    dm: MockDmTable,
 }
 
 impl DoctorMockFs {
@@ -122,6 +124,7 @@ impl DoctorMockFs {
                     .into(),
             block_devices: vec![],
             existing_paths: vec![],
+            dm: MockDmTable::default(),
         }
     }
 
@@ -132,6 +135,7 @@ impl DoctorMockFs {
             mountinfo: String::new(),
             block_devices: vec![],
             existing_paths: vec![],
+            dm: MockDmTable::default(),
         }
     }
 
@@ -146,6 +150,18 @@ impl DoctorMockFs {
     /// `classify_disk_state` renders `NotBlock` without touching the runner.
     pub(crate) fn with_existing_path(mut self, path: &str) -> Self {
         self.existing_paths.push(path.to_owned());
+        self
+    }
+
+    /// Add an active LUKS2 mapping to the sysfs device-mapper table.
+    pub(crate) fn with_luks_dm(mut self, mapper: &str, luks_uuid: &str) -> Self {
+        self.dm = self.dm.with_luks(mapper, luks_uuid);
+        self
+    }
+
+    /// Add every device of `table` to the sysfs device-mapper table.
+    pub(crate) fn with_dm(mut self, table: MockDmTable) -> Self {
+        self.dm = self.dm.merge(table);
         self
     }
 }
@@ -163,6 +179,8 @@ impl Filesystem for DoctorMockFs {
     fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
         if path == "/proc/self/mountinfo" {
             Ok(self.mountinfo.clone())
+        } else if let Some(body) = self.dm.read_to_string(path) {
+            Ok(body)
         } else {
             Err(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
@@ -171,8 +189,8 @@ impl Filesystem for DoctorMockFs {
         }
     }
 
-    fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
-        Ok(vec![])
+    fn list_dir(&self, path: &str) -> Result<Vec<String>, std::io::Error> {
+        Ok(self.dm.list_dir(path).unwrap_or_default())
     }
 
     fn create_dir_all(&self, _path: &str) -> Result<(), std::io::Error> {
@@ -355,6 +373,16 @@ pub(crate) fn pool_state_runner(
     }
 
     runner
+}
+
+/// The device-mapper table matching `pool_state_runner`'s devices: each
+/// mapper open over the LUKS UUID its tuple names.
+pub(crate) fn pool_state_dm(pool_devices: &[(&str, u64, &str, LuksUuid)]) -> MockDmTable {
+    pool_devices
+        .iter()
+        .fold(MockDmTable::default(), |table, (mapper, _, _, uuid)| {
+            table.with_luks(mapper, uuid.as_str())
+        })
 }
 
 /// Bare `RawCommandOutput` (not paired with a request) because braid-online

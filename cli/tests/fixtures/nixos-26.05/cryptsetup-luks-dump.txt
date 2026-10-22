@@ -3,7 +3,7 @@ Version:       	2
 Epoch:         	3
 Metadata area: 	16384 [bytes]
 Keyslots area: 	16744448 [bytes]
-UUID:          	0b6dc78b-dc0d-4cb4-9f5e-1d89b86e9c73
+UUID:          	3df30722-9efd-4381-9e14-a5db4933d4ce
 Label:         	braid-vdb
 Subsystem:     	(no subsystem)
 Flags:       	(no flags)
@@ -23,10 +23,10 @@ Keyslots:
 	Cipher key: 512 bits
 	PBKDF:      argon2id
 	Time cost:  7
-	Memory:     377678
+	Memory:     377424
 	Threads:    1
-	Salt:       04 ef 93 04 d5 cb e1 c1 5a 92 19 ec c0 d4 28 43 
-	            1a 55 3e 03 2e f2 fd 47 cb 6b 4d 3b aa ea 5c 8d 
+	Salt:       99 58 a7 a9 ed d1 5d 01 08 67 62 7e 6c c5 c9 1b 
+	            29 15 af 25 5e 07 06 d7 4e b9 c9 bb a6 ca 07 ee 
 	AF stripes: 4000
 	AF hash:    sha256
 	Area offset:32768 [bytes]
@@ -36,8 +36,8 @@ Tokens:
 Digests:
   0: pbkdf2
 	Hash:       sha256
-	Iterations: 641723
-	Salt:       5a 1d 38 aa 14 49 72 c8 d8 e8 03 4d e2 04 84 85 
-	            f2 f4 c4 73 20 91 2d 05 7f be 32 28 09 14 a0 fa 
-	Digest:     f6 ac 43 70 f7 56 8d 80 fc 89 cf ea 4c 43 81 d5 
-	            8e 71 10 c3 80 f8 17 48 c8 77 55 2f c9 15 8e f2 
+	Iterations: 634731
+	Salt:       66 46 bb eb 5a cf d1 5c 55 a7 72 59 87 35 98 05 
+	            48 76 d7 16 23 26 3f 15 9d 02 9c c4 1c ce e7 03 
+	Digest:     a8 6d 9f 52 bd 7c bc b9 a0 2c 9e 5c 6d 32 da f8 
+	            76 f5 5b 8b d6 8c 96 6f 75 1e 11 57 54 ab 65 0e 

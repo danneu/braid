@@ -310,9 +310,11 @@ struct CompactDrive {
 }
 
 /// Resolve every btrfs-surfaced devid to the display name status should show.
-/// Present devices mirror `build_disk_views`'s UUID-first name rule; missing
-/// and null-underlying entries use persisted devid only as the no-live-UUID
-/// fallback authorized for display joins.
+/// Present and null-underlying devices mirror `build_disk_views`'s UUID-first
+/// name rule (a null-underlying mapper keeps its LUKS UUID in the kernel's
+/// device-mapper table); only btrfs-MISSING devids that no open mapper
+/// accounts for (`PoolState::devid_only_missing`) join through persisted
+/// devid, the no-live-UUID fallback authorized for display joins.
 /// `membership` is either `load_membership`-validated or the empty fallback used
 /// when status degrades a load fault, so `by_devid`'s `DuplicateDevid` remains
 /// unreachable here and is treated as an unnamed join rather than refused. This
@@ -328,17 +330,14 @@ fn build_devid_names(pool: &PoolState, membership: &PoolMembership) -> HashMap<D
     }
 
     for nu in &pool.null_underlying {
-        if let Some((_, member)) = membership.by_devid(nu.devid).ok().flatten() {
-            names
-                .entry(nu.devid)
-                .or_insert_with(|| member.name.as_str().to_owned());
-        }
+        let name = membership::present_display_name(membership.by_uuid(&nu.luks_uuid), &nu.mapper);
+        names.insert(nu.devid, name);
     }
 
-    for devid in &pool.missing_devids {
-        if let Some((_, member)) = membership.by_devid(*devid).ok().flatten() {
+    for devid in pool.devid_only_missing() {
+        if let Some((_, member)) = membership.by_devid(devid).ok().flatten() {
             names
-                .entry(*devid)
+                .entry(devid)
                 .or_insert_with(|| member.name.as_str().to_owned());
         }
     }
@@ -1108,10 +1107,6 @@ fn build_disk_views<R: CommandRunner>(
     device_stats: &BtrfsDeviceStatsOutput,
 ) -> DiskViews {
     let pool_uuid_set: HashSet<&LuksUuid> = pool.devices.iter().map(|d| &d.luks_uuid).collect();
-    // Alert-confirmed missing devids gate the compact row's persisted devid:
-    // membership devids are a display fallback, shown only when live btrfs
-    // currently reports the devid missing (decision 024 display-join rule).
-    let alert_devids: HashSet<Devid> = pool.alert_missing_devids().into_iter().collect();
 
     let mut disk_reports = Vec::new();
     let mut human_details = Vec::new();
@@ -1314,9 +1309,7 @@ fn build_disk_views<R: CommandRunner>(
             CompactDrive {
                 name: cd.name.as_str().to_owned(),
                 device_short: "-".to_owned(),
-                devid: recorded
-                    .and_then(|(_, m)| m.devid)
-                    .filter(|d| alert_devids.contains(d)),
+                devid: unpooled_live_devid(pool, recorded),
                 status,
             },
         ));
@@ -1363,9 +1356,7 @@ fn build_disk_views<R: CommandRunner>(
             CompactDrive {
                 name: failure.name.as_str().to_owned(),
                 device_short: "-".to_owned(),
-                devid: recorded
-                    .and_then(|(_, m)| m.devid)
-                    .filter(|d| alert_devids.contains(d)),
+                devid: unpooled_live_devid(pool, recorded),
                 status: DiskStatus::Unknown,
             },
         ));
@@ -1386,6 +1377,26 @@ fn build_disk_views<R: CommandRunner>(
         human_details,
         compact_drives,
     }
+}
+
+/// The live btrfs devid for a recorded member that is not a present pool
+/// device, which the compact `Drives:` row shows so the operator can feed it
+/// to `remove-missing` and `replace`. An open mapper whose disk is gone binds
+/// by the LUKS UUID it records, so its devid comes from that mapper whatever
+/// pool.json persisted. Only a btrfs-MISSING device with no open mapper binds
+/// through the persisted devid (principles 2 and 5). Anything else is `None`,
+/// so a stale persisted devid is never shown as live.
+fn unpooled_live_devid(
+    pool: &PoolState,
+    recorded: Option<(&LuksUuid, &membership::DiskMember)>,
+) -> Option<Devid> {
+    let (uuid, member) = recorded?;
+    if let Some(null_backed) = pool.null_underlying.iter().find(|n| n.luks_uuid == *uuid) {
+        return Some(null_backed.devid);
+    }
+    member
+        .devid
+        .filter(|devid| pool.devid_only_missing().any(|missing| missing == *devid))
 }
 
 // ---------------------------------------------------------------------------
@@ -5458,7 +5469,9 @@ mod tests {
             )
             .with_luks_dump_text_luks2_for(&["/dev/disk/by-id/disk1", "/dev/disk/by-id/disk2"])
             .with_mappers_closed(&["braid-toshiba1", "braid-toshiba2"]);
-        let fs = status_fs_mounted(&["/dev/disk/by-id/disk1", "/dev/disk/by-id/disk2"]);
+        let fs = status_fs_mounted(&["/dev/disk/by-id/disk1", "/dev/disk/by-id/disk2"])
+            .with_luks_dm("disk1", "11111111-1111-1111-1111-111111111111")
+            .with_luks_dm("disk2", "22222222-2222-2222-2222-222222222222");
         let config = status_config();
         let (_tmp, paths) = isolated_paths();
         membership::save_membership(&membership, &paths).unwrap();
@@ -6390,11 +6403,13 @@ mod tests {
     fn build_devid_names_covers_present_null_underlying_and_missing() {
         // Intent: the alert-name map covers every live btrfs devid source:
         // present devices, null-underlying devices, and btrfs-MISSING rows.
-        // Why it exists: missing and null-underlying rows have no live
-        // DiskReport.devid join, so they must resolve through persisted
-        // membership devids instead.
+        // Why it exists: a null-underlying mapper keeps its LUKS UUID in the
+        // dm table, so it must join membership by UUID even when pool.json
+        // holds no devid for it; only btrfs-MISSING rows have no live UUID
+        // and resolve through the persisted membership devid.
         // Scenario: a three-disk pool has one present disk, one hot-unplugged
-        // null-underlying mapper, and one btrfs-MISSING placeholder.
+        // null-underlying mapper whose member has no persisted devid, and one
+        // btrfs-MISSING placeholder.
         let (uuid1, member1) = disk_member_with(
             11,
             "toshiba1",
@@ -6402,13 +6417,8 @@ mod tests {
             Some(Devid::new(1)),
             None,
         );
-        let (uuid2, member2) = disk_member_with(
-            12,
-            "toshiba2",
-            "/dev/disk/by-id/disk2",
-            Some(Devid::new(2)),
-            None,
-        );
+        let (uuid2, member2) =
+            disk_member_with(12, "toshiba2", "/dev/disk/by-id/disk2", None, None);
         let (uuid3, member3) = disk_member_with(
             13,
             "toshiba3",
@@ -6418,7 +6428,7 @@ mod tests {
         );
         let membership = membership_from(vec![
             (uuid1.clone(), member1),
-            (uuid2, member2),
+            (uuid2.clone(), member2),
             (uuid3, member3),
         ]);
         let pool = PoolState {
@@ -6435,6 +6445,7 @@ mod tests {
             fsid: None,
             null_underlying: vec![NullUnderlyingDevice {
                 mapper: MapperName::from_basename("braid-toshiba2".to_owned()),
+                luks_uuid: uuid2,
                 devid: Devid::new(2),
             }],
         };
@@ -6735,11 +6746,12 @@ mod tests {
     fn build_disk_views_missing_member_hides_stale_persisted_devid() {
         // Intent: a missing compact row hides a persisted devid when live
         // btrfs does not currently report that devid as missing.
-        // Why it exists: persisted membership is only a fallback join key; it
-        // must not make stale devids look btrfs-authoritative in display. Like
-        // the show branch, this devid lives only in the compact projection.
-        // Scenario: pool.json remembers toshiba3 as devid 3, but live btrfs has
-        // no MISSING or null-underlying record for devid 3.
+        // Why it exists: a persisted devid joins only a btrfs-MISSING device
+        // with no open mapper; it must not make stale devids look
+        // btrfs-authoritative in display. Like the show branch, this devid
+        // lives only in the compact projection.
+        // Scenario: pool.json remembers toshiba3 as devid 3, but live btrfs
+        // reports nothing missing and toshiba3 has no open mapper.
         let (_, member) = disk_member_with(
             941,
             "toshiba3",
@@ -6759,6 +6771,154 @@ mod tests {
         assert_eq!(views.compact_drives[0].name, "toshiba3");
         assert_eq!(views.compact_drives[0].devid, None);
         assert_eq!(views.compact_drives[0].status, DiskStatus::Missing);
+    }
+
+    /// Null-backed mapper for `name` at `devid`, recording `uuid` as its dm
+    /// UUID does.
+    fn null_backed(name: &str, uuid: &LuksUuid, devid: u64) -> NullUnderlyingDevice {
+        NullUnderlyingDevice {
+            mapper: MapperName::from_basename(format!("braid-{name}")),
+            luks_uuid: uuid.clone(),
+            devid: Devid::new(devid),
+        }
+    }
+
+    #[test]
+    fn build_disk_views_null_backed_member_shows_live_devid_by_uuid() {
+        // Intent: a hot-unplugged member's compact row shows the devid btrfs
+        // holds its open mapper at, found by the LUKS UUID the mapper
+        // records, whatever devid pool.json persisted.
+        // Why it exists: status.md tells operators to feed this devid to
+        // remove-missing and replace. Joining a null-backed member through
+        // its persisted devid shows `-` when pool.json has none, and the
+        // wrong disk's devid when pool.json's devid is stale.
+        // Scenario: toshiba2 and toshiba3 are both unplugged while their
+        // mappers stay open at devids 2 and 3. pool.json never recorded
+        // toshiba3's devid, and holds a stale devid 3 for toshiba2.
+        let (uuid2, member2) = disk_member_with(
+            952,
+            "toshiba2",
+            "/dev/disk/by-id/disk2",
+            Some(Devid::new(3)),
+            None,
+        );
+        let (uuid3, member3) =
+            disk_member_with(953, "toshiba3", "/dev/disk/by-id/disk3", None, None);
+        let membership = membership_from(vec![(uuid2.clone(), member2), (uuid3.clone(), member3)]);
+        let mut config_disks = status_cfg_absent("toshiba2", "/dev/disk/by-id/disk2");
+        config_disks.extend(status_cfg_absent("toshiba3", "/dev/disk/by-id/disk3"));
+        let pool = PoolState {
+            mounted: true,
+            devices: vec![],
+            missing_count: 2,
+            missing_devids: vec![],
+            total_devices: 2,
+            fsid: None,
+            null_underlying: vec![
+                null_backed("toshiba2", &uuid2, 2),
+                null_backed("toshiba3", &uuid3, 3),
+            ],
+        };
+        let runner = MockRunner::default();
+        let stats = BtrfsDeviceStatsOutput { devices: vec![] };
+
+        let views = build_disk_views(&runner, &membership, &config_disks, &[], &pool, &stats);
+
+        let rows: Vec<(&str, Option<Devid>, DiskStatus)> = views
+            .compact_drives
+            .iter()
+            .map(|d| (d.name.as_str(), d.devid, d.status))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("toshiba2", Some(Devid::new(2)), DiskStatus::Missing),
+                ("toshiba3", Some(Devid::new(3)), DiskStatus::Missing),
+            ]
+        );
+    }
+
+    #[test]
+    fn build_disk_views_probe_failure_row_shows_null_backed_live_devid() {
+        // Intent: a member whose by-id probe failed still shows the devid its
+        // open, diskless mapper holds, found by LUKS UUID.
+        // Why it exists: the probe-failure row is the other compact row for a
+        // member outside the present loop; it must bind the same way as the
+        // config-disk row, not through pool.json's devid.
+        // Scenario: toshiba2 was unplugged, its by-id probe errors, its mapper
+        // is still open at devid 2, and pool.json never recorded a devid.
+        let (uuid2, member2) =
+            disk_member_with(962, "toshiba2", "/dev/disk/by-id/disk2", None, None);
+        let membership = membership_from(vec![(uuid2.clone(), member2)]);
+        let probe_failures = vec![ConfigProbeFailure {
+            name: DiskName::parse("toshiba2").unwrap(),
+            by_id: ByIdPath::parse("/dev/disk/by-id/disk2").unwrap(),
+        }];
+        let pool = PoolState {
+            mounted: true,
+            devices: vec![],
+            missing_count: 1,
+            missing_devids: vec![],
+            total_devices: 1,
+            fsid: None,
+            null_underlying: vec![null_backed("toshiba2", &uuid2, 2)],
+        };
+        let runner = MockRunner::default();
+        let stats = BtrfsDeviceStatsOutput { devices: vec![] };
+
+        let views = build_disk_views(&runner, &membership, &[], &probe_failures, &pool, &stats);
+
+        assert_eq!(views.compact_drives.len(), 1);
+        assert_eq!(views.compact_drives[0].name, "toshiba2");
+        assert_eq!(views.compact_drives[0].devid, Some(Devid::new(2)));
+        assert_eq!(views.compact_drives[0].status, DiskStatus::Unknown);
+    }
+
+    #[test]
+    fn build_disk_views_persisted_devid_skips_devid_an_open_mapper_holds() {
+        // Intent: a persisted devid joins a compact row only to a
+        // btrfs-MISSING devid that no open mapper accounts for.
+        // Why it exists: once btrfs promotes a hot-unplugged device to
+        // MISSING, its devid is in both sets. It belongs to the mapper's LUKS
+        // UUID, so another member's stale persisted devid must not claim it.
+        // Scenario: toshiba3 was unplugged and btrfs promoted devid 3 while
+        // its mapper stayed open. toshiba2 is also gone with no open mapper,
+        // and pool.json holds a stale devid 3 for it.
+        let (uuid2, member2) = disk_member_with(
+            972,
+            "toshiba2",
+            "/dev/disk/by-id/disk2",
+            Some(Devid::new(3)),
+            None,
+        );
+        let (uuid3, member3) =
+            disk_member_with(973, "toshiba3", "/dev/disk/by-id/disk3", None, None);
+        let membership = membership_from(vec![(uuid2, member2), (uuid3.clone(), member3)]);
+        let mut config_disks = status_cfg_absent("toshiba2", "/dev/disk/by-id/disk2");
+        config_disks.extend(status_cfg_absent("toshiba3", "/dev/disk/by-id/disk3"));
+        let pool = PoolState {
+            mounted: true,
+            devices: vec![],
+            missing_count: 1,
+            missing_devids: vec![Devid::new(3)],
+            total_devices: 2,
+            fsid: None,
+            null_underlying: vec![null_backed("toshiba3", &uuid3, 3)],
+        };
+        let runner = MockRunner::default();
+        let stats = BtrfsDeviceStatsOutput { devices: vec![] };
+
+        let views = build_disk_views(&runner, &membership, &config_disks, &[], &pool, &stats);
+
+        let rows: Vec<(&str, Option<Devid>)> = views
+            .compact_drives
+            .iter()
+            .map(|d| (d.name.as_str(), d.devid))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![("toshiba2", None), ("toshiba3", Some(Devid::new(3)))]
+        );
     }
 
     // =======================================================================
@@ -7425,12 +7585,6 @@ mod tests {
                 status_cryptsetup_status_active("disk1", "/dev/vda"),
             )
             .with_output(
-                CmdRequest::CryptsetupLuksUuid {
-                    device: "/dev/vda".into(),
-                },
-                status_cryptsetup_uuid_ok("/dev/vda", "11111111-1111-1111-1111-111111111111"),
-            )
-            .with_output(
                 CmdRequest::BtrfsFilesystemDfJson {
                     mount_point: MountPoint::new("/mnt/storage".to_owned()),
                 },
@@ -7465,8 +7619,8 @@ mod tests {
                     ]}"#,
                 ),
             )
-            // probe_config_disk for "disk1": by-id UUID = 11111111, mapper
-            // backing reports 99999999 -> mapper conflict.
+            // probe_config_disk for "disk1": by-id UUID = 11111111, the
+            // braid-disk1 dm UUID records 99999999 -> mapper conflict.
             .with_output(
                 CmdRequest::CryptsetupLuksUuid {
                     device: "/dev/disk/by-id/disk1".into(),
@@ -7490,15 +7644,10 @@ mod tests {
                     mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 status_cryptsetup_status_active("braid-disk1", "/dev/vdz"),
-            )
-            .with_output(
-                CmdRequest::CryptsetupLuksUuid {
-                    device: "/dev/vdz".into(),
-                },
-                status_cryptsetup_uuid_ok("/dev/vdz", "99999999-9999-9999-9999-999999999999"),
             );
 
-        let fs = status_fs_one_disk();
+        let fs = status_fs_one_disk()
+            .with_luks_dm("braid-disk1", "99999999-9999-9999-9999-999999999999");
         let config = status_config();
 
         membership::save_membership(&membership, &paths).unwrap();
@@ -7605,12 +7754,6 @@ mod tests {
                 status_cryptsetup_status_active("disk1", "/dev/vda"),
             )
             .with_output(
-                CmdRequest::CryptsetupLuksUuid {
-                    device: "/dev/vda".into(),
-                },
-                status_cryptsetup_uuid_ok("/dev/vda", "11111111-1111-1111-1111-111111111111"),
-            )
-            .with_output(
                 CmdRequest::BtrfsFilesystemDfJson {
                     mount_point: status_mp(),
                 },
@@ -7662,7 +7805,8 @@ mod tests {
             "/dev/disk/by-id/disk1",
             "/dev/mapper/disk1",
             "/dev/disk/by-id/disk2",
-        ]);
+        ])
+        .with_luks_dm("disk1", "11111111-1111-1111-1111-111111111111");
         let config = status_config();
 
         let built = build_status(
@@ -7757,6 +7901,10 @@ mod tests {
                 name: "disk1".into(),
                 by_id: "/dev/disk/by-id/disk1".into(),
                 source: std::io::Error::from(std::io::ErrorKind::NotFound),
+            }),
+            ProbeError::MapperOwnership(MapperOwnershipFailure::IdentityUnreadable {
+                name: "disk1".into(),
+                detail: "no device-mapper device by that name".into(),
             }),
             ProbeError::UnsupportedLuksVersion {
                 name: "disk1".into(),

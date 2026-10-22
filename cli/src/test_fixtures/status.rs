@@ -12,7 +12,7 @@
 //! local helpers still existed in `status.rs::tests`.
 
 use super::shared::{
-    DeviceUsageSpec, device_usage_raw_body, disk_member, disk_member_with, mock_ok,
+    DeviceUsageSpec, MockDmTable, device_usage_raw_body, disk_member, disk_member_with, mock_ok,
     with_lsblk_hw_info,
 };
 use crate::alert::AlertCause;
@@ -30,23 +30,32 @@ use crate::types::*;
 // Filesystem
 // ---------------------------------------------------------------------------
 
-/// Status-scoped filesystem mock that only resolves `/proc/self/mountinfo`,
-/// preserving status tests' guard against unexpected sysfs/preflight reads.
-struct MockFs {
+/// Status-scoped filesystem mock that only resolves `/proc/self/mountinfo`
+/// and the seeded device-mapper identities under `/sys/block`, preserving
+/// status tests' guard against unexpected sysfs/preflight reads.
+pub(crate) struct StatusFs {
     paths: Vec<String>,
     mountinfo: String,
+    dm: MockDmTable,
 }
 
-impl MockFs {
+impl StatusFs {
     fn new(paths: &[&str], mountinfo: &str) -> Self {
         Self {
             paths: paths.iter().map(|s| s.to_string()).collect(),
             mountinfo: mountinfo.to_owned(),
+            dm: MockDmTable::default(),
         }
+    }
+
+    /// Add an active LUKS2 mapping to the sysfs device-mapper table.
+    pub(crate) fn with_luks_dm(mut self, mapper: &str, luks_uuid: &str) -> Self {
+        self.dm = self.dm.with_luks(mapper, luks_uuid);
+        self
     }
 }
 
-impl Filesystem for MockFs {
+impl Filesystem for StatusFs {
     fn exists(&self, path: &str) -> bool {
         self.paths.contains(&path.to_string())
     }
@@ -59,41 +68,45 @@ impl Filesystem for MockFs {
         if path == "/proc/self/mountinfo" {
             return Ok(self.mountinfo.clone());
         }
-        Err(std::io::Error::new(std::io::ErrorKind::NotFound, "mock"))
+        self.dm
+            .read_to_string(path)
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "mock"))
     }
 
-    fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
-        Ok(vec![])
+    fn list_dir(&self, path: &str) -> Result<Vec<String>, std::io::Error> {
+        Ok(self.dm.list_dir(path).unwrap_or_default())
     }
 
     fn create_dir_all(&self, _path: &str) -> Result<(), std::io::Error> {
-        unreachable!("status::MockFs: read-only fixture; create_dir_all must never be called")
+        unreachable!("StatusFs: read-only fixture; create_dir_all must never be called")
     }
 }
 
 /// Mounted-btrfs mountinfo fixture with caller-supplied existing paths.
-pub(crate) fn status_fs_mounted(paths: &[&str]) -> impl Filesystem {
-    MockFs::new(
+pub(crate) fn status_fs_mounted(paths: &[&str]) -> StatusFs {
+    StatusFs::new(
         paths,
         "36 35 0:32 / /mnt/storage rw shared:1 - btrfs /dev/mapper/disk1 rw\n",
     )
 }
 
 /// Offline mountinfo fixture for status tests that must short-circuit as not mounted.
-pub(crate) fn status_fs_not_mounted(paths: &[&str]) -> impl Filesystem {
-    MockFs::new(paths, "26 25 0:23 / / rw shared:1 - ext4 /dev/sda1 rw\n")
+pub(crate) fn status_fs_not_mounted(paths: &[&str]) -> StatusFs {
+    StatusFs::new(paths, "26 25 0:23 / / rw shared:1 - ext4 /dev/sda1 rw\n")
 }
 
 /// Non-btrfs mountinfo fixture for the ext4-at-mountpoint status branch.
-pub(crate) fn status_fs_ext4(paths: &[&str]) -> impl Filesystem {
-    MockFs::new(
+pub(crate) fn status_fs_ext4(paths: &[&str]) -> StatusFs {
+    StatusFs::new(
         paths,
         "36 35 0:32 / /mnt/storage rw shared:1 - ext4 /dev/sda1 rw\n",
     )
 }
 
-/// Canonical three-disk mounted filesystem surface for status integration tests.
-pub(crate) fn status_fs_three_disk() -> impl Filesystem {
+/// Canonical three-disk mounted filesystem surface for status integration
+/// tests: each mapper records the LUKS UUID `status_runner_healthy_3disk_base`
+/// reports for its disk.
+pub(crate) fn status_fs_three_disk() -> StatusFs {
     status_fs_mounted(&[
         "/dev/disk/by-id/disk1",
         "/dev/disk/by-id/disk2",
@@ -102,11 +115,15 @@ pub(crate) fn status_fs_three_disk() -> impl Filesystem {
         "/dev/mapper/disk2",
         "/dev/mapper/disk3",
     ])
+    .with_luks_dm("disk1", "11111111-1111-1111-1111-111111111111")
+    .with_luks_dm("disk2", "22222222-2222-2222-2222-222222222222")
+    .with_luks_dm("disk3", "33333333-3333-3333-3333-333333333333")
 }
 
 /// Canonical one-disk mounted filesystem surface for status integration tests.
-pub(crate) fn status_fs_one_disk() -> impl Filesystem {
+pub(crate) fn status_fs_one_disk() -> StatusFs {
     status_fs_mounted(&["/dev/disk/by-id/disk1", "/dev/mapper/disk1"])
+        .with_luks_dm("disk1", "11111111-1111-1111-1111-111111111111")
 }
 
 // ---------------------------------------------------------------------------

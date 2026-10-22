@@ -52,7 +52,7 @@ sudo braid remove toshiba3 --yes
 6. Closes the LUKS mapper on the removed disk
 7. Updates pool.json to remove the member's UUID entry
 
-The step-6 mapper close is best-effort. Because btrfs has already committed the device removal, braid never fails the remove on the close: a failed close prints a `[warn] disk <name>: lock failed` row, and a close-time ownership probe that cannot prove the mapper is the expected disk -- inactive, a probe failure or null backing device, or a foreign LUKS UUID -- skips the close with a `Warning:` line. A clean exit therefore does not guarantee the mapper is closed.
+The step-6 mapper close is best-effort. Because btrfs has already committed the device removal, braid never fails the remove on the close: a failed close prints a `[warn] disk <name>: lock failed` row, and a close-time ownership probe that cannot prove the mapper is the expected disk -- inactive, a probe failure, or a foreign LUKS UUID -- skips the close with a `Warning:` line. A clean exit therefore does not guarantee the mapper is closed. The probe reads the LUKS UUID the kernel recorded when the mapper was opened, not the disk's header, so the mapper still closes when the removed disk is already gone.
 
 A sleep inhibitor is held during data migration and cleanup.
 

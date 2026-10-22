@@ -2011,10 +2011,10 @@ mod tests {
         device_usage_raw, device_usage_raw_body, device_usage_three_one_tight,
         device_usage_three_two_tight, device_usage_two_healthy, device_usage_two_tight, df_json,
         df_json_fail, disk_member_with, doctor_btrfs_show, doctor_cryptsetup_status_active,
-        doctor_cryptsetup_uuid_ok, human_options, is_luks_ok, isolated_paths, luks_uuid_ok,
-        mountpoint_fail, mountpoint_ok, parsed_doctor_ctx, pool_state_runner,
-        smart_selftest_runner_for, smartctl_selftest_json, systemctl_show_active_state_output,
-        test_uuid, unlock_btrfs_balance_status_idle, unlock_btrfs_balance_status_paused,
+        human_options, is_luks_ok, isolated_paths, luks_uuid_ok, mountpoint_fail, mountpoint_ok,
+        parsed_doctor_ctx, pool_state_dm, pool_state_runner, smart_selftest_runner_for,
+        smartctl_selftest_json, systemctl_show_active_state_output, test_uuid,
+        unlock_btrfs_balance_status_idle, unlock_btrfs_balance_status_paused,
         unlock_btrfs_balance_status_paused_skip_balance, ups_ctx, valid_config_json, write_temp,
     };
     use crate::types::{Devid, MapperName, MountPoint, NullUnderlyingDevice};
@@ -2764,7 +2764,8 @@ mod tests {
         let runner = pool_state_runner(vec![("braid-disk1", 1, "/dev/vdb", test_uuid(1))], &[])
             .with_output(live_req, live_out)
             .with_output(by_id_req, by_id_out);
-        let fs = DoctorMockFs::mounted_btrfs_only();
+        let fs =
+            DoctorMockFs::mounted_btrfs_only().with_luks_dm("braid-disk1", test_uuid(1).as_str());
         let mut ctx =
             DoctorContext::for_test_parsed_with_fs(&runner, &fs, &paths, valid_config_json());
 
@@ -2803,7 +2804,8 @@ mod tests {
         let runner = pool_state_runner(vec![("braid-disk1", 1, "/dev/vdb", test_uuid(1))], &[])
             .with_output(live_req, live_out)
             .with_output(by_id_req, by_id_out);
-        let fs = DoctorMockFs::mounted_btrfs_only();
+        let fs =
+            DoctorMockFs::mounted_btrfs_only().with_luks_dm("braid-disk1", test_uuid(1).as_str());
         let mut ctx =
             DoctorContext::for_test_parsed_with_fs(&runner, &fs, &paths, valid_config_json());
 
@@ -2849,7 +2851,8 @@ mod tests {
         let runner = pool_state_runner(vec![("braid-disk2", 2, "/dev/vdc", test_uuid(2))], &[])
             .with_output(disk1_req, disk1_out)
             .with_output(disk2_req, disk2_out);
-        let fs = DoctorMockFs::mounted_btrfs_only();
+        let fs =
+            DoctorMockFs::mounted_btrfs_only().with_luks_dm("braid-disk2", test_uuid(2).as_str());
         let mut ctx =
             DoctorContext::for_test_parsed_with_fs(&runner, &fs, &paths, valid_config_json());
 
@@ -2905,10 +2908,11 @@ mod tests {
         let (by_id_isluks_req, by_id_isluks_out) = is_luks_ok("/dev/disk/by-id/disk1");
         let (by_id_uuid_req, by_id_uuid_out) =
             luks_uuid_ok("/dev/disk/by-id/disk1", observed.as_str());
-        // Counterfactual anchor: the live backing path /dev/vdb carries the
-        // MATCHING UUID (registered by pool_state_runner's luksUUID), so if a
-        // refactor wrongly routed this probe through underlying_for_uuid the
-        // check would pass Ok -- asserting Fail pins the by-id selection.
+        // Counterfactual anchor: the live mapper and its backing path /dev/vdb
+        // carry the MATCHING UUID (the dm table and pool_state_runner's
+        // luksUUID), so if a refactor wrongly routed this probe through
+        // underlying_for_uuid the check would pass Ok -- asserting Fail pins
+        // the by-id selection.
         let (live_isluks_req, live_isluks_out) = is_luks_ok("/dev/vdb");
         let runner = pool_state_runner(vec![("braid-disk1", 1, "/dev/vdb", expected.clone())], &[])
             .with_output(by_id_isluks_req, by_id_isluks_out)
@@ -2916,7 +2920,8 @@ mod tests {
             .with_output(live_isluks_req, live_isluks_out);
         let fs = DoctorMockFs::mounted_btrfs_only()
             .with_block_device("/dev/disk/by-id/disk1")
-            .with_block_device("/dev/vdb");
+            .with_block_device("/dev/vdb")
+            .with_luks_dm("braid-disk1", expected.as_str());
         let mut ctx =
             DoctorContext::for_test_parsed_with_fs(&runner, &fs, &paths, valid_config_json());
 
@@ -4462,7 +4467,8 @@ mod tests {
             &[Devid::new(2)],
         )
         .with_output(df_req, df_out);
-        let fs = DoctorMockFs::mounted_btrfs_only();
+        let fs =
+            DoctorMockFs::mounted_btrfs_only().with_luks_dm("braid-disk1", test_uuid(1).as_str());
         let f = write_temp(valid_config_json());
         let report = run_doctor(f.path(), &runner, &fs, &isolated_paths().1, human_options());
         let check = find_check(&report, "data_profile_mismatch");
@@ -4497,7 +4503,8 @@ mod tests {
         let (df_req, df_out) = df_json(DF_MIXED);
         let runner = pool_state_runner(vec![("braid-disk1", 1, "/dev/vdb", test_uuid(1))], &[])
             .with_output(df_req, df_out);
-        let fs = DoctorMockFs::mounted_btrfs_only();
+        let fs =
+            DoctorMockFs::mounted_btrfs_only().with_luks_dm("braid-disk1", test_uuid(1).as_str());
         let f = write_temp(valid_config_json());
         let report = run_doctor(f.path(), &runner, &fs, &isolated_paths().1, human_options());
         let check = find_check(&report, "data_profile_mismatch");
@@ -4966,7 +4973,8 @@ mod tests {
             &[Devid::new(2)],
         )
         .with_output(df_req, df_out);
-        let fs = DoctorMockFs::mounted_btrfs_only();
+        let fs =
+            DoctorMockFs::mounted_btrfs_only().with_luks_dm("braid-disk1", test_uuid(1).as_str());
         let f = write_temp(valid_config_json());
         let report = run_doctor(f.path(), &runner, &fs, &isolated_paths().1, human_options());
         let check = find_check(&report, "metadata_profile_mismatch");
@@ -5151,7 +5159,8 @@ mod tests {
             &[Devid::new(2)],
         )
         .with_output(df_req, df_out);
-        let fs = DoctorMockFs::mounted_btrfs_only();
+        let fs =
+            DoctorMockFs::mounted_btrfs_only().with_luks_dm("braid-disk1", test_uuid(1).as_str());
         let f = write_temp(valid_config_json());
         let report = run_doctor(f.path(), &runner, &fs, &isolated_paths().1, human_options());
 
@@ -5188,7 +5197,10 @@ mod tests {
         let usage = enospc_device_usage(&[5 * GIB, 5 * GIB, 5 * GIB], 100 * GIB);
         let runner = enospc_three_disk_runner(&usage);
         let (_dir, paths) = isolated_paths();
-        let fs = DoctorMockFs::mounted_btrfs_only();
+        let fs = DoctorMockFs::mounted_btrfs_only()
+            .with_luks_dm("braid-disk1", test_uuid(1).as_str())
+            .with_luks_dm("braid-disk2", test_uuid(2).as_str())
+            .with_luks_dm("braid-disk3", test_uuid(3).as_str());
         let mut ctx =
             DoctorContext::for_test_parsed_with_fs(&runner, &fs, &paths, valid_config_json());
 
@@ -5207,7 +5219,10 @@ mod tests {
         let usage = enospc_device_usage(&[10 * GIB, 10 * GIB, 50 * MIB], 100 * GIB);
         let runner = enospc_three_disk_runner(&usage);
         let (_dir, paths) = isolated_paths();
-        let fs = DoctorMockFs::mounted_btrfs_only();
+        let fs = DoctorMockFs::mounted_btrfs_only()
+            .with_luks_dm("braid-disk1", test_uuid(1).as_str())
+            .with_luks_dm("braid-disk2", test_uuid(2).as_str())
+            .with_luks_dm("braid-disk3", test_uuid(3).as_str());
         let mut ctx =
             DoctorContext::for_test_parsed_with_fs(&runner, &fs, &paths, valid_config_json());
 
@@ -5235,7 +5250,9 @@ mod tests {
             &[],
         );
         let (_dir, paths) = isolated_paths();
-        let fs = DoctorMockFs::mounted_btrfs_only();
+        let fs = DoctorMockFs::mounted_btrfs_only()
+            .with_luks_dm("braid-disk1", test_uuid(1).as_str())
+            .with_luks_dm("braid-disk2", test_uuid(2).as_str());
         let mut ctx =
             DoctorContext::for_test_parsed_with_fs(&runner, &fs, &paths, valid_config_json());
 
@@ -5283,7 +5300,8 @@ mod tests {
             &[Devid::new(2)],
         );
         let (_dir, paths) = isolated_paths();
-        let fs = DoctorMockFs::mounted_btrfs_only();
+        let fs =
+            DoctorMockFs::mounted_btrfs_only().with_luks_dm("braid-disk1", test_uuid(1).as_str());
         let mut ctx =
             DoctorContext::for_test_parsed_with_fs(&runner, &fs, &paths, valid_config_json());
 
@@ -5318,11 +5336,11 @@ mod tests {
         let usage = usage.as_ref();
         let (df_req, df_out) = df_json(df);
         let (usage_req, usage_out) = device_usage_raw(usage);
+        let fs = DoctorMockFs::mounted_btrfs_only().with_dm(pool_state_dm(&present));
         let runner = pool_state_runner(present, missing_devids)
             .with_output(df_req, df_out)
             .with_output(usage_req, usage_out);
         let (_dir, paths) = isolated_paths();
-        let fs = DoctorMockFs::mounted_btrfs_only();
         let mut ctx =
             DoctorContext::for_test_parsed_with_fs(&runner, &fs, &paths, valid_config_json());
         check_metadata_enospc_pressure(&mut ctx)
@@ -5767,6 +5785,7 @@ mod tests {
                 .into_iter()
                 .map(|devid| NullUnderlyingDevice {
                     mapper: MapperName::from_basename(format!("braid-disk{devid}")),
+                    luks_uuid: crate::test_fixtures::canonical_luks_uuid(devid.get()),
                     devid,
                 })
                 .collect(),
@@ -5779,7 +5798,8 @@ mod tests {
     #[test]
     fn pool_missing_devices_ok_when_healthy() {
         let runner = pool_state_runner(vec![("braid-disk1", 1, "/dev/vdb", test_uuid(1))], &[]);
-        let fs = DoctorMockFs::mounted_btrfs_only();
+        let fs =
+            DoctorMockFs::mounted_btrfs_only().with_luks_dm("braid-disk1", test_uuid(1).as_str());
         let f = write_temp(valid_config_json());
         let report = run_doctor(f.path(), &runner, &fs, &isolated_paths().1, human_options());
         let check = find_check(&report, "pool_missing_devices");
@@ -5799,7 +5819,8 @@ mod tests {
     fn pool_missing_devices_does_not_require_filesystem_df() {
         let runner = PoolMissingDevicesRunner::default();
         let (_dir, paths) = isolated_paths();
-        let fs = DoctorMockFs::mounted_btrfs_only();
+        let fs =
+            DoctorMockFs::mounted_btrfs_only().with_luks_dm("braid-disk1", test_uuid(1).as_str());
         let mut ctx =
             DoctorContext::for_test_parsed_with_fs(&runner, &fs, &paths, valid_config_json());
 
@@ -5838,7 +5859,8 @@ mod tests {
             vec![("braid-disk1", 1, "/dev/vdb", test_uuid(1))],
             &[Devid::new(2)],
         );
-        let fs = DoctorMockFs::mounted_btrfs_only();
+        let fs =
+            DoctorMockFs::mounted_btrfs_only().with_luks_dm("braid-disk1", test_uuid(1).as_str());
         let f = write_temp(valid_config_json());
         let report = run_doctor(f.path(), &runner, &fs, &isolated_paths().1, human_options());
         let check = find_check(&report, "pool_missing_devices");
@@ -5911,7 +5933,8 @@ mod tests {
             vec![("braid-disk1", 1, "/dev/vdb", test_uuid(1))],
             &[Devid::new(2), Devid::new(3)],
         );
-        let fs = DoctorMockFs::mounted_btrfs_only();
+        let fs =
+            DoctorMockFs::mounted_btrfs_only().with_luks_dm("braid-disk1", test_uuid(1).as_str());
         let f = write_temp(valid_config_json());
         let report = run_doctor(f.path(), &runner, &fs, &isolated_paths().1, human_options());
         let check = find_check(&report, "pool_missing_devices");
@@ -6185,15 +6208,10 @@ mod tests {
                 },
                 doctor_cryptsetup_status_active("braid-disk1", "/dev/vdb"),
             )
-            .with_output(
-                CmdRequest::CryptsetupLuksUuid {
-                    device: "/dev/vdb".to_owned(),
-                },
-                doctor_cryptsetup_uuid_ok("/dev/vdb", &healthy_uuid),
-            )
             // disk2's backing device is gone: cryptsetup reports `(null)`, so
             // `probe_pool` records it as null-underlying, not a `pool.devices`
             // member -- the empirical first state after a SATA hot-unplug.
+            // Its dm UUID still records disk2's LUKS UUID.
             .with_output(
                 CmdRequest::CryptsetupStatus {
                     mapper: MapperName::from_basename("braid-disk2".to_owned()),
@@ -6204,7 +6222,10 @@ mod tests {
             .with_output(by_id_uuid_req, by_id_uuid_out);
         // disk1's by-id resolves to a block device; disk2's is absent, so
         // `classify_disk_state` renders disk2 `Missing`.
-        let fs = DoctorMockFs::mounted_btrfs_only().with_block_device("/dev/disk/by-id/disk1");
+        let fs = DoctorMockFs::mounted_btrfs_only()
+            .with_block_device("/dev/disk/by-id/disk1")
+            .with_luks_dm("braid-disk1", healthy_uuid.as_str())
+            .with_luks_dm("braid-disk2", test_uuid(2).as_str());
         let f = write_temp(valid_config_json());
 
         let report = run_doctor(f.path(), &runner, &fs, &paths, human_options());
@@ -6260,12 +6281,14 @@ mod tests {
         let foreign_uuid = test_uuid(171);
         let runner = pool_state_runner(
             vec![
-                ("braid-disk1", 1, "/dev/vdb", known_uuid),
+                ("braid-disk1", 1, "/dev/vdb", known_uuid.clone()),
                 ("braid-stranger", 2, "/dev/vdc", foreign_uuid.clone()),
             ],
             &[],
         );
-        let fs = DoctorMockFs::mounted_btrfs_only();
+        let fs = DoctorMockFs::mounted_btrfs_only()
+            .with_luks_dm("braid-disk1", known_uuid.as_str())
+            .with_luks_dm("braid-stranger", foreign_uuid.as_str());
         let f = write_temp(valid_config_json());
 
         let report = run_doctor(f.path(), &runner, &fs, &paths, human_options());
@@ -6338,13 +6361,16 @@ mod tests {
         let other_uuid = test_uuid(182);
         let runner = pool_state_runner(
             vec![
-                ("braid-disk1", 1, "/dev/vdb", known_uuid),
+                ("braid-disk1", 1, "/dev/vdb", known_uuid.clone()),
                 ("braid-stranger", 2, "/dev/vdc", stranger_uuid.clone()),
                 ("braid-other", 3, "/dev/vdd", other_uuid.clone()),
             ],
             &[],
         );
-        let fs = DoctorMockFs::mounted_btrfs_only();
+        let fs = DoctorMockFs::mounted_btrfs_only()
+            .with_luks_dm("braid-disk1", known_uuid.as_str())
+            .with_luks_dm("braid-stranger", stranger_uuid.as_str())
+            .with_luks_dm("braid-other", other_uuid.as_str());
         let f = write_temp(valid_config_json());
 
         let report = run_doctor(f.path(), &runner, &fs, &paths, human_options());
@@ -6410,8 +6436,12 @@ mod tests {
             )],
         );
         let known_uuid = test_uuid(172);
-        let runner = pool_state_runner(vec![("braid-disk1", 1, "/dev/vdb", known_uuid)], &[]);
-        let fs = DoctorMockFs::mounted_btrfs_only();
+        let runner = pool_state_runner(
+            vec![("braid-disk1", 1, "/dev/vdb", known_uuid.clone())],
+            &[],
+        );
+        let fs =
+            DoctorMockFs::mounted_btrfs_only().with_luks_dm("braid-disk1", known_uuid.as_str());
         let f = write_temp(valid_config_json());
 
         let report = run_doctor(f.path(), &runner, &fs, &paths, human_options());
@@ -6517,7 +6547,8 @@ mod tests {
     #[test]
     fn human_format_contains_missing_devs_label() {
         let runner = pool_state_runner(vec![("braid-disk1", 1, "/dev/vdb", test_uuid(1))], &[]);
-        let fs = DoctorMockFs::mounted_btrfs_only();
+        let fs =
+            DoctorMockFs::mounted_btrfs_only().with_luks_dm("braid-disk1", test_uuid(1).as_str());
         let f = write_temp(valid_config_json());
         let report = run_doctor(f.path(), &runner, &fs, &isolated_paths().1, human_options());
         let human = format_doctor_human(&report);

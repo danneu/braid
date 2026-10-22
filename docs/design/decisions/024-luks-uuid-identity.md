@@ -24,9 +24,20 @@ Use the LUKS UUID as the persistent disk identity. `pool.json` and
 `pending-op.json` membership snapshots are keyed by canonical LUKS UUIDs.
 `DiskMember.name` remains the operator-facing name and `DiskMember.by_id`
 remains the hardware address used to reach the device. `DiskMember.devid` is
-persisted only as prior-binding state for btrfs cases where the live device is
-observable by devid but not by LUKS UUID, such as `null_underlying` mappers and
-`missing_devids`.
+persisted only as prior-binding state for btrfs `missing_devids`, where btrfs
+reports a member by devid with no device at all.
+
+An open mapper's LUKS UUID comes from the kernel, not from its disk.
+cryptsetup sets the device-mapper UUID `CRYPT-LUKS2-<uuid hex>-<name>` (or
+`CRYPT-LUKS1-...`) when it activates a mapping, and the kernel keeps it for as
+long as the mapping exists, with or without its backing disk. braid reads it
+from `/sys/block/dm-*/dm/uuid` through `cli/src/dm_identity.rs#mapper_luks_uuid`
+for every "which LUKS container is this open mapper" question: `lock`'s
+classification, `probe_pool` (pool devices with and without a backing disk),
+the post-commit close re-probe, and the UUID step of mapper reuse. So a mapper
+whose disk died or was unplugged (`null_underlying`) binds by UUID like any
+other. `cryptsetup luksUUID` stays for questions about a disk itself: by-id
+probes, format and recovery checks, and the backing-path check in rule 8 below.
 
 Fresh `add` and `replace` operations pre-generate the UUID that cryptsetup must
 write, store that UUID in the journal before mutation, and pass it through the
@@ -40,7 +51,7 @@ values may not override `--uuid` or `--label`.
 | `LuksUuid` | Encrypted-volume identity used for membership correlation, journals, duplicate detection, and live probe checks. | Yes | No |
 | `DiskName` | Operator-facing name used in commands, status summaries, mapper suffixes, and labels. | No | Yes |
 | `ByIdPath` | Hardware address used to find, open, or format a disk before it is mapped. | No | Setup and repair only |
-| `DiskMember.devid` | Prior btrfs binding used when btrfs can report a device by devid but no live LUKS UUID is observable. | Fallback binding only | Repair diagnostics only |
+| `DiskMember.devid` | Prior btrfs binding used when btrfs reports a missing device by devid alone (`missing_devids`). | Fallback binding only | Repair diagnostics only |
 | `braid-<DiskName>` mapper name | Runtime handle passed to cryptsetup, btrfs, mount, and close operations. | No | Mostly hidden |
 | `braid-<DiskName>` LUKS label | Human/debug label for LUKS headers and discovery bootstrapping. | No | Mostly hidden |
 
@@ -89,7 +100,8 @@ one.
   tell whether it is seeing the exact LUKS container that the interrupted plan
   intended to create.
 - **Cleanup follows observed ownership.** `lock` classifies live mappers by
-  UUID/devid and closes the mapper it actually observed. A mapper opened as
+  the LUKS UUID their dm UUID records and closes the mapper it actually
+  observed, including one whose disk is gone. A mapper opened as
   `braid-WRONG` but owned by `disk1` is closed as `braid-WRONG`; braid does not
   merely try `braid-disk1` and leave the real mapper open.
 - **Recovery compares member sets by identity.** Pending operations carry
@@ -153,20 +165,20 @@ one.
    replace recovery may require the expected label before treating an
    already-formatted target as the crash-created LUKS container, but still
    requires the journaled UUID to match. `lock` may use the `braid-*` prefix
-   only to discover cleanup candidates; member identity still requires
-   UUID/devid evidence, and candidates whose backing LUKS UUID cannot be
-   verified are warned and skipped.
-7. `lock` is the special cleanup case: classify live mappers by UUID/devid
-   first, then close the observed mapper name, not a reconstructed
-   `mapper_name(&member.name)`, so drifted-but-member-owned mappers are closed
-   correctly. If mounted per-device probing fails, `lock` reads the mounted
-   filesystem FSID to key the exclusive-operation preflight (so it will not
-   unmount mid balance/replace), then scans `/dev/mapper/braid-*` candidates
-   and closes only those with verified backing LUKS UUIDs. The unmount is
-   licensed by mount-point ownership, not an FSID identity match (see Limits
-   And Non-Goals). If a `null_underlying` mapper's persisted devid resolves to
-   multiple membership UUIDs, `lock` warns, leaves that mapper open, and marks
-   cleanup uncertain instead of demoting it to orphan cleanup. `lock` reports
+   only to discover cleanup candidates; member identity still requires the
+   LUKS UUID the candidate's dm UUID records, and candidates without one are
+   warned and skipped.
+7. `lock` is the special cleanup case: classify every live mapper by the LUKS
+   UUID its dm UUID records, then close the observed mapper name, not a
+   reconstructed `mapper_name(&member.name)`, so drifted-but-member-owned
+   mappers are closed correctly. A mapper whose disk is gone classifies the
+   same way, as a member or an orphan; no devid lookup is involved. If mounted
+   per-device probing fails, `lock` reads the mounted filesystem FSID to key
+   the exclusive-operation preflight (so it will not unmount mid
+   balance/replace), then scans `/dev/mapper/braid-*` candidates and closes
+   only those whose dm UUID records a LUKS UUID. The unmount is licensed by
+   mount-point ownership, not an FSID identity match (see Limits And
+   Non-Goals). `lock` reports
    `disk <name>: already closed` only for members the planner has proved absent
    from every observed live state; it must not reconstruct
    `mapper_name(&member.name)` during execute to infer absence. If a mapper is
@@ -178,9 +190,13 @@ one.
    mapper's LUKS UUID. A cloned LUKS header can give two physical devices the
    same UUID, so the runtime proof is backing path match first, then UUID
    match.
-9. Recovery must fail closed when a live btrfs device lacks an observable LUKS
-   UUID and the journal has no persisted devid binding. It must not recover by
-   inferring identity from `braid-<DiskName>`.
+9. Recovery binds a live btrfs device by the LUKS UUID its mapper's dm UUID
+   records, whether or not the mapper still has a backing disk, and fails
+   closed when that UUID cannot be read. `remove` recovery also refuses a
+   diskless pool device whose UUID is not in the journaled pre-operation
+   membership. A btrfs `missing_devids` entry has no mapper, so it binds by
+   persisted devid, and recovery fails closed without one. Recovery must not
+   infer identity from `braid-<DiskName>`.
 10. `replace` must re-probe the mounted pool after confirmation and passphrase
     verification but before sleep inhibitor acquisition, journal write, or
     `btrfs replace start`. If the pool is no longer mounted, the FSID differs
@@ -218,18 +234,28 @@ warns rather than claiming every declared member is assembled.
   does not silently rewrite drifted mapper names or labels back into the
   expected `braid-<DiskName>` form.
 - `devid` remains btrfs state. It is allowed only as a prior binding for
-  missing/null-underlying cases where btrfs can still identify a member but
-  braid cannot currently observe the LUKS UUID.
-- A member with neither observable LUKS UUID nor journaled/persisted devid is
-  not recoverable by mapper-name inference. The right behavior is to preserve
-  recovery state and require manual reconciliation.
+  btrfs `missing_devids`, where btrfs reports a member with no device at all.
+  A devid an open mapper holds belongs to that mapper's LUKS UUID, so a
+  persisted devid binds only the missing devids no open mapper holds
+  (`cli/src/types.rs#PoolState::devid_only_missing`).
+- A member with neither an observable LUKS UUID nor a journaled/persisted
+  devid is not recoverable by mapper-name inference. The right behavior is to
+  preserve recovery state and require manual reconciliation.
+- An open mapper's identity is only as trustworthy as its dm UUID. braid
+  trusts the value cryptsetup set at activation, the same way it trusts
+  cryptsetup itself; only root can create or name dm devices. A mapper whose
+  dm UUID is not `CRYPT-LUKS1-`/`CRYPT-LUKS2-` plus a UUID (plain dm-crypt,
+  LUKS2 OPAL, a stale `/dev/mapper` node with no dm device, an unreadable sysfs
+  table) is unverifiable: `lock` skips it, and every other caller fails
+  closed.
 - UUIDs are not a user-facing naming scheme. They may appear in diagnostics,
   `pool.json`, `pending-op.json`, and machine-readable output, but command
   selection and normal summaries should continue to use `DiskName`.
 - `lock`'s mounted-fallback teardown unmounts the configured btrfs mount point
   (licensed by mount-point ownership, not an FSID identity match -- braid
   persists no durable pool FSID to compare a probe against), then scans only
-  `/dev/mapper/braid-*` and closes by backing LUKS UUID: verified member UUIDs
+  `/dev/mapper/braid-*` and closes by the LUKS UUID each candidate's dm UUID
+  records: verified member UUIDs
   close as members, verified non-member `braid-*` mappers close as orphans;
   non-`braid-*` devices and unverified candidates are skipped. The cleanup is
   scoped by the `braid-*` namespace plus UUID, not by which devices backed the
@@ -332,16 +358,32 @@ warns rather than claiming every declared member is assembled.
   loop) and an offline member through its persisted by-id handle, so the two
   SMART surfaces cannot disagree under by-id drift. `tests/cli/braid-tui-browse.py`
   pins the live `/dev/vd*` node end-to-end for a present, unlocked member.
-- `cli/src/lock.rs` unit tests pin the normal UUID/devid-classified close set,
+- `cli/src/lock.rs` unit tests pin the normal UUID-classified close set,
   observed-mapper closing, UUID-scanned fallback cleanup, orphan warnings for
-  non-member UUID/devid cases, duplicate-devid `null_underlying` skip behavior,
-  and skip warnings for unverified candidates.
+  non-member UUIDs, and skip warnings for candidates with no LUKS dm UUID.
+  `cli/src/lock.rs#uuid_scanned_fallback_closes_null_backed_member_by_dm_uuid`
+  pins that a member whose disk is gone still closes as that member.
+- `cli/src/parse/dm_uuid.rs` and `cli/src/dm_identity.rs` unit tests pin which
+  dm UUIDs name a LUKS container and that an unreadable sysfs table is an
+  error, not absence. `cli/tests/golden_nixos_26_05.rs#golden_dm_uuid_luks2_matches_luks_uuid`
+  pins that a real captured dm UUID names the same UUID `cryptsetup luksUUID`
+  reads from the disk. `cli/src/probe.rs#probe_pool_unprovable_dm_identity_fails_closed`
+  pins that a pool device without a provable dm UUID fails the probe.
 - `cli/src/remove.rs` unit tests pin all live member devids into the
   pre-operation journal snapshot before mutation, so recovery has a legitimate
-  fallback binding when LUKS UUID is not observable.
-- `cli/src/recover.rs` unit tests verify recovery refuses a null-underlying
-  member when the journal lacks both observable UUID and persisted devid,
-  instead of falling back to mapper-name inference.
+  fallback binding for a member btrfs later reports missing.
+- `cli/src/recover.rs` unit tests verify `remove` recovery binds a
+  null-underlying target by its dm UUID with no persisted devid and records
+  the devid btrfs holds it at, and refuses a null-underlying device whose dm
+  UUID names a LUKS UUID outside the pre-operation membership, instead of
+  falling back to mapper-name inference.
+- `cli/src/status.rs`, `cli/src/replace.rs`, and `cli/src/remove_missing.rs`
+  unit tests pin that a hot-unplugged member whose mapper is still open binds
+  its live devid by UUID when pool.json's devid is absent or stale: the
+  compact `Drives:` row shows it, replace resolves or refuses on it instead of
+  rebuilding over another disk's devid, and remove-missing drops the member
+  that UUID names. They also pin that a persisted devid never claims a devid
+  an open mapper holds.
 - `cli/src/enroll_key_file.rs` unit tests verify standalone enroll rejects a
   member whose live LUKS UUID does not match the pool.json membership key
   before any slot inventory or keyfile mutation runs. Enroll also re-probes
@@ -361,6 +403,9 @@ warns rather than claiming every declared member is assembled.
   is accepted.
 - `tests/cli/luks-mapper-drift.py` verifies `braid lock` closes the observed
   drifted mapper owned by a member UUID.
+- `tests/cli/braid-lock-dead-member.py` verifies `braid lock` closes a member's
+  mapper by its dm UUID after the member's SCSI disk is deleted out from under
+  it.
 - `tests/cli/luks-lock-skipped-no-false-closed.py` verifies skipped mapper
   uncertainty does not produce false `already closed` rows.
 - `tests/cli/unlock-uuid-mismatch.py`,
@@ -406,7 +451,14 @@ warns rather than claiming every declared member is assembled.
    behavior, and they do not detect cloned LUKS headers.
 3. **Use btrfs devid as identity.** Devids are live filesystem state and are
    unavailable before mount. They remain useful only as fallback binding for
-   missing or null-underlying devices.
+   missing devices.
+4. **Identify an open mapper by rereading its disk's header.** braid used to
+   run `cryptsetup luksUUID` on a mapper's backing device. That fails exactly
+   when identity matters: a dead or unplugged disk leaves its mapper open with
+   no header to read, so `lock` skipped the mapper and left its volume key in
+   kernel memory, and recovery fell back to a persisted devid that is only as
+   fresh as the last `pool.json` write. The dm UUID is kernel state, set at
+   activation, and outlives the disk.
 
 ## See
 
@@ -416,3 +468,5 @@ warns rather than claiming every declared member is assembled.
 - `cli/src/journal.rs`
 - `cli/src/recover.rs`
 - `cli/src/lock.rs`
+- `cli/src/dm_identity.rs`
+- `cli/src/parse/dm_uuid.rs`
