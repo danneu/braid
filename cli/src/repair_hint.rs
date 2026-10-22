@@ -78,6 +78,28 @@ pub(crate) fn hot_unplug_not_yet_missing(devid: Devid, actor: &str) -> String {
     )
 }
 
+/// Operator remediation when members other than the command's target are
+/// hot-unplugged but not yet MISSING. Separate from
+/// `hot_unplug_not_yet_missing` because the refusal is about where btrfs
+/// would write, not about the target, while the promote-then-retry route
+/// is the same.
+pub(crate) fn hot_unplugged_bystander_not_yet_missing(devids: &[Devid], actor: &str) -> String {
+    let names: Vec<String> = devids.iter().map(Devid::to_string).collect();
+    let devids = match names.split_last() {
+        Some((last, rest)) if !rest.is_empty() => format!("devids {} and {last}", rest.join(", ")),
+        _ => format!("devid {}", names.concat()),
+    };
+    format!(
+        "`{actor}` cannot run while btrfs still treats a hot-unplugged member as \
+         present. Hot-unplugged but not yet promoted to MISSING: {devids} (LUKS \
+         mapper open, backing device gone). btrfs places new chunk copies on such a \
+         member, so they could land on a disk that is gone. Confirm each \
+         hot-unplugged disk is truly gone, then relock and re-unlock the pool \
+         degraded (`braid lock` then `braid unlock --allow-degraded`) so btrfs \
+         promotes {devids}, and retry."
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -222,6 +244,38 @@ mod tests {
              operates on btrfs-authoritative MISSING devids. Confirm the disk is truly \
              gone, then relock and re-unlock the pool degraded (`braid lock` then \
              `braid unlock --allow-degraded`) so btrfs promotes devid 2, and retry."
+        );
+    }
+
+    // Intent: the bystander hot-unplug hint names every unpromoted devid,
+    // with the right number, in both places it lists them.
+    // Why it exists: lock and degraded unlock promote every gone disk at
+    // once, so naming only one would hide the others from the operator.
+    // The full one-devid wording is pinned by remove-missing's
+    // `hot_unplugged_bystander_refused_*` tests.
+    // Scenario: one, two, or three other members are hot-unplugged while
+    // the operator runs `braid remove-missing` on a MISSING devid.
+    #[test]
+    fn hot_unplugged_bystander_names_every_devid() {
+        let hint = |devids: &[u64]| {
+            let devids: Vec<Devid> = devids.iter().copied().map(Devid::new).collect();
+            hot_unplugged_bystander_not_yet_missing(&devids, "braid remove-missing")
+        };
+        let one = hint(&[3]);
+        assert!(
+            one.contains("MISSING: devid 3 (") && one.contains("promotes devid 3,"),
+            "{one}"
+        );
+        let two = hint(&[2, 3]);
+        assert!(
+            two.contains("MISSING: devids 2 and 3 (") && two.contains("promotes devids 2 and 3,"),
+            "{two}"
+        );
+        let three = hint(&[2, 3, 5]);
+        assert!(
+            three.contains("MISSING: devids 2, 3 and 5 (")
+                && three.contains("promotes devids 2, 3 and 5,"),
+            "{three}"
         );
     }
 }

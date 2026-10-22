@@ -503,6 +503,23 @@ pub fn plan_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         ));
     }
 
+    // Refuse while another member is hot-unplugged but not yet MISSING.
+    // btrfs still allocates chunks on it, so `btrfs device remove` would put
+    // relocated copies on a disk that is gone, whatever the free space. It
+    // runs on every pool shape, including the single-survivor path that
+    // skips the space check. After the target check, so a null-backed or
+    // unknown --missing-id keeps its own message.
+    let bystanders = pool.hot_unplugged_not_missing();
+    if !bystanders.is_empty() {
+        return Err(PlanFailure::with_notes(
+            notes,
+            RemoveMissingError::Validation(repair_hint::hot_unplugged_bystander_not_yet_missing(
+                &bystanders,
+                "braid remove-missing",
+            )),
+        ));
+    }
+
     // Pre-flight: reject the exact 2-device RAID1 + 1 missing case. The
     // kernel's btrfs_rm_device calls btrfs_check_raid_min_devices on
     // `num_devices - 1` (where num_devices is fs_devices->num_devices,
@@ -574,7 +591,8 @@ pub fn plan_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     // relocated, so a relocation-space preflight has nothing to prove. Per
     // the scope block above, that case is deliberately delegated to the
     // kernel min-devices check and device_remove_error (pool.rs), not
-    // proven safe here.
+    // proven safe here. Its missing members are all btrfs-MISSING: the
+    // bystander refusal above already refused a hot-unplugged one.
     if pool.devices.len() >= 2
         && let Err(e) = check_relocation_space(runner, config.mount_point(), params.missing_id)
     {
@@ -734,6 +752,10 @@ fn check_relocation_space<R: CommandRunner>(
 
     validate_missing_target_usage_shape(target, mount_point, missing_id)?;
 
+    // A hot-unplugged member also has a real path and size here, but
+    // `plan_remove_missing` refuses before this check while one exists
+    // (`PoolState::hot_unplugged_not_missing`). So every stanza with a size
+    // belongs to a member the probe counts as present.
     let remaining: Vec<_> = usage.devices.iter().filter(|d| d.device_size > 0).collect();
     preflight::check_raid1_relocation_space(&[target], &remaining).map_err(|e| {
         RemoveMissingError::Validation(format!(
@@ -1270,6 +1292,154 @@ mod tests {
         assert!(
             msg.contains("nothing was written; re-run `braid remove-missing`"),
             "the refusal must say nothing was written: {msg}"
+        );
+        assert!(
+            msg.contains("Hot-unplugged but not yet promoted to MISSING: devid 2 "),
+            "the re-plan must refuse on the hot-unplugged member: {msg}"
+        );
+    }
+
+    /// Answer `cryptsetup status` for `mapper` with `device: (null)`: the
+    /// mapper is open but its backing disk is gone, so `probe_pool` puts the
+    /// member in `null_underlying`.
+    fn with_backing_gone(runner: MockRunner, mapper: &'static str) -> MockRunner {
+        runner.with_handler(move |req| match req {
+            CmdRequest::CryptsetupStatus { mapper: m } if m.as_str() == mapper => Some(Ok(mock_ok(
+                &format!("cryptsetup status {mapper}"),
+                &format!(
+                    "{mapper} is active and is in use.\n  type:    LUKS2\n  device:  (null)\n  mode:    read/write\n"
+                ),
+            ))),
+            _ => None,
+        })
+    }
+
+    /// Assert a real run refused on the hot-unplugged bystander before the
+    /// relocation-space probe, the journal, and `btrfs device remove`.
+    fn assert_refused_on_bystander(
+        result: Result<(), RemoveMissingError>,
+        expected: &str,
+        f: &PoolFixture,
+        runner: &MockRunner,
+    ) {
+        match result {
+            Err(RemoveMissingError::Validation(msg)) => assert_eq!(msg, expected),
+            other => panic!("expected the hot-unplugged bystander refusal, got: {other:?}"),
+        }
+        assert_stopped_before_journal(f, runner);
+        let calls = runner.requests();
+        assert!(
+            !calls
+                .iter()
+                .any(|c| matches!(c, CmdRequest::BtrfsDeviceUsageRaw { .. })),
+            "the refusal must come before the relocation-space probe: {calls:?}"
+        );
+    }
+
+    // Intent: remove-missing refuses while another member is hot-unplugged
+    //   but not yet MISSING, even when that member's free space would make
+    //   the relocation-space check pass.
+    // Why it exists: the space check counted every non-missing
+    //   `btrfs device usage` stanza as a survivor. A hot-unplugged member
+    //   keeps its mapper path and size there, and btrfs still allocates
+    //   chunks on it, so the removal passed on space that exists only on a
+    //   dead disk and put relocated copies there (finding 261022-0632-005).
+    // Scenario: in a four-disk pool devid 4 is MISSING and devid 3's cable
+    //   is pulled. Devids 1 and 2 are too full to take devid 4's chunks;
+    //   with devid 3's free space counted, they look like enough.
+    #[test]
+    fn hot_unplugged_bystander_refused_before_space_check() {
+        const FOUR_DISK_ONE_HOT_UNPLUGGED_SHOW: &str = "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\
+             \tTotal devices 4 FS bytes used 16.17MiB\n\
+             \tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\
+             \tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk2\n\
+             \tdevid    3 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk3\n\
+             \tdevid    4 size 0 used 0 path MISSING\n";
+        // Devids 1 and 2 alone give a RAID1 pair capacity of 40 MiB, below
+        // devid 4's 64 MiB. Counting devid 3's 96 MiB raises it to 80 MiB.
+        let usage = device_usage_raw_body(&[
+            relocation_usage_live_device(
+                "/dev/mapper/braid-disk1",
+                1,
+                &[("Data", "RAID1", 67_108_864)],
+                41_943_040,
+            ),
+            relocation_usage_live_device(
+                "/dev/mapper/braid-disk2",
+                2,
+                &[("Data", "RAID1", 67_108_864)],
+                41_943_040,
+            ),
+            relocation_usage_live_device(
+                "/dev/mapper/braid-disk3",
+                3,
+                &[("Data", "RAID1", 67_108_864)],
+                100_663_296,
+            ),
+            DeviceUsageSpec::missing(4, &[("Data", "RAID1", 67_108_864)], 0),
+        ]);
+        let f = PoolFixture::four_disk_devids_pinned();
+        let (runner, _) = RemoveMissingPool::four_disk_two_missing().install(MockRunner::default());
+        let runner = runner.with_handler(move |req| match req {
+            CmdRequest::BtrfsFilesystemShow { mount_point } => Some(Ok(mock_ok(
+                &format!("btrfs filesystem show {mount_point}"),
+                FOUR_DISK_ONE_HOT_UNPLUGGED_SHOW,
+            ))),
+            CmdRequest::BtrfsDeviceUsageRaw { .. } => {
+                Some(Ok(mock_ok("btrfs device usage --raw /mnt/storage", &usage)))
+            }
+            _ => None,
+        });
+        let runner = with_backing_gone(runner, "braid-disk3");
+        let fs = MockFs::storage(vec![]).with_dm(canonical_dm_table());
+
+        let result = cmd_remove_missing(
+            &runner,
+            &fs,
+            &f.remove_missing_params().missing_id(Devid::new(4)).build(),
+        );
+
+        assert_refused_on_bystander(
+            result,
+            "`braid remove-missing` cannot run while btrfs still treats a hot-unplugged \
+             member as present. Hot-unplugged but not yet promoted to MISSING: devid 3 \
+             (LUKS mapper open, backing device gone). btrfs places new chunk copies on such \
+             a member, so they could land on a disk that is gone. Confirm each hot-unplugged \
+             disk is truly gone, then relock and re-unlock the pool degraded (`braid lock` \
+             then `braid unlock --allow-degraded`) so btrfs promotes devid 3, and retry.",
+            &f,
+            &runner,
+        );
+    }
+
+    // Intent: remove-missing refuses while another member is hot-unplugged
+    //   but not yet MISSING when only one present member survives.
+    // Why it exists: the relocation-space check is skipped with one present
+    //   survivor, so nothing stopped `btrfs device remove` from relocating
+    //   the target's chunks onto the hot-unplugged member (finding
+    //   261022-0632-005).
+    // Scenario: in a three-disk pool devid 3 is MISSING and devid 2's cable
+    //   is pulled. Only devid 1 is still backed by a disk.
+    #[test]
+    fn hot_unplugged_bystander_refused_with_single_survivor() {
+        let f = PoolFixture::three_disk_devids_pinned();
+        let (runner, _) =
+            RemoveMissingPool::three_disk_one_missing().install(MockRunner::default());
+        let runner = with_backing_gone(runner, "braid-disk2");
+        let fs = MockFs::storage(vec![]).with_dm(canonical_dm_table());
+
+        let result = cmd_remove_missing(&runner, &fs, &f.remove_missing_params().build());
+
+        assert_refused_on_bystander(
+            result,
+            "`braid remove-missing` cannot run while btrfs still treats a hot-unplugged \
+             member as present. Hot-unplugged but not yet promoted to MISSING: devid 2 \
+             (LUKS mapper open, backing device gone). btrfs places new chunk copies on such \
+             a member, so they could land on a disk that is gone. Confirm each hot-unplugged \
+             disk is truly gone, then relock and re-unlock the pool degraded (`braid lock` \
+             then `braid unlock --allow-degraded`) so btrfs promotes devid 2, and retry.",
+            &f,
+            &runner,
         );
     }
 

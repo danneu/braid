@@ -981,6 +981,20 @@ impl PoolState {
             .copied()
             .filter(|devid| !self.null_underlying.iter().any(|n| n.devid == *devid))
     }
+
+    /// Hot-unplugged devids btrfs has not promoted to MISSING, sorted. btrfs
+    /// still treats each as writable, so its chunk allocator can put new
+    /// copies on a disk that is gone. Promotion moves the devid into
+    /// `missing_devids`, which takes it off the allocator.
+    pub fn hot_unplugged_not_missing(&self) -> Vec<Devid> {
+        self.null_underlying
+            .iter()
+            .map(|n| n.devid)
+            .filter(|devid| !self.missing_devids.contains(devid))
+            .collect::<BTreeSet<Devid>>()
+            .into_iter()
+            .collect()
+    }
 }
 
 /// Live btrfs member observed through `probe_pool`; identity comes from
@@ -1863,6 +1877,37 @@ mod tests {
         assert_eq!(
             pool.devid_only_missing().collect::<Vec<_>>(),
             vec![Devid::new(2)]
+        );
+    }
+
+    // Intent: `PoolState::hot_unplugged_not_missing` yields the null-backed
+    // devids btrfs has not promoted to MISSING, sorted, and nothing else.
+    // Why it exists: remove-missing refuses while any exist, because btrfs
+    // still allocates chunks on them. A promoted devid is off the allocator
+    // and must not block the command.
+    // Scenario: devid 2 is MISSING with no mapper, devid 3 is MISSING while
+    // its mapper still reports `(null)`, and devids 5 and 4 are null-backed
+    // only.
+    #[test]
+    fn hot_unplugged_not_missing_skips_promoted_devids() {
+        let null_backed = |devid: u64| NullUnderlyingDevice {
+            mapper: MapperName::from_basename(format!("braid-disk{devid}")),
+            luks_uuid: LuksUuid::parse(&format!("00000000-0000-0000-0000-{devid:012x}")).unwrap(),
+            devid: Devid::new(devid),
+        };
+        let pool = PoolState {
+            mounted: true,
+            devices: vec![],
+            missing_count: 4,
+            total_devices: 4,
+            fsid: None,
+            missing_devids: vec![Devid::new(2), Devid::new(3)],
+            null_underlying: vec![null_backed(5), null_backed(3), null_backed(4)],
+        };
+
+        assert_eq!(
+            pool.hot_unplugged_not_missing(),
+            vec![Devid::new(4), Devid::new(5)]
         );
     }
 }

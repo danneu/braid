@@ -20,7 +20,8 @@ Note: `braid remove-missing` operates only on btrfs-authoritative `MISSING`
 devids. A drive that is hot-unplugged while the pool is mounted contributes to
 `missing_count` and appears in `missing_devids` in `braid status` before btrfs
 promotes its devid to `MISSING`; `remove-missing` refuses the devid with a
-specific hot-unplug diagnostic until that promotion happens. See
+specific hot-unplug diagnostic until that promotion happens. Until then it also
+refuses every other devid, because btrfs still writes to the unplugged disk. See
 [Hot-unplug while pool is mounted](../guides/recovery-scenarios.md#hot-unplug-while-pool-is-mounted).
 
 First, find the missing device's ID:
@@ -61,7 +62,7 @@ sudo braid remove-missing --missing-id 3 --yes
 ## What happens under the hood
 
 1. Probes the pool to verify missing devices exist
-2. Validates that the specified devid is actually a missing device (not a live one)
+2. Validates that the specified devid is actually a missing device (not a live one), and that no other member is hot-unplugged but not yet `MISSING`
 3. Resolves the btrfs devid to the UUID-keyed pool member whose recorded devid matches. braid does not probe a MISSING device through its mapper, so it has no observable LUKS UUID and its recorded devid is the only binding
 4. Shows a confirmation prompt with the disk name, devid, and the resulting disk counts (e.g. `Pool: 2 present + 1 missing -> 2 disks`). This interactive prompt is skipped by `--yes` and not shown in `--dry-run`.
 5. After confirmation (or straight away with `--yes`), plans again against the live pool: steps 1-3 and the pool's safety checks below. If a check now refuses, or the new plan differs from the confirmed one, braid stops before writing anything. This runs before any `--enqueue` wait (see below), so it does not cover space used while the removal is queued behind another exclusive operation, or while it runs.
@@ -80,6 +81,12 @@ If a btrfs exclusive operation (a running balance, device add/remove/replace, re
 - Refuses if no missing devices are detected
 - Refuses if the specified devid belongs to a live device (use `braid remove` for that)
 - Refuses if the specified devid is not a device in this pool
+- Refuses while any other member is hot-unplugged but btrfs has not yet
+  promoted it to `MISSING` (its LUKS mapper is open and its backing disk is
+  gone). btrfs still writes new chunk copies to such a member, so the removal
+  could put relocated data on a disk that is gone. Confirm the disk is gone,
+  run `braid lock` then `braid unlock --allow-degraded` so btrfs promotes it,
+  and retry.
 - Refuses if surviving disks lack space to absorb the missing device's
   allocations (ENOSPC pre-flight), or if that pre-flight cannot run (the
   `btrfs device usage` probe failed to spawn, returned a nonzero exit,

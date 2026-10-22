@@ -280,6 +280,9 @@ btrfs continues to list the devid but has not yet promoted it to MISSING.
 appears in `missing_devids` -- but `braid remove-missing --missing-id N` and
 `braid replace` (with or without `--missing-id`) refuse the devid because they
 only act on btrfs-authoritative MISSING entries.
+`braid remove-missing` also refuses every other devid while this disk stays
+unpromoted, because btrfs still writes to it and could put relocated data on a
+disk that is gone.
 
 To make progress:
 

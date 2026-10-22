@@ -94,6 +94,23 @@ still runs the confirmed plan. The gate runs before any `--enqueue` wait, so
 it does not cover space used while the removal waits behind another exclusive
 operation or while it runs. Only stopping pool writes would close that.
 
+Before the space check, `remove-missing` refuses while any member other than
+the target is hot-unplugged but btrfs has not yet promoted it to MISSING
+(`cli/src/types.rs#PoolState::hot_unplugged_not_missing`). btrfs still treats
+such a member as writable, and `btrfs device usage` still reports its mapper
+path and full size. The chunk allocator uses every writable device and tries
+the ones with the most free space first (linux 6.18.33,
+`fs/btrfs/volumes.c` (`gather_device_info`)). So relocated chunks would get a
+copy on a disk that is gone. RAID1 tolerates one failed write per chunk, so the
+removal could report success while some chunks hold one real copy. No space
+arithmetic prevents that. Only promotion to MISSING, by a relock and a
+degraded unlock, takes the device off the allocator. The refusal therefore runs
+on every pool shape, including the single-survivor path that skips the space
+check. With it in place, every non-missing usage stanza with a nonzero size
+belongs to a present member, so the survivor set needs no second filter.
+Counting only probe-present members as survivors was rejected: it corrects the
+number but not where the kernel writes.
+
 `remove-missing` also refuses an untrusted missing-device allocation shape
 before `btrfs device remove`. Its trust check validates target identity and
 shape, not per-type completeness: the targeted missing devid must have exactly
