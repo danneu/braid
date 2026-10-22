@@ -45,6 +45,16 @@ pub(crate) fn mapper_luks_uuid<F: Filesystem + ?Sized>(
     fs: &F,
     mapper: &MapperName,
 ) -> Result<LuksUuid, UnprovenMapper> {
+    named_luks_uuid(fs, mapper.as_str())
+}
+
+/// `mapper_luks_uuid` for a device-mapper name read from the kernel, such as
+/// the `/dev/mapper/<name>` source of a mount, which need not be a name braid
+/// would give a mapper.
+pub(crate) fn named_luks_uuid<F: Filesystem + ?Sized>(
+    fs: &F,
+    name: &str,
+) -> Result<LuksUuid, UnprovenMapper> {
     let entries = fs
         .list_dir(SYS_BLOCK)
         .map_err(|source| UnprovenMapper::Unreadable {
@@ -52,21 +62,31 @@ pub(crate) fn mapper_luks_uuid<F: Filesystem + ?Sized>(
             source,
         })?;
     for entry in entries.iter().filter(|entry| entry.starts_with("dm-")) {
-        let Some(name) = read_attr(fs, entry, "name")? else {
+        let Some(entry_name) = read_attr(fs, entry, "name")? else {
             continue;
         };
-        if name.strip_suffix('\n').unwrap_or(&name) != mapper.as_str() {
+        if entry_name.strip_suffix('\n').unwrap_or(&entry_name) != name {
             continue;
         }
-        let Some(dm_uuid) = read_attr(fs, entry, "uuid")? else {
-            return Err(UnprovenMapper::Absent);
-        };
-        return match parse_dm_uuid(&dm_uuid) {
-            DmUuid::Luks(uuid) => Ok(uuid),
-            DmUuid::Other(dm_uuid) => Err(UnprovenMapper::NotLuks { dm_uuid }),
-        };
+        return entry_luks_uuid(fs, entry);
     }
     Err(UnprovenMapper::Absent)
+}
+
+/// The LUKS UUID recorded by the device-mapper device whose kernel name is
+/// `entry` (`dm-N`), for a device known by its `/dev/dm-N` node rather than
+/// its mapper name.
+pub(crate) fn entry_luks_uuid<F: Filesystem + ?Sized>(
+    fs: &F,
+    entry: &str,
+) -> Result<LuksUuid, UnprovenMapper> {
+    let Some(dm_uuid) = read_attr(fs, entry, "uuid")? else {
+        return Err(UnprovenMapper::Absent);
+    };
+    match parse_dm_uuid(&dm_uuid) {
+        DmUuid::Luks(uuid) => Ok(uuid),
+        DmUuid::Other(dm_uuid) => Err(UnprovenMapper::NotLuks { dm_uuid }),
+    }
 }
 
 /// Read `/sys/block/<entry>/dm/<attr>`; `None` when the device is gone.
@@ -105,6 +125,26 @@ mod tests {
             mapper_luks_uuid(&fs, &mapper("braid-disk1")).unwrap(),
             LuksUuid::parse(UUID).unwrap()
         );
+    }
+
+    #[test]
+    fn dm_entry_yields_its_luks_uuid() {
+        let fs = MockFs::storage(vec![])
+            .with_raw_dm("vg-root", "LVM-abc")
+            .with_luks_dm("braid-disk1", UUID);
+
+        assert_eq!(
+            entry_luks_uuid(&fs, "dm-1").unwrap(),
+            LuksUuid::parse(UUID).unwrap()
+        );
+        assert!(matches!(
+            entry_luks_uuid(&fs, "dm-0"),
+            Err(UnprovenMapper::NotLuks { .. })
+        ));
+        assert!(matches!(
+            entry_luks_uuid(&fs, "dm-7"),
+            Err(UnprovenMapper::Absent)
+        ));
     }
 
     #[test]

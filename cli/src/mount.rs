@@ -10,9 +10,11 @@ use crate::mapper_close::{
     forget_existing_scanned_devices_best_effort,
 };
 use crate::membership::PoolMembership;
+use crate::pool_mount::{self, ForeignMount, MountedAt, OtherBtrfs, UnprovenMount};
 use crate::preview::{self, NoteLevel, PerDiskStyle, PreviewNote};
 use crate::probe::{self, ProbeError};
 use crate::progress::Sleeper;
+use crate::state_paths::StatePaths;
 use crate::status_tag::{StatusTag, color_enabled_for_stderr, emit_status, status_line};
 use crate::types::{ByIdPath, ConfigDiskState, DiskName, MountPoint};
 use std::path::Path;
@@ -34,6 +36,29 @@ pub enum MountError {
     MountFailed(String),
     #[error("{0}")]
     DegradedRefused(String),
+    /// A btrfs at the mount point that is provably not this pool.
+    #[error("{0}")]
+    OtherBtrfs(#[from] OtherBtrfs),
+    /// A mount at the mount point that braid cannot prove is this pool.
+    #[error("{0}")]
+    UnprovenMount(#[from] UnprovenMount),
+}
+
+impl From<ForeignMount> for MountError {
+    /// A non-btrfs mount keeps the `ProbeError::NotBtrfs` refusal other
+    /// commands give; another btrfs gets its own.
+    fn from(foreign: ForeignMount) -> Self {
+        match foreign {
+            ForeignMount::NotBtrfs {
+                mount_point,
+                fstype,
+            } => MountError::Probe(ProbeError::NotBtrfs {
+                mount_point,
+                fstype,
+            }),
+            ForeignMount::OtherBtrfs(other) => MountError::OtherBtrfs(other),
+        }
+    }
 }
 
 /// Failure returned after unlock-and-mount has opened zero or more mappers.
@@ -159,15 +184,18 @@ pub struct PlanReport {
     pub result: Result<Option<OpenPlan>, MountError>,
 }
 
-/// Read-only planning inputs threaded from `plan_open_pool` into
-/// `plan_open_pool_inner` while generic execution seams and the event
-/// accumulator stay separate for the planner boundary.
-struct PlanOpenPoolParams<'a> {
-    config: &'a Config,
-    membership: &'a PoolMembership,
-    backing_path_resolver: &'a dyn BackingPathResolver,
-    allow_degraded: bool,
-    command_hint: &'a str,
+/// Read-only planning inputs for `plan_open_pool`, kept apart from the
+/// generic execution seams and the event accumulator at the planner
+/// boundary.
+pub struct PlanOpenPoolParams<'a> {
+    pub config: &'a Config,
+    /// State dir whose `pool.json` and pending journal say which LUKS UUIDs
+    /// are this pool's, when a mount is already at the mount point.
+    pub paths: &'a StatePaths,
+    pub membership: &'a PoolMembership,
+    pub backing_path_resolver: &'a dyn BackingPathResolver,
+    pub allow_degraded: bool,
+    pub command_hint: &'a str,
 }
 
 /// Probe membership disks, validate UUIDs, check degraded policy.
@@ -179,25 +207,15 @@ struct PlanOpenPoolParams<'a> {
 /// success and error paths. Callers typically render them (via
 /// `print_probe_events`) before `?`-propagating `result`.
 ///
-/// `result` is `Ok(None)` when the pool is already mounted.
+/// `result` is `Ok(None)` when this pool is already mounted. A mount at the
+/// mount point that is not provably this pool is an error.
 pub fn plan_open_pool<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
-    config: &Config,
-    membership: &PoolMembership,
-    backing_path_resolver: &dyn BackingPathResolver,
-    allow_degraded: bool,
-    command_hint: &str,
+    params: &PlanOpenPoolParams<'_>,
 ) -> PlanReport {
     let mut events = Vec::new();
-    let params = PlanOpenPoolParams {
-        config,
-        membership,
-        backing_path_resolver,
-        allow_degraded,
-        command_hint,
-    };
-    let result = plan_open_pool_inner(runner, fs, &params, &mut events);
+    let result = plan_open_pool_inner(runner, fs, params, &mut events);
     PlanReport { events, result }
 }
 
@@ -209,15 +227,19 @@ fn plan_open_pool_inner<R: CommandRunner, F: Filesystem + ?Sized>(
 ) -> Result<Option<OpenPlan>, MountError> {
     let mount_point = params.config.mount_point();
 
-    // 1. If pool already mounted -> None
-    let mp_result = runner.run(&CmdRequest::MountpointCheck {
-        path: mount_point.clone().into(),
-    })?;
-    if mp_result.exit_status == 0 {
-        events.push(ProbeEvent::AlreadyMounted {
-            mount_point: mount_point.to_string(),
-        });
-        return Ok(None);
+    // 1. If this pool is already mounted -> None. Any other mount there
+    // refuses: `mountpoint -q` exits 0 for every filesystem.
+    if let Some(mount) = pool_mount::confirmed_mount(runner, mount_point)? {
+        return match mount.classify(fs, params.paths) {
+            MountedAt::Pool(_) => {
+                events.push(ProbeEvent::AlreadyMounted {
+                    mount_point: mount_point.to_string(),
+                });
+                Ok(None)
+            }
+            MountedAt::Foreign(foreign) => Err(foreign.into()),
+            MountedAt::Unknown(unproven) => Err(unproven.into()),
+        };
     }
 
     // 2. Probe each membership disk
@@ -958,7 +980,10 @@ mod tests {
     fn mount_already_mounted_returns_false() {
         let config = test_config();
         let membership = two_disk_membership();
-        let fs = mount_fs(&[]);
+        // The pool on a member mapper: mountinfo names braid-disk1, whose dm
+        // UUID records a pool.json member's LUKS UUID.
+        let fs = crate::test_fixtures::MockFs::storage(vec![])
+            .with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111");
 
         let runner = MockRunner::default().with_output(
             CmdRequest::MountpointCheck {
@@ -1087,11 +1112,14 @@ mod tests {
         let report = plan_open_pool(
             &runner,
             &fs,
-            &config,
-            &membership,
-            crate::test_fixtures::mock_virtio_backing_path_resolver(),
-            false,
-            "unlock",
+            &PlanOpenPoolParams {
+                config: &config,
+                paths: &crate::test_fixtures::isolated_paths().1,
+                membership: &membership,
+                backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(),
+                allow_degraded: false,
+                command_hint: "unlock",
+            },
         );
         let plan = report
             .result
@@ -1792,11 +1820,14 @@ mod tests {
         let report = plan_open_pool(
             &runner,
             &fs,
-            &config,
-            &membership,
-            crate::test_fixtures::mock_virtio_backing_path_resolver(),
-            true,
-            "unlock",
+            &PlanOpenPoolParams {
+                config: &config,
+                paths: &crate::test_fixtures::isolated_paths().1,
+                membership: &membership,
+                backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(),
+                allow_degraded: true,
+                command_hint: "unlock",
+            },
         );
         let plan = report
             .result
@@ -2011,11 +2042,14 @@ pool already mounted at /mnt/storage
         let report = plan_open_pool(
             &runner,
             &fs,
-            &config,
-            &membership,
-            crate::test_fixtures::mock_virtio_backing_path_resolver(),
-            false,
-            "unlock",
+            &PlanOpenPoolParams {
+                config: &config,
+                paths: &crate::test_fixtures::isolated_paths().1,
+                membership: &membership,
+                backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(),
+                allow_degraded: false,
+                command_hint: "unlock",
+            },
         );
 
         let err = report
@@ -2085,11 +2119,14 @@ pool already mounted at /mnt/storage
         let report = plan_open_pool(
             &runner,
             &fs,
-            &config,
-            &membership,
-            crate::test_fixtures::mock_virtio_backing_path_resolver(),
-            false,
-            "unlock",
+            &PlanOpenPoolParams {
+                config: &config,
+                paths: &crate::test_fixtures::isolated_paths().1,
+                membership: &membership,
+                backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(),
+                allow_degraded: false,
+                command_hint: "unlock",
+            },
         );
 
         // disk1's healthy probe event survives on the mismatch Err path, and is

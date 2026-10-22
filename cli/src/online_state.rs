@@ -6,6 +6,9 @@
 
 use crate::cmd::{CmdError, CmdRequest, CommandRunner};
 use crate::config::Config;
+use crate::filesystem::Filesystem;
+use crate::pool_mount::{self, MountedAt, Mountpoint, PoolMounted, PoolUnmounted};
+use crate::state_paths::StatePaths;
 use crate::types::MountPoint;
 use crate::util::detail_suffix;
 use nix::unistd::{Group, User, chown};
@@ -257,38 +260,32 @@ pub fn snapshot(ops: &dyn OnlineStateOps) -> OnlineSnapshot {
     OnlineSnapshot { online_state }
 }
 
-/// Uses this lock window's entry-state `OnlineSnapshot` to gate `braid-online.service` start.
-/// Skipping captured active/activating/deactivating states avoids queueing start behind stop;
-/// see the snapshot rule in docs/design/decisions/026-pool-lock-rust-owned.md.
-pub fn mark_online(snap: Option<&OnlineSnapshot>, cfg: &Config, ops: &dyn OnlineStateOps) {
-    mark_online_to(snap, cfg, ops, &mut std::io::stderr());
+/// Brings a mounted pool online: mount-root ownership, then the
+/// `braid-online.service` start. It takes the `PoolMounted` proof so it never
+/// acts on a mount that is not the pool. Uses this lock window's entry-state
+/// `OnlineSnapshot` to gate the start; skipping captured
+/// active/activating/deactivating states avoids queueing start behind stop.
+/// See the snapshot rule in docs/design/decisions/026-pool-lock-rust-owned.md.
+pub fn mark_online(
+    mounted: PoolMounted,
+    snap: Option<&OnlineSnapshot>,
+    cfg: &Config,
+    ops: &dyn OnlineStateOps,
+) {
+    mark_online_to(mounted, snap, cfg, ops, &mut std::io::stderr());
 }
 
 /// Implements the online marker against an injected warning sink so its
 /// warn-and-continue contract is behaviorally testable without redirecting
 /// process-global stderr.
 fn mark_online_to(
+    _mounted: PoolMounted,
     snap: Option<&OnlineSnapshot>,
     cfg: &Config,
     ops: &dyn OnlineStateOps,
     out: &mut dyn Write,
 ) {
     let mount_point = Path::new(cfg.mount_point().as_str());
-    let mounted = match ops.is_mountpoint(cfg.mount_point()) {
-        Ok(mounted) => mounted,
-        Err(e) => {
-            writeln!(
-                out,
-                "braid: WARNING: failed to check mountpoint {mount_point:?}: {e}"
-            )
-            .ok();
-            return;
-        }
-    };
-    if !mounted {
-        return;
-    }
-
     if let Some(group) = cfg.pool_access_group() {
         if let Err(e) = ops.chown(mount_point, "root", group) {
             writeln!(
@@ -339,14 +336,19 @@ fn mark_online_to(
 }
 
 /// Shared online-side finalizer so dispatch cannot skip lifecycle
-/// reconciliation after post-mount command failures.
+/// reconciliation after post-mount command failures. It looks at the mount
+/// only after `op` returns, under the pool lock dispatch still holds, so it
+/// reads the `pool.json` and journal `op` left behind -- a bootstrap add's new
+/// pool is known by then.
 pub fn run_with_online_marker<E>(
     snap: Option<&OnlineSnapshot>,
     cfg: Option<&Config>,
+    paths: &StatePaths,
     ops: &dyn OnlineStateOps,
+    fs: &dyn Filesystem,
     op: impl FnOnce() -> Result<(), E>,
 ) -> Result<(), E> {
-    run_with_online_marker_to(snap, cfg, ops, &mut std::io::stderr(), op)
+    run_with_online_marker_to(snap, cfg, paths, ops, fs, &mut std::io::stderr(), op)
 }
 
 /// Runs the online finalizer with an injected warning sink while preserving
@@ -354,28 +356,60 @@ pub fn run_with_online_marker<E>(
 fn run_with_online_marker_to<E>(
     snap: Option<&OnlineSnapshot>,
     cfg: Option<&Config>,
+    paths: &StatePaths,
     ops: &dyn OnlineStateOps,
+    fs: &dyn Filesystem,
     out: &mut dyn Write,
     op: impl FnOnce() -> Result<(), E>,
 ) -> Result<(), E> {
     let result = op();
     if let Some(cfg) = cfg {
-        mark_online_to(snap, cfg, ops, out);
+        finalize_online_to(snap, cfg, paths, ops, fs, out);
     }
     result
 }
 
-/// Proof that `mountpoint -q` observed the pool unmounted. Only
-/// `observe_unmounted` builds one and `mark_offline` requires one, so
-/// `braid-online.service` stops only over an observed unmount, never over a
-/// mounted or unknown mount state.
-#[derive(Debug)]
-pub struct PoolUnmounted(());
+/// The finalizer body against an injected warning sink: mark the pool online
+/// only on a `PoolMounted` proof. Nothing mounted is the quiet pre-mount
+/// failure; a failed check, a foreign mount, or an unproven one warns and
+/// changes nothing.
+fn finalize_online_to(
+    snap: Option<&OnlineSnapshot>,
+    cfg: &Config,
+    paths: &StatePaths,
+    ops: &dyn OnlineStateOps,
+    fs: &dyn Filesystem,
+    out: &mut dyn Write,
+) {
+    let mount = match pool_mount::check_mountpoint(ops, cfg.mount_point()) {
+        Ok(Mountpoint::Mounted(mount)) => mount,
+        Ok(Mountpoint::NotMounted(_)) => return,
+        Err(e) => {
+            writeln!(
+                out,
+                "braid: WARNING: failed to check mountpoint {:?}: {e}",
+                Path::new(cfg.mount_point().as_str())
+            )
+            .ok();
+            return;
+        }
+    };
+    let skipped = match mount.classify(fs, paths) {
+        MountedAt::Pool(mounted) => return mark_online_to(mounted, snap, cfg, ops, out),
+        MountedAt::Foreign(foreign) => foreign.to_string(),
+        MountedAt::Unknown(unproven) => unproven.to_string(),
+    };
+    writeln!(
+        out,
+        "braid: WARNING: {skipped} -- not changing its ownership or starting braid-online.service"
+    )
+    .ok();
+}
 
 /// Plain lock's offline gate, probed once after each lock attempt whether it
 /// succeeded or failed. An unknown mount state counts as still mounted --
-/// mirrors `mark_online`'s fail-safe -- so a probe error warns and returns
-/// no proof.
+/// mirroring `run_with_online_marker`, which warns and skips on a failed
+/// check -- so a probe error warns and returns no proof.
 pub fn observe_unmounted(cfg: &Config, ops: &dyn OnlineStateOps) -> Option<PoolUnmounted> {
     observe_unmounted_to(cfg, ops, &mut std::io::stderr())
 }
@@ -387,9 +421,9 @@ fn observe_unmounted_to(
     ops: &dyn OnlineStateOps,
     out: &mut dyn Write,
 ) -> Option<PoolUnmounted> {
-    match ops.is_mountpoint(cfg.mount_point()) {
-        Ok(true) => None,
-        Ok(false) => Some(PoolUnmounted(())),
+    match pool_mount::check_mountpoint(ops, cfg.mount_point()) {
+        Ok(Mountpoint::Mounted(_)) => None,
+        Ok(Mountpoint::NotMounted(unmounted)) => Some(unmounted),
         Err(e) => {
             writeln!(
                 out,
@@ -631,6 +665,9 @@ impl OnlineStateOps for RecordingOnlineStateOps {
 mod tests {
     use super::*;
     use crate::cmd::{MockRunner, RawCommandOutput};
+    use crate::membership::save_membership;
+    use crate::test_fixtures::{MockFs, isolated_paths, two_disk_membership};
+    use tempfile::TempDir;
 
     fn cfg(raw: &str) -> Config {
         serde_json::from_str(raw).expect("config should parse")
@@ -776,6 +813,47 @@ mod tests {
         );
     }
 
+    /// The LUKS UUID `two_disk_membership` gives disk1, recorded on
+    /// `braid-disk1`, the device `MockFs::storage`'s mountinfo names.
+    const POOL_UUID: &str = "11111111-1111-1111-1111-111111111111";
+
+    /// A state dir and filesystem where the mount at /mnt/storage classifies
+    /// as this pool. The `TempDir` keeps the state dir alive.
+    fn pool_at_mount_point() -> (TempDir, StatePaths, MockFs) {
+        let (dir, paths) = isolated_paths();
+        save_membership(&two_disk_membership(), &paths).unwrap();
+        let fs = MockFs::storage(vec![]).with_luks_dm("braid-disk1", POOL_UUID);
+        (dir, paths, fs)
+    }
+
+    /// Run the finalizer body over the pool fixture; returns its warnings.
+    fn finalize(
+        snap: Option<&OnlineSnapshot>,
+        cfg: &Config,
+        ops: &RecordingOnlineStateOps,
+    ) -> String {
+        let (_dir, paths, fs) = pool_at_mount_point();
+        let mut out = Vec::new();
+        finalize_online_to(snap, cfg, &paths, ops, &fs, &mut out);
+        String::from_utf8(out).unwrap()
+    }
+
+    fn inactive() -> OnlineSnapshot {
+        OnlineSnapshot {
+            online_state: UnitActiveState::Inactive,
+        }
+    }
+
+    /// The unmounted proof, built the only way production builds it.
+    fn unmounted_proof() -> PoolUnmounted {
+        let ops = RecordingOnlineStateOps::new();
+        ops.set_mounted(false);
+        match pool_mount::check_mountpoint(&ops, &MountPoint::new("/mnt/storage".into())) {
+            Ok(Mountpoint::NotMounted(proof)) => proof,
+            other => panic!("expected the unmounted proof, got {other:?}"),
+        }
+    }
+
     // Intent: mark_online skips braid-online.service when lifecycle is disabled.
     // Why it exists: standalone CLI configs still run mount fixups but do not
     // own the module-defined online unit.
@@ -786,13 +864,7 @@ mod tests {
         let cfg = cfg(r#"{"mount_point":"/mnt/storage"}"#);
         let ops = RecordingOnlineStateOps::new();
 
-        mark_online(
-            Some(&OnlineSnapshot {
-                online_state: UnitActiveState::Inactive,
-            }),
-            &cfg,
-            &ops,
-        );
+        finalize(Some(&inactive()), &cfg, &ops);
 
         let calls = ops.calls();
         assert!(calls.contains(&"mountpoint".into()));
@@ -809,13 +881,7 @@ mod tests {
         let cfg = cfg(r#"{"mount_point":"/mnt/storage","pool_access_group":"storage"}"#);
         let ops = RecordingOnlineStateOps::new();
 
-        mark_online(
-            Some(&OnlineSnapshot {
-                online_state: UnitActiveState::Inactive,
-            }),
-            &cfg,
-            &ops,
-        );
+        finalize(Some(&inactive()), &cfg, &ops);
 
         let calls = ops.calls();
         assert!(calls.contains(&"chown".into()));
@@ -828,7 +894,7 @@ mod tests {
         let cfg = cfg(r#"{"mount_point":"/mnt/storage","systemd_lifecycle":true}"#);
         for state in [UnitActiveState::Inactive, UnitActiveState::Failed] {
             let ops = RecordingOnlineStateOps::new();
-            mark_online(
+            finalize(
                 Some(&OnlineSnapshot {
                     online_state: state,
                 }),
@@ -838,25 +904,17 @@ mod tests {
             assert!(ops.calls().contains(&format!("start {BRAID_ONLINE_UNIT}")));
         }
 
-        let ops = RecordingOnlineStateOps::new();
-        mark_online(
-            Some(&OnlineSnapshot {
-                online_state: UnitActiveState::Deactivating,
-            }),
-            &cfg,
-            &ops,
-        );
-        assert!(!ops.calls().contains(&format!("start {BRAID_ONLINE_UNIT}")));
-
-        let ops = RecordingOnlineStateOps::new();
-        mark_online(
-            Some(&OnlineSnapshot {
-                online_state: UnitActiveState::Maintenance,
-            }),
-            &cfg,
-            &ops,
-        );
-        assert!(!ops.calls().contains(&format!("start {BRAID_ONLINE_UNIT}")));
+        for state in [UnitActiveState::Deactivating, UnitActiveState::Maintenance] {
+            let ops = RecordingOnlineStateOps::new();
+            finalize(
+                Some(&OnlineSnapshot {
+                    online_state: state,
+                }),
+                &cfg,
+                &ops,
+            );
+            assert!(!ops.calls().contains(&format!("start {BRAID_ONLINE_UNIT}")));
+        }
     }
 
     // Intent: a failed braid-online start reports systemctl's exit code and
@@ -877,14 +935,18 @@ mod tests {
                 stderr: "Unit braid-online.service not loaded.".into(),
             },
         );
-        let snap = OnlineSnapshot {
-            online_state: UnitActiveState::Inactive,
-        };
+        let (_dir, paths, fs) = pool_at_mount_point();
         let mut out = Vec::new();
 
-        let result = run_with_online_marker_to(Some(&snap), Some(&cfg), &ops, &mut out, || {
-            Err::<(), _>("post-mount failure")
-        });
+        let result = run_with_online_marker_to(
+            Some(&inactive()),
+            Some(&cfg),
+            &paths,
+            &ops,
+            &fs,
+            &mut out,
+            || Err::<(), _>("post-mount failure"),
+        );
 
         assert_eq!(result, Err("post-mount failure"));
         assert_eq!(
@@ -913,12 +975,11 @@ mod tests {
         let snap = OnlineSnapshot {
             online_state: UnitActiveState::Failed,
         };
-        let mut out = Vec::new();
 
-        mark_online_to(Some(&snap), &cfg, &ops, &mut out);
+        let warnings = finalize(Some(&snap), &cfg, &ops);
 
         assert_eq!(
-            String::from_utf8(out).unwrap(),
+            warnings,
             "braid: WARNING: failed to activate braid-online.service (systemctl start braid-online.service failed (exit 5)) -- pool is mounted but shutdown may not lock automatically\n"
         );
     }
@@ -933,7 +994,7 @@ mod tests {
         let cfg = cfg(r#"{"mount_point":"/mnt/storage","systemd_lifecycle":true}"#);
         let ops = RecordingOnlineStateOps::new();
 
-        mark_online(None, &cfg, &ops);
+        finalize(None, &cfg, &ops);
 
         assert!(!ops.calls().contains(&format!("start {BRAID_ONLINE_UNIT}")));
     }
@@ -948,13 +1009,12 @@ mod tests {
     fn run_with_online_marker_calls_mark_online_on_err() {
         let cfg = cfg(r#"{"mount_point":"/mnt/storage","systemd_lifecycle":true}"#);
         let ops = RecordingOnlineStateOps::new();
-        let snap = OnlineSnapshot {
-            online_state: UnitActiveState::Inactive,
-        };
+        let (_dir, paths, fs) = pool_at_mount_point();
 
-        let result = run_with_online_marker(Some(&snap), Some(&cfg), &ops, || {
-            Err::<(), _>("post-mount failure")
-        });
+        let result =
+            run_with_online_marker(Some(&inactive()), Some(&cfg), &paths, &ops, &fs, || {
+                Err::<(), _>("post-mount failure")
+            });
 
         assert_eq!(result, Err("post-mount failure"));
         assert!(ops.calls().contains(&format!("start {BRAID_ONLINE_UNIT}")));
@@ -969,37 +1029,46 @@ mod tests {
     fn run_with_online_marker_calls_mark_online_on_ok() {
         let cfg = cfg(r#"{"mount_point":"/mnt/storage","systemd_lifecycle":true}"#);
         let ops = RecordingOnlineStateOps::new();
-        let snap = OnlineSnapshot {
-            online_state: UnitActiveState::Inactive,
-        };
+        let (_dir, paths, fs) = pool_at_mount_point();
 
         let result =
-            run_with_online_marker(Some(&snap), Some(&cfg), &ops, || Ok::<(), &'static str>(()));
+            run_with_online_marker(Some(&inactive()), Some(&cfg), &paths, &ops, &fs, || {
+                Ok::<(), &'static str>(())
+            });
 
         assert_eq!(result, Ok(()));
         assert!(ops.calls().contains(&format!("start {BRAID_ONLINE_UNIT}")));
     }
 
-    // Intent: the online finalizer relies on mark_online's mountpoint gate on
-    // failure paths.
+    // Intent: the online finalizer relies on the mountpoint gate on failure
+    // paths, and stays quiet when nothing is mounted.
     // Why it exists: pre-mount command errors must not activate
     // braid-online.service for an offline pool.
     // Scenario: planning or credential verification fails before anything is
     // mounted, then dispatch still runs the finalizer.
     #[test]
     fn run_with_online_marker_skips_when_mountpoint_false() {
-        let cfg = cfg(r#"{"mount_point":"/mnt/storage","systemd_lifecycle":true}"#);
+        let cfg = cfg(
+            r#"{"mount_point":"/mnt/storage","systemd_lifecycle":true,"pool_access_group":"storage"}"#,
+        );
         let ops = RecordingOnlineStateOps::new();
         ops.set_mounted(false);
-        let snap = OnlineSnapshot {
-            online_state: UnitActiveState::Inactive,
-        };
+        let (_dir, paths, fs) = pool_at_mount_point();
+        let mut out = Vec::new();
 
-        let result =
-            run_with_online_marker(Some(&snap), Some(&cfg), &ops, || Err::<(), _>("pre-mount"));
+        let result = run_with_online_marker_to(
+            Some(&inactive()),
+            Some(&cfg),
+            &paths,
+            &ops,
+            &fs,
+            &mut out,
+            || Err::<(), _>("pre-mount"),
+        );
 
         assert_eq!(result, Err("pre-mount"));
-        assert!(!ops.calls().contains(&format!("start {BRAID_ONLINE_UNIT}")));
+        assert_eq!(ops.calls(), vec!["mountpoint".to_owned()]);
+        assert!(out.is_empty(), "got {:?}", String::from_utf8(out));
     }
 
     // Intent: dry-run dispatch bypasses online lifecycle reconciliation.
@@ -1010,15 +1079,138 @@ mod tests {
     #[test]
     fn run_with_online_marker_skips_when_config_none() {
         let ops = RecordingOnlineStateOps::new();
-        let snap = OnlineSnapshot {
-            online_state: UnitActiveState::Inactive,
-        };
+        let (_dir, paths, fs) = pool_at_mount_point();
 
-        let result =
-            run_with_online_marker(Some(&snap), None, &ops, || Err::<(), _>("dry-run failure"));
+        let result = run_with_online_marker(Some(&inactive()), None, &paths, &ops, &fs, || {
+            Err::<(), _>("dry-run failure")
+        });
 
         assert_eq!(result, Err("dry-run failure"));
         assert!(ops.calls().is_empty());
+    }
+
+    // Intent: the finalizer over a mount that is not the pool changes no
+    //   ownership and starts nothing, warns, and returns the command's result.
+    // Why it exists: it used to gate only on `mountpoint -q`, so after any
+    //   unlock, add, or recover it chowned a foreign mount root to
+    //   root:<poolAccessGroup> 2770 and started braid-online.service, whose
+    //   consumers then served the wrong filesystem.
+    // Scenario: a tmpfs, an ext4 disk, or another btrfs sits at /mnt/storage
+    //   and `braid add` refuses it; dispatch still runs the finalizer.
+    #[test]
+    fn finalizer_leaves_a_foreign_mount_alone() {
+        let cfg = cfg(
+            r#"{"mount_point":"/mnt/storage","systemd_lifecycle":true,"pool_access_group":"storage"}"#,
+        );
+        let (_dir, paths, pool_fs) = pool_at_mount_point();
+        let foreign = [
+            (
+                pool_fs.with_mountinfo(
+                    "36 35 0:32 / /mnt/storage rw shared:1 - tmpfs tmpfs rw,size=1G\n",
+                ),
+                "braid: WARNING: /mnt/storage is mounted but fstype is tmpfs, not btrfs -- not changing its ownership or starting braid-online.service\n".to_owned(),
+            ),
+            (
+                MockFs::storage(vec![])
+                    .with_mountinfo(
+                        "36 35 0:32 / /mnt/storage rw shared:1 - btrfs /dev/mapper/backup rw\n",
+                    )
+                    .with_luks_dm("backup", "99999999-9999-9999-9999-999999999999"),
+                "braid: WARNING: /mnt/storage holds a btrfs filesystem on /dev/mapper/backup that is not this pool: its LUKS UUID 99999999-9999-9999-9999-999999999999 is not a member in pool.json or the pending-operation journal -- not changing its ownership or starting braid-online.service\n".to_owned(),
+            ),
+        ];
+        for (fs, expected) in foreign {
+            let ops = RecordingOnlineStateOps::new();
+            let mut out = Vec::new();
+
+            let result = run_with_online_marker_to(
+                Some(&inactive()),
+                Some(&cfg),
+                &paths,
+                &ops,
+                &fs,
+                &mut out,
+                || Err::<(), _>("foreign mount refused"),
+            );
+
+            assert_eq!(result, Err("foreign mount refused"));
+            assert_eq!(ops.calls(), vec!["mountpoint".to_owned()]);
+            assert_eq!(String::from_utf8(out).unwrap(), expected);
+        }
+    }
+
+    // Intent: a corrupt pool.json at finalizer time warns, changes nothing,
+    //   and returns the command's result unchanged; the finalizer never exits.
+    // Why it exists: the finalizer reads pool.json itself; an exit or a
+    //   panic there would replace the command's own error or exit code.
+    // Scenario: unlock fails, the pool is mounted, and pool.json is corrupt.
+    #[test]
+    fn finalizer_warns_on_a_corrupt_pool_json_and_keeps_the_result() {
+        let cfg = cfg(
+            r#"{"mount_point":"/mnt/storage","systemd_lifecycle":true,"pool_access_group":"storage"}"#,
+        );
+        let (_dir, paths, fs) = pool_at_mount_point();
+        std::fs::write(paths.pool_json(), "{not json").unwrap();
+        let ops = RecordingOnlineStateOps::new();
+        let mut out = Vec::new();
+
+        let result = run_with_online_marker_to(
+            Some(&inactive()),
+            Some(&cfg),
+            &paths,
+            &ops,
+            &fs,
+            &mut out,
+            || Err::<(), _>("unlock failure"),
+        );
+
+        assert_eq!(result, Err("unlock failure"));
+        assert_eq!(ops.calls(), vec!["mountpoint".to_owned()]);
+        let out = String::from_utf8(out).unwrap();
+        assert!(
+            out.starts_with(
+                "braid: WARNING: cannot tell whether the filesystem at /mnt/storage is this pool: pool membership file corrupt at "
+            ) && out.ends_with(" -- not changing its ownership or starting braid-online.service\n"),
+            "got {out:?}"
+        );
+    }
+
+    // Intent: a bootstrap add still gets the chown, the chmod, and the
+    //   braid-online start, whether it succeeds or fails after mounting.
+    // Why it exists: the finalizer reads pool.json after the command returns;
+    //   read before it, a bootstrap add has no pool.json and its new pool
+    //   would look foreign every time.
+    // Scenario: no pool.json exists when dispatch starts; `braid add` mounts
+    //   the new pool and writes pool.json, then returns Ok, or Err from a
+    //   later step.
+    #[test]
+    fn finalizer_marks_a_bootstrap_add_online() {
+        let cfg = cfg(
+            r#"{"mount_point":"/mnt/storage","systemd_lifecycle":true,"pool_access_group":"storage"}"#,
+        );
+        for result in [Ok(()), Err("post-mount failure")] {
+            let (_dir, paths) = isolated_paths();
+            let fs = MockFs::storage(vec![]).with_luks_dm("braid-disk1", POOL_UUID);
+            let ops = RecordingOnlineStateOps::new();
+            assert!(!paths.pool_json().exists());
+
+            let returned =
+                run_with_online_marker(Some(&inactive()), Some(&cfg), &paths, &ops, &fs, || {
+                    save_membership(&two_disk_membership(), &paths).unwrap();
+                    result
+                });
+
+            assert_eq!(returned, result);
+            assert_eq!(
+                ops.calls(),
+                vec![
+                    "mountpoint".to_owned(),
+                    "chown".to_owned(),
+                    "chmod".to_owned(),
+                    format!("start {BRAID_ONLINE_UNIT}"),
+                ]
+            );
+        }
     }
 
     // Intent: mark_offline skips braid-online.service when lifecycle is disabled.
@@ -1030,7 +1222,7 @@ mod tests {
         let cfg = cfg(r#"{"mount_point":"/mnt/storage"}"#);
         let ops = RecordingOnlineStateOps::new();
 
-        mark_offline(PoolUnmounted(()), &cfg, &ops);
+        mark_offline(unmounted_proof(), &cfg, &ops);
 
         assert!(
             !ops.calls()
@@ -1042,7 +1234,7 @@ mod tests {
     fn mark_offline_stops_when_lifecycle_enabled() {
         let cfg = cfg(r#"{"mount_point":"/mnt/storage","systemd_lifecycle":true}"#);
         let ops = RecordingOnlineStateOps::new();
-        mark_offline(PoolUnmounted(()), &cfg, &ops);
+        mark_offline(unmounted_proof(), &cfg, &ops);
         assert!(
             ops.calls()
                 .contains(&format!("stop {BRAID_ONLINE_UNIT} no_block=false"))

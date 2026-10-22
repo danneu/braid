@@ -17,6 +17,10 @@ pub enum MountInfoError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MountEntry {
     pub fstype: String,
+    /// Field 10, the mount source, with the kernel's octal escapes decoded.
+    /// For btrfs this is the device path the kernel registered for one of
+    /// the filesystem's devices.
+    pub source: String,
     pub vfs_options: String,
     pub fs_options: String,
 }
@@ -30,14 +34,16 @@ pub fn fstype_at_mount(content: &str, target: &str) -> Result<Option<String>, Mo
     Ok(find_unique_target_entry(content, target)?.map(|entry| entry.fstype))
 }
 
-/// Returns the mounted entry at `target`, including both mountinfo option
-/// fields. Field 6 (`vfs_options`) carries per-mount VFS flags such as
-/// `rw`/`ro`; field 11 (`fs_options`) carries filesystem/superblock options,
-/// including the filesystem-level `rw`/`ro` state.
+/// Returns the mounted entry at `target`, including its source and both
+/// mountinfo option fields. Field 6 (`vfs_options`) carries per-mount VFS
+/// flags such as `rw`/`ro`; field 11 (`fs_options`) carries
+/// filesystem/superblock options, including the filesystem-level `rw`/`ro`
+/// state.
 pub fn mount_entry_at(content: &str, target: &str) -> Result<Option<MountEntry>, MountInfoError> {
     Ok(
         find_unique_target_entry(content, target)?.map(|entry| MountEntry {
             fstype: entry.fstype,
+            source: entry.source,
             vfs_options: entry.vfs_options,
             fs_options: entry.fs_options,
         }),
@@ -81,6 +87,7 @@ fn find_unique_target_entry(
 struct ParsedLine {
     mount_point: String,
     fstype: String,
+    source: String,
     vfs_options: String,
     fs_options: String,
 }
@@ -107,7 +114,8 @@ fn parse_line(line: &str) -> Option<ParsedLine> {
         return None;
     }
     let fstype = fields.next()?.to_string();
-    fields.next()?; // source (may be empty for some pseudo-fs entries)
+    // May be empty for some pseudo-fs entries.
+    let source = decode_octal_escapes(fields.next()?);
     let fs_options = fields.next()?.to_string();
     if fields.next().is_some() {
         return None;
@@ -115,6 +123,7 @@ fn parse_line(line: &str) -> Option<ParsedLine> {
     Some(ParsedLine {
         mount_point,
         fstype,
+        source,
         vfs_options,
         fs_options,
     })
@@ -508,6 +517,7 @@ mod tests {
             mount_entry_at(&body, TARGET).unwrap(),
             Some(MountEntry {
                 fstype: "btrfs".to_string(),
+                source: "/dev/mapper/braid-vdb".to_string(),
                 vfs_options: "rw,relatime".to_string(),
                 fs_options: "rw,space_cache=v2".to_string(),
             })
@@ -530,6 +540,7 @@ mod tests {
             mount_entry_at(&body, "/mnt/storage/").unwrap(),
             Some(MountEntry {
                 fstype: "btrfs".to_string(),
+                source: "/dev/mapper/braid-vdb".to_string(),
                 vfs_options: "ro,relatime".to_string(),
                 fs_options: "ro,space_cache=v2".to_string(),
             })
@@ -615,8 +626,22 @@ mod tests {
         let body = format!("36 35 0:32 / {TARGET} rw shared:1 - tmpfs  rw,size=1G\n");
         let entry = mount_entry_at(&body, TARGET).unwrap().unwrap();
         assert_eq!(entry.fstype, "tmpfs");
+        assert_eq!(entry.source, "");
         assert_eq!(entry.vfs_options, "rw");
         assert_eq!(entry.fs_options, "rw,size=1G");
+    }
+
+    /* Intent: the source field decodes the kernel's octal escapes.
+     * Why: btrfs prints a device the kernel no longer has as
+     *   `<missing disk>`, escaped as `<missing\040disk>`; the pool-mount
+     *   classifier must see the decoded text, not a path it might resolve.
+     * Scenario: the device btrfs names for the mount went missing.
+     */
+    #[test]
+    fn mount_entry_at_decodes_octal_escaped_source() {
+        let body = format!("36 35 0:32 / {TARGET} rw shared:1 - btrfs <missing\\040disk> rw\n");
+        let entry = mount_entry_at(&body, TARGET).unwrap().unwrap();
+        assert_eq!(entry.source, "<missing disk>");
     }
 
     struct MockMountInfoFs {

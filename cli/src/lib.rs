@@ -39,6 +39,9 @@ pub mod online_state;
 pub mod parse;
 pub mod pool;
 pub mod pool_lock;
+/// Whether the filesystem at the mount point is this pool, so no caller acts
+/// on a foreign mount because `mountpoint -q` exits 0 for any filesystem.
+pub mod pool_mount;
 pub mod preflight;
 pub mod preview;
 pub mod probe;

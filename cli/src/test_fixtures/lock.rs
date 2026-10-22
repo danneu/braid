@@ -8,6 +8,7 @@
 use super::shared;
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, MockRunner, RawCommandOutput, Step};
 use crate::membership::{DiskMember, PoolMembership};
+use crate::state_paths::StatePaths;
 use crate::types::{ByIdPath, DiskName, LuksUuid, MountPoint};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
@@ -20,6 +21,14 @@ pub(crate) use super::mount::{
     NoopSleeper as LockNoopSleeper, err_raw as lock_err_raw, ok_raw as lock_ok_raw,
     test_config as lock_test_config,
 };
+
+/// A state dir with neither `pool.json` nor a pending journal. Lock reads
+/// state only to classify a mount at the mount point, so with this a mounted
+/// fixture classifies as unproven and runs lock's ordinary mounted-pool flow.
+/// Lock never writes state, so the directory need not exist.
+pub(crate) fn lock_no_state() -> StatePaths {
+    StatePaths::custom("/nonexistent/braid-lock-test-state".into())
+}
 
 // ---------------------------------------------------------------------------
 // RecordingRunner

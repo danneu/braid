@@ -11,10 +11,12 @@ use crate::online_state::{
     observe_unmounted,
 };
 use crate::pool_lock::StopCoordinatorGuard;
+use crate::pool_mount::{self, MountedAt};
 use crate::preflight::{self, LockExclop};
 use crate::preview::{self, PerDiskStyle, Preview, PreviewNote};
 use crate::probe::{ProbeError, probe_fsid, probe_pool};
 use crate::progress::{RealSleeper, Sleeper};
+use crate::state_paths::StatePaths;
 use crate::status_tag::{StatusTag, color_enabled_for_stderr, emit_status, status_line};
 use crate::types::{DiskName, Fsid, LuksUuid, MapperName, MountPoint, PoolState};
 use crate::util::detail_suffix;
@@ -767,19 +769,25 @@ impl LockPlan {
     }
 }
 
-/// Plan a `braid lock` run. Owns the mountpoint probe, preflight,
-/// per-device probe (for UUID classification), close-set assembly,
-/// the unit-stop list, step compilation, and any `PreviewNote::Warn`
-/// notes: one per detected orphan mapper, per skipped candidate, the
-/// mounted fallback warning when per-device probe failed, or a single
-/// warn from a failed candidate scan. It is lock's only refusal site and
-/// mutates nothing. The returned `LockPlan` is the single source of
+/// Plan a `braid lock` run. Owns the mountpoint probe, the pool-mount
+/// classification, preflight, per-device probe (for UUID classification),
+/// close-set assembly, the unit-stop list, step compilation, and any
+/// `PreviewNote::Warn` notes: one per detected orphan mapper, per skipped
+/// candidate, the mounted fallback warning when per-device probe failed, or
+/// a single warn from a failed candidate scan. It is lock's only refusal site
+/// and mutates nothing. The returned `LockPlan` is the single source of
 /// truth for both `--dry-run` preview and real execution.
+///
+/// `paths` is read only to classify a mount at the mount point
+/// (`cli/src/pool_mount.rs`): lock refuses a mount that is provably not this
+/// pool, and runs as before on this pool or an unproven mount, so a missing
+/// or corrupt `pool.json` never blocks shutdown cleanup.
 pub fn plan_lock<R, F>(
     runner: &R,
     fs: &F,
     config: &Config,
     membership: &PoolMembership,
+    paths: &StatePaths,
     mode: LockMode,
 ) -> Result<LockPlan, LockError>
 where
@@ -788,11 +796,15 @@ where
 {
     let mount_point = config.mount_point().clone();
 
-    // 1. Check if pool is mounted
-    let mp_result = runner.run(&CmdRequest::MountpointCheck {
-        path: mount_point.clone().into(),
-    })?;
-    let pool_was_mounted = mp_result.exit_status == 0;
+    // 1. Check if the pool is mounted. A mount that is provably not the pool
+    // refuses before anything is probed, stopped, or unmounted.
+    let pool_was_mounted = match pool_mount::confirmed_mount(runner, &mount_point)? {
+        None => false,
+        Some(mount) => match mount.classify(fs, paths) {
+            MountedAt::Foreign(foreign) => return Err(LockError::Failed(foreign.to_string())),
+            MountedAt::Pool(_) | MountedAt::Unknown(_) => true,
+        },
+    };
 
     // 2. Try per-device probe; on success take the Probed path so
     // close-set classification routes through observed UUIDs.
@@ -1007,6 +1019,7 @@ pub fn cmd_lock<R: CommandRunner, F: Filesystem + ?Sized>(
     fs: &F,
     config: &Config,
     membership: &PoolMembership,
+    paths: &StatePaths,
     dry_run: bool,
     extra_notes: Vec<PreviewNote>,
 ) -> Result<(), LockError> {
@@ -1016,6 +1029,7 @@ pub fn cmd_lock<R: CommandRunner, F: Filesystem + ?Sized>(
         &RealSleeper,
         config,
         membership,
+        paths,
         LockOptions {
             dry_run,
             extra_notes,
@@ -1033,6 +1047,7 @@ pub fn cmd_lock_systemd_stop<R: CommandRunner, F: Filesystem + ?Sized>(
     fs: &F,
     config: &Config,
     membership: &PoolMembership,
+    paths: &StatePaths,
 ) -> Result<(), LockError> {
     cmd_lock_impl_with_notes(
         runner,
@@ -1040,6 +1055,7 @@ pub fn cmd_lock_systemd_stop<R: CommandRunner, F: Filesystem + ?Sized>(
         &RealSleeper,
         config,
         membership,
+        paths,
         LockOptions {
             dry_run: false,
             extra_notes: Vec::new(),
@@ -1060,6 +1076,7 @@ pub fn cmd_lock_orchestrate<R, F, O>(
     online_ops: &O,
     config: &Config,
     membership: &PoolMembership,
+    paths: &StatePaths,
     coordinator_guard: &StopCoordinatorGuard,
 ) -> Result<(), LockOrchestrateError>
 where
@@ -1070,7 +1087,7 @@ where
     cmd_lock_orchestrate_impl(
         online_ops,
         config,
-        || cmd_lock(runner, fs, config, membership, false, Vec::new()),
+        || cmd_lock(runner, fs, config, membership, paths, false, Vec::new()),
         || coordinator_guard.mark_done(),
     )
 }
@@ -1111,6 +1128,8 @@ where
     lock_result
 }
 
+/// Test entry with no pool record (`lock_no_state`), so a mounted fixture
+/// classifies as unproven and runs lock's ordinary mounted-pool flow.
 #[cfg(test)]
 fn cmd_lock_impl<R, F, S>(
     runner: &R,
@@ -1131,6 +1150,7 @@ where
         sleeper,
         config,
         membership,
+        &crate::test_fixtures::lock_no_state(),
         LockOptions {
             dry_run,
             extra_notes: Vec::new(),
@@ -1147,6 +1167,7 @@ fn cmd_lock_impl_with_notes<R, F, S>(
     sleeper: &S,
     config: &Config,
     membership: &PoolMembership,
+    paths: &StatePaths,
     opts: LockOptions,
 ) -> Result<(), LockError>
 where
@@ -1154,7 +1175,7 @@ where
     F: Filesystem + ?Sized,
     S: Sleeper,
 {
-    let mut plan = plan_lock(runner, fs, config, membership, opts.mode)?;
+    let mut plan = plan_lock(runner, fs, config, membership, paths, opts.mode)?;
     plan.notes.splice(0..0, opts.extra_notes);
     if opts.dry_run {
         plan.preview().print_colored();
@@ -1266,7 +1287,7 @@ mod tests {
     use crate::test_fixtures::{
         LockNoopSleeper, LockRecordingRunner, assert_lines_in_order, disk_member, line_index,
         lock_count_forget_steps, lock_err_raw, lock_forget_step_devices, lock_fs, lock_member_fs,
-        lock_mounted_runner, lock_ok_raw, lock_test_config, lock_test_membership,
+        lock_mounted_runner, lock_no_state, lock_ok_raw, lock_test_config, lock_test_membership,
         lock_umount_failed_runner, lock_with_fsid_probe_mocks, test_uuid,
     };
     use crate::types::Devid;
@@ -1782,6 +1803,7 @@ mod tests {
             &fs,
             &config,
             &lock_test_membership(),
+            &lock_no_state(),
             LockMode::User,
         )
         .expect("plan_lock should succeed on mounted pool");
@@ -2013,8 +2035,15 @@ mod tests {
         let fs = lock_fs(&[]);
         let config = lock_test_config();
 
-        let plan = plan_lock(&runner, &fs, &config, &membership, LockMode::User)
-            .expect("plan should succeed");
+        let plan = plan_lock(
+            &runner,
+            &fs,
+            &config,
+            &membership,
+            &lock_no_state(),
+            LockMode::User,
+        )
+        .expect("plan should succeed");
 
         assert_eq!(known_closed_names(&plan), vec!["alpha", "zeta"]);
     }
@@ -2064,8 +2093,15 @@ mod tests {
         let config = lock_test_config();
         let membership = lock_test_membership();
 
-        let plan = plan_lock(&runner, &plan_fs, &config, &membership, LockMode::User)
-            .expect("plan_lock should succeed");
+        let plan = plan_lock(
+            &runner,
+            &plan_fs,
+            &config,
+            &membership,
+            &lock_no_state(),
+            LockMode::User,
+        )
+        .expect("plan_lock should succeed");
         assert!(
             plan.close_set.is_empty(),
             "precondition: plan should record no membership opens"
@@ -2863,6 +2899,7 @@ mod tests {
             &fs,
             &config,
             &lock_test_membership(),
+            &lock_no_state(),
             LockMode::User,
         )
         .expect("plan_lock should succeed with list_dir failure");
@@ -2922,6 +2959,7 @@ mod tests {
             &fs,
             &config,
             &lock_test_membership(),
+            &lock_no_state(),
             LockMode::User,
         )
         .expect("plan_lock should succeed with one orphan mapper");
@@ -2973,6 +3011,7 @@ mod tests {
             &fs,
             &config,
             &lock_test_membership(),
+            &lock_no_state(),
             LockMode::User,
         )
         .expect("plan_lock should succeed on mounted pool");
@@ -3041,6 +3080,7 @@ mod tests {
             &fs,
             &config,
             &lock_test_membership(),
+            &lock_no_state(),
             LockMode::User,
         )
         .expect("plan_lock should succeed on already-locked pool");
@@ -3074,8 +3114,15 @@ mod tests {
         let config = lock_test_config();
         let membership = lock_test_membership();
 
-        let plan = plan_lock(&runner, &fs, &config, &membership, LockMode::User)
-            .expect("fallback should plan");
+        let plan = plan_lock(
+            &runner,
+            &fs,
+            &config,
+            &membership,
+            &lock_no_state(),
+            LockMode::User,
+        )
+        .expect("fallback should plan");
 
         assert!(
             plan.notes.iter().any(|note| matches!(
@@ -3121,8 +3168,15 @@ mod tests {
         let config = lock_test_config();
         let membership = lock_test_membership();
 
-        let plan = plan_lock(&runner, &fs, &config, &membership, LockMode::SystemdStop)
-            .expect("probe-failed fallback should plan under systemd-stop");
+        let plan = plan_lock(
+            &runner,
+            &fs,
+            &config,
+            &membership,
+            &lock_no_state(),
+            LockMode::SystemdStop,
+        )
+        .expect("probe-failed fallback should plan under systemd-stop");
 
         assert!(
             plan.notes.iter().any(|note| matches!(
@@ -3176,8 +3230,15 @@ mod tests {
         let config = lock_test_config();
         let membership = lock_test_membership();
 
-        let plan = plan_lock(&runner, &fs, &config, &membership, LockMode::User)
-            .expect("unmounted lock must plan without consulting the exclusive-op preflight");
+        let plan = plan_lock(
+            &runner,
+            &fs,
+            &config,
+            &membership,
+            &lock_no_state(),
+            LockMode::User,
+        )
+        .expect("unmounted lock must plan without consulting the exclusive-op preflight");
 
         assert!(
             !plan.pool_was_mounted,
@@ -3211,8 +3272,15 @@ mod tests {
         let config = lock_test_config();
         let membership = lock_test_membership();
 
-        let plan = plan_lock(&runner, &fs, &config, &membership, LockMode::SystemdStop)
-            .expect("unmounted systemd-stop lock must plan without consulting the preflight");
+        let plan = plan_lock(
+            &runner,
+            &fs,
+            &config,
+            &membership,
+            &lock_no_state(),
+            LockMode::SystemdStop,
+        )
+        .expect("unmounted systemd-stop lock must plan without consulting the preflight");
 
         assert!(
             !plan.pool_was_mounted,
@@ -3242,8 +3310,15 @@ mod tests {
         let config = lock_test_config();
         let membership = lock_test_membership();
 
-        let plan = plan_lock(&runner, &fs, &config, &membership, LockMode::User)
-            .expect("fallback should plan");
+        let plan = plan_lock(
+            &runner,
+            &fs,
+            &config,
+            &membership,
+            &lock_no_state(),
+            LockMode::User,
+        )
+        .expect("fallback should plan");
 
         assert!(member_summaries(&plan.close_set).is_empty());
         assert_eq!(
@@ -3284,8 +3359,15 @@ mod tests {
         let config = lock_test_config();
         let membership = PoolMembership::empty();
 
-        let plan = plan_lock(&runner, &fs, &config, &membership, LockMode::User)
-            .expect("empty membership should still produce a close plan");
+        let plan = plan_lock(
+            &runner,
+            &fs,
+            &config,
+            &membership,
+            &lock_no_state(),
+            LockMode::User,
+        )
+        .expect("empty membership should still produce a close plan");
         assert!(member_summaries(&plan.close_set).is_empty());
         assert_eq!(
             orphan_summaries(&plan.close_set),
@@ -3333,8 +3415,15 @@ mod tests {
         let config = lock_test_config();
         let membership = lock_test_membership();
 
-        let plan = plan_lock(&runner, &fs, &config, &membership, LockMode::User)
-            .expect("fallback should plan");
+        let plan = plan_lock(
+            &runner,
+            &fs,
+            &config,
+            &membership,
+            &lock_no_state(),
+            LockMode::User,
+        )
+        .expect("fallback should plan");
 
         assert_eq!(
             member_summaries(&plan.close_set),
@@ -3365,8 +3454,15 @@ mod tests {
         let config = lock_test_config();
         let membership = lock_test_membership();
 
-        let plan = plan_lock(&runner, &fs, &config, &membership, LockMode::User)
-            .expect("fallback should plan");
+        let plan = plan_lock(
+            &runner,
+            &fs,
+            &config,
+            &membership,
+            &lock_no_state(),
+            LockMode::User,
+        )
+        .expect("fallback should plan");
         let output = plan.preview().render();
 
         assert!(plan.close_set.is_empty());
@@ -3994,7 +4090,7 @@ mod tests {
         let config = lock_test_config();
         let membership = lock_test_membership();
 
-        cmd_lock_systemd_stop(&runner, &fs, &config, &membership)
+        cmd_lock_systemd_stop(&runner, &fs, &config, &membership, &lock_no_state())
             .expect("systemd-stop lock should proceed during balance");
 
         assert_eq!(
@@ -4044,7 +4140,13 @@ mod tests {
 
         let mut result = None;
         let captured = crate::status_tag::testing::capture_with_color(false, || {
-            result = Some(cmd_lock_systemd_stop(&runner, &fs, &config, &membership));
+            result = Some(cmd_lock_systemd_stop(
+                &runner,
+                &fs,
+                &config,
+                &membership,
+                &lock_no_state(),
+            ));
         });
         result
             .expect("captured systemd-stop result")
@@ -4083,7 +4185,7 @@ mod tests {
         let config = lock_test_config();
         let membership = lock_test_membership();
 
-        let err = cmd_lock_systemd_stop(&runner, &fs, &config, &membership)
+        let err = cmd_lock_systemd_stop(&runner, &fs, &config, &membership, &lock_no_state())
             .expect_err("non-exit-2 pause failure must abort teardown");
 
         assert!(
@@ -4119,7 +4221,13 @@ mod tests {
 
         let mut result = None;
         let captured = crate::status_tag::testing::capture_with_color(false, || {
-            result = Some(cmd_lock_systemd_stop(&runner, &fs, &config, &membership));
+            result = Some(cmd_lock_systemd_stop(
+                &runner,
+                &fs,
+                &config,
+                &membership,
+                &lock_no_state(),
+            ));
         });
         result
             .expect("captured systemd-stop result")
@@ -4205,7 +4313,7 @@ mod tests {
         let config = lock_test_config();
         let membership = lock_test_membership();
 
-        cmd_lock_systemd_stop(&runner, &fs, &config, &membership)
+        cmd_lock_systemd_stop(&runner, &fs, &config, &membership, &lock_no_state())
             .expect("systemd-stop lock should outwait transient balance holder");
 
         assert_eq!(
@@ -4238,7 +4346,7 @@ mod tests {
         let config = lock_test_config();
         let membership = lock_test_membership();
 
-        let err = cmd_lock_systemd_stop(&runner, &fs, &config, &membership)
+        let err = cmd_lock_systemd_stop(&runner, &fs, &config, &membership, &lock_no_state())
             .expect_err("systemd-stop lock should reject non-balance exclop");
         let msg = err.to_string();
         assert!(
@@ -4366,10 +4474,17 @@ mod tests {
         let config = lock_test_config();
         let membership = lock_test_membership();
 
-        let preview = plan_lock(&runner(), &fs, &config, &membership, LockMode::User)
-            .expect("dry-run plan should proceed under a paused balance")
-            .preview()
-            .render();
+        let preview = plan_lock(
+            &runner(),
+            &fs,
+            &config,
+            &membership,
+            &lock_no_state(),
+            LockMode::User,
+        )
+        .expect("dry-run plan should proceed under a paused balance")
+        .preview()
+        .render();
         assert!(
             preview.lines().any(|line| line == NOTE),
             "expected paused-balance note in preview, got:\n{preview}"
@@ -4408,15 +4523,13 @@ mod tests {
         );
     }
 
-    // Intent: cmd_lock preserves probe_pool's NotBtrfs contract through
-    //   probe_fsid -- if the mount point is held by a non-btrfs
-    //   filesystem, lock fails with a typed message naming the fstype
-    //   rather than a generic btrfs-show parse failure.
-    // Why: the refactor from probe_pool to probe_fsid dropped per-device
-    //   cryptsetup checks; it must NOT also drop the mounted-non-btrfs
-    //   check. Without this guard, an ext4-mounted /mnt/storage would
-    //   fall through to `btrfs filesystem show`, fail with a confusing
-    //   parse error, and mask the real mount-configuration issue.
+    // Intent: if the mount point is held by a non-btrfs filesystem, lock
+    //   fails with a message naming the fstype rather than a generic
+    //   btrfs-show parse failure. The mount classifier
+    //   (`cli/src/pool_mount.rs`) now refuses before probe_pool runs.
+    // Why: an ext4-mounted /mnt/storage must not fall through to
+    //   `btrfs filesystem show`, fail with a confusing parse error, and
+    //   mask the real mount-configuration issue.
     // Scenario: MountpointCheck succeeds, mountinfo reports the mount
     //   point's fstype as ext4. cmd_lock must refuse with a
     //   LockError::Failed whose message mentions "not btrfs".
@@ -4440,6 +4553,142 @@ mod tests {
             msg.contains("not btrfs") && msg.contains("ext4"),
             "expected NotBtrfs-style message naming ext4, got: {msg}"
         );
+    }
+
+    /// Mountinfo with a btrfs filesystem from `source` at the lock-test
+    /// mount point.
+    fn btrfs_mountinfo_from(source: &str) -> String {
+        format!("36 35 0:32 / /mnt/storage rw,noatime shared:1 - btrfs {source} rw\n")
+    }
+
+    // Intent: lock refuses a btrfs filesystem at the mount point that is
+    //   provably not this pool, before it probes, stops a unit, or unmounts.
+    // Why it exists: lock used to treat any btrfs mount at the mount point
+    //   as the pool, so it unmounted a filesystem braid does not own.
+    // Scenario: an operator mounts a LUKS-encrypted backup btrfs at
+    //   /mnt/storage by hand. Its LUKS UUID is in neither pool.json nor a
+    //   pending journal, and the operator runs `braid lock`.
+    #[test]
+    fn lock_refuses_btrfs_that_is_not_this_pool() {
+        let (_state_dir, paths) = crate::test_fixtures::isolated_paths();
+        crate::membership::save_membership(&lock_test_membership(), &paths).unwrap();
+        let mountpoint = CmdRequest::MountpointCheck {
+            path: MountPoint::new("/mnt/storage".to_owned()).into(),
+        };
+        let runner = MockRunner::default().with_output(
+            mountpoint.clone(),
+            lock_ok_raw("mountpoint -q /mnt/storage"),
+        );
+        let fs = lock_member_fs(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"])
+            .with_mountinfo(&btrfs_mountinfo_from("/dev/mapper/backup"))
+            .with_luks_dm("backup", "99999999-9999-9999-9999-999999999999");
+
+        let Err(err) = plan_lock(
+            &runner,
+            &fs,
+            &lock_test_config(),
+            &lock_test_membership(),
+            &paths,
+            LockMode::User,
+        ) else {
+            panic!("lock must refuse a btrfs that is not this pool");
+        };
+
+        assert_eq!(
+            err.to_string(),
+            "/mnt/storage holds a btrfs filesystem on /dev/mapper/backup that is not \
+             this pool: its LUKS UUID 99999999-9999-9999-9999-999999999999 is not a \
+             member in pool.json or the pending-operation journal"
+        );
+        assert_eq!(
+            runner.requests(),
+            vec![mountpoint],
+            "lock must refuse before any probe, stop, or umount"
+        );
+    }
+
+    // Intent: lock runs its mounted-pool flow on a pool whose members braid
+    //   cannot name, so a missing pool.json never blocks shutdown cleanup.
+    // Why it exists: the mount classifier reads pool.json and the pending
+    //   journal. With neither, it knows no member, so the mount must
+    //   classify as Unknown, not Foreign; lock refuses only Foreign. Counting
+    //   an empty known set as Foreign would undo load_membership_for_lock's
+    //   leniency and strand the pool mounted at shutdown (ADR 026).
+    // Scenario: pool.json was deleted while the pool stayed mounted on
+    //   braid-aaa and no operation is pending, so lock gets an empty
+    //   membership; braid-online.service ExecStop runs lock.
+    #[test]
+    fn lock_unmounts_a_pool_braid_has_no_record_of() {
+        let (_state_dir, paths) = crate::test_fixtures::isolated_paths();
+        let fs = lock_member_fs(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"])
+            .with_mountinfo(&btrfs_mountinfo_from("/dev/mapper/braid-aaa"));
+
+        let plan = plan_lock(
+            &lock_mounted_runner(),
+            &fs,
+            &lock_test_config(),
+            &PoolMembership::empty(),
+            &paths,
+            LockMode::User,
+        )
+        .expect("lock must plan cleanup for an unproven mount");
+
+        assert!(plan.pool_was_mounted, "lock must plan the umount");
+    }
+
+    // Intent: lock counts the pending journal's members as the pool, so a
+    //   member that pool.json does not list yet does not make the pool look
+    //   foreign.
+    // Why it exists: an interrupted add leaves the new member in the live
+    //   pool and in the journal but not in pool.json; refusing there would
+    //   strand the pool mounted at shutdown.
+    // Scenario: pool.json lists aaa, a live-pool add of bbb was interrupted,
+    //   and mountinfo names braid-bbb as the pool's device.
+    #[test]
+    fn lock_recognizes_a_member_known_only_to_the_journal() {
+        let (_state_dir, paths) = crate::test_fixtures::isolated_paths();
+        let full = lock_test_membership();
+        let mut pre = PoolMembership::empty();
+        let (aaa, aaa_member) = disk_member(700, "aaa", "/dev/disk/by-id/a");
+        pre.insert(aaa, aaa_member).unwrap();
+        crate::membership::save_membership(&pre, &paths).unwrap();
+        let mut targets = crate::membership::LuksUuidMap::new();
+        targets
+            .insert(
+                test_uuid(701),
+                crate::journal::AddJournalTarget {
+                    name: DiskName::parse("bbb").unwrap(),
+                    by_id: crate::types::ByIdPath::parse("/dev/disk/by-id/b").unwrap(),
+                    mode: crate::journal::AddJournalMode::FreshLuks {
+                        extra_opts: crate::types::LuksFormatExtraOpts::parse(&[]).unwrap(),
+                        enroll_key_file: None,
+                    },
+                },
+            )
+            .unwrap();
+        let journal = crate::journal::build_journal(
+            pre,
+            full.clone(),
+            crate::journal::OpKind::Add {
+                phase: crate::journal::AddPhase::PoolMutation,
+                targets,
+            },
+        );
+        crate::journal::write_journal(&paths, &journal).unwrap();
+        let fs = lock_member_fs(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"])
+            .with_mountinfo(&btrfs_mountinfo_from("/dev/mapper/braid-bbb"));
+
+        let plan = plan_lock(
+            &lock_mounted_runner(),
+            &fs,
+            &lock_test_config(),
+            &full,
+            &paths,
+            LockMode::User,
+        )
+        .expect("lock must treat a journaled member as the pool");
+
+        assert!(plan.pool_was_mounted, "lock must plan the umount");
     }
 
     /// Test-local helper: build a member-owned close entry from a bare
@@ -5040,8 +5289,15 @@ mod tests {
         let config = lock_test_config();
         let membership = lock_test_membership();
 
-        let plan = plan_lock(&runner, &fs, &config, &membership, LockMode::User)
-            .expect("plan should succeed");
+        let plan = plan_lock(
+            &runner,
+            &fs,
+            &config,
+            &membership,
+            &lock_no_state(),
+            LockMode::User,
+        )
+        .expect("plan should succeed");
 
         assert!(
             member_summaries(&plan.close_set).contains(&("braid-WRONG".into(), "aaa".into())),
@@ -5296,8 +5552,15 @@ mod tests {
         let config = lock_test_config();
         let membership = lock_test_membership_with_ccc();
 
-        let plan = plan_lock(&runner, &fs, &config, &membership, LockMode::User)
-            .expect("plan should succeed");
+        let plan = plan_lock(
+            &runner,
+            &fs,
+            &config,
+            &membership,
+            &lock_no_state(),
+            LockMode::User,
+        )
+        .expect("plan should succeed");
 
         assert_eq!(
             plan.close_set.entries(),
@@ -5523,8 +5786,15 @@ mod tests {
         let config = lock_test_config();
         let membership = lock_test_membership_with_ccc();
 
-        let plan = plan_lock(&runner, &fs, &config, &membership, LockMode::User)
-            .expect("plan should succeed");
+        let plan = plan_lock(
+            &runner,
+            &fs,
+            &config,
+            &membership,
+            &lock_no_state(),
+            LockMode::User,
+        )
+        .expect("plan should succeed");
 
         assert!(
             plan.notes.iter().any(|note| matches!(
@@ -5557,8 +5827,15 @@ mod tests {
         let config = lock_test_config();
         let membership = lock_test_membership_with_ccc();
 
-        let plan = plan_lock(&runner, &fs, &config, &membership, LockMode::User)
-            .expect("plan should succeed");
+        let plan = plan_lock(
+            &runner,
+            &fs,
+            &config,
+            &membership,
+            &lock_no_state(),
+            LockMode::User,
+        )
+        .expect("plan should succeed");
 
         assert!(plan.cleanup_uncertain);
         assert!(
@@ -5610,10 +5887,11 @@ mod tests {
     /// Why: plan 3320 -- only per-device variants are catchable by
     /// fallback cleanup so a real configuration error
     /// (NotBtrfs) cannot be silently masked.
-    /// Scenario: seed 706. NB: an existing test
-    /// `lock_rejects_mounted_but_not_btrfs` proves this same
-    /// behavior end-to-end; this test exists separately to pin the
-    /// match-arm shape so a future refactor cannot collapse NotBtrfs
+    /// Scenario: seed 706. The mount classifier reads a btrfs it cannot
+    /// prove is the pool, then an ext4 replaces it before probe_pool
+    /// reads mountinfo. `lock_rejects_mounted_but_not_btrfs` covers the
+    /// common case, where the classifier refuses first; this test pins
+    /// the match-arm shape so a future refactor cannot collapse NotBtrfs
     /// into the catch-all without surfacing in CI.
     #[test]
     fn full_arm_notbtrfs_aborts_does_not_fall_back() {
@@ -5624,11 +5902,19 @@ mod tests {
             lock_ok_raw("mountpoint -q /mnt/storage"),
         );
         let fs = lock_fs(&["/dev/mapper/braid-aaa", "/dev/mapper/braid-bbb"])
+            .with_first_mountinfo(&btrfs_mountinfo_from("/dev/mapper/braid-aaa"))
             .with_mountinfo("36 35 0:32 / /mnt/storage rw,noatime shared:1 - ext4 /dev/sda1 rw\n");
         let config = lock_test_config();
         let membership = lock_test_membership();
 
-        let result = plan_lock(&runner, &fs, &config, &membership, LockMode::User);
+        let result = plan_lock(
+            &runner,
+            &fs,
+            &config,
+            &membership,
+            &lock_no_state(),
+            LockMode::User,
+        );
         let err = match result {
             Err(e) => e,
             Ok(_) => panic!("NotBtrfs must surface as an abort, not fallback cleanup"),

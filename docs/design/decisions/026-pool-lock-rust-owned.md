@@ -57,11 +57,14 @@ Lifecycle work also lives under the Rust-held pool lock:
 
 - After every real-run `unlock`, `add`, and `recover` attempt that gets past
   dispatch's early exits (pool-lock contention, the recovery gate, and config
-  and pool.json loads), dispatch runs `mark_online` as a finalizer, success or
-  failure. The `is_mountpoint` gate inside
-  `mark_online` short-circuits when the operation failed before mounting; the
-  bootstrap-add and recover cases where the mount succeeded but a later step
-  returned `Err` are exactly where this finalizer matters.
+  and pool.json loads), dispatch runs an online finalizer
+  (`cli/src/online_state.rs#run_with_online_marker`), success or failure. Its
+  `is_mountpoint` gate short-circuits when the operation failed before
+  mounting; the bootstrap-add and recover cases where the mount succeeded but
+  a later step returned `Err` are exactly where this finalizer matters. It
+  then runs `mark_online` only on a mount proven to be this pool
+  (`cli/src/pool_mount.rs#ConfirmedMount::classify`); any other mount gets a
+  warning, keeps its ownership, and does not start `braid-online.service`.
 - After every plain `braid lock` attempt, success or failure, dispatch runs
   an offline finalizer (`cli/src/lock.rs#cmd_lock_orchestrate`). It probes
   the mount once; only when the pool is unmounted does it write `done\n` and
@@ -96,16 +99,19 @@ usable, but automatic shutdown cleanup may be missing.
 
 ## Lock Tolerates Missing Or Corrupt Membership
 
-Lock-side dispatch loads pool membership from `pool.json` only; it consults no
-recovery journal. If `pool.json` is missing, unreadable, corrupt, or fails its
-uniqueness checks, lock does not abort -- it warns and proceeds with empty
-membership. On the live plain-lock and `braid-online.service` ExecStop paths
+Lock-side dispatch loads pool membership from `pool.json` only. If
+`pool.json` is missing, unreadable, corrupt, or fails its uniqueness checks,
+lock does not abort -- it warns and proceeds with empty membership. On the live plain-lock and `braid-online.service` ExecStop paths
 the warning goes to stderr; under `--dry-run` it is folded into the stdout
 preview to preserve the single-stream dry-run contract
 ([ADR 022](022-dry-run-preview-model.md)).
 
 Membership is advisory for lock, not authoritative -- its only role here is to
-attach friendly member names to status output. What lock closes is decided from
+attach friendly member names to status output. The one exception is the mount
+check: lock refuses a mount at the mount point that is provably not this pool,
+which it tells by the LUKS UUIDs in `pool.json` and the pending journal
+(`cli/src/pool_mount.rs`). A missing or unreadable record makes the mount
+unproven, not foreign, and lock proceeds. What lock closes is decided from
 observed state, not from `pool.json`:
 
 - mappers backing the live mounted pool, including members whose backing
@@ -134,7 +140,8 @@ close is read from the live mounted pool and the observed mappers, not from
 Lock therefore needs no special case for which operation was interrupted. An
 interrupted `Remove`, `RemoveMissing`, `Replace`, or live-pool `Add` is
 reconciled by `braid recover` against its `pending-op.json` journal; lock
-neither reads nor needs that journal to perform safe shutdown cleanup.
+reads that journal only to recognize the pool at the mount point and does not
+need it to perform safe shutdown cleanup.
 
 ## Stop Coordinator + Done Protocol
 
@@ -171,7 +178,7 @@ recursive `ExecStop` has a deterministic poll-out path instead of queuing
 behind itself.
 
 The `mountpoint -q` check runs before the marker, and `mark_offline` takes
-its answer (`cli/src/online_state.rs#PoolUnmounted`) instead of probing again.
+its answer (`cli/src/pool_mount.rs#PoolUnmounted`) instead of probing again.
 A check failure (e.g. `OnlineError::Spawn` mid-shutdown) counts as
 still-mounted: plain lock warns, writes no `done\n`, and skips the stop,
 leaving `braid-online.service` active. The operator can re-run `braid lock` or

@@ -73,7 +73,7 @@ sudo braid unlock --dry-run
 8. After mount: enriches pool.json with live btrfs device IDs and related metadata -- best-effort
 9. Checks for a paused balance and prints a warning if one is found
 
-If all mappers are already open and the pool is already mounted, unlock is a no-op.
+If all mappers are already open and this pool is already mounted, unlock is a no-op. "This pool" means a btrfs whose device is the LUKS mapper of a disk in `pool.json`. Unlock refuses any other mount at the mount point; see [Safety checks](#safety-checks--refusal-cases).
 
 ### On NixOS module installs
 
@@ -94,6 +94,12 @@ The exit code is **2** when a degraded mount is refused (vs. **1** for other err
 - Refuses if a pending operation journal (`pending-op.json`) exists -- run `braid recover` to reconcile.
 - Refuses if another braid operation is in progress (pool lock `/run/braid-pool.lock` is held) -- retry once it finishes.
 - Refuses to mount degraded without explicit `--allow-degraded`
+- Refuses (exit 1) if something other than this pool is mounted at the mount point. Unlock does not mount over it, and it does not change its ownership or start `braid-online.service` on it.
+  - A filesystem that is not btrfs: `error: /mnt/storage is mounted but fstype is ext4, not btrfs`.
+  - A btrfs that is provably not this pool: its device is not a LUKS mapper, or its LUKS UUID belongs to no disk in `pool.json`. The error names the device and the reason.
+  - A mount braid cannot identify: `error: cannot tell whether the filesystem at /mnt/storage is this pool: <reason>`. The reason is, for example, an unreadable device-mapper entry, or a mount source braid cannot resolve, such as a `/dev/disk/by-id/...` link or btrfs's `<missing disk>`.
+
+  For the first two, unmount it yourself (`sudo umount /mnt/storage`); `braid lock` refuses them too. For a mount braid cannot identify, `sudo braid lock` unmounts it as the pool, or unmount it yourself. Then re-run `braid unlock`.
 - Refuses if a present disk's LUKS UUID does not match the UUID recorded in `pool.json` -- the disk was swapped, cloned, or reformatted out of band. The error names the disk, its by-id path, and the expected vs found UUID. This is a hard error caught during the initial probe, before any mapper opens; `--allow-degraded` does not bypass it (that flag only covers *missing* disks). If unintended, detach the foreign disk and reattach the original; if the swap was intentional, see [Unlock refused by a foreign or mismatched disk](../guides/recovery-scenarios.md#unlock-refused-by-a-foreign-or-mismatched-disk).
 - If any disk rejects the selected credential during verification, unlock fails before opening any mapper and names the failing disk. If another disk already accepted the same credential, that points to disk-specific credential drift outside braid.
 - Does not prompt for a passphrase if all mappers are already open (idempotent re-run)

@@ -30,7 +30,7 @@ pool.json written from committed add membership.
 pending-op.json cleared. Recovery complete.
 ```
 
-Before the `pool.json` lines, a real run prints either per-disk LUKS-open and mount rows (if the pool was offline) or a single `pool already mounted at ...` row (if it was already mounted). On the idle/no-paused owed RAID1 path, after the `committed` line it prints a RAID1 soft-balance replay row pair before the final `pending-op.json cleared` line. If the balance check is paused, running, or unknown, recover fails before the replay row and does not clear the journal.
+Before the `pool.json` lines, a real run prints either per-disk LUKS-open and mount rows (if the pool was offline) or a single `pool already mounted at ...` row (if this pool was already mounted). On the idle/no-paused owed RAID1 path, after the `committed` line it prints a RAID1 soft-balance replay row pair before the final `pending-op.json cleared` line. If the balance check is paused, running, or unknown, recover fails before the replay row and does not clear the journal.
 
 > [!IMPORTANT]
 > If recover refuses owed RAID1 replay because btrfs balance state is paused, running, or unknown, it left `pending-op.json` in place. Inspect btrfs manually before clearing recovery state.
@@ -75,7 +75,7 @@ sudo braid recover --dry-run
 
 1. Loads `pending-op.json` (refuses if absent -- nothing to recover).
 2. Chooses the mount membership from the journal phase. Existing-pool add and remove-missing `PoolMutation` phases mount from the pre-operation membership. Add, remove-missing, and replace post-maintenance phases mount from the committed target membership. Replace `PoolMutation`, bootstrap add `PoolMutation` (the first disk, whose pre-operation membership is empty), and `Remove` mount from the admission membership (pre-operation snapshot plus target-only members) -- for replace this matters because the kernel may still be completing `dev_replace`.
-3. Opens LUKS devices and mounts the pool (or reuses the existing mount if already mounted). **Exception:** a `Replace::PoolMutation` journal on an externally-mounted pool is refused (see Safety checks); replace post-maintenance recovery on an already-mounted pool is allowed.
+3. Opens LUKS devices and mounts the pool (or reuses the existing mount if it is this pool: a btrfs whose device records the LUKS UUID of a disk in `pool.json` or the journal). **Exception:** a `Replace::PoolMutation` journal on an externally-mounted pool is refused (see Safety checks); replace post-maintenance recovery on an already-mounted pool is allowed.
 4. For `Replace::PoolMutation` only, if a kernel-resumed btrfs replace is in progress, waits for it to finish.
 5. For `Replace::PoolMutation` only, if the pool was just mounted by this recover run, performs a full relock-and-remount cycle (umount, `btrfs device scan --forget`, close LUKS, reopen, remount) to ensure the kernel's in-memory device topology matches the on-disk state.
 6. Probes the live pool to discover actual membership.
@@ -101,6 +101,11 @@ sudo braid recover --dry-run
 - Refuses to overwrite `pool.json` or clear `pending-op.json` if the post-mount probe at the configured mount point sees the pool unmounted or with zero btrfs devices. The mount may have been removed externally between recover's mount step and membership probe; `pool.json` and `pending-op.json` are both preserved -- investigate the mount, then re-run `braid recover`.
 - For existing-pool add recovery, refuses to clear the journal while any journaled add target is missing from the live pool.
 - Returned-disk replay may need a pool passphrase even when the pool is already mounted, because the mapper for the journaled target may still be closed.
+- Refuses if something other than this pool is mounted at the mount point, or if braid cannot tell.
+  - A filesystem that is not btrfs, or a btrfs that is provably not this pool: its device is not a LUKS mapper, or its LUKS UUID is in neither `pool.json` nor the journal. Unmount it yourself (`sudo umount /mnt/storage`); `braid lock` refuses it too.
+  - A mount braid cannot identify, for example because `pool.json` is corrupt, the device-mapper entry is unreadable, or the mount source is a `/dev/disk/by-id/...` link or btrfs's `<missing disk>`. Run `sudo braid lock`, which treats the mount as the pool and unmounts it.
+
+  Then re-run `braid recover`. With the mount point empty, recover mounts the pool from the journal's membership.
 - Without `--allow-degraded`, refuses to mount if devices are missing (exit code 2 for degraded-refused, distinguishing it from other errors).
 - Refuses to recover `Replace::PoolMutation` when the pool is already mounted (admin-mounted, circumventing braid's pending-op preflight on `unlock`). The kernel may have resumed an interrupted `dev_replace` on that mount session, leaving stale in-memory device state that recover cannot scrub without unmounting -- which it will not do on a mount it does not own. Remediation: `sudo braid lock; sudo braid recover`.
 

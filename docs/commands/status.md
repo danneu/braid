@@ -332,8 +332,8 @@ warning: /mnt/storage is mounted but fstype is ext4, not btrfs
 ```
 
 Unmount the foreign filesystem before retrying `braid unlock` --
-otherwise `unlock` reports "pool already mounted" because something is
-in fact mounted at that path.
+otherwise `unlock` refuses with that same message, because braid will
+not mount over it or take it over as the pool.
 
 **Pending recovery journal.** When `/var/lib/braid/pending-op.json`
 exists, an interrupted `add` / `remove` / `remove-missing` / `replace`

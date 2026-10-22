@@ -26,8 +26,8 @@ use crate::credential::OpenCredential;
 use crate::filesystem::Filesystem;
 use crate::membership::PoolMembership;
 use crate::mount::{
-    MountError, OpenPlan, UnlockAndMountFailure, execute_mount_only, execute_unlock_and_mount,
-    plan_open_pool,
+    MountError, OpenPlan, PlanOpenPoolParams, UnlockAndMountFailure, execute_mount_only,
+    execute_unlock_and_mount, plan_open_pool,
 };
 use crate::progress::Sleeper;
 use crate::secret::Passphrase;
@@ -410,14 +410,21 @@ pub(crate) fn open_and_mount_for_test<R: CommandRunner, F: Filesystem + ?Sized>(
     command_hint: &str,
 ) -> Result<bool, MountError> {
     let backing_path_resolver = shared::mock_virtio_backing_path_resolver();
+    // `membership` is the pool record, so an already-mounted fixture can
+    // prove the mount is this pool.
+    let (_state_dir, paths) = super::doctor::isolated_paths();
+    crate::membership::save_membership(membership, &paths).expect("write fixture pool.json");
     let report = plan_open_pool(
         runner,
         fs,
-        config,
-        membership,
-        backing_path_resolver,
-        allow_degraded,
-        command_hint,
+        &PlanOpenPoolParams {
+            config,
+            paths: &paths,
+            membership,
+            backing_path_resolver,
+            allow_degraded,
+            command_hint,
+        },
     );
     let plan = match report.result? {
         Some(p) => p,

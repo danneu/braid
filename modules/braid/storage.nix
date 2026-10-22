@@ -161,15 +161,18 @@ in
     # ExecStart=/bin/true — the service's purpose is state ownership, not work.
     # ExecStop=braid lock --systemd-stop unmounts and closes LUKS on shutdown
     # or manual stop with a deadline below TimeoutStopSec.
-    # Only activated by Rust post-success lifecycle fixups on successful
-    # unlock/add/recover (mountpoint -q check).
+    # Activated only by the CLI's online finalizer
+    # (cli/src/online_state.rs#run_with_online_marker), after it proves the
+    # filesystem at the mount point is this pool
+    # (cli/src/pool_mount.rs#ConfirmedMount::classify).
     systemd.services.braid-online = {
       description = "Braid storage pool online";
       # Guard against direct `systemctl start braid-online.service` bypassing
       # the CLI. When the condition is not met, systemd skips activation
-      # (unit stays inactive, systemctl returns 0). The CLI's mountpoint
-      # check in Rust is the primary gate; this is
-      # defense-in-depth. Out-of-band mount/unmount can leave this stale.
+      # (unit stays inactive, systemctl returns 0). The condition accepts any
+      # filesystem at the mount point; the CLI's proof that the mount is this
+      # pool is the primary gate, and this is defense-in-depth. Out-of-band
+      # mount/unmount can leave this stale.
       unitConfig.ConditionPathIsMountPoint = cfg.mountPoint;
       serviceConfig = {
         Type = "oneshot";
@@ -208,7 +211,7 @@ in
     };
 
     # Start handle: "bring pool online."
-    # Wants unlock only -- braid-online is activated by Rust dispatch on success.
+    # Wants unlock only -- braid-online is activated by the CLI's online finalizer.
     systemd.targets.braid-pool = {
       description = "Braid storage pool online";
       wants = [ "braid-unlock.service" ];

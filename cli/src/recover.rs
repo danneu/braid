@@ -14,6 +14,7 @@ use crate::mount::{self, MountError, OpenPlan};
 use crate::mount_check;
 use crate::parse::btrfs_filesystem_show::{DeviceBtrfsProbe, classify_btrfs_probe};
 use crate::parse::{ReplaceState, parse_btrfs_replace_status};
+use crate::pool_mount::{self, MountedAt};
 use crate::preview::{self, PerDiskStyle, PlanFailure, Preview, PreviewNote};
 use crate::probe::{self, ProbeError};
 use crate::probe_mapper_uuid::{MapperOwnership, probe_observed_mapper_uuid};
@@ -521,6 +522,7 @@ impl RecoverWorkAction {
                         RelockAndRemountCtx {
                             sleeper: params.sleeper,
                             config: params.config,
+                            paths: params.paths,
                             membership: &recovery_mount_membership,
                             backing_path_resolver: params.backing_path_resolver,
                             allow_degraded: params.allow_degraded,
@@ -1362,11 +1364,14 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     let report = mount::plan_open_pool(
         runner,
         fs,
-        params.config,
-        mount_membership,
-        params.backing_path_resolver,
-        params.allow_degraded,
-        "recover",
+        &mount::PlanOpenPoolParams {
+            config: params.config,
+            paths: params.paths,
+            membership: mount_membership,
+            backing_path_resolver: params.backing_path_resolver,
+            allow_degraded: params.allow_degraded,
+            command_hint: "recover",
+        },
     );
     for event in &report.events {
         notes.push(event.to_preview_note());
@@ -2112,11 +2117,14 @@ fn discover_add_targets_before_mount<R: CommandRunner, F: Filesystem + ?Sized>(
     journal: &Journal,
     targets: &LuksUuidMap<journal::AddJournalTarget>,
 ) -> Result<Option<OpenCredential>, RecoverError> {
-    let mount_result = runner.run(&CmdRequest::MountpointCheck {
-        path: params.config.mount_point().clone().into(),
-    })?;
-    if mount_result.exit_status == 0 {
-        return Ok(None);
+    // An already-mounted pool needs no pre-mount discovery. Any other mount
+    // at the mount point refuses here, before a target opens.
+    if let Some(mount) = pool_mount::confirmed_mount(runner, params.config.mount_point())? {
+        return match mount.classify(fs, params.paths) {
+            MountedAt::Pool(_) => Ok(None),
+            MountedAt::Foreign(foreign) => Err(recover_mount_error(foreign.into())),
+            MountedAt::Unknown(unproven) => Err(recover_mount_error(unproven.into())),
+        };
     }
 
     let mut credential: Option<OpenCredential> = None;
@@ -3475,6 +3483,7 @@ fn wait_for_kernel_replace_to_finish<R: CommandRunner>(
 struct RelockAndRemountCtx<'a> {
     sleeper: &'a dyn Sleeper,
     config: &'a Config,
+    paths: &'a StatePaths,
     membership: &'a PoolMembership,
     backing_path_resolver: &'a dyn BackingPathResolver,
     allow_degraded: bool,
@@ -3503,6 +3512,7 @@ fn relock_and_remount<R: CommandRunner, F: Filesystem + ?Sized>(
     let RelockAndRemountCtx {
         sleeper,
         config,
+        paths,
         membership,
         backing_path_resolver,
         allow_degraded,
@@ -3610,11 +3620,14 @@ fn relock_and_remount<R: CommandRunner, F: Filesystem + ?Sized>(
     let cycle_report = mount::plan_open_pool(
         runner,
         fs,
-        config,
-        membership,
-        backing_path_resolver,
-        allow_degraded,
-        "recover",
+        &mount::PlanOpenPoolParams {
+            config,
+            paths,
+            membership,
+            backing_path_resolver,
+            allow_degraded,
+            command_hint: "recover",
+        },
     );
     mount::print_probe_events(&cycle_report.events);
     let cycle_plan = cycle_report
@@ -3850,6 +3863,9 @@ mod tests {
     struct MockFs {
         paths: Vec<String>,
         mountinfo: String,
+        /// Mountinfo for the first read only; later reads see `mountinfo`.
+        /// Models a mount that changes between planning and execution.
+        first_mountinfo: Mutex<Option<String>>,
         dm: MockDmTable,
     }
 
@@ -3860,6 +3876,7 @@ mod tests {
                 mountinfo:
                     "36 35 0:32 / /mnt/storage rw shared:1 - btrfs /dev/mapper/braid-disk1 rw\n"
                         .to_owned(),
+                first_mountinfo: Mutex::new(None),
                 dm: MockDmTable::default(),
             }
         }
@@ -3868,6 +3885,7 @@ mod tests {
             Self {
                 paths: paths.iter().map(|s| s.to_string()).collect(),
                 mountinfo: "26 25 0:23 / / rw shared:1 - ext4 /dev/sda1 rw\n".to_owned(),
+                first_mountinfo: Mutex::new(None),
                 dm: MockDmTable::default(),
             }
         }
@@ -3878,6 +3896,7 @@ mod tests {
                 mountinfo:
                     "36 35 0:32 / /mnt/storage ro shared:1 - btrfs /dev/mapper/braid-disk1 rw\n"
                         .to_owned(),
+                first_mountinfo: Mutex::new(None),
                 dm: MockDmTable::default(),
             }
         }
@@ -3888,6 +3907,7 @@ mod tests {
                 mountinfo:
                     "36 35 0:32 / /mnt/storage rw shared:1 - btrfs /dev/mapper/braid-disk1 ro,space_cache=v2\n"
                         .to_owned(),
+                first_mountinfo: Mutex::new(None),
                 dm: MockDmTable::default(),
             }
         }
@@ -3895,6 +3915,21 @@ mod tests {
         /// Add an active LUKS2 mapping to the sysfs device-mapper table.
         fn with_luks_dm(mut self, mapper: &str, luks_uuid: &str) -> Self {
             self.dm = self.dm.with_luks(mapper, luks_uuid);
+            self
+        }
+
+        /// Name the mapper mountinfo reports as the pool's device, the
+        /// device the mount classifier reads the LUKS identity from.
+        fn mounted_from(mut self, mapper: &str) -> Self {
+            self.mountinfo = self
+                .mountinfo
+                .replace("/dev/mapper/braid-disk1", &format!("/dev/mapper/{mapper}"));
+            self
+        }
+
+        /// Show `mountinfo` on the first read only, then the current one.
+        fn first_reading(self, mountinfo: &str) -> Self {
+            *self.first_mountinfo.lock().unwrap() = Some(mountinfo.to_owned());
             self
         }
     }
@@ -3910,6 +3945,9 @@ mod tests {
 
         fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
             if path == "/proc/self/mountinfo" {
+                if let Some(first) = self.first_mountinfo.lock().unwrap().take() {
+                    return Ok(first);
+                }
                 return Ok(self.mountinfo.clone());
             }
             self.dm
@@ -13221,6 +13259,7 @@ mod tests {
     fn recover_fails_when_device_missing_from_both_snapshots() {
         let f = PoolFixture::empty();
         let fs = MockFs::new(&[])
+            .mounted_from("braid-toshiba")
             .with_luks_dm("braid-toshiba", "11111111-1111-1111-1111-111111111111")
             .with_luks_dm("braid-mystery", "22222222-2222-2222-2222-222222222222");
 
@@ -14696,6 +14735,7 @@ mod tests {
             RelockAndRemountCtx {
                 sleeper: &progress::NoopSleeper,
                 config: &config,
+                paths: &crate::test_fixtures::isolated_paths().1,
                 membership: &membership,
                 backing_path_resolver: &backing_path_resolver,
                 allow_degraded: false,
@@ -14854,6 +14894,7 @@ mod tests {
             RelockAndRemountCtx {
                 sleeper: &progress::NoopSleeper,
                 config: &config,
+                paths: &crate::test_fixtures::isolated_paths().1,
                 membership: &membership,
                 backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(),
                 allow_degraded: false,
@@ -15011,6 +15052,7 @@ mod tests {
             RelockAndRemountCtx {
                 sleeper: &progress::NoopSleeper,
                 config: &config,
+                paths: &crate::test_fixtures::isolated_paths().1,
                 membership: &membership,
                 backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(),
                 allow_degraded: false,
@@ -15164,6 +15206,7 @@ mod tests {
             RelockAndRemountCtx {
                 sleeper: &sleeper,
                 config: &config,
+                paths: &crate::test_fixtures::isolated_paths().1,
                 membership: &membership,
                 backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(),
                 allow_degraded: false,
@@ -15311,6 +15354,7 @@ mod tests {
             RelockAndRemountCtx {
                 sleeper: &progress::NoopSleeper,
                 config: &config,
+                paths: &crate::test_fixtures::isolated_paths().1,
                 membership: &membership,
                 backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(),
                 allow_degraded: false,
@@ -18194,7 +18238,11 @@ mod tests {
     #[test]
     fn cmd_recover_aborts_when_post_cycle_probe_reports_unmounted() {
         let f = PoolFixture::empty();
-        let fs = MockFs::without_mounted_pool(&[]);
+        let fs = MockFs::without_mounted_pool(&[])
+            .first_reading(
+                "36 35 0:32 / /mnt/storage rw shared:1 - btrfs /dev/mapper/braid-disk1 rw\n",
+            )
+            .with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111");
 
         let journal = remove_2to1_journal_with_target_devid();
         journal::write_journal(&f.paths, &journal).unwrap();
@@ -18235,7 +18283,8 @@ mod tests {
     #[test]
     fn cmd_recover_aborts_when_post_cycle_probe_reports_zero_devices() {
         let f = PoolFixture::empty();
-        let fs = MockFs::new(&[]);
+        let fs =
+            MockFs::new(&[]).with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111");
 
         let journal = remove_2to1_journal_with_target_devid();
         journal::write_journal(&f.paths, &journal).unwrap();
@@ -18279,7 +18328,8 @@ mod tests {
     #[test]
     fn cmd_recover_aborts_when_post_mount_probe_reports_vfs_read_only() {
         let f = PoolFixture::empty();
-        let fs = MockFs::with_mounted_pool_ro_vfs(&[]);
+        let fs = MockFs::with_mounted_pool_ro_vfs(&[])
+            .with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111");
 
         let journal = remove_2to1_journal_with_target_devid();
         journal::write_journal(&f.paths, &journal).unwrap();
@@ -18356,7 +18406,8 @@ mod tests {
     #[test]
     fn cmd_recover_aborts_when_post_mount_probe_reports_fs_read_only() {
         let f = PoolFixture::empty();
-        let fs = MockFs::with_mounted_pool_ro_fs(&[]);
+        let fs = MockFs::with_mounted_pool_ro_fs(&[])
+            .with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111");
 
         let journal = remove_2to1_journal_with_target_devid();
         journal::write_journal(&f.paths, &journal).unwrap();
@@ -19743,7 +19794,8 @@ mod tests {
     fn plan_recover_refuses_replace_on_externally_mounted_pool() {
         for dry_run in [false, true] {
             let f = PoolFixture::empty();
-            let fs = MockFs::new(&[]);
+            let fs = MockFs::new(&[])
+                .with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111");
 
             let journal = replace_journal();
             journal::write_journal(&f.paths, &journal).unwrap();
@@ -19815,6 +19867,52 @@ mod tests {
         }
     }
 
+    /* Intent: recover refuses a btrfs at the mount point that is provably not
+     * this pool in add-target discovery, before it probes or opens a target.
+     * Why it exists: discovery used to take any mount at the mount point for
+     * the pool and skip to the pool probe, so recover reconciled its journal
+     * against a filesystem braid does not own.
+     * Scenario: an add of disk2 was interrupted; the operator mounts a
+     * LUKS-encrypted backup btrfs at /mnt/storage by hand and runs
+     * `braid recover`.
+     */
+    #[test]
+    fn plan_recover_refuses_btrfs_that_is_not_this_pool_before_discovery() {
+        let f = PoolFixture::empty();
+        let fs = MockFs::new(&[])
+            .mounted_from("backup")
+            .with_luks_dm("backup", "99999999-9999-9999-9999-999999999999");
+        journal::write_journal(&f.paths, &recoverable_pool_mutation_add_journal()).unwrap();
+        let (mp_req, mp_out) = mountpoint_ok();
+        let runner = MockRunner::default().with_output(mp_req.clone(), mp_out);
+        let params = f.recover_params().passphrase_file(None).build();
+
+        let failure = match plan_recover(&runner, &fs, &params) {
+            Err(failure) => failure,
+            Ok(_) => panic!("recover must refuse a btrfs that is not this pool"),
+        };
+
+        assert!(
+            matches!(
+                &failure.error,
+                RecoverError::Mount(MountError::OtherBtrfs(_))
+            ),
+            "expected OtherBtrfs, got {:?}",
+            failure.error,
+        );
+        assert_eq!(
+            failure.error.to_string(),
+            "/mnt/storage holds a btrfs filesystem on /dev/mapper/backup that is not \
+             this pool: its LUKS UUID 99999999-9999-9999-9999-999999999999 is not a \
+             member in pool.json or the pending-operation journal",
+        );
+        assert_eq!(
+            runner.requests(),
+            vec![mp_req],
+            "discovery must refuse on its own mount check, before any probe",
+        );
+    }
+
     /* Intent: dry-run recover refuses an already-mounted read-only pool with
      * the same PlanFailure note preservation shape used by other preview
      * refusals.
@@ -19826,7 +19924,8 @@ mod tests {
     #[test]
     fn plan_recover_dry_run_refuses_already_mounted_read_only_fs_options() {
         let f = PoolFixture::empty();
-        let fs = MockFs::with_mounted_pool_ro_fs(&[]);
+        let fs = MockFs::with_mounted_pool_ro_fs(&[])
+            .with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111");
 
         let journal = remove_2to1_journal_with_target_devid();
         journal::write_journal(&f.paths, &journal).unwrap();

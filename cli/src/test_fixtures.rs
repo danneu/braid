@@ -166,8 +166,9 @@ pub(crate) use idle::{
 };
 pub(crate) use lock::{
     LockNoopSleeper, RecordingRunner as LockRecordingRunner, lock_count_forget_steps, lock_err_raw,
-    lock_forget_step_devices, lock_fs, lock_member_fs, lock_mounted_runner, lock_ok_raw,
-    lock_test_config, lock_test_membership, lock_umount_failed_runner, lock_with_fsid_probe_mocks,
+    lock_forget_step_devices, lock_fs, lock_member_fs, lock_mounted_runner, lock_no_state,
+    lock_ok_raw, lock_test_config, lock_test_membership, lock_umount_failed_runner,
+    lock_with_fsid_probe_mocks,
 };
 pub(crate) use monitor::{
     BTRFS_SHOW_2DISK_1MISSING, BTRFS_SHOW_2DISK_NO_UUID, MONITOR_FSID, MonitorOverride,

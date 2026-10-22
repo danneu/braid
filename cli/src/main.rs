@@ -608,7 +608,9 @@ fn main() {
             if let Err(e) = run_with_online_marker(
                 online_snapshot.as_ref(),
                 (!args.common.dry_run).then_some(&config),
+                &paths,
                 &online_ops,
+                &fs,
                 || {
                     braid_cli::add::cmd_add(
                         &runner,
@@ -776,7 +778,9 @@ fn main() {
             match run_with_online_marker(
                 online_snapshot.as_ref(),
                 (!args.dry_run).then_some(&config),
+                &paths,
                 &online_ops,
+                &fs,
                 || {
                     braid_cli::unlock::cmd_unlock(
                         &runner,
@@ -1105,7 +1109,9 @@ fn main() {
             match run_with_online_marker(
                 online_snapshot.as_ref(),
                 (!args.dry_run).then_some(&config),
+                &paths,
                 &online_ops,
+                &fs,
                 || {
                     braid_cli::recover::cmd_recover(
                         &runner,
@@ -1342,7 +1348,8 @@ fn run_dry_run_lock(config_path: &Path, paths: &StatePaths) {
     let runner = RealRunner;
     let fs = RealFilesystem;
     let extra_notes: Vec<PreviewNote> = load_note.into_iter().collect();
-    if let Err(e) = braid_cli::lock::cmd_lock(&runner, &fs, &config, &membership, true, extra_notes)
+    if let Err(e) =
+        braid_cli::lock::cmd_lock(&runner, &fs, &config, &membership, paths, true, extra_notes)
     {
         print_cli_error(&e.to_string());
         std::process::exit(1);
@@ -1385,6 +1392,7 @@ fn run_plain_lock(
         &online_ops,
         &config,
         &membership,
+        paths,
         &coordinator_guard,
     ) {
         print_cli_error(&e.to_string());
@@ -1447,7 +1455,9 @@ fn run_systemd_stop_lock(
     }
     let runner = RealRunner;
     let fs = RealFilesystem;
-    if let Err(e) = braid_cli::lock::cmd_lock_systemd_stop(&runner, &fs, &config, &membership) {
+    if let Err(e) =
+        braid_cli::lock::cmd_lock_systemd_stop(&runner, &fs, &config, &membership, paths)
+    {
         print_cli_error(&e.to_string());
         std::process::exit(1);
     }

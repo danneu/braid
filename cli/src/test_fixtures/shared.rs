@@ -449,6 +449,9 @@ impl MockDmTable {
 pub(crate) struct MockFs {
     paths: Vec<String>,
     mountinfo: String,
+    /// Mountinfo for the first read only; later reads see `mountinfo`.
+    /// Models a mount that changes between two probes of one command.
+    first_mountinfo: std::sync::Mutex<Option<String>>,
     excl_op: String,
     dm: MockDmTable,
     dev_mapper: DevMapperListing,
@@ -474,6 +477,7 @@ impl MockFs {
             paths,
             mountinfo: "36 35 0:32 / /mnt/storage rw shared:1 - btrfs /dev/mapper/braid-disk1 rw\n"
                 .into(),
+            first_mountinfo: std::sync::Mutex::new(None),
             excl_op: "none\n".into(),
             dm: MockDmTable::default(),
             dev_mapper: DevMapperListing::Empty,
@@ -488,6 +492,7 @@ impl MockFs {
         Self {
             paths,
             mountinfo: "26 25 0:23 / / rw shared:1 - ext4 /dev/sda1 rw\n".into(),
+            first_mountinfo: std::sync::Mutex::new(None),
             excl_op: "none\n".into(),
             dm: MockDmTable::default(),
             dev_mapper: DevMapperListing::Empty,
@@ -499,6 +504,13 @@ impl MockFs {
     /// non-btrfs, malformed, or otherwise custom mount table branches.
     pub(crate) fn with_mountinfo(mut self, body: &str) -> Self {
         self.mountinfo = body.to_owned();
+        self
+    }
+
+    /// Show `body` on the first mountinfo read only, then the current
+    /// mountinfo, for tests that drive a mount changing mid-command.
+    pub(crate) fn with_first_mountinfo(self, body: &str) -> Self {
+        *self.first_mountinfo.lock().unwrap() = Some(body.to_owned());
         self
     }
 
@@ -560,7 +572,8 @@ impl Filesystem for MockFs {
     }
     fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
         if path == "/proc/self/mountinfo" {
-            Ok(self.mountinfo.clone())
+            let first = self.first_mountinfo.lock().unwrap().take();
+            Ok(first.unwrap_or_else(|| self.mountinfo.clone()))
         } else if path.ends_with("/exclusive_operation") {
             Ok(self.excl_op.clone())
         } else if let Some(body) = self.dm.read_to_string(path) {

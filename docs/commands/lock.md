@@ -34,7 +34,7 @@ sudo braid lock --dry-run
 
 ## What happens under the hood
 
-1. Checks if the pool is mounted, and that the filesystem at the mount point is btrfs
+1. Checks if the pool is mounted, and that the filesystem at the mount point is this pool: a btrfs whose device records the LUKS UUID of a disk in `pool.json` or in the pending-operation journal. When braid cannot tell (for example, `pool.json` is corrupt, or was deleted while no operation is pending, or the kernel's device-mapper entry for the device cannot be read), lock treats the mount as the pool, so a missing record never blocks cleanup.
 2. Checks that no btrfs exclusive operation (balance, device remove, etc.) is running. Skipped when the pool is not mounted. A paused balance does not block lock: lock prints a `[warn]` note and unmounts, and the balance stays paused on disk. The next `braid unlock` and `braid doctor` report it.
 3. Unmounts the btrfs filesystem, retrying briefly if the device is busy (covers the brief race after stopping SMB/NFS consumers, where the kernel has not yet released the last file descriptors). During shutdown it retries longer; see [ADR-018](../design/decisions/018-systemd-lifecycle.md#execstop-bounded-wait-pattern).
 4. After a successful unmount, runs `btrfs device scan --forget` for the planned close-set mappers (member-owned plus any orphaned `braid-*` mappers from a prior crash) that still exist on disk, clearing the kernel's device registry so stale references do not race with mapper close. Skipped when there is nothing left to forget.
@@ -61,7 +61,7 @@ On module installs, lock stops the scrub units and consumers only after every ch
 
 - Refuses if another braid operation is in progress (pool lock `/run/braid-pool.lock` is held) -- retry once it finishes.
 - Refuses if a running balance or another btrfs exclusive operation is in progress -- wait for it to finish, then re-run `braid lock`. A paused balance does not block lock (step 2).
-- Refuses if the filesystem at the mount point is not btrfs. Lock then unmounts nothing and closes no mapper; check what is mounted there.
+- Refuses if the filesystem at the mount point is not btrfs, or is a btrfs that is provably not this pool (its device is not a LUKS mapper, or its LUKS UUID belongs to no disk braid knows). Lock then unmounts nothing and closes no mapper; check what is mounted there.
 - If unmount fails after exhausting its umount busy-retry budget (e.g. a process has files open on the mount), lock skips `btrfs device scan --forget` and still attempts to close the LUKS mappers, reporting the failure
 - If a mapper close fails with "device busy" after unmount also failed, the error is downgraded to a warning (the root cause is likely the stuck unmount)
 - If unmount succeeds but a mapper close then fails (e.g. a process still holds a `/dev/mapper/braid-*` device open), lock exits 1 with the pool unmounted and that mapper open. On module installs it still stops `braid-online.service`, so the next `braid unlock` restarts your shares and scrub. Free the holder and re-run `braid lock` to close the leftover mapper.

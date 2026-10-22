@@ -205,11 +205,14 @@ pub fn plan_unlock<R: CommandRunner, F: Filesystem + ?Sized>(
     let report = mount::plan_open_pool(
         runner,
         fs,
-        params.config,
-        params.membership,
-        params.backing_path_resolver,
-        params.allow_degraded,
-        "unlock",
+        &mount::PlanOpenPoolParams {
+            config: params.config,
+            paths: params.paths,
+            membership: params.membership,
+            backing_path_resolver: params.backing_path_resolver,
+            allow_degraded: params.allow_degraded,
+            command_hint: "unlock",
+        },
     );
     let notes: Vec<PreviewNote> = report
         .events
@@ -884,16 +887,19 @@ mod tests {
     //   steps; preview rendering emits exactly that note.
     // Why it exists: the note-only success path must not regress to the generic
     //   `nothing to do.` fallback or append spurious steps.
-    // Scenario: 2-disk pool whose mountpoint check returns exit 0.
+    // Scenario: 2-disk pool whose mountpoint check returns exit 0 and whose
+    //   mountinfo device is a pool.json member's mapper.
     #[test]
     fn plan_unlock_note_only_success_when_already_mounted() {
         let (_state_dir, sp) = isolated_paths();
         let config = test_config();
         let membership = two_disk_membership();
+        membership::save_membership(&membership, &sp).expect("seed pool.json");
         let fs = unlock_storage_fs(&[
             "/dev/disk/by-id/virtio-disk1",
             "/dev/disk/by-id/virtio-disk2",
-        ]);
+        ])
+        .with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111");
         let runner = base_two_disk_runner().with_output(
             CmdRequest::MountpointCheck {
                 path: MountPoint::new("/mnt/storage".to_owned()).into(),
@@ -931,6 +937,135 @@ mod tests {
         assert_eq!(
             rendered, "pool already mounted at /mnt/storage\n",
             "note-only success must render exactly the Info note",
+        );
+    }
+
+    // Intent: a non-btrfs filesystem at the mount point is refused with
+    //   ProbeError::NotBtrfs, and unlock never says "pool already mounted".
+    // Why it exists: unlock used to trust `mountpoint -q` exit 0, which
+    //   util-linux returns for any filesystem. Unlock then reported the pool
+    //   mounted and exited 0, and the dispatch finalizer chowned the foreign
+    //   root and started braid-online.service over it.
+    // Scenario: an ext4 disk or a tmpfs sits at /mnt/storage, and the
+    //   operator (or braid-auto-unlock) runs `braid unlock`.
+    #[test]
+    fn plan_unlock_refuses_non_btrfs_filesystem_at_mount_point() {
+        for (fstype, line) in [
+            (
+                "ext4",
+                "36 35 0:32 / /mnt/storage rw shared:1 - ext4 /dev/sdb1 rw\n",
+            ),
+            (
+                "tmpfs",
+                "36 35 0:32 / /mnt/storage rw shared:1 - tmpfs tmpfs rw,size=1G\n",
+            ),
+        ] {
+            let (_state_dir, sp) = isolated_paths();
+            let config = test_config();
+            let membership = two_disk_membership();
+            let fs = unlock_storage_fs(&[
+                "/dev/disk/by-id/virtio-disk1",
+                "/dev/disk/by-id/virtio-disk2",
+            ])
+            .with_mountinfo(line);
+            let runner = base_two_disk_runner().with_output(
+                CmdRequest::MountpointCheck {
+                    path: MountPoint::new("/mnt/storage".to_owned()).into(),
+                },
+                unlock_ok_raw("mountpoint"),
+            );
+            let params = UnlockParams {
+                config: &config,
+                membership: &membership,
+                paths: &sp,
+                passphrase_stdin: false,
+                passphrase_file: None,
+                key_file: None,
+                allow_degraded: false,
+                dry_run: false,
+                sleeper: &crate::progress::NoopSleeper,
+                backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(),
+            };
+
+            let PlanFailure { notes, error } = plan_unlock(&runner, &fs, &params)
+                .expect_err("unlock must refuse a non-btrfs filesystem at the mount point");
+
+            assert!(
+                matches!(
+                    &error,
+                    UnlockError::Mount(MountError::Probe(probe::ProbeError::NotBtrfs {
+                        fstype: found,
+                        ..
+                    })) if found == fstype
+                ),
+                "{fstype}: expected NotBtrfs, got {error:?}",
+            );
+            assert!(
+                !notes.iter().any(|note| matches!(
+                    note,
+                    PreviewNote::Info(text) if text.starts_with("pool already mounted")
+                )),
+                "{fstype}: a foreign mount must not be reported as the pool, got {notes:?}",
+            );
+        }
+    }
+
+    // Intent: a btrfs filesystem at the mount point that is provably not this
+    //   pool is refused, and unlock never says "pool already mounted".
+    // Why it exists: the fstype check alone accepts any btrfs, so a second
+    //   btrfs volume at the mount point would still pass as the pool and the
+    //   finalizer would take it over.
+    // Scenario: an operator mounts a backup btrfs from /dev/sdb1 (no LUKS) at
+    //   /mnt/storage, and braid-auto-unlock runs `braid unlock`.
+    #[test]
+    fn plan_unlock_refuses_btrfs_that_is_not_this_pool() {
+        let (_state_dir, sp) = isolated_paths();
+        let config = test_config();
+        let membership = two_disk_membership();
+        membership::save_membership(&membership, &sp).expect("seed pool.json");
+        let fs = unlock_storage_fs(&[
+            "/dev/disk/by-id/virtio-disk1",
+            "/dev/disk/by-id/virtio-disk2",
+            "/sys/class/block/sdb1",
+        ])
+        .with_mountinfo("36 35 0:32 / /mnt/storage rw shared:1 - btrfs /dev/sdb1 rw\n");
+        let runner = base_two_disk_runner().with_output(
+            CmdRequest::MountpointCheck {
+                path: MountPoint::new("/mnt/storage".to_owned()).into(),
+            },
+            unlock_ok_raw("mountpoint"),
+        );
+        let params = UnlockParams {
+            config: &config,
+            membership: &membership,
+            paths: &sp,
+            passphrase_stdin: false,
+            passphrase_file: None,
+            key_file: None,
+            allow_degraded: false,
+            dry_run: false,
+            sleeper: &crate::progress::NoopSleeper,
+            backing_path_resolver: crate::test_fixtures::mock_virtio_backing_path_resolver(),
+        };
+
+        let PlanFailure { notes, error } = plan_unlock(&runner, &fs, &params)
+            .expect_err("unlock must refuse a btrfs that is not this pool");
+
+        assert!(
+            matches!(&error, UnlockError::Mount(MountError::OtherBtrfs(_))),
+            "expected OtherBtrfs, got {error:?}",
+        );
+        assert_eq!(
+            error.to_string(),
+            "/mnt/storage holds a btrfs filesystem on /dev/sdb1 that is not this pool: \
+             /dev/sdb1 is not a device-mapper device",
+        );
+        assert!(
+            !notes.iter().any(|note| matches!(
+                note,
+                PreviewNote::Info(text) if text.starts_with("pool already mounted")
+            )),
+            "a foreign btrfs must not be reported as the pool, got {notes:?}",
         );
     }
 
