@@ -71,7 +71,7 @@ sudo braid replace --old toshiba1 --new toshiba4=/dev/disk/by-id/ata-TOSHIBA_MN0
 | Flag | Purpose |
 |---|---|
 | `--old <name>` | Name of the disk to replace |
-| `--new <name>=<path>` | Name and by-id path of the replacement disk |
+| `--new <name>=<path>` | Name and by-id path of the replacement disk, a whole disk (not a partition) |
 | `--missing-id <devid>` | Optional cross-check for a dead-disk replace: assert the missing btrfs devid. braid refuses if it disagrees with --old's devid: the one its still-open mapper holds if its disk was hot-unplugged, else the one pool.json records. Never required. |
 | `--enroll <dir>` | Enroll `braid.key` from this directory into LUKS slot 1 on the new disk |
 | `--dry-run` | Show what would happen without executing |
@@ -113,6 +113,7 @@ If a btrfs exclusive operation (a running balance, device add/remove/replace, re
 - Refuses if `--old` and `--new` are the same disk: the same name, or a `--new` disk whose LUKS UUID is `--old`'s. Such a disk is `--old` itself under another by-id path (a re-seated cable, a USB dock) or a clone of it, and recover could not tell a finished replace from an unfinished one. Use a different disk, or wipe that one so braid formats it fresh.
 - Refuses if the new disk's LUKS UUID is already in use by the pool (registered membership or live btrfs devices) -- detach the conflicting disk before retrying
 - Refuses if the new disk is absent (not plugged in)
+- Refuses a new disk that is not a whole disk. braid asks the kernel (sysfs), not the link's name, so it refuses a partition even when its link has no `-partN` suffix, and refuses a device sysfs cannot answer for. Pass the disk's own by-id link. This check runs when planning, so `--dry-run` refuses too.
 - Refuses a fresh new disk that is not ready to format, both when planning (so `--dry-run` refuses too) and again just before the journal: if its `/dev/mapper/braid-<new>` mapper is already open, close it with `sudo cryptsetup close braid-<new>`; if a mount, an LVM volume group, an md array, or a device-mapper device holds the disk, free it (`lsblk <by-id path>` shows the holder). Then re-run.
 - Refuses if the new disk's mapper capacity is smaller than the source disk's btrfs `total_bytes` (read via `BTRFS_IOC_DEV_INFO`, the same value `btrfs replace start` compares against). For existing LUKS targets, mapper capacity is derived from the LUKS2 segment `offset` and `size` (`dynamic` means `raw - offset`, fixed means the segment size). For fresh-LUKS targets, braid formats with a fixed data offset (`luksFormat --offset`, the same 16 MiB cryptsetup picks on an ordinary disk), so mapper capacity is `raw - offset` whatever optimal I/O size or alignment offset the disk reports. braid refuses `--offset`/`-o` as a `--luks-format-arg`, since it would replace the pinned offset, and `--hw-opal`/`--hw-opal-only`, since OPAL would shrink the data segment to the drive's alignment. It also refuses `--align-payload` and `--sector-size`. Neither can change the layout, but either can make `luksFormat` fail after braid has journaled the format, so the replace would stop and need `braid recover`: cryptsetup refuses `--align-payload` next to `--offset`, and refuses a sector size that does not divide `raw - offset`.
 - For live replacements: refuses if the pool has missing devices (resolve those first)

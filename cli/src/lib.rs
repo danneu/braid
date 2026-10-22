@@ -67,6 +67,9 @@ pub mod state_io;
 pub mod state_paths;
 pub mod status;
 pub mod status_tag;
+/// Plan-time proof that add and replace targets are distinct whole disks, so
+/// two specs on one disk cannot both reach a format after the journal.
+pub mod target_disk;
 #[cfg(test)]
 pub(crate) mod test_fixtures;
 pub mod tui;

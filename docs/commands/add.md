@@ -79,7 +79,7 @@ not persistent host storage.
 Each disk is specified as `NAME=PATH`, where:
 
 - **NAME** is a short label you choose (e.g. `toshiba1`)
-- **PATH** is the `/dev/disk/by-id/` stable device path
+- **PATH** is a `/dev/disk/by-id/` link to a whole disk, not a partition. A disk has several links (`ata-`, `wwn-`, ...); pass one of them, once.
 
 The name is stored in pool.json and used in LUKS mapper names (`braid-toshiba1`), LUKS labels, and all future commands. The persistent member identity is the LUKS UUID, not the name.
 
@@ -114,6 +114,8 @@ braid classifies each disk before acting:
 ## Safety checks / refusal cases
 
 - Rejects duplicate disk names in the same command
+- Rejects two disks that are the same disk: one by-id link passed twice, or two links (such as `ata-...` and `wwn-...`) that point to one device. Pass each disk once.
+- Rejects a disk that is not a whole disk. braid asks the kernel (sysfs), not the link's name, so it refuses a partition even when its link has no `-partN` suffix, and refuses a device sysfs cannot answer for. Pass the disk's own by-id link. These checks run when planning, so `--dry-run` refuses too.
 - Rejects disks that conflict with existing pool membership (same LUKS UUID, same name, or same by-id path)
 - Rejects absent disks (not plugged in)
 - Verifies the passphrase against an existing pool member before formatting new disks

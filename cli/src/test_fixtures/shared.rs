@@ -453,7 +453,7 @@ impl MockDmTable {
 // ---------------------------------------------------------------------------
 
 /// Generic `Filesystem` mock: configurable existing paths, mountinfo,
-/// sysfs `exclusive_operation`, live device-mapper identities, and
+/// sysfs `exclusive_operation` and block entries, live device-mapper identities, and
 /// `/dev/mapper` listing behavior for command tests that need filesystem
 /// probes without touching the host.
 pub(crate) struct MockFs {
@@ -472,6 +472,11 @@ pub(crate) struct MockFs {
     /// Per-path `claim_exclusive` failures, so fresh-target tests can model a
     /// disk another holder has claimed. Unlisted paths claim cleanly.
     claim_errors: Vec<(String, std::io::ErrorKind)>,
+    /// Kernel names whose `/sys/class/block/<name>/partition` file reads, so
+    /// target checks see a partition. Every other block entry is a whole disk.
+    sysfs_partitions: Vec<String>,
+    /// Per-path `read_to_string` failures, checked before any other answer.
+    read_errors: Vec<(String, std::io::ErrorKind)>,
 }
 
 /// `/dev/mapper` listing behavior, kept explicit so tests can distinguish
@@ -496,6 +501,8 @@ impl MockFs {
             dev_mapper: DevMapperListing::Empty,
             create_dir_error: None,
             claim_errors: Vec::new(),
+            sysfs_partitions: Vec::new(),
+            read_errors: Vec::new(),
         }
     }
 
@@ -512,6 +519,8 @@ impl MockFs {
             dev_mapper: DevMapperListing::Empty,
             create_dir_error: None,
             claim_errors: Vec::new(),
+            sysfs_partitions: Vec::new(),
+            read_errors: Vec::new(),
         }
     }
 
@@ -583,6 +592,28 @@ impl MockFs {
         self.claim_errors.push((path.to_owned(), kind));
         self
     }
+
+    /// Give each kernel name a `/sys/class/block` entry with no `partition`
+    /// file, so add and replace target checks see a whole disk.
+    pub(crate) fn with_sysfs_disks(mut self, names: &[&str]) -> Self {
+        self.paths
+            .extend(names.iter().map(|name| format!("/sys/class/block/{name}")));
+        self
+    }
+
+    /// Give `name` a `/sys/class/block` entry whose `partition` file reads,
+    /// so add and replace target checks see a partition.
+    pub(crate) fn with_sysfs_partition(mut self, name: &str) -> Self {
+        self.paths.push(format!("/sys/class/block/{name}"));
+        self.sysfs_partitions.push(name.to_owned());
+        self
+    }
+
+    /// Make `read_to_string(path)` fail with `kind`.
+    pub(crate) fn with_read_error(mut self, path: &str, kind: std::io::ErrorKind) -> Self {
+        self.read_errors.push((path.to_owned(), kind));
+        self
+    }
 }
 
 impl Filesystem for MockFs {
@@ -593,7 +624,15 @@ impl Filesystem for MockFs {
         false
     }
     fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
-        if path == "/proc/self/mountinfo" {
+        if let Some((_, kind)) = self.read_errors.iter().find(|(p, _)| p == path) {
+            Err(std::io::Error::new(*kind, "mock read_to_string failure"))
+        } else if let Some(name) = path
+            .strip_prefix("/sys/class/block/")
+            .and_then(|rest| rest.strip_suffix("/partition"))
+            && self.sysfs_partitions.iter().any(|p| p == name)
+        {
+            Ok("1\n".into())
+        } else if path == "/proc/self/mountinfo" {
             let first = self.first_mountinfo.lock().unwrap().take();
             Ok(first.unwrap_or_else(|| self.mountinfo.clone()))
         } else if path.ends_with("/exclusive_operation") {

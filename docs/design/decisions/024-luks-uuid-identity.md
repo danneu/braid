@@ -231,6 +231,52 @@ cause-neutral `Warn`, never `Fail`; `Fail` stays reserved for a live LUKS UUID
 mismatch. When the pool is mounted but live topology cannot be probed, doctor
 warns rather than claiming every declared member is assembled.
 
+## Whole-Disk Targets
+
+A `by_id` path addresses hardware, but it cannot tell two targets apart. One
+disk has several by-id links (ata-, wwn-, scsi-, ...), and each of its
+partitions has links of its own. So before any probe, `add` (every spec) and
+`replace` (the new spec) run `cli/src/target_disk.rs#check_whole_disk_targets`.
+It resolves each link to its kernel device and refuses two specs that reach one
+device. Then it refuses any device that sysfs does not show as a whole disk:
+`/sys/class/block/<name>` must exist and have no `partition` file. Once every
+target is a whole disk, two targets overlap only by being the same device. A
+stacked device (dm, md) on another target's disk needs no extra rule: the stack
+holds that disk, so the fresh-target claim check refuses it.
+
+Two specs on one disk would pass every per-disk check. After the journal, the
+first format holds the disk, and cryptsetup refuses the second as in use. Then
+`recover` finds the second link carrying the first target's label and fails on
+every run, so the operator cannot leave recovery mode. A partition member is
+stuck the same way, because `cli/src/recover.rs#resolve_by_id_for_underlying`
+skips `-partN` links and fails when no other link resolves to the device. udev
+gives every whole disk a link without that suffix, so recover can rebuild every
+member that add and replace admit.
+
+The kernel decides, not the link's `-partN` suffix, which is a udev naming
+habit braid cannot vouch for. A sysfs read that gives no answer refuses,
+because a wrong answer strands a journal. A link that does not exist skips the
+sysfs proof, so the probe's "not present" refusal still owns an absent disk.
+
+Rejected:
+
+- **Compare raw by-id strings.** Misses two links to one disk.
+- **Normalize link names, such as stripping `ata-`/`wwn-`.** The links carry
+  different firmware fields (model plus serial, WWN, SCSI VPD), so no string
+  rule can join them. Only the kernel's symlink resolution can.
+- **Keep partition targets, and refuse only a partition whose disk is another
+  target.** Closes the in-command overlaps, but leaves partition members
+  unrecoverable.
+- **Hold each fresh target's exclusive claim from the check until its format.**
+  The kernel would answer every overlap, but the proof would own a live
+  resource every path must release before luksFormat, and an in-use refusal
+  could not name the sibling spec.
+
+Limits: a device whose sysfs name differs from its `/dev` name (a cciss-style
+disk, where sysfs spells `/` as `!`) is refused, loudly and before the
+journal. Two kernel paths to one dual-ported disk without dm-multipath are two
+devices to the kernel, so this check cannot join them.
+
 ## Limits And Non-Goals
 
 - A LUKS UUID identifies an encrypted LUKS container, not a physical drive,
@@ -408,6 +454,18 @@ warns rather than claiming every declared member is assembled.
   before any journal write, sleep inhibitor, LUKS open, or `btrfs replace
   start`. `cli/src/journal.rs#tests::replace_equal_old_and_new_uuid_fails`
   pins that `load_journal` rejects a Replace journal with an equal pair.
+- `cli/src/target_disk.rs` unit tests pin the whole-disk target check: one link
+  named twice refuses before any sysfs read, a partition beside its whole disk
+  refuses, a device with no sysfs entry or an unreadable `partition` file or a
+  link that cannot resolve refuses as unproven, and an absent link skips the
+  sysfs proof so the probe still owns "not present".
+  `cli/src/add.rs#tests::cmd_add_refuses_two_links_to_one_disk_before_journal`
+  pins that two different links to one disk refuse with no `pending-op.json`,
+  no sleep inhibitor, and no `luksFormat`.
+  `cli/src/add.rs#tests::dry_run_add_refuses_partition_target` and
+  `cli/src/replace.rs#tests::dry_run_replace_refuses_partition_target` pin that
+  a partition target whose link has no `-partN` suffix refuses in `--dry-run`,
+  before any probe.
 - `cli/src/recover.rs` unit tests verify post-maintenance replace recovery
   re-probes the old mapper UUID before close, skips foreign mappers, and still
   closes owned active dm mappings without relying on `/dev/mapper` path nodes.
@@ -483,3 +541,4 @@ warns rather than claiming every declared member is assembled.
 - `cli/src/lock.rs`
 - `cli/src/dm_identity.rs`
 - `cli/src/parse/dm_uuid.rs`
+- `cli/src/target_disk.rs`

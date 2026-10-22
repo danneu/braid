@@ -498,6 +498,14 @@ impl<'a> ReplaceParamsBuilder<'a> {
         self.enroll_key_file = path;
         self
     }
+    pub(crate) fn backing_path_resolver(
+        mut self,
+        resolver: &'a dyn crate::luks::BackingPathResolver,
+    ) -> Self {
+        self.backing_path_resolver = resolver;
+        self
+    }
+
     pub(crate) fn luks_format_extra_opts(mut self, opts: &'a [String]) -> Self {
         self.luks_format_extra_opts = opts;
         self

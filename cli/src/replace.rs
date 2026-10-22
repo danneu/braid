@@ -31,6 +31,7 @@ use crate::progress::{self, ProgressOutput};
 use crate::repair_hint;
 use crate::state_paths::StatePaths;
 use crate::status_tag::{StatusTag, color_enabled_for_stderr, status_line};
+use crate::target_disk;
 use crate::types::*;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -1286,7 +1287,8 @@ mod replace_stderr_capture {
 
 /// Plan a `braid replace` run after dispatch has already checked for a
 /// pending operation and loaded config under the pool lock. Owns `--new` spec
-/// parsing, `--old == --new` guard, keyfile path validation, `probe_pool` +
+/// parsing, `--old == --new` guard, keyfile path validation, the whole-disk
+/// target check (`cli/src/target_disk.rs#check_whole_disk_targets`), `probe_pool` +
 /// mounted validation, mutation/UPS preflight, replace-source resolution,
 /// membership load + `build_replacement_membership`, new-disk probe, and step
 /// compilation. On success, accumulated notes move into `plan.notes`; on
@@ -1340,6 +1342,16 @@ where
     if let Some(kf) = params.enroll_key_file
         && let Err(e) = crate::enroll_key_file::validate_key_file_path(kf, false)
     {
+        return Err(PlanFailure::empty(ReplaceError::Validation(e.to_string())));
+    }
+
+    // The new disk must be a whole disk, by the same check `add` runs, before
+    // any probe, so `--dry-run` refuses a partition too.
+    if let Err(e) = target_disk::check_whole_disk_targets(
+        fs,
+        params.backing_path_resolver,
+        &[(new_name_parsed.clone(), new_by_id.clone())],
+    ) {
         return Err(PlanFailure::empty(ReplaceError::Validation(e.to_string())));
     }
 
@@ -3607,6 +3619,7 @@ mod tests {
             "/dev/disk/by-id/virtio-disk3".into(),
             "/dev/mapper/braid-disk3".into(),
         ])
+        .with_sysfs_disks(&["vdd"])
         .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner = ReplacementPool::two_disk_healthy()
@@ -3810,6 +3823,7 @@ mod tests {
             "/dev/disk/by-id/virtio-disk3".into(),
             "/dev/mapper/braid-disk3".into(),
         ])
+        .with_sysfs_disks(&["vdd"])
         .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner = ReplacementPool::two_disk_healthy()
@@ -4302,6 +4316,7 @@ mod tests {
             "/dev/disk/by-id/virtio-disk3".into(),
             "/dev/mapper/braid-disk3".into(),
         ])
+        .with_sysfs_disks(&["vdd"])
         .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner = ReplacementPool::two_disk_healthy()
@@ -4378,6 +4393,7 @@ mod tests {
     fn cmd_replace_refuses_fresh_target_with_active_mapper_before_journal() {
         let f = PoolFixture::two_disk_healthy();
         let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()])
+            .with_sysfs_disks(&["vdd"])
             .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner = ReplacementPool::two_disk_healthy()
@@ -4429,6 +4445,7 @@ mod tests {
     fn dry_run_replace_refuses_fresh_target_held_by_another_holder() {
         let f = PoolFixture::two_disk_healthy();
         let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()])
+            .with_sysfs_disks(&["vdd"])
             .with_dm(canonical_dm_table())
             .with_claim_error(
                 "/dev/disk/by-id/virtio-disk3",
@@ -4533,6 +4550,7 @@ mod tests {
     fn cmd_replace_fresh_target_mapper_opened_after_format_aborts_before_replace_start() {
         let f = PoolFixture::two_disk_healthy();
         let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()])
+            .with_sysfs_disks(&["vdd"])
             .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let formatted = Arc::new(AtomicBool::new(false));
@@ -4689,6 +4707,7 @@ mod tests {
         let f = PoolFixture::one_live_one_missing();
         let old_uuid = canonical_luks_uuid(2);
         let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()])
+            .with_sysfs_disks(&["vdd"])
             .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner = ReplacementPool::one_live_one_missing()
@@ -4768,6 +4787,7 @@ mod tests {
             "/dev/disk/by-id/virtio-disk3".into(),
             "/dev/mapper/braid-disk3".into(),
         ])
+        .with_sysfs_disks(&["vdd"])
         .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner = ReplacementPool::two_disk_healthy()
@@ -4807,6 +4827,7 @@ mod tests {
             "/dev/disk/by-id/virtio-disk3".into(),
             "/dev/mapper/braid-disk3".into(),
         ])
+        .with_sysfs_disks(&["vdd"])
         .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner = ReplacementPool::two_disk_healthy()
@@ -4927,6 +4948,7 @@ mod tests {
             "/dev/disk/by-id/virtio-disk3".into(),
             "/dev/mapper/braid-disk3".into(),
         ])
+        .with_sysfs_disks(&["vdd"])
         .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner = ReplacementPool::two_disk_healthy()
@@ -4985,6 +5007,7 @@ mod tests {
             "/dev/disk/by-id/virtio-disk3".into(),
             "/dev/mapper/braid-disk3".into(),
         ])
+        .with_sysfs_disks(&["vdd"])
         .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let close_attempts = Arc::new(AtomicU32::new(0));
@@ -5057,6 +5080,7 @@ mod tests {
             "/dev/disk/by-id/virtio-disk3".into(),
             "/dev/mapper/braid-disk3".into(),
         ])
+        .with_sysfs_disks(&["vdd"])
         .with_luks_dm("braid-disk1", canonical_luks_uuid(1).as_str())
         .with_luks_dm("braid-WRONG", canonical_luks_uuid(2).as_str())
         .with_luks_dm("braid-disk3", canonical_luks_uuid(3).as_str());
@@ -5137,11 +5161,13 @@ mod tests {
                 "/dev/disk/by-id/virtio-disk3".into(),
                 "/dev/mapper/braid-disk3".into(),
             ])
+            .with_sysfs_disks(&["vdd"])
             .with_dm(canonical_dm_table()),
             after: MockFs::storage(vec![
                 "/dev/disk/by-id/virtio-disk3".into(),
                 "/dev/mapper/braid-disk3".into(),
             ])
+            .with_sysfs_disks(&["vdd"])
             .with_luks_dm("braid-disk1", canonical_luks_uuid(1).as_str())
             .with_luks_dm("braid-disk3", canonical_luks_uuid(3).as_str()),
             switched: replace_done.clone(),
@@ -5207,11 +5233,13 @@ mod tests {
                 "/dev/disk/by-id/virtio-disk3".into(),
                 "/dev/mapper/braid-disk3".into(),
             ])
+            .with_sysfs_disks(&["vdd"])
             .with_dm(canonical_dm_table()),
             after: MockFs::storage(vec![
                 "/dev/disk/by-id/virtio-disk3".into(),
                 "/dev/mapper/braid-disk3".into(),
             ])
+            .with_sysfs_disks(&["vdd"])
             .with_dm(canonical_dm_table())
             .with_luks_dm("braid-disk2", "99999999-9999-9999-9999-999999999999"),
             switched: replace_done.clone(),
@@ -5292,6 +5320,7 @@ mod tests {
             "/dev/disk/by-id/virtio-disk3".into(),
             "/dev/mapper/braid-disk3".into(),
         ])
+        .with_sysfs_disks(&["vdd"])
         .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner =
@@ -5875,6 +5904,7 @@ mod tests {
             "/dev/disk/by-id/virtio-disk3".into(),
             "/dev/mapper/braid-disk3".into(),
         ])
+        .with_sysfs_disks(&["vdd"])
         .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner = ReplacementPool::two_disk_healthy()
@@ -5962,6 +5992,7 @@ mod tests {
                 "/dev/disk/by-id/virtio-disk3".into(),
                 "/dev/mapper/braid-disk3".into(),
             ])
+            .with_sysfs_disks(&["vdd"])
             .with_dm(canonical_dm_table())
             .with_luks_dm("braid-disk3", uuid.as_str())
         };
@@ -6086,6 +6117,7 @@ mod tests {
                 "/dev/disk/by-id/virtio-disk3".into(),
                 "/dev/mapper/braid-disk3".into(),
             ])
+            .with_sysfs_disks(&["vdd"])
             .with_dm(canonical_dm_table())
             .with_luks_dm("braid-disk3", uuid.as_str())
         };
@@ -6201,6 +6233,7 @@ mod tests {
         let f = PoolFixture::two_disk_healthy();
         // Mapper closed -> only the by-id exists, not /dev/mapper/braid-disk3.
         let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()])
+            .with_sysfs_disks(&["vdd"])
             .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
 
@@ -6302,6 +6335,7 @@ mod tests {
         let f = PoolFixture::two_disk_healthy();
         // Mapper closed -> only the by-id exists, not /dev/mapper/braid-disk3.
         let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()])
+            .with_sysfs_disks(&["vdd"])
             .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
 
@@ -6453,6 +6487,7 @@ mod tests {
             "/dev/disk/by-id/virtio-disk3".into(),
             "/dev/mapper/braid-disk3".into(),
         ])
+        .with_sysfs_disks(&["vdd"])
         .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner = ReplacementPool::one_live_one_missing()
@@ -6602,6 +6637,7 @@ mod tests {
             "/dev/disk/by-id/virtio-disk3".into(),
             "/dev/mapper/braid-disk3".into(),
         ])
+        .with_sysfs_disks(&["vdd"])
         .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner = ReplacementPool::one_live_one_missing()
@@ -6690,6 +6726,7 @@ mod tests {
             "/dev/disk/by-id/virtio-disk3".into(),
             "/dev/mapper/braid-disk3".into(),
         ])
+        .with_sysfs_disks(&["vdd"])
         .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         // Resize and soft balance succeed, so a run that skips the fatal
@@ -6798,6 +6835,7 @@ mod tests {
             "/dev/disk/by-id/virtio-disk3".into(),
             "/dev/mapper/braid-disk3".into(),
         ])
+        .with_sysfs_disks(&["vdd"])
         .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner = ReplacementPool::one_live_two_missing()
@@ -6879,6 +6917,7 @@ mod tests {
             "/dev/disk/by-id/virtio-disk3".into(),
             "/dev/mapper/braid-disk3".into(),
         ])
+        .with_sysfs_disks(&["vdd"])
         .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner = ReplacementPool::one_live_two_missing()
@@ -7026,6 +7065,7 @@ mod tests {
         // on braid-disk3 reports inactive (via with_mapper_closed) so
         // `ensure_luks_open` proceeds to issue `LuksOpen`.
         let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()])
+            .with_sysfs_disks(&["vdd"])
             .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner = ReplacementPool::one_live_one_missing()
@@ -7120,6 +7160,7 @@ mod tests {
     fn replace_returns_enriched_error_when_post_format_backup_fails() {
         let f = PoolFixture::one_live_one_missing();
         let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()])
+            .with_sysfs_disks(&["vdd"])
             .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner = ReplacementPool::one_live_one_missing()
@@ -7208,6 +7249,7 @@ mod tests {
             "/dev/disk/by-id/virtio-disk3".into(),
             "/dev/mapper/braid-disk3".into(),
         ])
+        .with_sysfs_disks(&["vdd"])
         .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner = ReplacementPool::one_live_one_missing()
@@ -7305,6 +7347,7 @@ mod tests {
             "/dev/disk/by-id/virtio-disk3".into(),
             "/dev/mapper/braid-disk3".into(),
         ])
+        .with_sysfs_disks(&["vdd"])
         .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner = ReplacementPool::two_disk_healthy()
@@ -7375,6 +7418,7 @@ mod tests {
             "/dev/disk/by-id/virtio-disk3".into(),
             "/dev/mapper/braid-disk3".into(),
         ])
+        .with_sysfs_disks(&["vdd"])
         .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let malformed_post_replace_probe_emitted = Arc::new(AtomicBool::new(false));
@@ -7465,6 +7509,7 @@ mod tests {
             "/dev/disk/by-id/virtio-disk3".into(),
             "/dev/mapper/braid-disk3".into(),
         ])
+        .with_sysfs_disks(&["vdd"])
         .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner =
@@ -7524,6 +7569,7 @@ mod tests {
             "/dev/disk/by-id/virtio-disk3".into(),
             "/dev/mapper/braid-disk3".into(),
         ])
+        .with_sysfs_disks(&["vdd"])
         .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner = ReplacementPool::one_live_one_missing()
@@ -7612,7 +7658,11 @@ mod tests {
         let pre = membership_from(vec![(u_r, member_r), (u_d, member_d)]);
         membership::save_membership(&pre, &f.paths).expect("save decoy membership");
 
-        let fs = MockFs::storage(vec!["/dev/disk/by-id/new".into()]).with_dm(canonical_dm_table());
+        let fs = MockFs::storage(vec!["/dev/disk/by-id/new".into()])
+            .with_dm(canonical_dm_table())
+            .with_sysfs_disks(&["vde"]);
+        let resolver = crate::test_fixtures::MockBackingPathResolver::with_virtio_offset_defaults()
+            .with_path("/dev/disk/by-id/new", "/dev/vde");
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner = ReplacementPool::one_live_one_missing()
             .with_mapper_closed("braid-replacement")
@@ -7643,6 +7693,7 @@ mod tests {
                 .old("misleading-label")
                 .new_disk("replacement=/dev/disk/by-id/new")
                 .dry_run(true)
+                .backing_path_resolver(&resolver)
                 .build(),
         )
         .expect("missing-path decoy fixture should plan");
@@ -7682,6 +7733,7 @@ mod tests {
             "/dev/disk/by-id/virtio-disk3".into(),
             "/dev/mapper/braid-disk3".into(),
         ])
+        .with_sysfs_disks(&["vdd"])
         .with_dm(canonical_dm_table())
         .with_excl_op("device add\n");
         let replace_done = Arc::new(AtomicBool::new(false));
@@ -7725,6 +7777,7 @@ mod tests {
     fn plan_replace_refuses_when_target_smaller_live_fresh() {
         let f = PoolFixture::two_disk_healthy();
         let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()])
+            .with_sysfs_disks(&["vdd"])
             .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner = ReplacementPool::two_disk_healthy()
@@ -7790,6 +7843,7 @@ mod tests {
             "/dev/disk/by-id/virtio-disk3".into(),
             "/dev/mapper/braid-disk3".into(),
         ])
+        .with_sysfs_disks(&["vdd"])
         .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner =
@@ -7835,6 +7889,7 @@ mod tests {
             "/dev/disk/by-id/virtio-disk3".into(),
             "/dev/mapper/braid-disk3".into(),
         ])
+        .with_sysfs_disks(&["vdd"])
         .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner =
@@ -7882,6 +7937,7 @@ mod tests {
             "/dev/disk/by-id/virtio-disk3".into(),
             "/dev/mapper/braid-disk3".into(),
         ])
+        .with_sysfs_disks(&["vdd"])
         .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner =
@@ -7913,6 +7969,52 @@ mod tests {
         );
     }
 
+    // Intent: a --new disk whose link resolves to a partition is refused at
+    //   plan time, so --dry-run refuses it too, before any pool or disk probe.
+    // Why it exists: finding 261022-1230-003. replace formats the new disk
+    //   with the same whole-disk assumption as add, and recover cannot
+    //   rebuild a partition member's pool.json entry. The link has no -partN
+    //   suffix, so only the kernel's sysfs answer can catch it.
+    // Scenario: the operator previews a replace onto the data partition of
+    //   a disk that also holds an OS partition.
+    #[test]
+    fn dry_run_replace_refuses_partition_target() {
+        let f = PoolFixture::two_disk_healthy();
+        let link = "/dev/disk/by-id/virtio-disk3";
+        let fs = MockFs::storage(vec![link.into()]).with_sysfs_partition("vdd1");
+        let resolver = crate::test_fixtures::MockBackingPathResolver::with_virtio_offset_defaults()
+            .with_path(link, "/dev/vdd1");
+        let runner = MockRunner::default();
+
+        let failure = match plan_replace(
+            &runner,
+            &fs,
+            &f.replace_params()
+                .dry_run(true)
+                .backing_path_resolver(&resolver)
+                .build(),
+        ) {
+            Ok(_) => panic!("expected a partition target to fail planning"),
+            Err(failure) => failure,
+        };
+
+        match &failure.error {
+            ReplaceError::Validation(body) => assert_eq!(
+                body,
+                &format!(
+                    "disk 'disk3' ({link}) is the partition /dev/vdd1, not a whole disk. braid \
+                     formats whole disks: pass the disk's own by-id link, not a partition's."
+                )
+            ),
+            other => panic!("expected Validation, got: {other:?}"),
+        }
+        assert!(
+            runner.requests().is_empty(),
+            "the refusal must come before any pool or disk probe"
+        );
+        assert!(journal::load_journal(&f.paths).unwrap().is_none());
+    }
+
     // Intent: plan_replace rejects an absent replacement disk with the
     //   exact validation text and the requested disk identity.
     // Why it exists: the absent-disk rejection moved from the builder to
@@ -7925,11 +8027,21 @@ mod tests {
         let fs = MockFs::storage(vec![])
             .with_dm(canonical_dm_table())
             .with_excl_op("device add\n");
+        // The disk is unplugged, so its link does not resolve either.
+        let resolver = crate::test_fixtures::MockBackingPathResolver::with_virtio_offset_defaults()
+            .with_error("/dev/disk/by-id/virtio-disk3", std::io::ErrorKind::NotFound);
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner =
             ReplacementPool::two_disk_healthy().install(MockRunner::default(), replace_done);
 
-        let failure = match plan_replace(&runner, &fs, &f.replace_params().dry_run(true).build()) {
+        let failure = match plan_replace(
+            &runner,
+            &fs,
+            &f.replace_params()
+                .dry_run(true)
+                .backing_path_resolver(&resolver)
+                .build(),
+        ) {
             Ok(_) => panic!("expected absent new disk to fail planning"),
             Err(failure) => failure,
         };
@@ -8174,6 +8286,7 @@ mod tests {
     fn plan_replace_keyfile_probe_failure_becomes_warn_notes() {
         let f = PoolFixture::two_disk_healthy();
         let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()])
+            .with_sysfs_disks(&["vdd"])
             .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner = ReplacementPool::two_disk_healthy()
@@ -8224,6 +8337,7 @@ mod tests {
     fn plan_replace_keyfile_asymmetry_suppresses_probe_failure_warning() {
         let f = PoolFixture::two_disk_healthy();
         let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()])
+            .with_sysfs_disks(&["vdd"])
             .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner = ReplacementPool::two_disk_healthy()
@@ -8344,6 +8458,7 @@ mod tests {
     fn plan_replace_keyfile_asymmetry_emits_warn_for_returning_disk_with_empty_slot_1() {
         let f = PoolFixture::two_disk_healthy();
         let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()])
+            .with_sysfs_disks(&["vdd"])
             .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner = ReplacementPool::two_disk_healthy()
@@ -8380,6 +8495,7 @@ mod tests {
     fn plan_replace_keyfile_no_warn_for_returning_disk_with_occupied_slot_1() {
         let f = PoolFixture::two_disk_healthy();
         let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()])
+            .with_sysfs_disks(&["vdd"])
             .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner = ReplacementPool::two_disk_healthy()
@@ -8431,6 +8547,7 @@ mod tests {
     fn plan_replace_keyfile_emits_target_probe_failure_for_returning_disk_dump_error() {
         let f = PoolFixture::two_disk_healthy();
         let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()])
+            .with_sysfs_disks(&["vdd"])
             .with_dm(canonical_dm_table());
         let target = ByIdPath::parse("/dev/disk/by-id/virtio-disk3").unwrap();
         let replace_done = Arc::new(AtomicBool::new(false));
@@ -8530,6 +8647,7 @@ mod tests {
             "/dev/disk/by-id/virtio-disk3".into(),
             "/dev/mapper/braid-disk3".into(),
         ])
+        .with_sysfs_disks(&["vdd"])
         .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner = ReplacementPool::two_disk_healthy()
@@ -8570,6 +8688,7 @@ mod tests {
             "/dev/disk/by-id/virtio-disk3".into(),
             "/dev/mapper/braid-disk3".into(),
         ])
+        .with_sysfs_disks(&["vdd"])
         .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner = ReplacementPool::two_disk_healthy()
@@ -8613,6 +8732,7 @@ mod tests {
             "/dev/disk/by-id/virtio-disk3".into(),
             "/dev/mapper/braid-disk3".into(),
         ])
+        .with_sysfs_disks(&["vdd"])
         .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner = ReplacementPool::two_disk_healthy()
@@ -8658,6 +8778,7 @@ mod tests {
             "/dev/disk/by-id/virtio-disk3".into(),
             "/dev/mapper/braid-disk3".into(),
         ])
+        .with_sysfs_disks(&["vdd"])
         .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner = ReplacementPool::one_live_one_missing()
@@ -8712,6 +8833,7 @@ mod tests {
             "/dev/disk/by-id/virtio-disk3".into(),
             "/dev/mapper/braid-disk3".into(),
         ])
+        .with_sysfs_disks(&["vdd"])
         .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner = ReplacementPool::two_disk_healthy()
@@ -9579,6 +9701,7 @@ mod tests {
             "/dev/disk/by-id/virtio-disk3".into(),
             "/dev/mapper/braid-disk3".into(),
         ])
+        .with_sysfs_disks(&["vdd"])
         .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         // Force replace to fail at BtrfsReplaceStart so we don't have to

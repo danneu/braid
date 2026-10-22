@@ -27,8 +27,10 @@ Once the NixOS module is installed (see [Install](#install)), the whole NAS
 lifecycle is a handful of commands. Full walkthrough:
 [Getting started](docs/guides/getting-started.md).
 
-**Find your disks.** braid only accepts stable `/dev/disk/by-id/` paths --
-`/dev/sdX` names can change between reboots:
+**Find your disks.** braid only accepts stable `/dev/disk/by-id/` paths of
+whole disks, not partitions -- `/dev/sdX` names can change between reboots.
+One disk has several by-id links (`ata-...`, `wwn-...`). Pick one, and pass
+each disk once:
 
 ```
 lsblk -d -o NAME,SIZE,MODEL,ID-LINK

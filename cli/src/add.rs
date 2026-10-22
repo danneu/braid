@@ -32,6 +32,7 @@ use crate::progress::RealSleeper;
 use crate::repair_hint;
 use crate::state_paths::StatePaths;
 use crate::status_tag::{StatusTag, color_enabled_for_stderr, emit_status, status_line};
+use crate::target_disk;
 use crate::types::*;
 use std::path::{Path, PathBuf};
 
@@ -1661,7 +1662,8 @@ impl AddPlan {
 
 /// Plan a `braid add` run after dispatch has already checked for a pending
 /// operation and loaded config under the pool lock. Owns disk-spec parsing,
-/// duplicate-name / duplicate-by-id validation, keyfile path validation,
+/// duplicate-name validation, the distinct-whole-disk target check
+/// (`cli/src/target_disk.rs#check_whole_disk_targets`), keyfile path validation,
 /// membership load, conflict validation, pool probe, mutation preflight,
 /// per-disk probe, UPS preflight, the missing-devices warning, the keyfile-asymmetry
 /// warning, and the semantic add work planner. On success, every accumulated
@@ -1718,25 +1720,19 @@ pub fn plan_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         }
     }
 
-    // Reject duplicate by_id values within the same invocation. Runs before
-    // any probing, confirmation, passphrase read, inhibitor acquisition, or
-    // journal write so a typo like `d1=/dev/disk/by-id/X d2=/dev/disk/by-id/X`
-    // fails fast with no side effects. Compares raw strings only -- symlink
-    // alias resolution is out of scope.
-    {
-        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
-        for by_id in &by_ids {
-            if !seen.insert(by_id.as_str()) {
-                return Err(PlanFailure::empty(AddError::Validation(format!(
-                    "duplicate by_id: '{}'",
-                    by_id
-                ))));
-            }
-        }
-    }
-
     if let Some(kf) = params.enroll_key_file
         && let Err(e) = crate::enroll_key_file::validate_key_file_path(kf, false)
+    {
+        return Err(PlanFailure::empty(AddError::Validation(e.to_string())));
+    }
+
+    // Reject two specs on one disk, and any spec that is not a whole disk,
+    // before any probe, confirmation, passphrase read, inhibitor acquisition,
+    // or journal write. Specs compare by the device their link resolves to,
+    // so two by-id links to one disk refuse like the same link typed twice;
+    // otherwise both would pass every check and the second format would fail
+    // after the journal.
+    if let Err(e) = target_disk::check_whole_disk_targets(fs, params.backing_path_resolver, &parsed)
     {
         return Err(PlanFailure::empty(AddError::Validation(e.to_string())));
     }
@@ -1758,8 +1754,9 @@ pub fn plan_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     // Fail-fast name/by-id conflict gate. Runs before any probe, passphrase
     // read, inhibitor acquisition, or journal write so a name/by-id collision
     // with an existing member fails with zero side effects. In-invocation
-    // duplicate names and by-ids were already rejected above, so each spec is
-    // mutually distinct and only needs checking against existing members.
+    // duplicate names and specs on one disk were already rejected above, so
+    // each spec is mutually distinct and only needs checking against existing
+    // members.
     //
     // Only the name and by-id axes are checked here: no LUKS UUID has been
     // assigned yet (it is generated/probed per target later) and devid is
@@ -5821,7 +5818,14 @@ mod tests {
             self
         }
 
-        fn fs(&self, paths: Vec<String>) -> AddFullPathFs {
+        /// A filesystem over `paths` on which the disks this runner models
+        /// (`mapper_underlying`) are whole disks in sysfs.
+        fn fs(&self, mut paths: Vec<String>) -> AddFullPathFs {
+            paths.extend(
+                ["vdb", "vdc", "vdd"]
+                    .iter()
+                    .map(|name| format!("/sys/class/block/{name}")),
+            );
             AddFullPathFs {
                 paths,
                 mounted: Arc::clone(&self.mounted),
@@ -6992,6 +6996,7 @@ mod tests {
             "/dev/disk/by-id/virtio-disk2".into(),
             "/dev/mapper/braid-disk2".into(),
         ])
+        .with_sysfs_disks(&["vdc"])
         .with_dm(canonical_dm_table());
         let runner = AddTestRunner {
             disk_in_pool: true,
@@ -7053,6 +7058,7 @@ mod tests {
             "/dev/disk/by-id/virtio-disk2".into(),
             "/dev/mapper/braid-disk2".into(),
         ])
+        .with_sysfs_disks(&["vdc"])
         .with_dm(canonical_dm_table());
         let runner = AddTestRunner {
             disk_in_pool: false,
@@ -7271,6 +7277,7 @@ mod tests {
     fn closed_present_luks_identity_failure_verifies_credentials_before_no_journal() {
         let (_state_tmp, paths, _tmp, config_path, pass_path) = add_test_setup();
         let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk2".into()])
+            .with_sysfs_disks(&["vdb"])
             .with_dm(canonical_dm_table());
         let runner = RequestRecordingRunner::new(ClosedNoBtrfsRunner {
             inner: AddTestRunner {
@@ -7353,16 +7360,18 @@ mod tests {
     }
 
     #[test]
-    // Intent: two disk specs with different names pointing at the same
-    //   /dev/disk/by-id/... are rejected before any probing, confirmation,
-    //   passphrase read, inhibitor acquisition, or journal write.
+    // Intent: two disk specs with different names and the same
+    //   /dev/disk/by-id/... link are rejected before any probing,
+    //   confirmation, passphrase read, inhibitor acquisition, or journal
+    //   write.
     //
     // Why it exists: cmd_add already dedups disk names (see
     //   duplicate_name_rejected), but a typo of the form
     //   `d1=/dev/disk/by-id/X d2=/dev/disk/by-id/X` slipped past validation
     //   and failed at execution time -- after the journal was written and
     //   the inhibitor was held. Fast-fail at the validation phase keeps the
-    //   state dir clean on operator typo.
+    //   state dir clean on operator typo. Two different links to one disk
+    //   take the same path: cmd_add_refuses_two_links_to_one_disk_before_journal.
     //
     // Scenario: operator pastes the same by_id twice with two different
     //   logical names and runs a non-dry-run `braid add`. cmd_add must
@@ -7370,10 +7379,11 @@ mod tests {
     //   with MissingMock if anything tried to execute).
     fn duplicate_by_id_rejected() {
         let (_state_tmp, paths, _tmp, config_path, pass_path) = add_test_setup();
-        // fs lookups never happen — dedup fires before any filesystem probe.
+        // No sysfs entry is seeded: the duplicate refuses before the
+        // whole-disk proof reads sysfs.
         let fs = MockFs::storage(vec![]);
         // Empty MockRunner: any runner.run() would return MissingMock, which
-        // would surface in the returned error rather than a "duplicate by_id"
+        // would surface in the returned error rather than the duplicate
         // message. Asserting the duplicate error text indirectly pins
         // "nothing executed".
         let runner = MockRunner::default();
@@ -7410,13 +7420,9 @@ mod tests {
         let err = result
             .expect_err("duplicate by_id must be rejected")
             .to_string();
-        assert!(
-            err.contains("duplicate by_id"),
-            "expected duplicate by_id error, got: {err}"
-        );
-        assert!(
-            err.contains("/dev/disk/by-id/virtio-disk2"),
-            "error must name the offending by_id, got: {err}"
+        assert_eq!(
+            err,
+            "disks 'd1' and 'd2' both name /dev/disk/by-id/virtio-disk2. Pass each disk once."
         );
         assert!(
             journal::load_journal(&paths).unwrap().is_none(),
@@ -7427,6 +7433,152 @@ mod tests {
             0,
             "validation failure must NOT acquire the sleep inhibitor"
         );
+    }
+
+    #[test]
+    // Intent: two specs whose different by-id links lead to one disk are
+    //   refused at plan time, naming both specs and the device, with no
+    //   pending-op.json and no luksFormat.
+    //
+    // Why it exists: finding 261022-1230-003. plan_add told targets apart by
+    //   the raw by-id string, and one disk has several links (ata-, wwn-,
+    //   scsi-). Both specs passed every check, the journal was written, a's
+    //   format took the disk, and cryptsetup refused b's format as "in use".
+    //   recover then found b's link carrying label braid-a and failed on
+    //   every run, so the operator could never leave recovery mode.
+    //
+    // Scenario: the operator copies two lines of `ls -l /dev/disk/by-id` for
+    //   one blank disk and runs `braid add a=<virtio link> b=<wwn link>`.
+    fn cmd_add_refuses_two_links_to_one_disk_before_journal() {
+        let (_state_tmp, paths, _tmp, config_path, pass_path) = fresh_add_setup();
+        let link_a = "/dev/disk/by-id/virtio-disk2";
+        let link_b = "/dev/disk/by-id/wwn-disk2";
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: link_a.into(),
+                },
+                mock_not_luks(&format!("cryptsetup luksUUID {link_a}")),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: link_b.into(),
+                },
+                mock_not_luks(&format!("cryptsetup luksUUID {link_b}")),
+            )
+            .with_mappers_closed(&["braid-a", "braid-b"]);
+        let fs = MockFs::unmounted(vec![
+            link_a.into(),
+            link_b.into(),
+            "/sys/class/block/vdc".into(),
+        ]);
+        let resolver = crate::test_fixtures::MockBackingPathResolver::with_virtio_offset_defaults()
+            .with_path(link_b, "/dev/vdc");
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let confirm = crate::confirm::RecordingConfirm::new();
+
+        let result = cmd_add(
+            &runner,
+            &fs,
+            &AddParams {
+                config: &read_test_config(&config_path),
+                disk_specs: &[format!("a={link_a}"), format!("b={link_b}")],
+                dry_run: false,
+                yes: true,
+                passphrase_stdin: false,
+                passphrase_file: Some(pass_path.as_path()),
+                enroll_key_file: None,
+                luks_format_extra_opts: &[],
+                progress: ProgressOutput::Off,
+                paths: &paths,
+                sleep_inhibitor: &inhibitor,
+                confirm: &confirm,
+                passphrase_reader: &RealTty,
+                backing_path_resolver: &resolver,
+            },
+        );
+
+        assert!(
+            journal::load_journal(&paths).unwrap().is_none(),
+            "two links to one disk must refuse before pending-op.json is written"
+        );
+        assert!(
+            !runner
+                .requests()
+                .iter()
+                .any(|r| matches!(r, CmdRequest::CryptsetupLuksFormat { .. })),
+            "two links to one disk must refuse before luksFormat"
+        );
+        assert_eq!(inhibitor.acquire_count(), 0);
+        let err = result
+            .expect_err("two links to one disk must be refused")
+            .to_string();
+        assert_eq!(
+            err,
+            format!(
+                "disks 'a' and 'b' are the same disk -- {link_a} and {link_b} both point to \
+                 /dev/vdc. Pass each disk once."
+            )
+        );
+    }
+
+    #[test]
+    // Intent: a target whose link resolves to a partition is refused at plan
+    //   time, so --dry-run refuses it too, before any disk probe.
+    //
+    // Why it exists: finding 261022-1230-003. A partition and its whole disk
+    //   in one add both pass every per-disk check, and the kernel refuses the
+    //   second format after the journal. recover also cannot rebuild a
+    //   partition member's pool.json entry. The link here has no -partN
+    //   suffix, so only the kernel's sysfs answer can catch it.
+    //
+    // Scenario: the operator previews `braid add data=<link>`, and the link
+    //   leads to the data partition beside an OS partition.
+    fn dry_run_add_refuses_partition_target() {
+        let (_state_tmp, paths, _tmp, config_path, _pass_path) = fresh_add_setup();
+        let link = "/dev/disk/by-id/virtio-disk2";
+        let runner = MockRunner::default();
+        let fs = MockFs::unmounted(vec![link.into()]).with_sysfs_partition("vdc1");
+        let resolver = crate::test_fixtures::MockBackingPathResolver::with_virtio_offset_defaults()
+            .with_path(link, "/dev/vdc1");
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let confirm = crate::confirm::RecordingConfirm::new();
+
+        let err = cmd_add(
+            &runner,
+            &fs,
+            &AddParams {
+                config: &read_test_config(&config_path),
+                disk_specs: &[format!("data={link}")],
+                dry_run: true,
+                yes: true,
+                passphrase_stdin: false,
+                passphrase_file: None,
+                enroll_key_file: None,
+                luks_format_extra_opts: &[],
+                progress: ProgressOutput::Off,
+                paths: &paths,
+                sleep_inhibitor: &inhibitor,
+                confirm: &confirm,
+                passphrase_reader: &RealTty,
+                backing_path_resolver: &resolver,
+            },
+        )
+        .expect_err("a partition target must be refused")
+        .to_string();
+
+        assert_eq!(
+            err,
+            format!(
+                "disk 'data' ({link}) is the partition /dev/vdc1, not a whole disk. braid \
+                 formats whole disks: pass the disk's own by-id link, not a partition's."
+            )
+        );
+        assert!(
+            runner.requests().is_empty(),
+            "the refusal must come before any disk probe"
+        );
+        assert!(journal::load_journal(&paths).unwrap().is_none());
     }
 
     #[test]
@@ -7462,6 +7614,9 @@ mod tests {
         // moved after credential reading would still error and still pass. The
         // unpopped queue makes "never read" an explicit assertion.
         let tty = ScriptedPassphraseReader::new(["SENTINEL"]);
+        // virtio-disk9 is not plugged in, so its link does not resolve.
+        let resolver = crate::test_fixtures::MockBackingPathResolver::with_virtio_offset_defaults()
+            .with_error("/dev/disk/by-id/virtio-disk9", std::io::ErrorKind::NotFound);
 
         let result = cmd_add(
             &runner,
@@ -7480,8 +7635,7 @@ mod tests {
                 sleep_inhibitor: &inhibitor,
                 confirm: &confirm,
                 passphrase_reader: &tty,
-                backing_path_resolver:
-                    crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
+                backing_path_resolver: &resolver,
             },
         );
 
@@ -7531,8 +7685,9 @@ mod tests {
     //   side effects.
     fn add_rejects_by_id_collision_with_existing_member() {
         let (_state_tmp, paths, _tmp, config_path, _pass_path) = add_test_setup();
-        // fs lookups never happen -- the conflict gate fires before any probe.
-        let fs = MockFs::storage(vec![]);
+        // The whole-disk target check reads vdb's sysfs entry first; then the
+        // conflict gate fires before any probe.
+        let fs = MockFs::storage(vec![]).with_sysfs_disks(&["vdb"]);
         // Empty MockRunner: the gate fires before the first runner.run() at
         // probe_pool, so an empty runner never returns MissingMock. Asserting
         // the conflict error text indirectly pins "nothing executed".
@@ -7614,7 +7769,8 @@ mod tests {
         // it; that earlier refusal has its own dedicated test
         // (cmd_add_refuses_when_pool_locked_with_membership).
         membership::save_membership(&membership::PoolMembership::empty(), &paths).unwrap();
-        let fs = MockFs::unmounted(vec!["/dev/disk/by-id/virtio-disk2".into()]);
+        let fs = MockFs::unmounted(vec!["/dev/disk/by-id/virtio-disk2".into()])
+            .with_sysfs_disks(&["vdc"]);
         let runner = MockRunner::default()
             .with_output(
                 CmdRequest::CryptsetupLuksUuid {
@@ -7707,7 +7863,7 @@ mod tests {
                 },
                 mock_status_active("braid-disk1", "/dev/vdz"),
             );
-        let fs = MockFs::unmounted(vec![by_id.into()]);
+        let fs = MockFs::unmounted(vec![by_id.into()]).with_sysfs_disks(&["vdb"]);
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
         let confirm = crate::confirm::RecordingConfirm::new();
 
@@ -7827,7 +7983,7 @@ mod tests {
                 braid_disk1_status,
                 mock_status_active("braid-disk1", "/dev/vdz"),
             );
-        let fs = MockFs::unmounted(vec![by_id.into()]);
+        let fs = MockFs::unmounted(vec![by_id.into()]).with_sysfs_disks(&["vdb"]);
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
         let confirm = crate::confirm::RecordingConfirm::new();
 
@@ -7924,6 +8080,7 @@ mod tests {
             )
             .with_mappers_closed(&["braid-disk1"]);
         let fs = MockFs::unmounted(vec![by_id.into()])
+            .with_sysfs_disks(&["vdb"])
             .with_claim_error(by_id, std::io::ErrorKind::ResourceBusy);
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
         let confirm = crate::confirm::RecordingConfirm::new();
@@ -8020,7 +8177,8 @@ mod tests {
                 b"test-passphrase".to_vec(),
                 mock_ok("cryptsetup open --test-passphrase", ""),
             );
-        let fs = MockFs::unmounted(vec![disk1.into(), disk2.into()]);
+        let fs =
+            MockFs::unmounted(vec![disk1.into(), disk2.into()]).with_sysfs_disks(&["vdb", "vdc"]);
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
         let confirm = crate::confirm::RecordingConfirm::new();
 
@@ -9129,7 +9287,8 @@ mod tests {
     #[test]
     fn cmd_add_bootstrap_aborts_on_passphrase_mismatch() {
         let (_state_tmp, paths, _tmp, config_path) = confirm_test_setup();
-        let fs = MockFs::unmounted(vec!["/dev/disk/by-id/virtio-disk1".into()]);
+        let fs = MockFs::unmounted(vec!["/dev/disk/by-id/virtio-disk1".into()])
+            .with_sysfs_disks(&["vdb"]);
         let runner = AddRecordingRunner::new(false);
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
         let confirm = crate::confirm::RecordingConfirm::new();
@@ -9201,7 +9360,8 @@ mod tests {
     #[test]
     fn cmd_add_bootstrap_proceeds_on_passphrase_match() {
         let (_state_tmp, paths, _tmp, config_path) = confirm_test_setup();
-        let fs = MockFs::unmounted(vec!["/dev/disk/by-id/virtio-disk1".into()]);
+        let fs = MockFs::unmounted(vec!["/dev/disk/by-id/virtio-disk1".into()])
+            .with_sysfs_disks(&["vdb"]);
         let runner = AddRecordingRunner::new(false);
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
         let confirm = crate::confirm::RecordingConfirm::new();
@@ -9251,7 +9411,8 @@ mod tests {
     #[test]
     fn add_returns_enriched_error_when_post_format_backup_fails() {
         let (_state_tmp, paths, _tmp, config_path) = confirm_test_setup();
-        let fs = MockFs::unmounted(vec!["/dev/disk/by-id/virtio-disk1".into()]);
+        let fs = MockFs::unmounted(vec!["/dev/disk/by-id/virtio-disk1".into()])
+            .with_sysfs_disks(&["vdb"]);
         let runner =
             AddRecordingRunner::new(false).with_backup_failure_stderr("No space left on device");
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
@@ -9320,7 +9481,8 @@ mod tests {
     #[test]
     fn cmd_add_with_keyfile_orders_format_addkey_backup_open() {
         let (_state_tmp, paths, _tmp, config_path) = confirm_test_setup();
-        let fs = MockFs::unmounted(vec!["/dev/disk/by-id/virtio-disk1".into()]);
+        let fs = MockFs::unmounted(vec!["/dev/disk/by-id/virtio-disk1".into()])
+            .with_sysfs_disks(&["vdb"]);
         let runner = AddRecordingRunner::new(false).with_backup_success();
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
         let confirm = crate::confirm::RecordingConfirm::new();
@@ -9417,7 +9579,8 @@ mod tests {
     #[test]
     fn cmd_add_refuses_when_pool_locked_with_membership() {
         let (_state_tmp, paths, _tmp, config_path, _pass_path) = add_test_setup();
-        let fs = MockFs::unmounted(vec!["/dev/disk/by-id/virtio-disk2".into()]);
+        let fs = MockFs::unmounted(vec!["/dev/disk/by-id/virtio-disk2".into()])
+            .with_sysfs_disks(&["vdc"]);
         let runner = AddRecordingRunner::new(false);
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
         let confirm = crate::confirm::RecordingConfirm::new();
@@ -9502,6 +9665,7 @@ mod tests {
             // /sys/fs/btrfs/<fsid>/exclusive_operation is served by
             // MockFs::read_to_string, not exists(). No entry needed.
         ])
+        .with_sysfs_disks(&["vdc"])
         .with_luks_dm("braid-disk1", DISK1_UUID);
         let runner = AddRecordingRunner::new(true);
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
@@ -9563,6 +9727,7 @@ mod tests {
             "/dev/disk/by-id/virtio-disk1".into(),
             "/dev/disk/by-id/virtio-disk2".into(),
         ])
+        .with_sysfs_disks(&["vdb", "vdc"])
         .with_luks_dm("braid-disk1", DISK1_UUID);
         let runner = AddRecordingRunner::new(true).with_disk1_present_luks_member();
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
@@ -10037,8 +10202,9 @@ mod tests {
     fn plan_add_missing_devices_becomes_single_warn_note() {
         let fixture = plan_add_fixture();
         let runner = AddPlanTestRunner::new().with_missing(1);
-        let fs =
-            MockFs::storage(vec!["/dev/disk/by-id/virtio-disk2".into()]).with_dm(runner.dm_table());
+        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk2".into()])
+            .with_sysfs_disks(&["vdc"])
+            .with_dm(runner.dm_table());
 
         let disk_specs = ["disk2=/dev/disk/by-id/virtio-disk2".to_string()];
         let report = plan_add(&runner, &fs, &fixture.params(&disk_specs, true));
@@ -10077,8 +10243,9 @@ mod tests {
     fn plan_add_keyfile_asymmetry_becomes_warn_note() {
         let fixture = plan_add_fixture();
         let runner = AddPlanTestRunner::new().with_keyfile();
-        let fs =
-            MockFs::storage(vec!["/dev/disk/by-id/virtio-disk2".into()]).with_dm(runner.dm_table());
+        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk2".into()])
+            .with_sysfs_disks(&["vdc"])
+            .with_dm(runner.dm_table());
 
         let disk_specs = ["disk2=/dev/disk/by-id/virtio-disk2".to_string()];
         let report = plan_add(&runner, &fs, &fixture.params(&disk_specs, true));
@@ -10116,8 +10283,9 @@ mod tests {
     fn plan_add_keyfile_probe_failure_becomes_warn_note() {
         let fixture = plan_add_fixture();
         let runner = AddPlanTestRunner::new().with_keyfile_probe_failure();
-        let fs =
-            MockFs::storage(vec!["/dev/disk/by-id/virtio-disk2".into()]).with_dm(runner.dm_table());
+        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk2".into()])
+            .with_sysfs_disks(&["vdc"])
+            .with_dm(runner.dm_table());
 
         let disk_specs = ["disk2=/dev/disk/by-id/virtio-disk2".to_string()];
         let report = plan_add(&runner, &fs, &fixture.params(&disk_specs, true));
@@ -10157,8 +10325,9 @@ mod tests {
     fn plan_add_warn_notes_preserve_missing_before_keyfile_order() {
         let fixture = plan_add_fixture();
         let runner = AddPlanTestRunner::new().with_missing(1).with_keyfile();
-        let fs =
-            MockFs::storage(vec!["/dev/disk/by-id/virtio-disk2".into()]).with_dm(runner.dm_table());
+        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk2".into()])
+            .with_sysfs_disks(&["vdc"])
+            .with_dm(runner.dm_table());
 
         let disk_specs = ["disk2=/dev/disk/by-id/virtio-disk2".to_string()];
         let report = plan_add(&runner, &fs, &fixture.params(&disk_specs, true));
@@ -10198,8 +10367,9 @@ mod tests {
         let runner = AddPlanTestRunner::new()
             .with_missing(1)
             .with_keyfile_probe_failure();
-        let fs =
-            MockFs::storage(vec!["/dev/disk/by-id/virtio-disk2".into()]).with_dm(runner.dm_table());
+        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk2".into()])
+            .with_sysfs_disks(&["vdc"])
+            .with_dm(runner.dm_table());
 
         let disk_specs = ["disk2=/dev/disk/by-id/virtio-disk2".to_string()];
         let report = plan_add(&runner, &fs, &fixture.params(&disk_specs, true));
@@ -10241,8 +10411,9 @@ mod tests {
             AddPlanKeyfileProbe::Failure,
             AddPlanKeyfileProbe::Occupied,
         ]);
-        let fs =
-            MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()]).with_dm(runner.dm_table());
+        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()])
+            .with_sysfs_disks(&["vdd"])
+            .with_dm(runner.dm_table());
 
         let disk_specs = ["disk3=/dev/disk/by-id/virtio-disk3".to_string()];
         let report = plan_add(&runner, &fs, &fixture.params(&disk_specs, true));
@@ -10277,8 +10448,9 @@ mod tests {
             "/dev/disk/by-id/virtio-disk2",
             AddPlanTargetProbe::ClosedSlot1Empty,
         );
-        let fs =
-            MockFs::storage(vec!["/dev/disk/by-id/virtio-disk2".into()]).with_dm(runner.dm_table());
+        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk2".into()])
+            .with_sysfs_disks(&["vdc"])
+            .with_dm(runner.dm_table());
 
         let disk_specs = ["disk2=/dev/disk/by-id/virtio-disk2".to_string()];
         let plan = plan_add(&runner, &fs, &fixture.params(&disk_specs, true))
@@ -10309,8 +10481,9 @@ mod tests {
             "/dev/disk/by-id/virtio-disk2",
             AddPlanTargetProbe::ClosedSlot1Occupied,
         );
-        let fs =
-            MockFs::storage(vec!["/dev/disk/by-id/virtio-disk2".into()]).with_dm(runner.dm_table());
+        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk2".into()])
+            .with_sysfs_disks(&["vdc"])
+            .with_dm(runner.dm_table());
 
         let disk_specs = ["disk2=/dev/disk/by-id/virtio-disk2".to_string()];
         let plan = plan_add(&runner, &fs, &fixture.params(&disk_specs, true))
@@ -10340,7 +10513,9 @@ mod tests {
         let runner = AddPlanTestRunner::new()
             .with_keyfile()
             .with_target_probe(target.as_str(), AddPlanTargetProbe::ClosedDumpFails);
-        let fs = MockFs::storage(vec![target.as_str().to_owned()]).with_dm(runner.dm_table());
+        let fs = MockFs::storage(vec![target.as_str().to_owned()])
+            .with_sysfs_disks(&["vdc"])
+            .with_dm(runner.dm_table());
 
         let disk_specs = [format!("disk2={target}")];
         let plan = plan_add(&runner, &fs, &fixture.params(&disk_specs, true))
@@ -10379,8 +10554,9 @@ mod tests {
                 "/dev/disk/by-id/virtio-disk2",
                 AddPlanTargetProbe::ClosedSlot1Empty,
             );
-        let fs =
-            MockFs::storage(vec!["/dev/disk/by-id/virtio-disk2".into()]).with_dm(runner.dm_table());
+        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk2".into()])
+            .with_sysfs_disks(&["vdc"])
+            .with_dm(runner.dm_table());
 
         let disk_specs = ["disk2=/dev/disk/by-id/virtio-disk2".to_string()];
         let plan = plan_add(&runner, &fs, &fixture.params(&disk_specs, true))
@@ -10422,8 +10598,9 @@ mod tests {
                 "/dev/disk/by-id/virtio-disk2",
                 AddPlanTargetProbe::AlreadyInPoolSlot1Empty,
             );
-        let fs =
-            MockFs::storage(vec!["/dev/disk/by-id/virtio-disk2".into()]).with_dm(runner.dm_table());
+        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk2".into()])
+            .with_sysfs_disks(&["vdc"])
+            .with_dm(runner.dm_table());
 
         let disk_specs = ["disk2=/dev/disk/by-id/virtio-disk2".to_string()];
         let plan = plan_add(&runner, &fs, &fixture.params(&disk_specs, true))
@@ -10466,8 +10643,9 @@ mod tests {
             "/dev/disk/by-id/virtio-disk2",
             AddPlanTargetProbe::OpenRecoverableSlot1Empty,
         );
-        let fs =
-            MockFs::storage(vec!["/dev/disk/by-id/virtio-disk2".into()]).with_dm(runner.dm_table());
+        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk2".into()])
+            .with_sysfs_disks(&["vdc"])
+            .with_dm(runner.dm_table());
 
         let disk_specs = ["disk2=/dev/disk/by-id/virtio-disk2".to_string()];
         let plan = plan_add(&runner, &fs, &fixture.params(&disk_specs, true))
@@ -10538,6 +10716,7 @@ mod tests {
             "/dev/disk/by-id/virtio-disk2".into(),
             "/dev/mapper/braid-disk2".into(),
         ])
+        .with_sysfs_disks(&["vdc"])
         .with_dm(canonical_dm_table());
         let runner = AddTestRunner {
             disk_in_pool: true,
@@ -10600,6 +10779,7 @@ mod tests {
             "/dev/disk/by-id/virtio-disk1".into(),
             "/dev/disk/by-id/virtio-disk2".into(),
         ])
+        .with_sysfs_disks(&["vdb", "vdc"])
         .with_luks_dm("braid-disk1", DISK1_UUID);
         let runner = AddRecordingRunner::new(true).with_disk1_present_luks_member();
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
@@ -10680,7 +10860,8 @@ mod tests {
         )
         .unwrap();
 
-        let fs = MockFs::unmounted(vec!["/dev/disk/by-id/virtio-disk1".into()]);
+        let fs = MockFs::unmounted(vec!["/dev/disk/by-id/virtio-disk1".into()])
+            .with_sysfs_disks(&["vdb"]);
         // AddRecordingRunner with pool_mounted=false drives plan_add's
         // unmounted-pool branch and simulates disk1 as PresentNotLuks.
         let runner = AddRecordingRunner::new(false);
@@ -10744,8 +10925,9 @@ mod tests {
     fn plan_add_render_emits_warn_above_steps() {
         let fixture = plan_add_fixture();
         let runner = AddPlanTestRunner::new().with_missing(1);
-        let fs =
-            MockFs::storage(vec!["/dev/disk/by-id/virtio-disk2".into()]).with_dm(runner.dm_table());
+        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk2".into()])
+            .with_sysfs_disks(&["vdc"])
+            .with_dm(runner.dm_table());
 
         let disk_specs = ["disk2=/dev/disk/by-id/virtio-disk2".to_string()];
         let report = plan_add(&runner, &fs, &fixture.params(&disk_specs, true));
@@ -10813,8 +10995,9 @@ mod tests {
     fn plan_add_degraded_preview_omits_balance_step() {
         let fixture = plan_add_fixture();
         let runner = AddPlanTestRunner::new().with_missing(1);
-        let fs =
-            MockFs::storage(vec!["/dev/disk/by-id/virtio-disk2".into()]).with_dm(runner.dm_table());
+        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk2".into()])
+            .with_sysfs_disks(&["vdc"])
+            .with_dm(runner.dm_table());
 
         let disk_specs = ["disk2=/dev/disk/by-id/virtio-disk2".to_string()];
         let report = plan_add(&runner, &fs, &fixture.params(&disk_specs, true));
@@ -10860,8 +11043,9 @@ mod tests {
                 "/dev/disk/by-id/virtio-disk2",
                 AddPlanTargetProbe::AlreadyInPoolSlot1Empty,
             );
-        let fs =
-            MockFs::storage(vec!["/dev/disk/by-id/virtio-disk2".into()]).with_dm(runner.dm_table());
+        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk2".into()])
+            .with_sysfs_disks(&["vdc"])
+            .with_dm(runner.dm_table());
 
         let disk_specs = ["disk2=/dev/disk/by-id/virtio-disk2".to_string()];
         let plan = plan_add(&runner, &fs, &fixture.params(&disk_specs, true))
@@ -11002,6 +11186,7 @@ mod tests {
             "/dev/disk/by-id/virtio-disk2".into(),
             "/dev/mapper/braid-disk2".into(),
         ])
+        .with_sysfs_disks(&["vdc"])
         .with_dm(canonical_dm_table());
         // AddTestRunner supports no_btrfs_superblock AND reports the
         // pool with braid-disk1 only. Override by wrapping it with a
@@ -11078,6 +11263,7 @@ mod tests {
         let fixture = plan_add_fixture();
         let runner = AddPlanTestRunner::new();
         let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk2".into()])
+            .with_sysfs_disks(&["vdc"])
             .with_excl_op("device add\n")
             .with_dm(runner.dm_table());
 
@@ -11150,6 +11336,7 @@ mod tests {
             inner: AddPlanTestRunner::new(),
         };
         let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk2".into()])
+            .with_sysfs_disks(&["vdc"])
             .with_excl_op("device add\n")
             .with_dm(runner.inner.dm_table());
 
@@ -11203,9 +11390,16 @@ mod tests {
         let fixture = plan_add_fixture();
         let runner = AddPlanTestRunner::new();
         let fs = MockFs::storage(vec![]).with_dm(runner.dm_table());
+        // The disk is unplugged, so its link does not resolve either.
+        let resolver = crate::test_fixtures::MockBackingPathResolver::with_virtio_offset_defaults()
+            .with_error("/dev/disk/by-id/virtio-disk2", std::io::ErrorKind::NotFound);
 
         let disk_specs = ["disk2=/dev/disk/by-id/virtio-disk2".to_string()];
-        let failure = match plan_add(&runner, &fs, &fixture.params(&disk_specs, true)) {
+        let params = AddParams {
+            backing_path_resolver: &resolver,
+            ..fixture.params(&disk_specs, true)
+        };
+        let failure = match plan_add(&runner, &fs, &params) {
             Ok(_) => panic!("expected absent new disk to fail planning"),
             Err(failure) => failure,
         };

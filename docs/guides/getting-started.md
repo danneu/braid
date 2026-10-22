@@ -99,7 +99,7 @@ sdc   10.9T TOSHIBA MN07ACA12T  ata-TOSHIBA_MN07ACA12T_ZZZZ
 sdd  465.8G Samsung SSD 860     ata-Samsung_SSD_860_AAAA     <- boot drive, leave it alone
 ```
 
-You need the `ID-LINK` values. braid always uses `/dev/disk/by-id/` paths -- never `/dev/sdX`, which can change between reboots.
+You need the `ID-LINK` values. braid only accepts `/dev/disk/by-id/` paths of whole disks, not partitions -- never `/dev/sdX`, which can change between reboots. One disk has several by-id links (`ata-...`, `wwn-...`). Pick one, and pass each disk once.
 
 ## Create the pool
 
