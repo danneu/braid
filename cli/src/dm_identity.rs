@@ -192,6 +192,11 @@ mod tests {
             fn read_to_string(&self, _path: &str) -> Result<String, std::io::Error> {
                 unreachable!("nothing to read after a failed listing")
             }
+            fn claim_exclusive(&self, _path: &str) -> Result<(), std::io::Error> {
+                unreachable!(
+                    "DeniedSysBlock: never formats a disk; claim_exclusive must never be called"
+                )
+            }
             fn create_dir_all(&self, _path: &str) -> Result<(), std::io::Error> {
                 unreachable!("read-only lookup")
             }

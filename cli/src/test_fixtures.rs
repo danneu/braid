@@ -202,9 +202,10 @@ pub(crate) use shared::{
     DeviceUsageSpec, MockBackingPathResolver, MockDmTable, MockFs, PoolFixture, RecordingSleeper,
     SwitchingFs, TEST_PASSPHRASE_BYTES, assert_exact_lines_in_order, assert_lines_in_order,
     btrfs_remove_devid_error, btrfs_remove_path_error, canonical_dm_table, canonical_luks_uuid,
-    device_usage_raw_body, disk_member, disk_member_with, line_index, lsblk_device_json_output,
-    mock_ok, mock_virtio_backing_path_resolver, mock_virtio_offset_backing_path_resolver,
-    read_fixture, read_stable_fixture, test_uuid, with_lsblk_hw_info,
+    device_usage_raw_body, disk_member, disk_member_with, fresh_target_ready, line_index,
+    lsblk_device_json_output, mock_ok, mock_virtio_backing_path_resolver,
+    mock_virtio_offset_backing_path_resolver, read_fixture, read_stable_fixture, test_uuid,
+    with_lsblk_hw_info,
 };
 pub(crate) use status::{
     status_btrfs_device_usage_raw_1disk, status_btrfs_df_single, status_btrfs_scrub_aborted,

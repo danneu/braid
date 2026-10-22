@@ -10,8 +10,9 @@ use crate::filesystem::Filesystem;
 use crate::inhibit::AcquireSleepInhibitor;
 use crate::journal;
 use crate::luks::{
-    BackingPathResolver, KeySlotState, LUKS_SLOT_KEYFILE, MapperOwnershipFailure, OwnershipError,
-    backup_luks_header_post_mutation, check_key_slot, classify_mapper_ownership, ensure_luks_open,
+    BackingPathResolver, FreshTargetChecked, FreshTargetReady, KeySlotState, LUKS_SLOT_KEYFILE,
+    MapperOwnershipFailure, OwnershipError, backup_luks_header_post_mutation,
+    check_fresh_target_ready, check_key_slot, classify_mapper_ownership, ensure_luks_open,
     format_keyfile_asymmetry_warning, format_keyfile_enrollment_probe_failure,
     format_target_keyfile_probe_failure, luks_format, luks_header_backup_path,
     probe_pool_keyfile_enrollment, push_enrollment_preview_steps, read_passphrase,
@@ -242,9 +243,15 @@ pub struct ReplacePlan {
     work_plan: ReplaceWorkPlan,
 }
 
+/// How replace prepares the new disk. `C` is what the FreshLuks arm holds
+/// for its fresh-target check: the plan holds the `FreshTargetChecked`
+/// receipt for the plan-time check, and the pre-journal gate
+/// (`verify_new_target_preflight`) swaps it for a `FreshTargetReady` minted
+/// after confirmation, which Step 1's `luks_format` consumes.
 #[derive(Debug, Clone)]
-enum ReplaceTargetPrep {
+enum ReplaceTargetPrep<C = FreshTargetChecked> {
     FreshLuks {
+        check: C,
         /// Validated `--luks-format-arg` extras. Managed flags
         /// (`--uuid`, `--label`) are rejected by
         /// `LuksFormatExtraOpts::parse` at the CLI boundary inside
@@ -267,7 +274,7 @@ enum ReplaceTargetPrep {
     },
 }
 
-impl ReplaceTargetPrep {
+impl<C> ReplaceTargetPrep<C> {
     fn needs_luks_format(&self) -> bool {
         matches!(self, ReplaceTargetPrep::FreshLuks { .. })
     }
@@ -307,6 +314,7 @@ impl ReplaceWorkPlan {
             ReplaceTargetPrep::FreshLuks {
                 extra_opts,
                 enroll_key_file,
+                ..
             } => {
                 let label = luks_label_for(&self.new_name);
                 let header_backup_path =
@@ -565,16 +573,17 @@ impl ReplacePlan {
         }
 
         verify_replace_execute_live_pool_uuid(runner, fs, config.mount_point(), &pool, new_uuid)?;
-        // Pre-journal new-target identity gate (two-tier defense; see the
-        // dispatcher doc). The arm-appropriate ExistingLuks identity check runs
-        // here, BEFORE the inhibitor + journal, so a post-confirmation
-        // disk-swap/backing-drift aborts on the reversible side instead of
-        // stranding pending-op.json. The Step-1 post-journal re-probe stays as
-        // the tight pre-open TOCTOU guard.
-        verify_existing_luks_new_target_preflight(
+        // Pre-journal new-target gate (two-tier defense; see the dispatcher
+        // doc). The arm-appropriate check runs here, BEFORE the inhibitor +
+        // journal: ExistingLuks identity, or FreshLuks readiness, which mints
+        // the proof Step 1's luks_format consumes. So a post-confirmation
+        // disk-swap, backing drift, stray mapper, or new disk holder aborts on
+        // the reversible side instead of stranding pending-op.json. The Step-1
+        // post-journal re-probe stays as the tight pre-open TOCTOU guard.
+        let target_prep = verify_new_target_preflight(
             runner,
             fs,
-            &target_prep,
+            target_prep,
             &new_name,
             &new_mn,
             &new_by_id,
@@ -645,11 +654,11 @@ impl ReplacePlan {
             .map_err(|e| ReplaceError::Validation(e.to_string()))?;
 
         // Step 1: Init new disk (LUKS format/open) -- irreversible from here.
-        match &target_prep {
+        match target_prep {
             ReplaceTargetPrep::FreshLuks {
+                check: ready,
                 extra_opts,
                 enroll_key_file,
-                ..
             } => {
                 // Passphrase already verified above.
                 eprint!(
@@ -661,14 +670,7 @@ impl ReplacePlan {
                     )
                 );
                 let label = luks_label_for(&new_name);
-                luks_format(
-                    runner,
-                    new_by_id.as_str(),
-                    &passphrase,
-                    new_uuid,
-                    &label,
-                    extra_opts,
-                )?;
+                luks_format(runner, ready, &passphrase, new_uuid, &label, &extra_opts)?;
                 eprint!(
                     "{}",
                     status_line(
@@ -678,7 +680,7 @@ impl ReplacePlan {
                     )
                 );
 
-                if let Some(kf) = enroll_key_file {
+                if let Some(kf) = &enroll_key_file {
                     eprint!(
                         "{}",
                         status_line(
@@ -740,7 +742,6 @@ impl ReplacePlan {
             ReplaceTargetPrep::ExistingLuks {
                 mapper_open,
                 enroll_key_file,
-                ..
             } => {
                 // Enroll the keyfile + back up the header BEFORE unlock so
                 // the slot 1 mutation is captured in the post-mutation
@@ -749,7 +750,7 @@ impl ReplacePlan {
                 // pins. cryptsetup luksAddKey works whether the mapper is
                 // currently open or closed -- it operates on the
                 // underlying block device, not the dm slot.
-                if let Some(kf) = enroll_key_file {
+                if let Some(kf) = &enroll_key_file {
                     eprint!(
                         "{}",
                         status_line(
@@ -776,7 +777,7 @@ impl ReplacePlan {
                     eprintln!("LUKS header backed up: {backup_path}");
                 }
 
-                if !*mapper_open {
+                if !mapper_open {
                     eprint!(
                         "{}",
                         status_line(
@@ -1139,40 +1140,57 @@ fn verify_existing_luks_open_mapper_target<R: CommandRunner, F: Filesystem + ?Si
     })
 }
 
-/// Pre-journal new-target identity gate for `replace`. Hoists the
-/// arm-appropriate ExistingLuks identity check above `journal::write_journal`
-/// so an operator disk-swap/backing-drift in the post-confirmation window
-/// aborts on the reversible side (principles.md "line of no return") instead
-/// of stranding pending-op.json. FreshLuks has no pre-existing identity to
-/// probe. The post-journal probe/verify in Step 1 remain as the tight
-/// pre-open guard (two-tier).
+/// Pre-journal new-target gate for `replace`. Hoists the arm-appropriate
+/// check above `journal::write_journal` so post-confirmation drift aborts on
+/// the reversible side (principles.md "line of no return") instead of
+/// stranding pending-op.json. ExistingLuks re-checks identity: disk swap or
+/// backing drift. FreshLuks re-checks readiness and returns the
+/// `FreshTargetReady` that Step 1's `luks_format` consumes, so the format
+/// never runs on the check made before the prompt. The post-journal
+/// probe/verify in Step 1 remain as the tight pre-open guard (two-tier).
 #[allow(clippy::too_many_arguments)]
-fn verify_existing_luks_new_target_preflight<R: CommandRunner, F: Filesystem + ?Sized>(
+fn verify_new_target_preflight<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
-    target_prep: &ReplaceTargetPrep,
+    target_prep: ReplaceTargetPrep,
     new_name: &DiskName,
     new_mapper: &MapperName,
     new_by_id: &ByIdPath,
     new_uuid: &LuksUuid,
     backing_path_resolver: &dyn BackingPathResolver,
-) -> Result<(), ReplaceError> {
+) -> Result<ReplaceTargetPrep<FreshTargetReady>, ReplaceError> {
     match target_prep {
         ReplaceTargetPrep::ExistingLuks {
-            mapper_open: false, ..
-        } => probe_existing_luks_new_target_uuid(runner, new_by_id, new_uuid),
-        ReplaceTargetPrep::ExistingLuks {
-            mapper_open: true, ..
-        } => verify_existing_luks_open_mapper_target(
-            runner,
-            fs,
-            new_name,
-            new_mapper,
-            new_by_id,
-            new_uuid,
-            backing_path_resolver,
-        ),
-        ReplaceTargetPrep::FreshLuks { .. } => Ok(()),
+            mapper_open,
+            enroll_key_file,
+        } => {
+            if mapper_open {
+                verify_existing_luks_open_mapper_target(
+                    runner,
+                    fs,
+                    new_name,
+                    new_mapper,
+                    new_by_id,
+                    new_uuid,
+                    backing_path_resolver,
+                )?;
+            } else {
+                probe_existing_luks_new_target_uuid(runner, new_by_id, new_uuid)?;
+            }
+            Ok(ReplaceTargetPrep::ExistingLuks {
+                mapper_open,
+                enroll_key_file,
+            })
+        }
+        ReplaceTargetPrep::FreshLuks {
+            check: _,
+            extra_opts,
+            enroll_key_file,
+        } => Ok(ReplaceTargetPrep::FreshLuks {
+            check: check_fresh_target_ready(runner, fs, new_name, new_by_id)?,
+            extra_opts,
+            enroll_key_file,
+        }),
     }
 }
 
@@ -1615,6 +1633,21 @@ where
         return Err(PlanFailure::with_notes(notes, e.into()));
     }
 
+    // Fresh-target readiness, plan tier: a blank --new disk must have
+    // `braid-<new>` inactive and be claimable now, so a stray mapper or a
+    // disk holder refuses in --dry-run and before the prompt, with nothing
+    // written. Execute re-checks before the journal.
+    let target_prep = match plan_replace_target_prep(
+        runner,
+        fs,
+        &new_probed,
+        resolved_enroll_key_file.clone(),
+        luks_format_extra_opts.clone(),
+    ) {
+        Ok(prep) => prep,
+        Err(e) => return Err(PlanFailure::with_notes(notes, e.into())),
+    };
+
     // Resolve existing-member credential-verify display names now, while the
     // plan-time `pre_membership` is in scope, so the join reuses the
     // already-loaded membership (no extra pool.json read) and only the
@@ -1634,10 +1667,37 @@ where
         paths: params.paths,
         enroll_key_file: resolved_enroll_key_file,
         luks_format_extra_opts,
+        target_prep,
         member_verify_targets,
     });
 
     Ok(ReplacePlan { notes, work_plan })
+}
+
+/// Decide how replace prepares the new disk. A fresh (not-LUKS) target is
+/// built only from a passing `check_fresh_target_ready`, whose proof the
+/// FreshLuks arm consumes, so no fresh target is planned without a check.
+fn plan_replace_target_prep<R: CommandRunner, F: Filesystem + ?Sized>(
+    runner: &R,
+    fs: &F,
+    new_probed: &PresentConfigDisk,
+    enroll_key_file: Option<KeyFilePath>,
+    extra_opts: LuksFormatExtraOpts,
+) -> Result<ReplaceTargetPrep, crate::luks::LuksError> {
+    Ok(match &new_probed.state {
+        PresentConfigDiskState::PresentNotLuks => ReplaceTargetPrep::FreshLuks {
+            check: check_fresh_target_ready(runner, fs, &new_probed.name, &new_probed.by_id_path)?
+                .into_checked(),
+            extra_opts,
+            enroll_key_file,
+        },
+        PresentConfigDiskState::PresentLuks { mapper_open, .. } => {
+            ReplaceTargetPrep::ExistingLuks {
+                mapper_open: *mapper_open,
+                enroll_key_file,
+            }
+        }
+    })
 }
 
 /// Pre-journal-write refusal for a colliding `new_uuid`. Inspects every
@@ -1766,6 +1826,9 @@ struct ReplaceWorkPlanInput<'a> {
     /// resolution is a no-op so this carries the raw user input.
     enroll_key_file: Option<KeyFilePath>,
     luks_format_extra_opts: LuksFormatExtraOpts,
+    /// Built by `plan_replace_target_prep`, so a FreshLuks prep exists only
+    /// after a passing fresh-target check.
+    target_prep: ReplaceTargetPrep,
     /// Existing-pool-member credential-verify targets, resolved by the caller
     /// at plan time so the join reuses the already-loaded `pre_membership`
     /// (no extra `pool.json` read) and the plan stores only display strings.
@@ -1825,18 +1888,6 @@ fn build_replace_work_plan(input: ReplaceWorkPlanInput<'_>) -> ReplaceWorkPlan {
     let remaining_present = input.pool.devices.len() + 1;
     let restore_raid1_after_commit =
         crate::pool::should_restore_raid1(will_clear_last_missing, remaining_present);
-    let target_prep = match input.new_probed.state {
-        PresentConfigDiskState::PresentNotLuks => ReplaceTargetPrep::FreshLuks {
-            extra_opts: input.luks_format_extra_opts.clone(),
-            enroll_key_file: input.enroll_key_file.clone(),
-        },
-        PresentConfigDiskState::PresentLuks { mapper_open, .. } => {
-            ReplaceTargetPrep::ExistingLuks {
-                mapper_open,
-                enroll_key_file: input.enroll_key_file.clone(),
-            }
-        }
-    };
 
     ReplaceWorkPlan {
         config: input.config,
@@ -1847,7 +1898,7 @@ fn build_replace_work_plan(input: ReplaceWorkPlanInput<'_>) -> ReplaceWorkPlan {
         pool: input.pool,
         replace_source: input.replace_source,
         luks_headers_dir: input.paths.luks_headers_dir(),
-        target_prep,
+        target_prep: input.target_prep,
         journal_target,
         journal_source,
         restore_raid1_after_commit,
@@ -2098,6 +2149,14 @@ fn replace_work_plan_for_test(input: &ReplaceWorkPlanTestInput<'_>) -> ReplaceWo
         input.replace_source,
         &old_uuid,
     );
+    let enroll_key_file = input
+        .enroll_key_file
+        .map(|p| KeyFilePath::new(p.to_path_buf()));
+    let target_prep = replace_target_prep_for_test(
+        input.new_probed,
+        enroll_key_file.clone(),
+        extra_opts.clone(),
+    );
     build_replace_work_plan(ReplaceWorkPlanInput {
         config,
         identity: journal::ReplaceIdentity::new(old_uuid, new_uuid)
@@ -2109,12 +2168,31 @@ fn replace_work_plan_for_test(input: &ReplaceWorkPlanTestInput<'_>) -> ReplaceWo
         replace_source: input.replace_source.clone(),
         pool,
         paths: input.paths,
-        enroll_key_file: input
-            .enroll_key_file
-            .map(|p| KeyFilePath::new(p.to_path_buf())),
+        enroll_key_file,
         luks_format_extra_opts: extra_opts,
+        target_prep,
         member_verify_targets,
     })
+}
+
+/// Plan a target prep through `plan_replace_target_prep` against an inactive
+/// mapper and a claimable disk, for tests that build work plans directly.
+#[cfg(test)]
+fn replace_target_prep_for_test(
+    new_probed: &PresentConfigDisk,
+    enroll_key_file: Option<KeyFilePath>,
+    extra_opts: LuksFormatExtraOpts,
+) -> ReplaceTargetPrep {
+    let runner = crate::cmd::MockRunner::default()
+        .with_mapper_closed(mapper_name(&new_probed.name).as_str());
+    plan_replace_target_prep(
+        &runner,
+        &crate::test_fixtures::MockFs::storage(vec![]),
+        new_probed,
+        enroll_key_file,
+        extra_opts,
+    )
+    .expect("inactive mapper and claimable disk pass the fresh-target check")
 }
 
 #[cfg(test)]
@@ -2320,6 +2398,10 @@ mod tests {
 
         fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
             panic!("planner-boundary test: fs.read_to_string must not be called; got: {path}");
+        }
+
+        fn claim_exclusive(&self, path: &str) -> Result<(), std::io::Error> {
+            panic!("planner-boundary test: fs.claim_exclusive must not be called; got: {path}");
         }
 
         fn create_dir_all(&self, path: &str) -> Result<(), std::io::Error> {
@@ -3753,6 +3835,11 @@ mod tests {
         let old_uuid = LuksUuid::parse("22222222-2222-2222-2222-222222222222").unwrap();
         let new_name = disk_name("disk3");
         let new_by_id = ByIdPath::parse("/dev/disk/by-id/virtio-disk3").unwrap();
+        let new_probed = PresentConfigDisk {
+            name: new_name.clone(),
+            by_id_path: new_by_id.clone(),
+            state: PresentConfigDiskState::PresentNotLuks,
+        };
 
         let pool = PoolState {
             mounted: true,
@@ -3797,11 +3884,12 @@ mod tests {
                 old_name: disk_name("disk2"),
                 new_name: new_name.clone(),
                 new_by_id: new_by_id.clone(),
-                new_probed: PresentConfigDisk {
-                    name: new_name,
-                    by_id_path: new_by_id,
-                    state: PresentConfigDiskState::PresentNotLuks,
-                },
+                target_prep: replace_target_prep_for_test(
+                    &new_probed,
+                    None,
+                    LuksFormatExtraOpts::default(),
+                ),
+                new_probed,
                 replace_source,
                 pool,
                 paths: &f.paths,
@@ -4245,6 +4333,278 @@ mod tests {
             f.inhibitor.acquire_count(),
             1,
             "sleep inhibitor must be acquired exactly once on the path through journal::write_journal"
+        );
+    }
+
+    /// Handler for a blank (not-LUKS) disk3 whose `luksFormat` and header
+    /// backup would succeed, so a test can see whether replace ever got
+    /// that far.
+    fn fresh_disk3_handler()
+    -> impl Fn(&CmdRequest) -> Option<Result<RawCommandOutput, CmdError>> + Send + Sync + 'static
+    {
+        |req| match req {
+            CmdRequest::CryptsetupLuksUuid { device }
+                if device == "/dev/disk/by-id/virtio-disk3" =>
+            {
+                Some(Ok(RawCommandOutput {
+                    cmd: format!("cryptsetup luksUUID {device}"),
+                    stdout: String::new(),
+                    stderr: "Device is not a valid LUKS device.\n".into(),
+                    exit_status: 1,
+                }))
+            }
+            CmdRequest::CryptsetupLuksFormat { device, .. } => {
+                Some(Ok(mock_ok(&format!("cryptsetup luksFormat {device}"), "")))
+            }
+            CmdRequest::CryptsetupLuksHeaderBackup { device, .. } => Some(Ok(mock_ok(
+                &format!("cryptsetup luksHeaderBackup {device}"),
+                "",
+            ))),
+            _ => None,
+        }
+    }
+
+    // Intent: a fresh replace target whose `braid-<new>` mapper name is
+    //   already active is refused with nothing written: no pending-op.json,
+    //   no luksFormat, no sleep inhibitor.
+    // Why it exists: finding 261022-0632-011. probe_config_disk returns
+    //   PresentNotLuks before any mapper probe, and the FreshLuks arm of the
+    //   pre-journal gate checked nothing. So replace wrote the journal and
+    //   formatted the disk, and only then did ensure_luks_open refuse the
+    //   mapper, leaving the operator in recovery mode.
+    // Scenario: disk3 is blank, but a stray `braid-disk3` mapper is open on
+    //   another disk (/dev/vdz) when the operator replaces disk2 with disk3.
+    #[test]
+    fn cmd_replace_refuses_fresh_target_with_active_mapper_before_journal() {
+        let f = PoolFixture::two_disk_healthy();
+        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()])
+            .with_dm(canonical_dm_table());
+        let replace_done = Arc::new(AtomicBool::new(false));
+        let runner = ReplacementPool::two_disk_healthy()
+            .install(MockRunner::default(), replace_done)
+            .with_handler(fresh_disk3_handler())
+            .with_handler(|req| match req {
+                CmdRequest::CryptsetupStatus { mapper } if mapper.as_str() == "braid-disk3" => {
+                    Some(Ok(mock_status_active("braid-disk3", "/dev/vdz")))
+                }
+                _ => None,
+            });
+
+        let err = cmd_replace(&runner, &fs, &f.replace_params().build())
+            .expect_err("an active braid-disk3 mapper must refuse a fresh replace");
+
+        assert!(
+            !matches!(err, ReplaceError::JournalLifecycle { .. }),
+            "the refusal must come before the journal, got: {err}"
+        );
+        assert!(
+            err.to_string()
+                .contains("sudo cryptsetup close braid-disk3"),
+            "the refusal must tell the operator to close the mapper, got: {err}"
+        );
+        assert!(
+            journal::load_journal(&f.paths).unwrap().is_none(),
+            "an active braid-disk3 mapper must not leave pending-op.json"
+        );
+        assert!(
+            !runner
+                .requests()
+                .iter()
+                .any(|r| matches!(r, CmdRequest::CryptsetupLuksFormat { .. })),
+            "an active braid-disk3 mapper must refuse before luksFormat"
+        );
+        assert_eq!(f.inhibitor.acquire_count(), 0);
+    }
+
+    // Intent: a fresh replace target that another holder has claimed is
+    //   refused at plan time, so even --dry-run refuses it, and it tells the
+    //   operator how to find the holder.
+    // Why it exists: finding 261022-0632-011. Before the readiness gate a
+    //   disk held by a mount, LVM, md, or dm failed only at luksFormat's own
+    //   exclusive open, after replace had written pending-op.json.
+    // Scenario: disk3 is blank but LVM auto-activated a stale volume group on
+    //   it, and the operator previews `braid replace --old disk2 --new disk3=...
+    //   --dry-run`.
+    #[test]
+    fn dry_run_replace_refuses_fresh_target_held_by_another_holder() {
+        let f = PoolFixture::two_disk_healthy();
+        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()])
+            .with_dm(canonical_dm_table())
+            .with_claim_error(
+                "/dev/disk/by-id/virtio-disk3",
+                std::io::ErrorKind::ResourceBusy,
+            );
+        let replace_done = Arc::new(AtomicBool::new(false));
+        let runner = ReplacementPool::two_disk_healthy()
+            .with_mapper_closed("braid-disk3")
+            .install(MockRunner::default(), replace_done)
+            .with_handler(fresh_disk3_handler());
+
+        let err = cmd_replace(&runner, &fs, &f.replace_params().dry_run(true).build())
+            .expect_err("a held disk3 must refuse even a dry-run replace");
+
+        assert!(
+            matches!(
+                err,
+                ReplaceError::Luks(crate::luks::LuksError::FreshTargetNotReady(
+                    crate::luks::FreshTargetNotReady::DiskBusy { .. }
+                ))
+            ),
+            "expected DiskBusy, got: {err:?}"
+        );
+        assert!(
+            err.to_string()
+                .contains("lsblk /dev/disk/by-id/virtio-disk3"),
+            "the refusal must say how to find the holder, got: {err}"
+        );
+        assert!(journal::load_journal(&f.paths).unwrap().is_none());
+        assert!(
+            !runner
+                .requests()
+                .iter()
+                .any(|r| matches!(r, CmdRequest::CryptsetupLuksFormat { .. })),
+            "a held disk3 must refuse before luksFormat"
+        );
+        assert_eq!(f.inhibitor.acquire_count(), 0);
+    }
+
+    // Intent: `ReplacePlan::execute` re-checks fresh-target readiness before
+    //   the inhibitor and journal, so a mapper that appears after a clean plan
+    //   still refuses with nothing written.
+    // Why it exists: finding 261022-0632-011. The plan-time proof is only a
+    //   receipt; luks_format needs a proof minted at execute time, after the
+    //   confirmation and passphrase window in which a mapper can appear.
+    // Scenario: replace planned disk3 as a fresh target with braid-disk3
+    //   closed. While the operator typed the passphrase, a stray braid-disk3
+    //   was opened on /dev/vdz.
+    #[test]
+    fn execute_rechecks_fresh_target_readiness_before_journal() {
+        let f = PoolFixture::two_disk_healthy();
+        let new_uuid = LuksUuid::parse("33333333-3333-3333-3333-333333333333").unwrap();
+        let plan = fresh_luks_execute_plan_for_test(&f, new_uuid);
+        let runner = execute_gate_runner(None, true).with_handler(|req| match req {
+            CmdRequest::CryptsetupStatus { mapper } if mapper.as_str() == "braid-disk3" => {
+                Some(Ok(mock_status_active("braid-disk3", "/dev/vdz")))
+            }
+            _ => None,
+        });
+        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()])
+            .with_dm(canonical_dm_table());
+
+        let err = plan
+            .execute(&runner, &fs, &f.replace_params().build())
+            .expect_err("a mapper opened after planning must refuse execute");
+
+        assert!(
+            matches!(
+                err,
+                ReplaceError::Luks(crate::luks::LuksError::FreshTargetNotReady(
+                    crate::luks::FreshTargetNotReady::MapperActive { .. }
+                ))
+            ),
+            "expected MapperActive before the journal, got: {err:?}"
+        );
+        assert_eq!(f.inhibitor.acquire_count(), 0);
+        assert!(journal::load_journal(&f.paths).unwrap().is_none());
+        assert!(
+            !runner
+                .requests()
+                .iter()
+                .any(|r| matches!(r, CmdRequest::CryptsetupLuksFormat { .. })),
+            "the execute re-check must refuse before luksFormat"
+        );
+    }
+
+    // Intent: a `braid-<new>` mapper that appears after both readiness checks
+    //   passed, in the journal->luksFormat->open window, is still refused by
+    //   the ownership check in `ensure_luks_open` before `btrfs replace
+    //   start`, with the journal kept for `braid recover`.
+    // Why it exists: ADR 019 gives a fresh target two tiers: the readiness
+    //   gate before the journal, and the open helper's ownership check after
+    //   it. The plan-time and execute-time tests above stop at the first tier,
+    //   so without this one no command-level test would fail if the FreshLuks
+    //   arm stopped going through the ownership-checking open and routed pool
+    //   data onto a foreign `/dev/mapper/braid-disk3`. The add twin is
+    //   `add::tests::cmd_add_fresh_bootstrap_mapper_opened_after_format_stops_before_mkfs`.
+    // Scenario: the operator replaces disk2 with a blank disk3. braid-disk3
+    //   is closed at plan time and at the execute re-check, then something
+    //   opens it on /dev/vdz while luksFormat runs.
+    #[test]
+    fn cmd_replace_fresh_target_mapper_opened_after_format_aborts_before_replace_start() {
+        let f = PoolFixture::two_disk_healthy();
+        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()])
+            .with_dm(canonical_dm_table());
+        let replace_done = Arc::new(AtomicBool::new(false));
+        let formatted = Arc::new(AtomicBool::new(false));
+        let runner = ReplacementPool::two_disk_healthy()
+            .install(MockRunner::default(), replace_done)
+            .with_handler(fresh_disk3_handler())
+            .with_handler({
+                let formatted = formatted.clone();
+                move |req| match req {
+                    CmdRequest::CryptsetupLuksFormat { device, .. }
+                        if device == "/dev/disk/by-id/virtio-disk3" =>
+                    {
+                        formatted.store(true, Ordering::SeqCst);
+                        Some(Ok(mock_ok(&format!("cryptsetup luksFormat {device}"), "")))
+                    }
+                    CmdRequest::CryptsetupStatus { mapper } if mapper.as_str() == "braid-disk3" => {
+                        if formatted.load(Ordering::SeqCst) {
+                            Some(Ok(mock_status_active("braid-disk3", "/dev/vdz")))
+                        } else {
+                            Some(Ok(RawCommandOutput {
+                                cmd: "cryptsetup status braid-disk3".into(),
+                                stdout: String::new(),
+                                stderr: "/dev/mapper/braid-disk3 is inactive.\n".into(),
+                                exit_status: 4,
+                            }))
+                        }
+                    }
+                    _ => None,
+                }
+            });
+
+        let result = cmd_replace(&runner, &fs, &f.replace_params().build());
+
+        match result {
+            Err(ReplaceError::JournalLifecycle { source, advice }) => match *source {
+                ReplaceError::Luks(crate::luks::LuksError::MapperOwnership(
+                    crate::luks::MapperOwnershipFailure::BackingPathMismatch {
+                        expected_path,
+                        found_path,
+                        ..
+                    },
+                )) => {
+                    assert_eq!(expected_path, "/dev/vdd");
+                    assert_eq!(found_path, "/dev/vdz");
+                    assert!(advice.contains("run `braid recover`"));
+                }
+                other => panic!("expected mapper backing-path mismatch source, got: {other:?}"),
+            },
+            other => panic!("expected a post-journal mapper backing-path mismatch, got: {other:?}"),
+        }
+        assert!(
+            journal::load_journal(&f.paths).unwrap().is_some(),
+            "pending-op.json must survive so braid recover can reconcile"
+        );
+        let log = runner.requests();
+        assert!(
+            formatted.load(Ordering::SeqCst),
+            "both readiness checks must pass so luksFormat runs: {log:?}"
+        );
+        assert!(
+            !log.iter()
+                .any(|r| matches!(r, CmdRequest::BtrfsReplaceStart { .. })),
+            "no BtrfsReplaceStart may issue -- no pool data routed onto the foreign mapper"
+        );
+        assert!(
+            !log.iter().any(|r| matches!(
+                r,
+                CmdRequest::CryptsetupLuksOpen { mapper, .. }
+                    | CmdRequest::CryptsetupClose { mapper }
+                    if mapper.as_str() == "braid-disk3"
+            )),
+            "braid must neither open over nor close a mapper it did not open: {log:?}"
         );
     }
 
@@ -5185,6 +5545,11 @@ mod tests {
             old_name: DiskName::parse("disk2").unwrap(),
             new_name: DiskName::parse("disk3").unwrap(),
             new_by_id: ByIdPath::parse("/dev/disk/by-id/virtio-disk3").unwrap(),
+            target_prep: replace_target_prep_for_test(
+                &new_probed,
+                Some(KeyFilePath::new(kf.to_path_buf())),
+                LuksFormatExtraOpts::default(),
+            ),
             new_probed,
             replace_source: source,
             pool: replace_work_plan_test_pool(
@@ -5417,6 +5782,11 @@ mod tests {
             build_member_verify_targets(&membership, &pool, &replace_source, &old_uuid);
         let new_name = disk_name("disk3");
         let new_by_id = ByIdPath::parse("/dev/disk/by-id/virtio-disk3").unwrap();
+        let new_probed = PresentConfigDisk {
+            name: new_name.clone(),
+            by_id_path: new_by_id.clone(),
+            state: PresentConfigDiskState::PresentNotLuks,
+        };
         let work_plan = build_replace_work_plan(ReplaceWorkPlanInput {
             config: f.config.clone(),
             identity: journal::ReplaceIdentity::new(old_uuid, LuksUuid::new_v4())
@@ -5424,11 +5794,12 @@ mod tests {
             old_name: disk_name("disk2"),
             new_name: new_name.clone(),
             new_by_id: new_by_id.clone(),
-            new_probed: PresentConfigDisk {
-                name: new_name,
-                by_id_path: new_by_id,
-                state: PresentConfigDiskState::PresentNotLuks,
-            },
+            target_prep: replace_target_prep_for_test(
+                &new_probed,
+                None,
+                LuksFormatExtraOpts::default(),
+            ),
+            new_probed,
             replace_source,
             pool,
             paths: &f.paths,
@@ -5564,7 +5935,7 @@ mod tests {
     //   identity; a mapper-keyed skip would let a foreign open mapper reach
     //   `btrfs replace start` when the live row's UUID differs from the
     //   planned replacement UUID. The open-arm identity check now runs as the
-    //   pre-journal tier (verify_existing_luks_new_target_preflight), so a
+    //   pre-journal tier (verify_new_target_preflight), so a
     //   single post-confirmation backing drift aborts on the reversible side
     //   (no stranded pending-op.json, no inhibitor) per ADR 019's pre-journal
     //   excluded scope -- this is the open-arm analog of
@@ -5680,7 +6051,7 @@ mod tests {
     //
     // Why it exists: the open arm's counterpart to
     //   cmd_replace_existing_luks_closed_mapper_enroll_post_journal_swap_aborts.
-    //   The pre-journal tier (verify_existing_luks_new_target_preflight) now
+    //   The pre-journal tier (verify_new_target_preflight) now
     //   intercepts the single-drift scenario before the journal, so deleting the
     //   post-journal verify (verify_existing_luks_open_mapper_target) in Step 1
     //   would no longer fail any single-drift full-execute test. This makes the
@@ -5814,7 +6185,7 @@ mod tests {
     //   reversible side per ADR 019's pre-journal excluded scope and
     //   principles.md's "line of no return" -- not strand pending-op.json and
     //   force the operator into `braid recover`. The pre-journal tier hoists this
-    //   probe (verify_existing_luks_new_target_preflight) above the journal; the
+    //   probe (verify_new_target_preflight) above the journal; the
     //   tight post-journal re-probe still runs as the pre-open TOCTOU guard for
     //   the keyfile-enroll window and is covered by the --enroll post-journal-tier
     //   test below. The mapper_open=true arm has the matching pre-journal wiring
@@ -5911,7 +6282,7 @@ mod tests {
     //   swap at the residual POST-journal re-probe -- aborting before
     //   ensure_luks_open and BtrfsReplaceStart, with the journal already written.
     //
-    // Why it exists: the pre-journal tier (verify_existing_luks_new_target_preflight)
+    // Why it exists: the pre-journal tier (verify_new_target_preflight)
     //   now intercepts the single-swap scenario before the journal, so deleting
     //   the post-journal probe in Step 1 (probe_existing_luks_new_target_uuid)
     //   would no longer fail any single-swap test. This is the only full-execute
@@ -7244,6 +7615,7 @@ mod tests {
         let fs = MockFs::storage(vec!["/dev/disk/by-id/new".into()]).with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner = ReplacementPool::one_live_one_missing()
+            .with_mapper_closed("braid-replacement")
             .install(MockRunner::default(), replace_done)
             .with_handler(|req| match req {
                 CmdRequest::CryptsetupLuksUuid { device } if device == "/dev/disk/by-id/new" => {
@@ -7805,6 +8177,7 @@ mod tests {
             .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner = ReplacementPool::two_disk_healthy()
+            .with_mapper_closed("braid-disk3")
             .install(MockRunner::default(), replace_done)
             .with_handler(keyfile_probe_all_failures_handler());
         let report = plan_replace(
@@ -7854,6 +8227,7 @@ mod tests {
             .with_dm(canonical_dm_table());
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner = ReplacementPool::two_disk_healthy()
+            .with_mapper_closed("braid-disk3")
             .install(MockRunner::default(), replace_done)
             .with_handler(|req| match req {
                 CmdRequest::CryptsetupLuksUuid { device }
@@ -8636,50 +9010,6 @@ mod tests {
                 ),
             ),
         )
-    }
-
-    #[test]
-    // Intent: the pre-journal new-target preflight dispatcher is a no-op for
-    //   FreshLuks targets -- it issues no probe and returns Ok(()).
-    // Why it exists: a FreshLuks new target has no pre-existing LUKS identity
-    //   to probe -- its journaled UUID is minted by `cryptsetup luksFormat`
-    //   AFTER the journal and is gated at finish-time/recovery instead. Pinning
-    //   the skip structure-insensitively (zero requests) keeps a future edit
-    //   from routing FreshLuks through an ExistingLuks probe and reading a disk
-    //   that has no header yet. The ExistingLuks closed/open routing is already
-    //   covered by the helper unit tests below
-    //   (replace_existing_luks_open_boundary_probe_* and
-    //   replace_existing_luks_open_mapper_backing_*); this only pins the
-    //   FreshLuks-skip branch and the dispatch.
-    // Scenario: the planner classified the new disk as FreshLuks (blank or
-    //   non-LUKS disk to be formatted); execute calls the pre-journal gate.
-    fn preflight_dispatcher_fresh_luks_is_noop() {
-        let runner = MockRunner::default();
-        let target_prep = ReplaceTargetPrep::FreshLuks {
-            extra_opts: LuksFormatExtraOpts::default(),
-            enroll_key_file: None,
-        };
-        let fs = MockFs::storage(vec![]);
-        let resolver = MockBackingPathResolver::default();
-        let result = verify_existing_luks_new_target_preflight(
-            &runner,
-            &fs,
-            &target_prep,
-            &disk_name("disk3"),
-            &MapperName::from_basename("braid-disk3".into()),
-            &ByIdPath::parse("/dev/disk/by-id/virtio-disk3").unwrap(),
-            &LuksUuid::parse("33333333-3333-3333-3333-333333333333").unwrap(),
-            &resolver,
-        );
-        assert!(
-            result.is_ok(),
-            "FreshLuks preflight must be a no-op Ok(()), got: {result:?}"
-        );
-        assert!(
-            runner.requests().is_empty(),
-            "FreshLuks preflight must issue zero probes, got: {:?}",
-            runner.requests()
-        );
     }
 
     /// Seed 630: ExistingLuks new-target open-boundary re-probe

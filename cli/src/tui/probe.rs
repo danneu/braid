@@ -961,6 +961,10 @@ mod tests {
                 .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "stub"))
         }
 
+        fn claim_exclusive(&self, _path: &str) -> Result<(), std::io::Error> {
+            unreachable!("StubFs: never formats a disk; claim_exclusive must never be called")
+        }
+
         fn create_dir_all(&self, _path: &str) -> Result<(), std::io::Error> {
             unreachable!("tui::StubFs: read-only fixture; create_dir_all must never be called")
         }

@@ -9,11 +9,12 @@ use crate::filesystem::Filesystem;
 use crate::inhibit::AcquireSleepInhibitor;
 use crate::journal;
 use crate::luks::{
-    BackingPathResolver, KeySlotState, LUKS_SLOT_KEYFILE, OpenOutcome, PassphraseReader,
-    backup_luks_header_post_mutation, check_key_slot, ensure_luks_open,
-    format_keyfile_asymmetry_warning, format_keyfile_enrollment_probe_failure,
-    format_target_keyfile_probe_failure, luks_format, luks_header_backup_path,
-    probe_pool_keyfile_enrollment, push_enrollment_preview_steps, read_passphrase_with,
+    BackingPathResolver, FreshTargetChecked, FreshTargetReady, KeySlotState, LUKS_SLOT_KEYFILE,
+    OpenOutcome, PassphraseReader, backup_luks_header_post_mutation, check_fresh_target_ready,
+    check_key_slot, ensure_luks_open, format_keyfile_asymmetry_warning,
+    format_keyfile_enrollment_probe_failure, format_target_keyfile_probe_failure, luks_format,
+    luks_header_backup_path, probe_pool_keyfile_enrollment, push_enrollment_preview_steps,
+    read_passphrase_with,
 };
 use crate::mapper_close::{CloseContext, TrackedMapper, close_mapper_best_effort};
 use crate::membership::{self, DiskMember, LuksUuidMap, PoolMembership};
@@ -493,7 +494,9 @@ struct AddCredentialPrelude {
 /// Fresh-LUKS target adopted into `AddWorkPlan`. `luks_uuid` is generated
 /// at planning time via `LuksUuid::new_v4()` so the journal records the
 /// authoritative identity before `cryptsetup luksFormat` runs, and so a
-/// mid-format crash and replay reformat under the same identity.
+/// mid-format crash and replay reformat under the same identity. `_checked`
+/// is the receipt for the plan-time fresh-target check, so no fresh target
+/// exists without one; execute re-checks before the journal.
 #[derive(Debug, Clone)]
 struct FreshLuksTarget {
     name: DiskName,
@@ -503,6 +506,32 @@ struct FreshLuksTarget {
     luks_uuid: LuksUuid,
     luks_format_extra_opts: LuksFormatExtraOpts,
     enroll_key_file: Option<KeyFilePath>,
+    _checked: FreshTargetChecked,
+}
+
+impl FreshLuksTarget {
+    /// Build a fresh target from its plan-time readiness proof, so the
+    /// target's name and by-id are the ones the check passed.
+    fn new(
+        ready: FreshTargetReady,
+        luks_uuid: LuksUuid,
+        luks_format_extra_opts: LuksFormatExtraOpts,
+        enroll_key_file: Option<KeyFilePath>,
+    ) -> Self {
+        let name = ready.name().clone();
+        let by_id = ready.by_id().clone();
+        let mapper_name = mapper_name(&name);
+        Self {
+            mapper_path: mapper_name.dev_path(),
+            mapper_name,
+            name,
+            by_id,
+            luks_uuid,
+            luks_format_extra_opts,
+            enroll_key_file,
+            _checked: ready.into_checked(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1252,6 +1281,23 @@ impl AddPlan {
             params.backing_path_resolver,
         )?;
 
+        // Fresh-target readiness, execute tier: re-check every fresh target
+        // after the prompt and passphrase and before the inhibitor + journal,
+        // so a mapper opened or a disk claimed since planning refuses with
+        // nothing written. Each proof rides into Pass 2, whose luks_format
+        // consumes it. Operator-visible iteration: sorted by DiskName.
+        let fresh_ready: Vec<(&FreshLuksTarget, FreshTargetReady)> = sorted_targets
+            .iter()
+            .filter_map(|target| match target {
+                AddTargetWork::Fresh(target) => Some(target),
+                _ => None,
+            })
+            .map(|target| {
+                check_fresh_target_ready(runner, fs, &target.name, &target.by_id)
+                    .map(|ready| (target, ready))
+            })
+            .collect::<Result<_, _>>()?;
+
         // Hold a logind sleep inhibitor for the rest of the add operation --
         // covers Pass-2 LUKS format/open of fresh disks, the bootstrap-or-add
         // pool phase, and the conditional pool_balance_raid1 that converts
@@ -1305,14 +1351,11 @@ impl AddPlan {
         journal::write_journal_tracked(params.paths, &journal, journal_state)
             .map_err(|e| AddError::Validation(e.to_string()))?;
 
-        // Pass 2: execute irreversible operations for fresh disks.
-        // Operator-visible iteration: sort by DiskName so progress
-        // lines stay in alphabetical order regardless of UUID-lex
-        // order of the journal map.
-        for target in &sorted_targets {
-            let AddTargetWork::Fresh(target) = target else {
-                continue;
-            };
+        // Pass 2: execute irreversible operations for fresh disks, each with
+        // the readiness proof minted above. Operator-visible iteration:
+        // `fresh_ready` is sorted by DiskName so progress lines stay in
+        // alphabetical order regardless of UUID-lex order of the journal map.
+        for (target, ready) in fresh_ready {
             let name = &target.name;
 
             if !matches!(
@@ -1336,7 +1379,7 @@ impl AddPlan {
             );
             luks_format(
                 runner,
-                target.by_id.as_str(),
+                ready,
                 &passphrase,
                 &target.luks_uuid,
                 &label,
@@ -1824,6 +1867,7 @@ pub fn plan_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     let by_ids_refs: Vec<&ByIdPath> = by_ids.iter().collect();
     let work_plan_result = build_add_work_plan(
         runner,
+        fs,
         &AddStepsInput {
             names: &names,
             by_ids: &by_ids_refs,
@@ -2099,8 +2143,9 @@ fn resolve_existing_luks_enroll<R: CommandRunner>(
     }
 }
 
-fn build_add_work_plan<R: CommandRunner>(
+fn build_add_work_plan<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
+    fs: &F,
     input: &AddStepsInput<'_>,
 ) -> Result<AddWorkPlan, AddError> {
     let mut targets = Vec::new();
@@ -2119,22 +2164,24 @@ fn build_add_work_plan<R: CommandRunner>(
 
         match &p.state {
             PresentConfigDiskState::PresentNotLuks => {
+                // Fresh-target readiness, plan tier: `braid-<name>` must be
+                // inactive and the disk claimable now, so a stray mapper or
+                // a disk holder refuses in --dry-run and before the prompt.
+                // Execute re-checks before the journal.
+                let ready = check_fresh_target_ready(runner, fs, name, by_id)?;
                 // FreshLuks: pre-generate the LUKS UUID at planning so
                 // the journal records authoritative identity from t=0.
                 // A mid-format crash and replay reformats under the
                 // same identity.
                 let luks_uuid = LuksUuid::new_v4();
-                let target = FreshLuksTarget {
-                    name: name.clone(),
-                    by_id: (*by_id).clone(),
-                    mapper_name: mn.clone(),
-                    mapper_path,
-                    luks_uuid: luks_uuid.clone(),
-                    luks_format_extra_opts: input.luks_format_extra_opts.clone(),
-                    enroll_key_file: input
+                let target = FreshLuksTarget::new(
+                    ready,
+                    luks_uuid.clone(),
+                    input.luks_format_extra_opts.clone(),
+                    input
                         .enroll_key_file
                         .map(|p| KeyFilePath::new(p.to_path_buf())),
-                };
+                );
                 // Identity scopes first (in-flight + membership), then the
                 // live-pool guard -- the same order the old single assert
                 // used, so a generated UUID that collides with a known member
@@ -2578,6 +2625,9 @@ mod tests {
             fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
                 Ok(vec![])
             }
+            fn claim_exclusive(&self, _path: &str) -> Result<(), std::io::Error> {
+                Ok(())
+            }
             fn create_dir_all(&self, _path: &str) -> Result<(), std::io::Error> {
                 unreachable!(
                     "add::MockFs: read-only dry-run fixture; create_dir_all must never be called"
@@ -2973,16 +3023,15 @@ mod tests {
     }
 
     fn fresh_target(name: &str, by_id: &str, uuid: &str) -> FreshLuksTarget {
-        let name = DiskName::parse(name).unwrap();
-        FreshLuksTarget {
-            mapper_name: mapper_name(&name),
-            mapper_path: mapper_name(&name).dev_path(),
-            by_id: ByIdPath::parse(by_id).unwrap(),
-            luks_uuid: LuksUuid::parse(uuid).unwrap(),
-            luks_format_extra_opts: LuksFormatExtraOpts::default(),
-            enroll_key_file: None,
-            name,
-        }
+        FreshLuksTarget::new(
+            crate::test_fixtures::fresh_target_ready(
+                &DiskName::parse(name).unwrap(),
+                &ByIdPath::parse(by_id).unwrap(),
+            ),
+            LuksUuid::parse(uuid).unwrap(),
+            LuksFormatExtraOpts::default(),
+            None,
+        )
     }
 
     fn journal_targets_with(
@@ -3318,20 +3367,22 @@ mod tests {
             "/dev/vdb",
             "11111111-1111-1111-1111-111111111111",
         )];
-        let runner = pool_probe_runner(POOL_FSID, &devices).with_output(
-            CmdRequest::CryptsetupLuksFormat {
-                device: BY_ID.to_owned(),
-                uuid: target.luks_uuid.clone(),
-                label: luks_label_for(&target.name),
-                extra_opts: LuksFormatExtraOpts::default(),
-            },
-            RawCommandOutput {
-                cmd: "cryptsetup luksFormat".into(),
-                stdout: String::new(),
-                stderr: "mock luksFormat failure after journal write".into(),
-                exit_status: 9,
-            },
-        );
+        let runner = pool_probe_runner(POOL_FSID, &devices)
+            .with_mapper_closed("braid-disk2")
+            .with_output(
+                CmdRequest::CryptsetupLuksFormat {
+                    device: BY_ID.to_owned(),
+                    uuid: target.luks_uuid.clone(),
+                    label: luks_label_for(&target.name),
+                    extra_opts: LuksFormatExtraOpts::default(),
+                },
+                RawCommandOutput {
+                    cmd: "cryptsetup luksFormat".into(),
+                    stdout: String::new(),
+                    stderr: "mock luksFormat failure after journal write".into(),
+                    exit_status: 9,
+                },
+            );
         let fs = MockFs::storage(vec![BY_ID.into()]).with_dm(pool_probe_dm(&devices));
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
         let confirm = crate::confirm::RecordingConfirm::new();
@@ -3373,6 +3424,88 @@ mod tests {
             "journal should survive the forced post-write failure"
         );
         assert_eq!(inhibitor.acquire_count(), 1);
+    }
+
+    // Intent: `AddPlan::execute` re-checks every fresh target's readiness
+    //   before the inhibitor and journal, so a mapper that appears after a
+    //   clean plan still refuses with nothing written.
+    // Why it exists: finding 261022-0632-011. The plan-time proof is only a
+    //   receipt; luks_format needs a proof minted at execute time, after the
+    //   confirmation and passphrase window in which a mapper can appear.
+    // Scenario: add planned disk2 as a fresh target with braid-disk2 closed.
+    //   While the operator typed the passphrase, a stray braid-disk2 was
+    //   opened on /dev/vdz.
+    #[test]
+    fn execute_rechecks_fresh_target_readiness_before_journal() {
+        const UUID: &str = "33333333-3333-3333-3333-333333333333";
+        const BY_ID: &str = "/dev/disk/by-id/virtio-disk2";
+        let target = fresh_target("disk2", BY_ID, UUID);
+        let journal_targets =
+            journal_targets_with(target.luks_uuid.clone(), fresh_journal_target(&target));
+        let plan = plan_for_execute_target(
+            AddTargetWork::Fresh(target),
+            journal_targets,
+            pool_mounted_with_fsid(POOL_FSID),
+        );
+        let (_state_tmp, paths, _tmp, pass_path) = execute_fixture();
+        let devices = [(
+            "braid-disk1",
+            1,
+            "/dev/vdb",
+            "11111111-1111-1111-1111-111111111111",
+        )];
+        let runner = pool_probe_runner(POOL_FSID, &devices).with_output(
+            CmdRequest::CryptsetupStatus {
+                mapper: MapperName::from_basename("braid-disk2".into()),
+            },
+            mock_status_active("braid-disk2", "/dev/vdz"),
+        );
+        let fs = MockFs::storage(vec![BY_ID.into()]).with_dm(pool_probe_dm(&devices));
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let confirm = crate::confirm::RecordingConfirm::new();
+        let resolver = CountingBackingPathResolver::default().with_path(BY_ID, "/dev/vdc");
+
+        let err = plan
+            .execute(
+                &runner,
+                &fs,
+                &AddParams {
+                    config: &test_config(),
+                    disk_specs: &[],
+                    dry_run: false,
+                    yes: true,
+                    passphrase_stdin: false,
+                    passphrase_file: Some(pass_path.as_path()),
+                    enroll_key_file: None,
+                    luks_format_extra_opts: &[],
+                    progress: ProgressOutput::Off,
+                    paths: &paths,
+                    sleep_inhibitor: &inhibitor,
+                    confirm: &confirm,
+                    passphrase_reader: &RealTty,
+                    backing_path_resolver: &resolver,
+                },
+            )
+            .expect_err("a mapper opened after planning must refuse execute");
+
+        assert!(
+            matches!(
+                err,
+                AddError::Luks(crate::luks::LuksError::FreshTargetNotReady(
+                    crate::luks::FreshTargetNotReady::MapperActive { .. }
+                ))
+            ),
+            "expected MapperActive before the journal, got: {err:?}"
+        );
+        assert_eq!(inhibitor.acquire_count(), 0);
+        assert!(journal::load_journal(&paths).unwrap().is_none());
+        assert!(
+            !runner
+                .requests()
+                .iter()
+                .any(|r| matches!(r, CmdRequest::CryptsetupLuksFormat { .. })),
+            "the execute re-check must refuse before luksFormat"
+        );
     }
 
     // Intent: execute rejects a mounted-plan snapshot when the fresh pool
@@ -3603,6 +3736,7 @@ mod tests {
 
         let result = build_add_work_plan(
             &runner,
+            &MockFs::storage(vec![]),
             &AddStepsInput {
                 names: &[DiskName::parse("disk1").unwrap()],
                 by_ids: &[&ByIdPath::parse("/dev/disk/by-id/disk1").unwrap()],
@@ -3645,6 +3779,7 @@ mod tests {
 
         let result = build_add_work_plan(
             &runner,
+            &MockFs::storage(vec![]),
             &AddStepsInput {
                 names: &[DiskName::parse("disk1").unwrap()],
                 by_ids: &[&ByIdPath::parse("/dev/disk/by-id/disk1").unwrap()],
@@ -3679,6 +3814,7 @@ mod tests {
 
         let steps = build_add_work_plan(
             &runner,
+            &MockFs::storage(vec![]),
             &AddStepsInput {
                 names: &[DiskName::parse("disk1").unwrap()],
                 by_ids: &[&ByIdPath::parse("/dev/disk/by-id/disk1").unwrap()],
@@ -3717,6 +3853,7 @@ mod tests {
 
         let result = build_add_work_plan(
             &runner,
+            &MockFs::storage(vec![]),
             &AddStepsInput {
                 names: &[DiskName::parse("disk1").unwrap()],
                 by_ids: &[&ByIdPath::parse("/dev/disk/by-id/disk1").unwrap()],
@@ -3741,7 +3878,7 @@ mod tests {
 
     #[test]
     fn dry_run_raw_disk_still_shows_destructive_format() {
-        let runner = MockRunner::default();
+        let runner = MockRunner::default().with_mappers_closed(&["braid-disk1"]);
         let probed = vec![PresentConfigDisk {
             name: DiskName::parse("disk1").expect("valid disk name in test fixture"),
             by_id_path: ByIdPath::parse("/dev/disk/by-id/disk1").unwrap(),
@@ -3751,6 +3888,7 @@ mod tests {
 
         let steps = build_add_work_plan(
             &runner,
+            &MockFs::storage(vec![]),
             &AddStepsInput {
                 names: &[DiskName::parse("disk1").unwrap()],
                 by_ids: &[&ByIdPath::parse("/dev/disk/by-id/disk1").unwrap()],
@@ -3840,6 +3978,7 @@ mod tests {
 
         let work_plan = build_add_work_plan(
             &runner,
+            &MockFs::storage(vec![]),
             &AddStepsInput {
                 names: &[DiskName::parse("disk2").unwrap()],
                 by_ids: &[&by_id],
@@ -4020,6 +4159,7 @@ mod tests {
 
         let dry_err = build_add_work_plan(
             &runner,
+            &MockFs::storage(vec![]),
             &AddStepsInput {
                 names: &[DiskName::parse("disk1").unwrap()],
                 by_ids: &[&ByIdPath::parse("/dev/disk/by-id/disk1").unwrap()],
@@ -4700,6 +4840,7 @@ mod tests {
         }];
         let work_plan = build_add_work_plan(
             &runner,
+            &MockFs::storage(vec![]),
             &AddStepsInput {
                 names: &[DiskName::parse("disk2").unwrap()],
                 by_ids: &[&by_id_disk2],
@@ -5851,6 +5992,10 @@ mod tests {
 
         fn list_dir(&self, path: &str) -> Result<Vec<String>, std::io::Error> {
             Ok(self.dm.lock().unwrap().list_dir(path).unwrap_or_default())
+        }
+
+        fn claim_exclusive(&self, _path: &str) -> Result<(), std::io::Error> {
+            Ok(())
         }
 
         fn create_dir_all(&self, _path: &str) -> Result<(), std::io::Error> {
@@ -7529,17 +7674,103 @@ mod tests {
     }
 
     #[test]
-    // Intent: fresh bootstrap add rejects a pre-existing mapper name conflict
-    // before mkfs.btrfs or mount can run.
+    // Intent: a fresh add target whose `braid-<name>` mapper name is already
+    // active is refused at plan time with nothing written: no pending-op.json,
+    // no luksFormat, no sleep inhibitor.
     //
-    // Why it exists: bootstrap helpers no longer probe btrfs themselves, so
-    // the LUKS open helper's mapper ownership check is the boundary that
-    // prevents an already-open `/dev/mapper/braid-disk1` from being treated as
-    // the just-formatted disk.
+    // Why it exists: finding 261022-0632-011. The add twin of
+    // `replace::tests::cmd_replace_refuses_fresh_target_with_active_mapper_before_journal`:
+    // add built a fresh target from PresentNotLuks with no mapper check, so it
+    // wrote the journal and formatted the disk before ensure_luks_open
+    // refused the mapper, leaving the operator in recovery mode.
     //
     // Scenario: an empty host adds disk1 as a fresh disk, but
-    // `/dev/mapper/braid-disk1` already points at a non-LUKS backing device.
-    fn cmd_add_fresh_bootstrap_mapper_conflict_stops_before_mkfs() {
+    // `/dev/mapper/braid-disk1` is already open on another disk (/dev/vdz).
+    fn cmd_add_fresh_target_with_active_mapper_refuses_before_journal() {
+        let (_state_tmp, paths, _tmp, config_path, pass_path) = fresh_add_setup();
+        let by_id = "/dev/disk/by-id/virtio-disk1";
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: by_id.into(),
+                },
+                mock_not_luks(&format!("cryptsetup luksUUID {by_id}")),
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName::from_basename("braid-disk1".into()),
+                },
+                mock_status_active("braid-disk1", "/dev/vdz"),
+            );
+        let fs = MockFs::unmounted(vec![by_id.into()]);
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let confirm = crate::confirm::RecordingConfirm::new();
+
+        let err = cmd_add(
+            &runner,
+            &fs,
+            &AddParams {
+                config: &read_test_config(&config_path),
+                disk_specs: &["disk1=/dev/disk/by-id/virtio-disk1".into()],
+                dry_run: false,
+                yes: true,
+                passphrase_stdin: false,
+                passphrase_file: Some(pass_path.as_path()),
+                enroll_key_file: None,
+                luks_format_extra_opts: &[],
+                progress: ProgressOutput::Off,
+                paths: &paths,
+                sleep_inhibitor: &inhibitor,
+                confirm: &confirm,
+                passphrase_reader: &RealTty,
+                backing_path_resolver:
+                    crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
+            },
+        )
+        .expect_err("an active braid-disk1 mapper must refuse a fresh add");
+
+        assert!(
+            matches!(
+                err,
+                AddError::Luks(crate::luks::LuksError::FreshTargetNotReady(
+                    crate::luks::FreshTargetNotReady::MapperActive { .. }
+                ))
+            ),
+            "expected a plan-time MapperActive refusal, got: {err:?}"
+        );
+        assert!(
+            err.to_string()
+                .contains("sudo cryptsetup close braid-disk1"),
+            "the refusal must tell the operator to close the mapper, got: {err}"
+        );
+        assert!(journal::load_journal(&paths).unwrap().is_none());
+        assert!(
+            !runner
+                .requests()
+                .iter()
+                .any(|r| matches!(r, CmdRequest::CryptsetupLuksFormat { .. })),
+            "an active braid-disk1 mapper must refuse before luksFormat"
+        );
+        assert_eq!(inhibitor.acquire_count(), 0);
+    }
+
+    #[test]
+    // Intent: a `braid-<name>` mapper that appears after both readiness checks
+    // passed, in the journal->luksFormat->open window, is still refused by the
+    // ownership check in `ensure_luks_open` before mkfs.btrfs or mount, with
+    // the journal kept for `braid recover`.
+    //
+    // Why it exists: ADR 019 gives a fresh target two tiers: the readiness
+    // gate before the journal, and the open helper's ownership check after it.
+    // The plan-time and execute-time tests stop at the first tier, so without
+    // this one no command-level test would fail if bootstrap stopped going
+    // through the ownership-checking open and treated a foreign
+    // `/dev/mapper/braid-disk1` as the just-formatted disk.
+    //
+    // Scenario: an empty host adds disk1 as a fresh disk. braid-disk1 is
+    // closed at plan time and at the execute re-check, then something opens
+    // it on /dev/vdz while luksFormat runs.
+    fn cmd_add_fresh_bootstrap_mapper_opened_after_format_stops_before_mkfs() {
         let (_state_tmp, paths, _tmp, config_path, pass_path) = fresh_add_setup();
         let by_id = "/dev/disk/by-id/virtio-disk1";
         let backup_tmp = paths
@@ -7547,18 +7778,17 @@ mod tests {
             .join("braid-disk1.luksheader.tmp")
             .display()
             .to_string();
-        // CryptsetupLuksFormat carries a randomly generated LuksUuid at
-        // runtime (Phase 2's t=0 identity), so the runner matches it via
-        // a handler keyed on `device` instead of by full-value equality.
+        let braid_disk1_status = CmdRequest::CryptsetupStatus {
+            mapper: MapperName::from_basename("braid-disk1".into()),
+        };
+        // CryptsetupLuksFormat carries a randomly generated LuksUuid, so the
+        // runner matches it by `device` in a handler.
         let runner = MockRunner::default()
-            .with_output_sequence(
+            .with_output(
                 CmdRequest::CryptsetupLuksUuid {
                     device: by_id.into(),
                 },
-                vec![
-                    mock_not_luks(&format!("cryptsetup luksUUID {by_id}")),
-                    mock_luks_uuid(by_id, "11111111-1111-1111-1111-111111111111"),
-                ],
+                mock_not_luks(&format!("cryptsetup luksUUID {by_id}")),
             )
             .with_handler({
                 let by_id = by_id.to_owned();
@@ -7579,17 +7809,18 @@ mod tests {
                 },
                 mock_ok("cryptsetup luksHeaderBackup", ""),
             )
-            .with_output(
-                CmdRequest::CryptsetupStatus {
-                    mapper: MapperName::from_basename("braid-disk1".into()),
-                },
-                mock_status_active("braid-disk1", "/dev/vdz"),
+            // Inactive for the plan check and the execute re-check, then
+            // active for every later probe (the open after luksFormat).
+            .with_output_sequence(
+                braid_disk1_status.clone(),
+                vec![
+                    mock_status_inactive("braid-disk1"),
+                    mock_status_inactive("braid-disk1"),
+                ],
             )
             .with_output(
-                CmdRequest::CryptsetupLuksUuid {
-                    device: "/dev/vdz".into(),
-                },
-                mock_not_luks("cryptsetup luksUUID /dev/vdz"),
+                braid_disk1_status,
+                mock_status_active("braid-disk1", "/dev/vdz"),
             );
         let fs = MockFs::unmounted(vec![by_id.into()]);
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
@@ -7632,9 +7863,19 @@ mod tests {
                 }
                 other => panic!("expected mapper backing-path mismatch source, got {other:?}"),
             },
-            other => panic!("expected mapper backing-path mismatch, got {other:?}"),
+            other => panic!("expected a post-journal mapper backing-path mismatch, got {other:?}"),
         }
+        assert!(
+            journal::load_journal(&paths).unwrap().is_some(),
+            "pending-op.json must survive so braid recover can reconcile"
+        );
         let requests = runner.requests();
+        assert!(
+            requests
+                .iter()
+                .any(|r| matches!(r, CmdRequest::CryptsetupLuksFormat { .. })),
+            "both readiness checks must pass so luksFormat runs: {requests:?}"
+        );
         assert!(
             !requests.iter().any(|request| matches!(
                 request,
@@ -7642,8 +7883,92 @@ mod tests {
                     | CmdRequest::MkfsBtrfsRaid1 { .. }
                     | CmdRequest::Mount { .. }
             )),
-            "mapper conflict must stop before mkfs or mount: {requests:?}"
+            "the mapper conflict must stop before mkfs or mount: {requests:?}"
         );
+        assert!(
+            !requests.iter().any(|r| matches!(
+                r,
+                CmdRequest::CryptsetupLuksOpen { .. } | CmdRequest::CryptsetupClose { .. }
+            )),
+            "braid must neither open over nor close a mapper it did not open: {requests:?}"
+        );
+    }
+
+    #[test]
+    // Intent: a fresh add target that another holder has claimed is refused
+    // at plan time, so even --dry-run refuses it, and it tells the operator
+    // how to find the holder.
+    //
+    // Why it exists: finding 261022-0632-011. The add twin of
+    // `replace::tests::dry_run_replace_refuses_fresh_target_held_by_another_holder`:
+    // before the readiness gate a disk held by a mount, LVM, md, or dm failed
+    // only at luksFormat's own exclusive open, after add had written
+    // pending-op.json.
+    //
+    // Scenario: disk1 is blank but LVM auto-activated a stale volume group on
+    // it, and the operator previews `braid add disk1=... --dry-run`.
+    fn dry_run_add_refuses_fresh_target_held_by_another_holder() {
+        let (_state_tmp, paths, _tmp, config_path, _pass_path) = fresh_add_setup();
+        let by_id = "/dev/disk/by-id/virtio-disk1";
+        let runner = MockRunner::default()
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: by_id.into(),
+                },
+                mock_not_luks(&format!("cryptsetup luksUUID {by_id}")),
+            )
+            .with_mappers_closed(&["braid-disk1"]);
+        let fs = MockFs::unmounted(vec![by_id.into()])
+            .with_claim_error(by_id, std::io::ErrorKind::ResourceBusy);
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let confirm = crate::confirm::RecordingConfirm::new();
+
+        let err = cmd_add(
+            &runner,
+            &fs,
+            &AddParams {
+                config: &read_test_config(&config_path),
+                disk_specs: &["disk1=/dev/disk/by-id/virtio-disk1".into()],
+                dry_run: true,
+                yes: true,
+                passphrase_stdin: false,
+                passphrase_file: None,
+                enroll_key_file: None,
+                luks_format_extra_opts: &[],
+                progress: ProgressOutput::Off,
+                paths: &paths,
+                sleep_inhibitor: &inhibitor,
+                confirm: &confirm,
+                passphrase_reader: &RealTty,
+                backing_path_resolver:
+                    crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
+            },
+        )
+        .expect_err("a held disk1 must refuse even a dry-run add");
+
+        assert!(
+            matches!(
+                err,
+                AddError::Luks(crate::luks::LuksError::FreshTargetNotReady(
+                    crate::luks::FreshTargetNotReady::DiskBusy { .. }
+                ))
+            ),
+            "expected DiskBusy, got: {err:?}"
+        );
+        assert!(
+            err.to_string()
+                .contains("lsblk /dev/disk/by-id/virtio-disk1"),
+            "the refusal must say how to find the holder, got: {err}"
+        );
+        assert!(journal::load_journal(&paths).unwrap().is_none());
+        assert!(
+            !runner
+                .requests()
+                .iter()
+                .any(|r| matches!(r, CmdRequest::CryptsetupLuksFormat { .. })),
+            "a held disk1 must refuse before luksFormat"
+        );
+        assert_eq!(inhibitor.acquire_count(), 0);
     }
 
     #[test]
@@ -7682,12 +8007,7 @@ mod tests {
                     "LUKS header information\nVersion:       \t2\nLabel:         \tbraid-disk2\nSubsystem:     \t(no subsystem)\n",
                 ),
             )
-            .with_output(
-                CmdRequest::CryptsetupStatus {
-                    mapper: MapperName::from_basename("braid-disk2".into()),
-                },
-                mock_status_inactive("braid-disk2"),
-            )
+            .with_mappers_closed(&["braid-disk1", "braid-disk2"])
             .with_output_stdin(
                 CmdRequest::CryptsetupTestPassphrase {
                     device: disk2.into(),
@@ -7753,7 +8073,7 @@ mod tests {
     // Scenario: first disk added to an empty pool (no pool mounted yet).
     #[test]
     fn dry_run_render_fresh_single_disk_bootstrap() {
-        let runner = MockRunner::default();
+        let runner = MockRunner::default().with_mappers_closed(&["braid-disk1"]);
         let probed = vec![PresentConfigDisk {
             name: DiskName::parse("disk1").expect("valid disk name in test fixture"),
             by_id_path: ByIdPath::parse("/dev/disk/by-id/disk1").unwrap(),
@@ -7769,6 +8089,7 @@ mod tests {
 
         let steps = build_add_work_plan(
             &runner,
+            &MockFs::storage(vec![]),
             &AddStepsInput {
                 names: &[DiskName::parse("disk1").unwrap()],
                 by_ids: &[&ByIdPath::parse("/dev/disk/by-id/disk1").unwrap()],
@@ -7922,7 +8243,7 @@ mod tests {
     // Scenario: an operator runs `braid add --dry-run` twice against the same
     //   fresh disk and expects identical, honest preview output.
     fn dry_run_render_fresh_disk_uuid_is_reproducible_across_invocations() {
-        let runner = MockRunner::default();
+        let runner = MockRunner::default().with_mappers_closed(&["braid-disk1"]);
         let probed = vec![PresentConfigDisk {
             name: DiskName::parse("disk1").expect("valid disk name in test fixture"),
             by_id_path: ByIdPath::parse("/dev/disk/by-id/disk1").unwrap(),
@@ -7953,10 +8274,16 @@ mod tests {
         };
 
         // Each call mints a fresh `LuksUuid::new_v4()` internally.
-        let first =
-            Step::render_dry_run(&build_add_work_plan(&runner, &input).unwrap().render_steps());
-        let second =
-            Step::render_dry_run(&build_add_work_plan(&runner, &input).unwrap().render_steps());
+        let first = Step::render_dry_run(
+            &build_add_work_plan(&runner, &MockFs::storage(vec![]), &input)
+                .unwrap()
+                .render_steps(),
+        );
+        let second = Step::render_dry_run(
+            &build_add_work_plan(&runner, &MockFs::storage(vec![]), &input)
+                .unwrap()
+                .render_steps(),
+        );
 
         assert_eq!(
             first, second,
@@ -7985,7 +8312,7 @@ mod tests {
      * Scenario: bootstrap `braid add disk1=... --enroll-key-file=/mnt/kf`.
      */
     fn dry_run_render_fresh_disk_with_keyfile_orders_backup_after_addkey() {
-        let runner = MockRunner::default();
+        let runner = MockRunner::default().with_mappers_closed(&["braid-disk1"]);
         let probed = vec![PresentConfigDisk {
             name: DiskName::parse("disk1").expect("valid disk name in test fixture"),
             by_id_path: ByIdPath::parse("/dev/disk/by-id/disk1").unwrap(),
@@ -7996,6 +8323,7 @@ mod tests {
 
         let steps = build_add_work_plan(
             &runner,
+            &MockFs::storage(vec![]),
             &AddStepsInput {
                 names: &[DiskName::parse("disk1").unwrap()],
                 by_ids: &[&ByIdPath::parse("/dev/disk/by-id/disk1").unwrap()],
@@ -8099,6 +8427,7 @@ mod tests {
 
         let steps = build_add_work_plan(
             &runner,
+            &MockFs::storage(vec![]),
             &AddStepsInput {
                 names: &[DiskName::parse("disk1").unwrap()],
                 by_ids: &[&ByIdPath::parse("/dev/disk/by-id/disk1").unwrap()],
@@ -8180,6 +8509,7 @@ mod tests {
 
         let steps = build_add_work_plan(
             &runner,
+            &MockFs::storage(vec![]),
             &AddStepsInput {
                 names: &[DiskName::parse("disk1").unwrap()],
                 by_ids: &[&ByIdPath::parse("/dev/disk/by-id/disk1").unwrap()],
@@ -8219,7 +8549,7 @@ mod tests {
     // no pool is mounted yet.
     #[test]
     fn dry_run_render_fresh_two_disk_bootstrap_uses_raid1_mkfs() {
-        let runner = MockRunner::default();
+        let runner = MockRunner::default().with_mappers_closed(&["braid-disk1", "braid-disk2"]);
         let by_id_disk1 = ByIdPath::parse("/dev/disk/by-id/disk1").unwrap();
         let by_id_disk2 = ByIdPath::parse("/dev/disk/by-id/disk2").unwrap();
         let names = vec![
@@ -8243,6 +8573,7 @@ mod tests {
 
         let steps = build_add_work_plan(
             &runner,
+            &MockFs::storage(vec![]),
             &AddStepsInput {
                 names: &names,
                 by_ids: &by_ids,
@@ -8280,7 +8611,7 @@ mod tests {
     // Why: verifies the pool-mounted path includes balance to RAID1.
     // Scenario: adding a fresh disk to a 1-disk pool (pool already mounted).
     fn dry_run_render_add_to_existing_pool_with_balance() {
-        let runner = MockRunner::default();
+        let runner = MockRunner::default().with_mappers_closed(&["braid-disk2"]);
         let probed = vec![PresentConfigDisk {
             name: DiskName::parse("disk2").expect("valid disk name in test fixture"),
             by_id_path: ByIdPath::parse("/dev/disk/by-id/disk2").unwrap(),
@@ -8290,6 +8621,7 @@ mod tests {
 
         let steps = build_add_work_plan(
             &runner,
+            &MockFs::storage(vec![]),
             &AddStepsInput {
                 names: &[DiskName::parse("disk2").unwrap()],
                 by_ids: &[&ByIdPath::parse("/dev/disk/by-id/disk2").unwrap()],
@@ -8655,6 +8987,10 @@ mod tests {
 
         fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
             panic!("planner-boundary test: fs.read_to_string must not be called; got: {path}");
+        }
+
+        fn claim_exclusive(&self, path: &str) -> Result<(), std::io::Error> {
+            panic!("planner-boundary test: fs.claim_exclusive must not be called; got: {path}");
         }
 
         fn create_dir_all(&self, path: &str) -> Result<(), std::io::Error> {
@@ -9468,7 +9804,8 @@ mod tests {
                                 | AddPlanTargetProbe::AlreadyInPoolSlot1Empty => {}
                             }
                         } else {
-                            return Err(CmdError::MissingMock);
+                            // A fresh target: its mapper slot is free.
+                            return Ok(mock_status_inactive(mapper.as_str()));
                         }
                     }
                     let underlying = Self::pool_underlying(index);
@@ -10996,6 +11333,7 @@ mod tests {
         let recording = RequestRecordingRunner::new(runner);
         let result = build_add_work_plan(
             &recording,
+            &MockFs::storage(vec![]),
             &AddStepsInput {
                 names: &names,
                 by_ids: &by_ids_refs,
@@ -11087,6 +11425,7 @@ mod tests {
 
         let work_plan = build_add_work_plan(
             &recording,
+            &MockFs::storage(vec![]),
             &AddStepsInput {
                 names: &names,
                 by_ids: &by_ids_refs,
@@ -11142,6 +11481,7 @@ mod tests {
 
         let result = build_add_work_plan(
             &recording,
+            &MockFs::storage(vec![]),
             &AddStepsInput {
                 names: &names,
                 by_ids: &by_ids_refs,
@@ -11197,6 +11537,7 @@ mod tests {
 
         let work_plan = build_add_work_plan(
             &runner,
+            &MockFs::storage(vec![]),
             &AddStepsInput {
                 names: &names,
                 by_ids: &by_ids_refs,
@@ -11239,7 +11580,8 @@ mod tests {
         let mut pool =
             pool_with_live_devices(vec![live_pool_device("braid-drifted", &uuid, "/dev/vdb")]);
         pool.fsid = Some(Fsid::parse("cc86845b-aec3-408e-bef5-553affc1f2b1").unwrap());
-        let runner = RequestRecordingRunner::new(MockRunner::default());
+        let runner =
+            RequestRecordingRunner::new(MockRunner::default().with_mapper_closed("braid-fresh"));
         let probed = vec![
             cloned_disk_probed_with_mapper_state(
                 "clone",
@@ -11263,6 +11605,7 @@ mod tests {
 
         let work_plan = build_add_work_plan(
             &runner,
+            &MockFs::storage(vec![]),
             &AddStepsInput {
                 names: &names,
                 by_ids: &by_ids_refs,
@@ -11298,10 +11641,14 @@ mod tests {
             work_plan.target_names(),
             vec![DiskName::parse("fresh").unwrap()]
         );
-        assert!(
-            runner.requests().is_empty(),
-            "closed no-op plus fresh planning should not need command probes: {:?}",
-            runner.requests()
+        // The only probe is the fresh target's readiness check; the closed
+        // no-op clone needs none.
+        assert_eq!(
+            runner.requests(),
+            vec![CmdRequest::CryptsetupStatus {
+                mapper: MapperName::from_basename("braid-fresh".into()),
+            }],
+            "closed no-op plus fresh planning should probe only the fresh mapper slot"
         );
     }
 
@@ -11333,6 +11680,7 @@ mod tests {
 
         let result = build_add_work_plan(
             &runner,
+            &MockFs::storage(vec![]),
             &AddStepsInput {
                 names: &names,
                 by_ids: &by_ids_refs,
@@ -11385,7 +11733,11 @@ mod tests {
      */
     #[test]
     fn add_preview_iteration_sorts_by_disk_name() {
-        let runner = MockRunner::default();
+        let runner = MockRunner::default().with_mappers_closed(&[
+            "braid-a-disk",
+            "braid-m-disk",
+            "braid-z-disk",
+        ]);
         let probed = vec![
             PresentConfigDisk {
                 name: DiskName::parse("a-disk").expect("valid disk name in test fixture"),
@@ -11416,6 +11768,7 @@ mod tests {
 
         let work_plan = build_add_work_plan(
             &runner,
+            &MockFs::storage(vec![]),
             &AddStepsInput {
                 names: &names,
                 by_ids: &by_ids_refs,
@@ -11689,6 +12042,7 @@ mod tests {
 
         let result = build_add_work_plan(
             &recording,
+            &MockFs::storage(vec![]),
             &AddStepsInput {
                 names: &names,
                 by_ids: &by_ids_refs,
@@ -11778,6 +12132,7 @@ mod tests {
 
         let result = build_add_work_plan(
             &recording,
+            &MockFs::storage(vec![]),
             &AddStepsInput {
                 names: &names,
                 by_ids: &by_ids_refs,

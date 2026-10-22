@@ -16,7 +16,7 @@
 #     conceptually "command never started." That contradicts decision 019's
 #     explicit guidance that a preflight failure aborts cleanly without
 #     stranding pending-op.json. See
-#     `cli/src/replace.rs#verify_existing_luks_new_target_preflight`: its
+#     `cli/src/replace.rs#verify_new_target_preflight`: its
 #     closed-LUKS branch (`ReplaceTargetPrep::ExistingLuks {
 #     mapper_open: false }`) pairs with the fresh-format
 #     (`PresentNotLuks`) branch.

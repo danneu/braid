@@ -1538,6 +1538,12 @@ mod tests {
             self.first.read_to_string(path)
         }
 
+        fn claim_exclusive(&self, _path: &str) -> Result<(), std::io::Error> {
+            unreachable!(
+                "ExclOpChangesAfterFirstRead: never formats a disk; claim_exclusive must never be called"
+            )
+        }
+
         fn create_dir_all(&self, path: &str) -> Result<(), std::io::Error> {
             self.first.create_dir_all(path)
         }

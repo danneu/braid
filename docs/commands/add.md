@@ -117,6 +117,7 @@ braid classifies each disk before acting:
 - Rejects disks that conflict with existing pool membership (same LUKS UUID, same name, or same by-id path)
 - Rejects absent disks (not plugged in)
 - Verifies the passphrase against an existing pool member before formatting new disks
+- Refuses a fresh disk that is not ready to format, both when planning (so `--dry-run` refuses too) and again just before the journal: if its `/dev/mapper/braid-<name>` mapper is already open, close it with `sudo cryptsetup close braid-<name>`; if a mount, an LVM volume group, an md array, or a device-mapper device holds the disk, free it (`lsblk <by-id path>` shows the holder). Then re-run.
 - Warns if the pool has missing devices but does not refuse: `braid add` still adds the new disk, but **skips the RAID1 convert balance** (it surfaces a `[skip]` note), so the pool stays degraded and redundancy is not restored at add time. To repair, either run `braid replace --old <missing-name> --new <new-name>=/dev/disk/by-id/<...>` to swap in a new disk for the missing member, or -- on a 2-disk degraded pool where [`remove-missing`](remove-missing.md) alone would refuse (it cannot drop RAID1 below two devices) -- run `braid add` then `braid remove-missing` to drop the dead member and rebalance onto the new disk.
 - Warns if existing pool drives have a keyfile but `--enroll` was not passed
 - With `--enroll`, refuses if an adopted disk's LUKS slot 1 is occupied by an unknown key the keyfile does not authenticate -- remove it first with `cryptsetup luksKillSlot`, then retry.
@@ -126,7 +127,7 @@ braid classifies each disk before acting:
 
 Existing-pool adds recover in two phases:
 
-- **PoolMutation**: disk preparation and btrfs membership are not fully committed yet. `braid recover` may finish formatting a fresh target, re-open a verified returned target, run the narrow btrfs-signature wipe for that returned target, and run `btrfs device add`.
+- **PoolMutation**: disk preparation and btrfs membership are not fully committed yet. `braid recover` may finish formatting a fresh target, re-open a verified returned target, run the narrow btrfs-signature wipe for that returned target, and run `btrfs device add`. Before it formats a fresh target it runs the same readiness check as `braid add`; a refusal keeps the journal, so free the disk and run `braid recover` again.
 - **PostAddBalanceRaid1**: membership and `pool.json` are committed. `braid recover` will not format, wipe, or add disks in this phase; it only mounts/probes the committed pool, repairs `pool.json` from the committed live topology if needed, runs the owed RAID1 balance when btrfs balance state is idle, and clears `pending-op.json` after that succeeds. A paused, running, or unknown balance state fails closed with the journal preserved.
 
 ## Related commands

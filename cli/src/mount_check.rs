@@ -664,6 +664,11 @@ mod tests {
                 .clone()
                 .map_err(|kind| std::io::Error::new(kind, "mock mountinfo read failed"))
         }
+        fn claim_exclusive(&self, _path: &str) -> Result<(), std::io::Error> {
+            unreachable!(
+                "MockMountInfoFs: never formats a disk; claim_exclusive must never be called"
+            )
+        }
         fn create_dir_all(&self, _: &str) -> Result<(), std::io::Error> {
             unreachable!("MockMountInfoFs: read-only fixture; create_dir_all must never be called")
         }
@@ -778,6 +783,11 @@ mod tests {
                     std::io::ErrorKind::PermissionDenied,
                     "test: read denied",
                 ))
+            }
+            fn claim_exclusive(&self, _path: &str) -> Result<(), std::io::Error> {
+                unreachable!(
+                    "FailingFs: never formats a disk; claim_exclusive must never be called"
+                )
             }
             fn create_dir_all(&self, _: &str) -> Result<(), std::io::Error> {
                 unreachable!("FailingFs: read-only fixture; create_dir_all must never be called")

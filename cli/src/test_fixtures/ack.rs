@@ -61,6 +61,12 @@ impl Filesystem for AckPanicFilesystem {
         panic!("sentinel-only retry must not touch the filesystem; got list_dir({path})");
     }
 
+    fn claim_exclusive(&self, _path: &str) -> Result<(), std::io::Error> {
+        unreachable!(
+            "AckPanicFilesystem: never formats a disk; claim_exclusive must never be called"
+        )
+    }
+
     fn create_dir_all(&self, path: &str) -> Result<(), std::io::Error> {
         panic!("sentinel-only retry must not touch the filesystem; got create_dir_all({path})");
     }
@@ -86,6 +92,10 @@ impl Filesystem for AckMountinfoFs {
 
     fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
         Ok(vec![])
+    }
+
+    fn claim_exclusive(&self, _path: &str) -> Result<(), std::io::Error> {
+        unreachable!("AckMountinfoFs: never formats a disk; claim_exclusive must never be called")
     }
 
     fn create_dir_all(&self, _path: &str) -> Result<(), std::io::Error> {
@@ -116,6 +126,12 @@ impl Filesystem for OfflineFsThatTouchesSmartd<'_> {
         Ok(vec![])
     }
 
+    fn claim_exclusive(&self, _path: &str) -> Result<(), std::io::Error> {
+        unreachable!(
+            "OfflineFsThatTouchesSmartd: never formats a disk; claim_exclusive must never be called"
+        )
+    }
+
     fn create_dir_all(&self, _path: &str) -> Result<(), std::io::Error> {
         unreachable!(
             "OfflineFsThatTouchesSmartd: read-only fixture; create_dir_all must never be called"
@@ -144,6 +160,12 @@ impl Filesystem for MountedFsThatTouchesSmartd<'_> {
 
     fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
         Ok(vec![])
+    }
+
+    fn claim_exclusive(&self, _path: &str) -> Result<(), std::io::Error> {
+        unreachable!(
+            "MountedFsThatTouchesSmartd: never formats a disk; claim_exclusive must never be called"
+        )
     }
 
     fn create_dir_all(&self, _path: &str) -> Result<(), std::io::Error> {
@@ -178,6 +200,12 @@ impl Filesystem for OfflineFsThatTouchesScrubFailed<'_> {
 
     fn list_dir(&self, _path: &str) -> Result<Vec<String>, std::io::Error> {
         Ok(vec![])
+    }
+
+    fn claim_exclusive(&self, _path: &str) -> Result<(), std::io::Error> {
+        unreachable!(
+            "OfflineFsThatTouchesScrubFailed: never formats a disk; claim_exclusive must never be called"
+        )
     }
 
     fn create_dir_all(&self, _path: &str) -> Result<(), std::io::Error> {

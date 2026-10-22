@@ -77,6 +77,10 @@ impl Filesystem for StatusFs {
         Ok(self.dm.list_dir(path).unwrap_or_default())
     }
 
+    fn claim_exclusive(&self, _path: &str) -> Result<(), std::io::Error> {
+        unreachable!("StatusFs: never formats a disk; claim_exclusive must never be called")
+    }
+
     fn create_dir_all(&self, _path: &str) -> Result<(), std::io::Error> {
         unreachable!("StatusFs: read-only fixture; create_dir_all must never be called")
     }

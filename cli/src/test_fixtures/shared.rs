@@ -3,10 +3,11 @@
 
 use crate::cmd::{CmdRequest, MockRunner, RawCommandOutput};
 use crate::config::Config;
+use crate::config::mapper_name;
 use crate::confirm::RecordingConfirm;
 use crate::filesystem::Filesystem;
 use crate::inhibit::RecordingInhibitor;
-use crate::luks::BackingPathResolver;
+use crate::luks::{BackingPathResolver, FreshTargetReady, check_fresh_target_ready};
 use crate::membership::{self, DiskMember, PoolMembership};
 use crate::progress::Sleeper;
 use crate::state_paths::StatePaths;
@@ -117,6 +118,15 @@ pub(crate) fn disk_member_with(
 /// `read_passphrase` strips the trailing newline from the file body, so
 /// these are the bytes that reach `cryptsetup` over stdin.
 pub(crate) const TEST_PASSPHRASE_BYTES: &[u8] = b"test-passphrase";
+
+/// Mint a `FreshTargetReady` through the real check, against an inactive
+/// mapper and a claimable disk, for tests that build fresh-target plans
+/// directly instead of through a planner.
+pub(crate) fn fresh_target_ready(name: &DiskName, by_id: &ByIdPath) -> FreshTargetReady {
+    let runner = MockRunner::default().with_mapper_closed(mapper_name(name).as_str());
+    check_fresh_target_ready(&runner, &MockFs::storage(vec![]), name, by_id)
+        .expect("inactive mapper and claimable disk pass the fresh-target check")
+}
 
 /// Compact constructor for a successful `RawCommandOutput`. Mirrors the
 /// per-file `mock_ok` helper that lived in `replace.rs`/`add.rs` so
@@ -459,6 +469,9 @@ pub(crate) struct MockFs {
     /// succeeding, so mount/pool failure tests can exercise the fail-closed
     /// mount-point-creation path without touching a real filesystem.
     create_dir_error: Option<std::io::ErrorKind>,
+    /// Per-path `claim_exclusive` failures, so fresh-target tests can model a
+    /// disk another holder has claimed. Unlisted paths claim cleanly.
+    claim_errors: Vec<(String, std::io::ErrorKind)>,
 }
 
 /// `/dev/mapper` listing behavior, kept explicit so tests can distinguish
@@ -482,6 +495,7 @@ impl MockFs {
             dm: MockDmTable::default(),
             dev_mapper: DevMapperListing::Empty,
             create_dir_error: None,
+            claim_errors: Vec::new(),
         }
     }
 
@@ -497,6 +511,7 @@ impl MockFs {
             dm: MockDmTable::default(),
             dev_mapper: DevMapperListing::Empty,
             create_dir_error: None,
+            claim_errors: Vec::new(),
         }
     }
 
@@ -561,6 +576,13 @@ impl MockFs {
         self.create_dir_error = Some(kind);
         self
     }
+
+    /// Make `claim_exclusive(path)` fail with `kind`; `ResourceBusy` models
+    /// a disk held by a mount, LVM, md, or device-mapper holder.
+    pub(crate) fn with_claim_error(mut self, path: &str, kind: std::io::ErrorKind) -> Self {
+        self.claim_errors.push((path.to_owned(), kind));
+        self
+    }
 }
 
 impl Filesystem for MockFs {
@@ -595,6 +617,12 @@ impl Filesystem for MockFs {
             }
         } else {
             Ok(vec![])
+        }
+    }
+    fn claim_exclusive(&self, path: &str) -> Result<(), std::io::Error> {
+        match self.claim_errors.iter().find(|(p, _)| p == path) {
+            Some((_, kind)) => Err(std::io::Error::new(*kind, "mock claim_exclusive failure")),
+            None => Ok(()),
         }
     }
     fn create_dir_all(&self, _path: &str) -> Result<(), std::io::Error> {
@@ -642,6 +670,9 @@ impl<B: Filesystem, A: Filesystem> Filesystem for SwitchingFs<B, A> {
     }
     fn list_dir(&self, path: &str) -> Result<Vec<String>, std::io::Error> {
         self.current().list_dir(path)
+    }
+    fn claim_exclusive(&self, path: &str) -> Result<(), std::io::Error> {
+        self.current().claim_exclusive(path)
     }
     fn create_dir_all(&self, path: &str) -> Result<(), std::io::Error> {
         self.current().create_dir_all(path)

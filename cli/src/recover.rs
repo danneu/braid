@@ -2625,9 +2625,18 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
                     let expected_label = config::luks_label_for(&target.name);
                     match probed.state {
                         ConfigDiskState::PresentNotLuks => {
+                            // Same readiness gate as the live add, so a stray
+                            // mapper or a disk holder refuses with its advice
+                            // instead of a raw luksFormat error.
+                            let ready = luks::check_fresh_target_ready(
+                                runner,
+                                fs,
+                                &target.name,
+                                &target.by_id,
+                            )?;
                             luks::luks_format(
                                 runner,
-                                target.by_id.as_str(),
+                                ready,
                                 passphrase,
                                 target_uuid,
                                 &expected_label,
@@ -3957,6 +3966,10 @@ mod tests {
 
         fn list_dir(&self, path: &str) -> Result<Vec<String>, std::io::Error> {
             Ok(self.dm.list_dir(path).unwrap_or_default())
+        }
+
+        fn claim_exclusive(&self, _path: &str) -> Result<(), std::io::Error> {
+            Ok(())
         }
 
         fn create_dir_all(&self, _path: &str) -> Result<(), std::io::Error> {
@@ -9678,6 +9691,96 @@ mod tests {
             },
         )
         .expect("fresh replay should use stored format options");
+    }
+
+    // Intent: recover's fresh-add replay re-checks the target's readiness
+    //   before luksFormat, so a stray mapper refuses with its close advice
+    //   and the journal stays for a retry.
+    // Why it exists: finding 261022-0632-011. luks_format demands a
+    //   FreshTargetReady, so the replay mints one; before the gate a stray
+    //   `braid-<name>` surfaced only after the format, as an ownership
+    //   failure from the open.
+    // Scenario: an add of fresh disk2 crashed before luksFormat; when the
+    //   operator runs `braid recover`, a stray braid-disk2 is open on /dev/vdz.
+    #[test]
+    fn fresh_replay_refuses_active_mapper_before_luks_format() {
+        let f = PoolFixture::empty();
+        let journal = fresh_pool_mutation_add_journal(Vec::new(), None);
+        journal::write_journal(&f.paths, &journal).unwrap();
+        let union = test_recovery_admission_membership(&journal);
+        let targets = match &journal.op {
+            OpKind::Add { targets, .. } => targets,
+            _ => unreachable!("test journal is Add"),
+        };
+
+        let inner = with_two_disk_pool_probe(
+            MockRunner::default()
+                .with_output(
+                    CmdRequest::CryptsetupLuksUuid {
+                        device: "/dev/disk/by-id/virtio-disk2".into(),
+                    },
+                    err_raw(
+                        "cryptsetup luksUUID",
+                        1,
+                        "Device is not a valid LUKS device",
+                    ),
+                )
+                .with_output_stdin(
+                    CmdRequest::CryptsetupTestPassphrase {
+                        device: "/dev/vda".into(),
+                    },
+                    TEST_PASSPHRASE_BYTES.to_vec(),
+                    ok_raw_empty("cryptsetup open --test-passphrase"),
+                )
+                .with_output(
+                    CmdRequest::CryptsetupStatus {
+                        mapper: MapperName::from_basename("braid-disk2".into()),
+                    },
+                    cryptsetup_status_active("braid-disk2", "/dev/vdz"),
+                ),
+        );
+        let harness = RemountHarness::new(&["/dev/disk/by-id/virtio-disk2"], inner, &[])
+            .with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111");
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
+        let params = f.recover_params().build();
+
+        let err = execute_add_pool_mutation_recovery(
+            &harness.runner,
+            &harness.fs,
+            &resolver,
+            &params,
+            AddPoolReplayCtx {
+                credential: None,
+                journal: &journal,
+                union: &union,
+                targets,
+                pool: pool_state_one_disk(),
+            },
+        )
+        .expect_err("a stray braid-disk2 mapper must refuse the fresh replay");
+
+        assert!(
+            matches!(
+                err,
+                RecoverError::Luks(luks::LuksError::FreshTargetNotReady(
+                    luks::FreshTargetNotReady::MapperActive { .. }
+                ))
+            ),
+            "expected MapperActive before luksFormat, got: {err:?}"
+        );
+        assert!(
+            err.to_string()
+                .contains("sudo cryptsetup close braid-disk2"),
+            "the refusal must tell the operator to close the mapper, got: {err}"
+        );
+        assert!(
+            !harness
+                .requests()
+                .iter()
+                .any(|r| matches!(r, CmdRequest::CryptsetupLuksFormat { .. })),
+            "a stray mapper must refuse before luksFormat"
+        );
+        assert!(f.paths.pending_op_json().exists());
     }
 
     #[test]

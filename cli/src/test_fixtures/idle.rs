@@ -162,6 +162,10 @@ impl Filesystem for IdleMockFs {
         }
     }
 
+    fn claim_exclusive(&self, _path: &str) -> Result<(), std::io::Error> {
+        unreachable!("IdleMockFs: never formats a disk; claim_exclusive must never be called")
+    }
+
     fn create_dir_all(&self, _path: &str) -> Result<(), std::io::Error> {
         unreachable!("IdleMockFs: read-only fixture; create_dir_all must never be called")
     }

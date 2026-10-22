@@ -77,7 +77,7 @@ The protected scope includes:
 - post-replace resize
 - post-replace soft RAID1 balance for missing-path replacements that clear the last missing device
 
-The new-target LUKS identity check is deliberately **two-tier**: the primary gate (`cli/src/replace.rs#verify_existing_luks_new_target_preflight`) runs pre-journal under the excluded "reversible validation and identity checks" rule above, so an operator disk-swap or backing-drift in the post-confirmation window aborts on the reversible side without stranding `pending-op.json`; a residual re-probe (`probe_existing_luks_new_target_uuid` closed-mapper arm, `verify_existing_luks_open_mapper_target` open-mapper arm) stays post-journal inside the "new-disk LUKS initialization/open" scope to guard the narrow journal->open window that contains the optional slot-1 keyfile enroll. Do not collapse it to one tier.
+The new-target check is deliberately **two-tier**: the primary gate (`cli/src/replace.rs#verify_new_target_preflight`) runs pre-journal under the excluded "reversible validation and identity checks" rule above, so a problem that appears in the post-confirmation window aborts on the reversible side without stranding `pending-op.json`. For a pre-formatted LUKS target the gate re-checks identity, so an operator disk-swap or backing drift refuses. For a fresh target it re-runs `cli/src/luks.rs#check_fresh_target_ready`, so a stray `braid-<new>` mapper or another holder of the disk refuses; the `FreshTargetReady` proof it mints is the only input `luks_format` accepts. A residual guard stays post-journal inside the "new-disk LUKS initialization/open" scope to cover the narrow journal->open window that contains the optional slot-1 keyfile enroll: for a pre-formatted target the re-probe (`probe_existing_luks_new_target_uuid` closed-mapper arm, `verify_existing_luks_open_mapper_target` open-mapper arm), and for a fresh target luksFormat's own exclusive claim plus the ownership check in the open that follows. Do not collapse it to one tier.
 
 ### `braid remove`
 
@@ -114,9 +114,11 @@ The protected scope includes:
 
 As with `remove-missing`, the inhibitor is acquired unconditionally before journal write. The bootstrap path's mkfs phase is fast but still irreversible across the journal boundary; the add-to-existing path's RAID1 balance is the long-running phase that the inhibitor primarily protects.
 
+Fresh targets get the same two tiers as `braid replace`: planning runs `cli/src/luks.rs#check_fresh_target_ready` for each one, and execute runs it again before the inhibitor and journal. The execute-time proof is what `luks_format` consumes, so a mapper or disk holder that appears while the operator confirms refuses on the reversible side.
+
 The no-op early-return path (all requested disks already in the pool) returns before the inhibitor seam fires — no journal is written, so no protection is required.
 
-`braid recover` follows the same boundary for replayed destructive work. In particular, add `PoolMutation` recovery resolves and verifies the needed passphrase before acquiring a sleep inhibitor; the inhibitor is acquired only after reversible credential checks pass and immediately before replaying target preparation or btrfs membership work.
+`braid recover` follows the same boundary for replayed destructive work. In particular, add `PoolMutation` recovery resolves and verifies the needed passphrase before acquiring a sleep inhibitor; the inhibitor is acquired only after reversible credential checks pass and immediately before replaying target preparation or btrfs membership work. A replayed fresh-target format first runs `cli/src/luks.rs#check_fresh_target_ready`; a refusal leaves the journal in place, so the operator frees the disk and runs `braid recover` again.
 Bootstrap-add `GenericLivePool` recovery likewise acquires the inhibitor immediately before replaying its owed post-add RAID1 soft balance, so every recover balance-replay path holds the inhibitor across the interruptible btrfs work.
 
 ### Excluded: `braid lock`

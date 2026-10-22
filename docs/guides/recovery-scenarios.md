@@ -144,6 +144,8 @@ For an interrupted fresh-disk add, recover replays the format, optional keyfile 
 
 If the disk is absent or has a different LUKS label than the journal records, recover fails and leaves `pending-op.json` in place. Reconnect the original disk or replace the target, then rerun `sudo braid recover`.
 
+Before it formats the disk, recover also checks that the disk is ready, as `braid add` does. If `/dev/mapper/braid-<name>` is already open, or a mount, an LVM volume group, an md array, or a device-mapper device holds the disk, recover fails and keeps `pending-op.json`. Close the mapper with `sudo cryptsetup close braid-<name>`, or free the disk (`lsblk <by-id path>` shows what holds it), then rerun `sudo braid recover`.
+
 ## Pending-op file corruption
 
 **Symptom:** braid reports that `/var/lib/braid/pending-op.json` could not be parsed.

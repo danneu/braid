@@ -193,6 +193,10 @@ impl Filesystem for DoctorMockFs {
         Ok(self.dm.list_dir(path).unwrap_or_default())
     }
 
+    fn claim_exclusive(&self, _path: &str) -> Result<(), std::io::Error> {
+        unreachable!("DoctorMockFs: never formats a disk; claim_exclusive must never be called")
+    }
+
     fn create_dir_all(&self, _path: &str) -> Result<(), std::io::Error> {
         unreachable!("DoctorMockFs: read-only fixture; create_dir_all must never be called")
     }

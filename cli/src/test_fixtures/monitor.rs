@@ -450,6 +450,10 @@ impl Filesystem for MonitorFs {
         panic!("unexpected monitor fs list_dir probe: {path}");
     }
 
+    fn claim_exclusive(&self, _path: &str) -> Result<(), std::io::Error> {
+        unreachable!("MonitorFs: never formats a disk; claim_exclusive must never be called")
+    }
+
     fn create_dir_all(&self, path: &str) -> Result<(), std::io::Error> {
         panic!("unexpected monitor fs create_dir_all probe: {path}");
     }

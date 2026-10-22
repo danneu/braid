@@ -179,6 +179,9 @@ impl Filesystem for RemountFs {
     fn list_dir(&self, path: &str) -> Result<Vec<String>, std::io::Error> {
         Ok(self.open_dm().list_dir(path).unwrap_or_default())
     }
+    fn claim_exclusive(&self, _path: &str) -> Result<(), std::io::Error> {
+        Ok(())
+    }
     fn create_dir_all(&self, _path: &str) -> Result<(), std::io::Error> {
         Ok(())
     }

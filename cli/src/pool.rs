@@ -1257,6 +1257,10 @@ $ btrfs balance start --enqueue '-dconvert=raid1,soft' '-mconvert=raid1,soft' /m
             Ok(self.dm.list_dir(path).unwrap_or_default())
         }
 
+        fn claim_exclusive(&self, _path: &str) -> Result<(), std::io::Error> {
+            unreachable!("RestoreFs: never formats a disk; claim_exclusive must never be called")
+        }
+
         fn create_dir_all(&self, _path: &str) -> Result<(), std::io::Error> {
             Ok(())
         }

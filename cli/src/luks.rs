@@ -115,12 +115,58 @@ pub enum LuksError {
     },
     #[error("{0}")]
     MapperOwnership(#[from] MapperOwnershipFailure),
+    #[error("{0}")]
+    FreshTargetNotReady(#[from] FreshTargetNotReady),
     #[error("parse error: {0}")]
     Parse(#[from] ParseError),
     #[error("command failed: {0}")]
     Cmd(#[from] CmdError),
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+}
+
+/// Operator-facing refusals from `check_fresh_target_ready`: each names what
+/// holds a fresh target and what to do before braid can format it.
+#[derive(Debug, thiserror::Error)]
+pub enum FreshTargetNotReady {
+    #[error(
+        "disk '{name}' mapper '{}' is open ({}), but '{name}' is a fresh disk \
+         that braid has not formatted yet. Close the conflicting mapper with \
+         'sudo cryptsetup close {mapper}' and re-run.",
+        mapper.dev_path(),
+        active_mapper_backing_display(backing)
+    )]
+    MapperActive {
+        name: DiskName,
+        mapper: MapperName,
+        backing: BackingDevice,
+    },
+    #[error(
+        "fresh disk '{name}' ({by_id}) is in use: the kernel refused braid an \
+         exclusive open, so a mount, an LVM volume group, an md array, or a \
+         device-mapper device holds it. Free the disk ('lsblk {by_id}' shows \
+         what holds it) and re-run."
+    )]
+    DiskBusy { name: DiskName, by_id: ByIdPath },
+    #[error(
+        "could not check that fresh disk '{name}' ({by_id}) is free to format: \
+         {source}. braid formats only a disk it can check; fix the cause and \
+         re-run."
+    )]
+    ClaimFailed {
+        name: DiskName,
+        by_id: ByIdPath,
+        source: std::io::Error,
+    },
+}
+
+/// Names an active mapper's backing in `MapperActive`, including the diskless
+/// mapper a hot-unplug leaves behind.
+fn active_mapper_backing_display(backing: &BackingDevice) -> String {
+    match backing {
+        BackingDevice::Path(path) => format!("backed by '{path}'"),
+        BackingDevice::Null => "no backing disk (stale mapper)".to_owned(),
+    }
 }
 
 /// Operator-facing failures proving that an active mapper is not owned by its
@@ -454,22 +500,106 @@ fn check_passphrase_match(first: Passphrase, second: Passphrase) -> Result<Passp
     }
 }
 
-/// LUKS format a device with the given passphrase, journaled `uuid`, and
-/// braid-derived `label`. The caller produces `uuid` (typically via
-/// `LuksUuid::new_v4()` at the planning site for fresh-format paths, or the
-/// preserved journaled value on a recovery replay) so a mid-format crash
-/// and replay reformat under the same identity, and so the same UUID is
-/// recorded in `OpKind::Add`/`OpKind::Replace` from t=0. `extra_opts`
-/// carries already-validated user argv extras (managed flags `--uuid`
-/// and `--label` are rejected by `LuksFormatExtraOpts::parse`).
+/// Proof that `check_fresh_target_ready` found `braid-<name>` inactive and the
+/// by-id disk claimable. Private fields, so only that check mints one, and not
+/// `Clone`, so each proof is spent once: a fresh-target plan entry consumes
+/// the plan-time proof (`into_checked`), and `luks_format` consumes one minted
+/// after confirmation, so no format runs on a check made before the prompt.
+#[derive(Debug)]
+pub struct FreshTargetReady {
+    name: DiskName,
+    by_id: ByIdPath,
+}
+
+impl FreshTargetReady {
+    /// The disk name this proof checked, so a plan entry built from the
+    /// proof carries the identity that was checked.
+    pub fn name(&self) -> &DiskName {
+        &self.name
+    }
+
+    /// The by-id disk this proof checked; see `name`.
+    pub fn by_id(&self) -> &ByIdPath {
+        &self.by_id
+    }
+
+    /// Spend a plan-time proof on the fresh-target plan entry it checked.
+    pub fn into_checked(self) -> FreshTargetChecked {
+        FreshTargetChecked(())
+    }
+}
+
+/// Receipt a fresh-target plan entry holds for the plan-time
+/// `FreshTargetReady` it consumed. Only `FreshTargetReady::into_checked` mints
+/// one, so no fresh target can be planned without a check. It authorizes
+/// nothing: `luks_format` demands a `FreshTargetReady`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FreshTargetChecked(());
+
+/// Fresh-target readiness check for every caller that will format a disk:
+/// `braid-<name>` must be inactive and the by-id disk claimable now. Each half
+/// sees what the other cannot: a diskless mapper, or one on another disk, does
+/// not hold this disk, and a mount, LVM, or md holder does not take the mapper
+/// name. The mapper half runs first so a mapper on this very disk gets the
+/// close advice, not the generic busy refusal. Any probe failure refuses.
+pub fn check_fresh_target_ready<R: CommandRunner, F: Filesystem + ?Sized>(
+    runner: &R,
+    fs: &F,
+    name: &DiskName,
+    by_id: &ByIdPath,
+) -> Result<FreshTargetReady, LuksError> {
+    let mapper = mapper_name(name);
+    let status = runner.run(&CmdRequest::CryptsetupStatus {
+        mapper: mapper.clone(),
+    })?;
+    if let CryptsetupStatusOutput::Active { backing } = parse_cryptsetup_status(&status)? {
+        return Err(FreshTargetNotReady::MapperActive {
+            name: name.clone(),
+            mapper,
+            backing,
+        }
+        .into());
+    }
+    fs.claim_exclusive(by_id.as_str()).map_err(|source| {
+        if source.kind() == std::io::ErrorKind::ResourceBusy {
+            FreshTargetNotReady::DiskBusy {
+                name: name.clone(),
+                by_id: by_id.clone(),
+            }
+        } else {
+            FreshTargetNotReady::ClaimFailed {
+                name: name.clone(),
+                by_id: by_id.clone(),
+                source,
+            }
+        }
+    })?;
+    Ok(FreshTargetReady {
+        name: name.clone(),
+        by_id: by_id.clone(),
+    })
+}
+
+/// LUKS format the checked fresh target with the given passphrase, journaled
+/// `uuid`, and braid-derived `label`. Taking `target` by value means every
+/// format spends a `FreshTargetReady` minted after confirmation; the residual
+/// guards for the journal-to-format window are luksFormat's own exclusive
+/// claim and the ownership check in the open that follows. The caller produces
+/// `uuid` (typically via `LuksUuid::new_v4()` at the planning site for
+/// fresh-format paths, or the preserved journaled value on a recovery replay)
+/// so a mid-format crash and replay reformat under the same identity, and so
+/// the same UUID is recorded in `OpKind::Add`/`OpKind::Replace` from t=0.
+/// `extra_opts` carries already-validated user argv extras (managed flags
+/// `--uuid` and `--label` are rejected by `LuksFormatExtraOpts::parse`).
 pub fn luks_format<R: CommandRunner>(
     runner: &R,
-    device: &str,
+    target: FreshTargetReady,
     passphrase: &Passphrase,
     uuid: &LuksUuid,
     label: &LuksLabel,
     extra_opts: &LuksFormatExtraOpts,
 ) -> Result<(), LuksError> {
+    let device = target.by_id.as_str();
     let result = runner.run_with_stdin(
         &CmdRequest::CryptsetupLuksFormat {
             device: device.to_owned(),
@@ -2961,6 +3091,71 @@ $ cryptsetup luksHeaderBackup --header-backup-file /var/lib/braid/luks-headers/b
     }
 
     /*
+     * Intent: check_fresh_target_ready mints a proof only when braid-<name> is
+     *   inactive and the disk claims cleanly; a mapper wins over a busy disk,
+     *   a diskless mapper is named as stale, and every probe failure refuses.
+     * Why: finding 261022-0632-011. This check is the only way to mint the
+     *   FreshTargetReady that luks_format demands, so each verdict is pinned
+     *   here once instead of through every command that formats.
+     * Scenario: a hot-unplug left a diskless braid-disk1 behind; separately, a
+     *   non-root run cannot open the disk, and cryptsetup itself cannot run.
+     */
+    #[test]
+    fn check_fresh_target_ready_verdicts() {
+        let name = disk("disk1");
+        let by_id = ByIdPath::parse("/dev/disk/by-id/virtio-disk1").unwrap();
+        let status = CmdRequest::CryptsetupStatus {
+            mapper: mapper_name(&name),
+        };
+        let inactive =
+            MockRunner::default().with_output(status.clone(), crypt_status_inactive("braid-disk1"));
+        let free_disk = MockFs::storage(vec![]);
+
+        let ready = check_fresh_target_ready(&inactive, &free_disk, &name, &by_id)
+            .expect("an inactive mapper and a free disk are ready");
+        assert_eq!((ready.name(), ready.by_id()), (&name, &by_id));
+
+        let stale = MockRunner::default()
+            .with_output(status.clone(), crypt_status_active("braid-disk1", "(null)"));
+        let busy_disk = MockFs::storage(vec![])
+            .with_claim_error(by_id.as_str(), std::io::ErrorKind::ResourceBusy);
+        let err = check_fresh_target_ready(&stale, &busy_disk, &name, &by_id).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                LuksError::FreshTargetNotReady(FreshTargetNotReady::MapperActive {
+                    backing: BackingDevice::Null,
+                    ..
+                })
+            ),
+            "the mapper half must win over a busy disk, got: {err:?}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("stale mapper") && msg.contains("sudo cryptsetup close braid-disk1"),
+            "a diskless mapper must be named stale with close advice, got: {msg}"
+        );
+
+        let denied = MockFs::storage(vec![])
+            .with_claim_error(by_id.as_str(), std::io::ErrorKind::PermissionDenied);
+        let err = check_fresh_target_ready(&inactive, &denied, &name, &by_id).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                LuksError::FreshTargetNotReady(FreshTargetNotReady::ClaimFailed { .. })
+            ),
+            "a claim that fails for another reason must refuse, got: {err:?}"
+        );
+
+        let unprobed = MockRunner::default();
+        let err = check_fresh_target_ready(&unprobed, &free_disk, &name, &by_id).unwrap_err();
+        assert!(
+            matches!(err, LuksError::Cmd(_)),
+            "a status probe that cannot run must refuse, got: {err:?}"
+        );
+    }
+
+    /*
      * Intent: verify luks_format produces an exit-code-specific error for exit 2.
      * Why: previously all format failures said "cryptsetup luksFormat failed (exit N)" generically.
      * Scenario: non-root user runs `braid add`, cryptsetup luksFormat returns EPERM.
@@ -2971,9 +3166,13 @@ $ cryptsetup luksHeaderBackup --header-backup-file /var/lib/braid/luks-headers/b
         // fixed UUID is enough; these tests do not assert on the UUID value).
         let uuid = LuksUuid::parse("00000000-0000-0000-0000-000000000200").unwrap();
         let extras = LuksFormatExtraOpts::default();
+        let target = crate::test_fixtures::fresh_target_ready(
+            &disk("test"),
+            &ByIdPath::parse("/dev/disk/by-id/virtio-test").unwrap(),
+        );
         let runner = MockRunner::default().with_output_stdin(
             CmdRequest::CryptsetupLuksFormat {
-                device: "/dev/sda".into(),
+                device: "/dev/disk/by-id/virtio-test".into(),
                 uuid: uuid.clone(),
                 label: luks_label("test"),
                 extra_opts: extras.clone(),
@@ -2988,7 +3187,7 @@ $ cryptsetup luksHeaderBackup --header-backup-file /var/lib/braid/luks-headers/b
         );
         let err = luks_format(
             &runner,
-            "/dev/sda",
+            target,
             &zpass("pass"),
             &uuid,
             &luks_label("test"),
@@ -3019,9 +3218,13 @@ $ cryptsetup luksHeaderBackup --header-backup-file /var/lib/braid/luks-headers/b
     fn luks_format_exit_4_mentions_device_not_found() {
         let uuid = LuksUuid::parse("00000000-0000-0000-0000-000000000200").unwrap();
         let extras = LuksFormatExtraOpts::default();
+        let target = crate::test_fixtures::fresh_target_ready(
+            &disk("test"),
+            &ByIdPath::parse("/dev/disk/by-id/virtio-test").unwrap(),
+        );
         let runner = MockRunner::default().with_output_stdin(
             CmdRequest::CryptsetupLuksFormat {
-                device: "/dev/sdz".into(),
+                device: "/dev/disk/by-id/virtio-test".into(),
                 uuid: uuid.clone(),
                 label: luks_label("test"),
                 extra_opts: extras.clone(),
@@ -3036,7 +3239,7 @@ $ cryptsetup luksHeaderBackup --header-backup-file /var/lib/braid/luks-headers/b
         );
         let err = luks_format(
             &runner,
-            "/dev/sdz",
+            target,
             &zpass("pass"),
             &uuid,
             &luks_label("test"),
