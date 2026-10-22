@@ -341,10 +341,13 @@ ups.test.result: Done and passed\n\
     }
 
     // Intent: `ups.mfr` / `ups.model` / `ups.serial` populate device fields
-    // only when the `device.*` form is absent.
+    // only when the `device.*` form is absent, and a shadowed `ups.*` line
+    // is dropped, not kept in `extra`.
     // Why: different drivers prefer different keys, and some emit both. If
     // both spellings are present, the `device.*` value wins; if only
-    // `ups.*` is present, the parser still surfaces it.
+    // `ups.*` is present, the parser still surfaces it. The ups-status page
+    // (docs/commands/ups-status.md#json-output) promises that a key braid
+    // parses never appears in `extra`.
     // Scenario: old APC firmwares emit only `ups.model`; newer firmwares
     // emit both.
     #[test]
@@ -356,6 +359,7 @@ ups.test.result: Done and passed\n\
         // Both present -- device.* wins.
         let both = parse_upsc("device.mfr: DeviceMfr\nups.mfr: UpsMfr\n");
         assert_eq!(both.device.mfr.as_deref(), Some("DeviceMfr"));
+        assert!(!both.extra.contains_key("ups.mfr"));
     }
 
     // Intent: watts_estimated returns None unless both ingredients are set.
@@ -387,16 +391,21 @@ ups.test.result: Done and passed\n\
         assert_eq!(out.watts_estimated(), Some(u32::MAX));
     }
 
-    // Intent: percent values out of range round-trip to None.
+    // Intent: percent values out of range round-trip to None, and the
+    // rejected raw value is not kept in `extra`.
     // Why: a driver bug that emits `battery.charge: 200` should not be
     // quietly clipped; callers render "--" and the typed field reflects
-    // that the source was unreliable.
+    // that the source was unreliable. The ups-status page
+    // (docs/commands/ups-status.md#json-output) promises that a key braid
+    // parses never appears in `extra`, even when its value is rejected.
     // Scenario: malformed driver output.
     #[test]
     fn pct_out_of_range_is_none() {
         let out = parse_upsc("battery.charge: 200\nups.load: 999\n");
         assert_eq!(out.battery.charge_pct, None);
         assert_eq!(out.load_pct, None);
+        assert!(!out.extra.contains_key("battery.charge"));
+        assert!(!out.extra.contains_key("ups.load"));
     }
 
     // Intent: percent parsing floors fractional values and rejects only

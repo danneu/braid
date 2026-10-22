@@ -45,10 +45,14 @@ sudo braid ups status --json | jq .
 ```
 
 Emits the serialized `UpscOutput` model. A success body (no top-level
-`error`) is **trustworthy telemetry**: braid faithfully serialized
-whatever `upsc` reported. It is **not** a claim that the UPS is online --
-on-battery (`OB`), low-battery (`OB LB`), and all-unrecognized status sets
-are all success bodies with no `error` and no `warning`.
+`error`) means the `upsc` query succeeded. The body is braid's parse of
+that output, plus the `warning` sentinel from the table below when it
+applies. The typed fields are braid's reading of the keys it knows, not
+copies of the raw lines, and `extra` holds the other keys verbatim. So
+the body is **not** a full copy of what `upsc` printed. It is also
+**not** a claim that the UPS is online -- on-battery (`OB`), low-battery
+(`OB LB`), and all-unrecognized status sets are all success bodies with
+no `error` and no `warning`.
 
 To judge UPS state, read `status_flags`: utility power is proven only by
 the presence of `OL` with no blocking flag (`OB`, `LB`, `TESTFAIL`,
@@ -102,7 +106,9 @@ the rule above.
 
 `status_flags` lists flags in first-seen `ups.status` token order (whitespace normalized, duplicate tokens dropped); braid does not sort them, so the order is deterministic for a given UPS state.
 
-`extra` is a string-keyed map of every `upsc` line that did not land in a typed field above. Its contents vary with the NUT driver and version (typically `driver.*` debug keys plus other untyped fields like `battery.charge.low` or `input.voltage.nominal`), and values are kept verbatim as strings.
+`extra` is a string-keyed map of every `upsc` line whose key braid does not parse into a typed field above. Its contents vary with the NUT driver and version (typically `driver.*` debug keys plus other untyped keys like `battery.charge.low` or `input.voltage.nominal`), and values are kept verbatim as strings.
+
+A key braid parses never appears in `extra`, so `--json` does not keep every raw value. When braid rejects a typed key's value (out of range, or not a number), the typed field is `null` and the raw value is not kept. A `ups.*` device-identity key such as `ups.model` is dropped when its `device.*` twin has a value, because `device` prefers the `device.*` spelling. To see exactly what the driver sent, run `upsc <name>` or open the Browse tab's NUT > Variables view in the [TUI](tui.md).
 
 Distinct sentinels cover the common non-OK cases:
 

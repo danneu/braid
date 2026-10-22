@@ -823,10 +823,10 @@ pub struct DeviceFields {
     pub type_: Option<String>,
 }
 
-/// Typed `upsc <name>` output. `extra` keeps every `key: value` line that
-/// did not land in a typed field, so operators can still see unfamiliar
-/// entries (e.g. driver-specific debug keys) if they inspect the full
-/// structure via `--json`.
+/// Typed `upsc <name>` output. `extra` keeps every `key: value` line whose
+/// key has no typed field, so operators can still see unfamiliar entries
+/// (e.g. driver-specific debug keys) via `--json`. A typed key never lands
+/// in `extra`, so this is not a full copy of the `upsc` output.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct UpscOutput {
     /// Flags from `ups.status`, in first-seen token order, deduplicated on
@@ -848,7 +848,9 @@ pub struct UpscOutput {
     /// `ups.test.result` -- last self-test result, verbatim.
     pub test_result: Option<String>,
     pub device: DeviceFields,
-    /// Every `key: value` line not captured by a typed field above.
+    /// Every `key: value` line whose key has no typed field, verbatim. A
+    /// typed key's raw value is dropped when `cli/src/parse/upsc.rs#parse_upsc`
+    /// rejects it or a `device.*` twin shadows it; it never lands here.
     pub extra: std::collections::BTreeMap<String, String>,
 }
 
