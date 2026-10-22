@@ -266,8 +266,11 @@ mod tests {
     // Why it exists: this empty-set result rides entirely on
     // `split_ascii_whitespace` yielding no tokens for "" -- there is no
     // explicit empty guard. A swap to `split(' ')` would emit a stray
-    // `Unknown("")`, silently breaking the `ups_status_empty` JSON warning
-    // and the `(unknown -- ups.status missing)` human sentinel. Until now
+    // `Unknown("")`, so `UpsSeverity::classify` would return `indeterminate`
+    // instead of `status_missing`. That changes the `--json` `severity` and
+    // loses the `(unknown -- ups.status missing)` human sentinel and the
+    // preflight and doctor empty-status wording, though every surface still
+    // fails closed. Until now
     // only the `emptyups.dev` VM canary (tests/cli/braid-status-ups) covered
     // this path; this is its cheap unit mirror.
     // Scenario: a driver publishes ups.status with no tokens -- the dummy-ups

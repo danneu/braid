@@ -289,7 +289,7 @@ fn ups_severity_color(flags: &[UpsStatusFlag]) -> Color {
         UpsSeverity::Critical => Color::Red,
         UpsSeverity::OnBattery => Color::Yellow,
         UpsSeverity::Online => Color::Green,
-        UpsSeverity::Indeterminate => Color::DarkGray,
+        UpsSeverity::Indeterminate | UpsSeverity::StatusMissing => Color::DarkGray,
     }
 }
 

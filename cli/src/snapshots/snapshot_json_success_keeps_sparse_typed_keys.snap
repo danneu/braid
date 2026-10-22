@@ -3,6 +3,7 @@ source: cli/src/ups.rs
 expression: "&JsonReport::success(&parsed)"
 ---
 {
+  "severity": "online",
   "status_flags": [
     "OL"
   ],

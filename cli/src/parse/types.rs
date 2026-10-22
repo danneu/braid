@@ -731,22 +731,35 @@ impl UpsStatusFlag {
     }
 }
 
-/// Shared UPS severity classifier for preflight, the TUI, and the human CLI
-/// render. Classification lives in the parse domain so every surface consumes
-/// the same fail-closed ladder, while presentation choices stay at the caller.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Shared UPS severity classifier: every surface that judges UPS state,
+/// empty status included, matches on this one fail-closed verdict, while
+/// presentation stays at the caller. The serde names are the `braid ups
+/// status --json` `severity` contract for scripts; renaming one breaks them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum UpsSeverity {
+    #[serde(rename = "online")]
     Online,
+    #[serde(rename = "on_battery")]
     OnBattery,
+    #[serde(rename = "critical")]
     Critical,
+    /// Flags present, but none proves utility power or blocks it.
+    #[serde(rename = "indeterminate")]
     Indeterminate,
+    /// `ups.status` empty or missing, so there are no flags to judge.
+    #[serde(rename = "status_missing")]
+    StatusMissing,
 }
 
 impl UpsSeverity {
-    /// Classify the raw `ups.status` flag set. The worst condition wins:
-    /// critical flags first, then on-battery, then affirmative utility power,
-    /// then indeterminate for empty or unproven states.
+    /// Classify the raw `ups.status` flag set. An empty set is
+    /// `StatusMissing`. Otherwise the worst condition wins: critical flags
+    /// first, then on-battery, then affirmative utility power, then
+    /// indeterminate for flags that prove none of these.
     pub fn classify(flags: &[UpsStatusFlag]) -> Self {
+        if flags.is_empty() {
+            return Self::StatusMissing;
+        }
         if flags.iter().any(UpsStatusFlag::is_critical) {
             return Self::Critical;
         }
@@ -966,9 +979,11 @@ mod tests {
         }
     }
 
-    // Intent: UpsSeverity::classify owns the cross-surface severity ladder.
-    // Why: preflight, the TUI, and the human UPS status line must agree about
-    //   which condition wins when NUT reports contradictory or advisory flags.
+    // Intent: UpsSeverity::classify owns the cross-surface severity ladder,
+    //   including the empty-status case.
+    // Why: every UPS surface must agree about which condition wins when NUT
+    //   reports contradictory or advisory flags, and must tell an empty
+    //   `ups.status` apart from flags that prove nothing.
     // Scenario: representative critical, on-battery, online, advisory, empty,
     //   and unknown-only status sets.
     #[test]
@@ -993,7 +1008,7 @@ mod tests {
             UpsSeverity::classify(&[UpsStatusFlag::Ol, UpsStatusFlag::Rb]),
             UpsSeverity::Online
         );
-        assert_eq!(UpsSeverity::classify(&[]), UpsSeverity::Indeterminate);
+        assert_eq!(UpsSeverity::classify(&[]), UpsSeverity::StatusMissing);
         assert_eq!(
             UpsSeverity::classify(&[UpsStatusFlag::Unknown("WEIRD".into())]),
             UpsSeverity::Indeterminate

@@ -94,12 +94,13 @@ impl<'a> JsonReport<'a> {
     }
 }
 
-/// Flattened success shape so scripts keep reading the typed UPS model
-/// at top level while braid can add warning sentinels for suspect data.
+/// Success body: the typed UPS model flattened at top level plus braid's
+/// `severity` verdict, so scripts read the judgment preflight uses instead of
+/// re-deriving it from `status_flags`. The verdict is computed from the model
+/// here rather than stored on `UpscOutput`, so the two cannot disagree.
 #[derive(Debug, serde::Serialize)]
 struct JsonSuccessReport<'a> {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    warning: Option<JsonWarning>,
+    severity: UpsSeverity,
     #[serde(flatten)]
     parsed: &'a UpscOutput,
 }
@@ -107,21 +108,10 @@ struct JsonSuccessReport<'a> {
 impl<'a> JsonSuccessReport<'a> {
     fn new(parsed: &'a UpscOutput) -> Self {
         Self {
-            warning: parsed
-                .status_flags
-                .is_empty()
-                .then_some(JsonWarning::UpsStatusEmpty),
+            severity: parsed.severity(),
             parsed,
         }
     }
-}
-
-/// JSON warning sentinels for success-status output whose typed body is
-/// still useful but must not be treated as trusted healthy UPS state.
-#[derive(Debug, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-enum JsonWarning {
-    UpsStatusEmpty,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -245,19 +235,7 @@ fn format_human(name: &str, parsed: &UpscOutput, color_enabled: bool) -> String 
     use std::fmt::Write;
     let mut out = String::new();
     let _ = writeln!(out, "UPS: {}", name);
-    let status = format_status(&parsed.status_flags);
-    if parsed.status_flags.is_empty() {
-        let _ = writeln!(out, "Status: {status}");
-    } else {
-        let (tag, gloss) = severity_tag_and_gloss(parsed.severity());
-        let _ = writeln!(
-            out,
-            "Status: {}  {} {}",
-            status,
-            status_tag::render_status_tag(tag, color_enabled),
-            gloss
-        );
-    }
+    let _ = writeln!(out, "Status: {}", format_status_line(parsed, color_enabled));
     line(
         &mut out,
         "Battery",
@@ -306,13 +284,22 @@ fn format_human(name: &str, parsed: &UpscOutput, color_enabled: bool) -> String 
     out
 }
 
-/// Maps shared UPS severity to the human status tag and plain-language gloss.
-fn severity_tag_and_gloss(severity: UpsSeverity) -> (StatusTag, &'static str) {
-    match severity {
-        UpsSeverity::Online => (StatusTag::Ok, "on utility power"),
-        UpsSeverity::OnBattery => (StatusTag::Warn, "on battery"),
-        UpsSeverity::Critical => (StatusTag::Fail, "critical"),
-        UpsSeverity::Indeterminate => (StatusTag::Skip, "utility power not confirmed"),
+/// Human `Status:` value from one exhaustive match on the shared UPS verdict,
+/// so the tag, the gloss, and the empty-status sentinel follow `UpsSeverity`.
+fn format_status_line(parsed: &UpscOutput, color_enabled: bool) -> String {
+    let tagged = |tag, gloss: &str| {
+        format!(
+            "{}  {} {gloss}",
+            format_status(&parsed.status_flags),
+            status_tag::render_status_tag(tag, color_enabled)
+        )
+    };
+    match parsed.severity() {
+        UpsSeverity::Online => tagged(StatusTag::Ok, "on utility power"),
+        UpsSeverity::OnBattery => tagged(StatusTag::Warn, "on battery"),
+        UpsSeverity::Critical => tagged(StatusTag::Fail, "critical"),
+        UpsSeverity::Indeterminate => tagged(StatusTag::Skip, "utility power not confirmed"),
+        UpsSeverity::StatusMissing => "(unknown -- ups.status missing)".to_owned(),
     }
 }
 
@@ -339,9 +326,6 @@ fn format_device_line(parsed: &UpscOutput) -> Option<String> {
 }
 
 fn format_status(flags: &[UpsStatusFlag]) -> String {
-    if flags.is_empty() {
-        return "(unknown -- ups.status missing)".to_owned();
-    }
     flags
         .iter()
         .map(UpsStatusFlag::as_token)
@@ -421,30 +405,18 @@ mod tests {
         );
     }
 
-    // Intent: format_status returns the literal sentinel
-    // `(unknown -- ups.status missing)` for an empty flag set.
-    // Why it exists: an empty flag set is the parser's empty-status case
-    // (see parse/upsc.rs); this is its operator-facing rendering, paired
-    // with the machine-facing `ups_status_empty` JSON warning. The
-    // exact-match pin guards that rendering against silent degradation --
-    // a refactor returning `(unknown)`, `unknown status`, or a blank line
-    // would satisfy a substring check yet drop the cause an operator needs.
-    // Scenario: dummy-ups fixture with no ups.status line yet.
+    // Intent: JSON output of a healthy parse round-trips to a stable shape,
+    // with an unrecognized token beside `OL` kept verbatim and still judged
+    // `online`.
+    // Why it exists: the --json contract is the top-level typed UPS body
+    // plus braid's `severity` verdict. Snapshot-style coverage lives in
+    // golden tests; here we lock in the minimum invariants (status_flags
+    // present, battery.charge_pct surfaced, unknown tokens neither dropped
+    // nor treated as blockers).
+    // Scenario: a newer driver adds a status token braid does not know yet
+    // while the UPS is on utility power.
     #[test]
-    fn format_status_empty_is_unknown() {
-        let flags = Vec::new();
-        let rendered = format_status(&flags);
-        assert_eq!(rendered, "(unknown -- ups.status missing)");
-    }
-
-    // Intent: JSON output of a healthy parse round-trips to a stable shape.
-    // Why it exists: the --json contract is the top-level typed UPS body,
-    // optionally decorated with sentinel fields. Snapshot-style coverage
-    // lives in golden tests; here we lock in the minimum invariants
-    // (status_flags present, battery.charge_pct surfaced, no warning).
-    // Scenario: unit coverage for the JSON branch without spinning up a VM.
-    #[test]
-    fn json_output_has_status_and_battery_keys() {
+    fn json_output_has_severity_status_and_battery_keys() {
         let parsed = UpscOutput {
             status_flags: vec![UpsStatusFlag::Ol, UpsStatusFlag::Unknown("NEWFLAG".into())],
             battery: BatteryFields {
@@ -471,10 +443,7 @@ mod tests {
             text.contains("\"NEWFLAG\""),
             "unknown flag token appears verbatim: {text}"
         );
-        assert!(
-            value.get("warning").is_none(),
-            "healthy output must omit warning: {text}"
-        );
+        assert_eq!(value["severity"], "online", "got: {text}");
     }
 
     // Intent: --json serializes status_flags in stored Vec order, with no
@@ -537,13 +506,15 @@ mod tests {
         );
     }
 
-    // Intent: JSON output marks empty status_flags with a warning sentinel.
-    // Why it exists: scripts need a machine-readable signal that the
-    // flattened typed body is telemetry, not trusted healthy UPS state.
+    // Intent: a `status_missing` success body still carries the typed
+    // telemetry upsc reported.
+    // Why it exists: the empty-status verdict replaces the old warning
+    // sentinel, so it must not cost scripts the battery, load, and device
+    // fields that arrive before the driver fills in ups.status.
     // Scenario: upsc exits 0 and reports battery data before the driver
     // has populated ups.status.
     #[test]
-    fn json_output_with_empty_status_has_warning_and_body() {
+    fn json_output_with_empty_status_keeps_body() {
         let parsed = UpscOutput {
             status_flags: Vec::new(),
             battery: BatteryFields {
@@ -564,7 +535,7 @@ mod tests {
             serde_json::from_str(&serde_json::to_string(&JsonReport::success(&parsed)).unwrap())
                 .unwrap();
 
-        assert_eq!(value["warning"], "ups_status_empty");
+        assert_eq!(value["severity"], "status_missing", "got: {value}");
         assert!(value["status_flags"].as_array().unwrap().is_empty());
         assert_eq!(value["battery"]["charge_pct"], 55);
         assert_eq!(value["load_pct"], 12);
@@ -572,25 +543,23 @@ mod tests {
         assert!(value.get("error").is_none(), "got: {value}");
     }
 
-    // Intent: an all-unrecognized `ups.status` serializes as a no-warning,
-    // no-error success body whose `status_flags` carries the unknown token
-    // verbatim.
-    // Why it exists: the commands page tells scripts the absence of
-    // `warning`/`error` is NOT a health claim; this pins the one body that
-    // proves it -- `upsc` reports a status braid cannot classify, yet
-    // `--json` still emits a clean success. Driving the real `parse_upsc`
-    // -> `JsonReport::success` path (not a hand-built struct) is deliberate:
-    // a future parser regression that dropped unknown-only tokens would flip
-    // this to `ups_status_empty`, and only raw input catches that.
+    // Intent: an all-unrecognized `ups.status` serializes as a success body
+    // whose `status_flags` carries the unknown token verbatim.
+    // Why it exists: `severity` says only that braid could not judge the
+    // UPS (`json_success_carries_severity_verdict` pins `indeterminate`);
+    // the token is how a script or operator learns what braid could not
+    // judge. Driving the real `parse_upsc` -> `JsonReport::success` path
+    // (not a hand-built struct) is deliberate: a parser regression that
+    // dropped unknown-only tokens would empty `status_flags`, and only raw
+    // input catches that.
     // Scenario: `upsc` emits `ups.status: WEIRD` -- a token from a newer
     // firmware braid has not shipped support for.
     #[test]
-    fn json_all_unknown_status_has_no_warning() {
+    fn json_all_unknown_status_keeps_token_verbatim() {
         let parsed = parse_upsc("ups.status: WEIRD\n");
         let value: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&JsonReport::success(&parsed)).unwrap())
                 .unwrap();
-        assert!(value.get("warning").is_none(), "got: {value}");
         assert!(value.get("error").is_none(), "got: {value}");
         assert_eq!(value["status_flags"], serde_json::json!(["WEIRD"]));
     }
@@ -1077,11 +1046,12 @@ mod tests {
     //
     // The online fixture additionally JSON-serializes its parsed model
     // (json_online_fixture_has_expected_shape), anchoring the `--json`
-    // contract against a real fixture. The other states keep only their
-    // human snapshot -- per-state JSON shape is not re-checked here,
-    // because status-token serialization is covered by
-    // json_output_status_flags_preserve_insertion_order and sparse field
-    // presence by snapshot_json_success_keeps_sparse_typed_keys.
+    // contract against a real fixture. Every fixture's `--json` verdict is
+    // pinned by json_success_carries_severity_verdict; beyond that, the
+    // other states keep only their human snapshot -- per-state JSON shape
+    // is not re-checked here, because status-token serialization is
+    // covered by json_output_status_flags_preserve_insertion_order and
+    // sparse field presence by snapshot_json_success_keeps_sparse_typed_keys.
 
     fn parse_fixture(stdout: &str) -> UpscOutput {
         crate::parse::parse_upsc(stdout)
@@ -1132,6 +1102,58 @@ mod tests {
         assert_eq!(value["device"]["type"], "ups");
         assert!(value["battery"].get("type_").is_none());
         assert!(value["device"].get("type_").is_none());
+    }
+
+    // Intent: every --json success body carries braid's UPS verdict as a
+    //   top-level `severity` string, and none carries a `warning` key.
+    // Why it exists: scripts must take the verdict from the one classifier
+    //   that preflight, doctor, the TUI, and the human render share, instead
+    //   of re-deriving the ladder from `status_flags` and drifting when it
+    //   changes. Literal strings pin the wire names, so renaming a variant
+    //   fails here instead of silently breaking scripts.
+    // Scenario: `braid ups status --json` against each captured fixture
+    //   state, a newer firmware's unknown-only status, and a driver that has
+    //   not yet populated `ups.status` (absent key, then an empty value).
+    #[test]
+    fn json_success_carries_severity_verdict() {
+        for (label, stdout, want) in [
+            (
+                "online fixture",
+                include_str!("../tests/fixtures/nixos-26.05/upsc/upsc-online.txt"),
+                "online",
+            ),
+            (
+                "onbattery fixture",
+                include_str!("../tests/fixtures/nixos-26.05/upsc/upsc-onbattery.txt"),
+                "on_battery",
+            ),
+            (
+                "lowbattery fixture",
+                include_str!("../tests/fixtures/nixos-26.05/upsc/upsc-lowbattery.txt"),
+                "critical",
+            ),
+            (
+                "replace-battery fixture",
+                include_str!("../tests/fixtures/nixos-26.05/upsc/upsc-replace-battery.txt"),
+                "online",
+            ),
+            (
+                "unknown-only status",
+                "ups.status: WEIRD\n",
+                "indeterminate",
+            ),
+            ("absent status", "battery.charge: 55\n", "status_missing"),
+            (
+                "empty status",
+                "battery.charge: 55\nups.status:\n",
+                "status_missing",
+            ),
+        ] {
+            let parsed = parse_fixture(stdout);
+            let value = serde_json::to_value(JsonReport::success(&parsed)).unwrap();
+            assert_eq!(value["severity"], want, "{label}: got {value}");
+            assert!(value.get("warning").is_none(), "{label}: got {value}");
+        }
     }
 
     // Intent: onbattery fixture renders Status: OB with a partial-charge

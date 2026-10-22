@@ -89,13 +89,16 @@ when output is piped.
 The watts line is labeled `estimated` and omitted entirely if the UPS
 does not report both `ups.load` and `ups.realpower.nominal`.
 
-The `--json` output serializes the full parsed model. Distinct error
-sentinels are emitted for the common non-OK cases:
+The `--json` output serializes the full parsed model plus braid's
+`severity` verdict, from the same classifier the
+[mutation preflight](#mutation-refusal-when-utility-power-is-not-verified)
+uses. Only `"severity": "online"` proves utility power; the
+[`ups status` page](../commands/ups-status.md#json-output) lists every
+value. Distinct error sentinels are emitted for the common non-OK cases:
 
 | Condition | JSON shape | Exit code |
 | --- | --- | --- |
-| UPS reachable with populated `ups.status` | serialized `UpscOutput` | 0 |
-| UPS reachable but `ups.status` empty | serialized `UpscOutput` plus `"warning": "ups_status_empty"` | 0 |
+| UPS reachable | serialized `UpscOutput` plus `severity` | 0 |
 | UPS query failed | `{"error": "query_failed", "detail": "exit <code>: <stderr>"}`. If stderr is blank, `detail` is just `exit <code>`. | 1 |
 | UPS invocation failed (upsc could not run -- missing on PATH, killed by signal, or other runner-level failure) | `{"error": "invocation_failed", "detail": "command failed: upsc ups: <reason>"}` | 1 |
 | UPS not enabled | `{"error": "ups_not_enabled"}` | 0 |

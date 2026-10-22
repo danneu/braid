@@ -29,7 +29,7 @@ use crate::mountpoint_guard::{GuardError, MountpointGuard, RealMountpointGuard};
 use crate::online_state::{BRAID_ONLINE_UNIT, OnlineStateOps, RealOnlineStateOps, UnitActiveState};
 use crate::parse::smartctl::selftest_age_hours;
 use crate::parse::types::{
-    BtrfsBgType, BtrfsDeviceUsageOutput, BtrfsDfOutput, BtrfsProfile, SelftestSummary,
+    BtrfsBgType, BtrfsDeviceUsageOutput, BtrfsDfOutput, BtrfsProfile, SelftestSummary, UpsSeverity,
 };
 use crate::parse::{
     parse_btrfs_device_usage, parse_btrfs_df_json, parse_cryptsetup_luks_uuid,
@@ -1452,14 +1452,22 @@ fn check_ups_daemon_up<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> Chec
                 crate::util::detail_suffix(&stderr)
             ),
         ),
-        Ok(q) if q.parsed.status_flags.is_empty() => CheckResult::warn(
-            name,
-            format!(
-                "upsc {} responded but ups.status is empty -- driver may still be starting",
-                ups_cfg.name
+        Ok(q) => match q.parsed.severity() {
+            UpsSeverity::StatusMissing => CheckResult::warn(
+                name,
+                format!(
+                    "upsc {} responded but ups.status is empty -- driver may still be starting",
+                    ups_cfg.name
+                ),
             ),
-        ),
-        Ok(_) => CheckResult::ok(name, format!("upsc {} reachable", ups_cfg.name)),
+            // Reachability only: the power verdict belongs to preflight.
+            UpsSeverity::Online
+            | UpsSeverity::OnBattery
+            | UpsSeverity::Critical
+            | UpsSeverity::Indeterminate => {
+                CheckResult::ok(name, format!("upsc {} reachable", ups_cfg.name))
+            }
+        },
     }
 }
 

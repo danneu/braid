@@ -593,10 +593,11 @@ fn mapper_capacity_from_dynamic_segment(
 /// proof (`OL`), not merely the absence of a known blocker. Caller
 /// passes `None` when no UPS is configured, which makes this a no-op.
 ///
-/// Severity classification is shared with the TUI and the human UPS status
-/// render via `UpsSeverity`, so every surface uses the same ordering: critical
-/// tokens block first, `OB` blocks next, `OL` passes, and everything else
-/// remains untrusted.
+/// Severity classification, the empty-status case included, is shared with
+/// every other UPS surface via `UpsSeverity`, so every surface uses the same
+/// ordering: critical tokens block first, `OB` blocks next, `OL` passes, and
+/// everything else remains untrusted. This check passes exactly when
+/// `braid ups status --json` reports `"severity": "online"`.
 ///
 /// Wire into `add`, `remove`, `remove-missing`, `replace` before journal
 /// write. See docs/design/decisions/020-ups-integration.md for the safety
@@ -624,9 +625,6 @@ pub fn check_ups_not_on_battery<R: CommandRunner>(
             return refuse(&format!("upsc query failed{}", detail_suffix(&stderr)));
         }
     };
-    if parsed.status_flags.is_empty() {
-        return refuse("ups.status is empty or missing");
-    }
     match parsed.severity() {
         UpsSeverity::Online => Ok(()),
         UpsSeverity::Critical => {
@@ -634,6 +632,7 @@ pub fn check_ups_not_on_battery<R: CommandRunner>(
         }
         UpsSeverity::OnBattery => refuse("UPS reports on-battery"),
         UpsSeverity::Indeterminate => refuse("UPS does not report utility power (OL missing)"),
+        UpsSeverity::StatusMissing => refuse("ups.status is empty or missing"),
     }
 }
 

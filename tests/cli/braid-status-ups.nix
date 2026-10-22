@@ -20,9 +20,9 @@
 # invocation-failed, not-enabled}` matrix and checks each outcome's
 # process contract -- exit codes, `--json` stderr silence,
 # stdout/stderr routing, human-vs-json wording, the empty-status
-# warning, and the not-enabled stdout hint. Without that coverage, a
-# refactor that silently broke `cmd_ups_status` could pass golden tests
-# and only fail at runtime on a real host.
+# `status_missing` verdict, and the not-enabled stdout hint. Without
+# that coverage, a refactor that silently broke `cmd_ups_status` could
+# pass golden tests and only fail at runtime on a real host.
 #
 # Shared end-to-end coverage: resolving `upsc` through the wrapper on an
 # empty PATH is also covered by
@@ -98,7 +98,7 @@
         ups.test.result: Done and passed
       '';
 
-      # Secondary dummy UPS for the empty-status JSON warning path. The
+      # Secondary dummy UPS for the empty-status (`status_missing`) path. The
       # dummy-ups driver initializes a missing ups.status to OL, so this
       # fixture must explicitly set an empty status line.
       power.ups.ups.emptyups = {

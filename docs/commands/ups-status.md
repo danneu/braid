@@ -46,24 +46,35 @@ sudo braid ups status --json | jq .
 
 Emits the serialized `UpscOutput` model. A success body (no top-level
 `error`) means the `upsc` query succeeded. The body is braid's parse of
-that output, plus the `warning` sentinel from the table below when it
-applies. The typed fields are braid's reading of the keys it knows, not
-copies of the raw lines, and `extra` holds the other keys verbatim. So
-the body is **not** a full copy of what `upsc` printed. It is also
-**not** a claim that the UPS is online -- on-battery (`OB`), low-battery
-(`OB LB`), and all-unrecognized status sets are all success bodies with
-no `error` and no `warning`.
+that output plus braid's `severity` verdict. The typed fields are
+braid's reading of the keys it knows, not copies of the raw lines, and
+`extra` holds the other keys verbatim. So the body is **not** a full
+copy of what `upsc` printed.
 
-To judge UPS state, read `status_flags`: utility power is proven only by
-the presence of `OL` with no blocking flag (`OB`, `LB`, `TESTFAIL`,
-`COMMBAD`, `FSD`) -- the same affirmative-`OL` criterion braid's own
-mutation preflight uses (see
+`severity` is braid's judgment of the UPS state, from the same
+classifier braid's own mutation preflight uses (see
 [the UPS guide](../guides/ups.md#mutation-refusal-when-utility-power-is-not-verified)).
+Only `"severity": "online"` proves utility power. Any other value, or a
+missing `severity` key (error bodies), means utility power is not
+proven. Treat a value you do not recognize the same way, so a value
+added later fails closed. The values are:
+
+| `severity` | Meaning |
+| --- | --- |
+| `online` | On utility power with no blocking flag; preflight lets mutations start |
+| `on_battery` | On battery, not yet critical |
+| `critical` | A critical state, such as low battery or lost contact with the UPS |
+| `indeterminate` | `ups.status` has flags, but none proves utility power |
+| `status_missing` | `ups.status` is empty or missing, for example while the driver is still starting |
+
+To learn which flag fired -- an advisory flag such as `RB`, or
+`OL TESTFAIL` versus `OB LB` -- read `status_flags`.
 
 Shape:
 
 ```json
 {
+  "severity": "online",
   "status_flags": ["OL"],
   "battery": {
     "charge_pct": 100,
@@ -93,16 +104,16 @@ Shape:
 ```
 
 In a success body (the shape above -- a reachable UPS, no top-level `error`),
-every typed field is always present: a scalar the driver did not report
+no field is ever omitted, and `severity` is always present and never `null`.
+Every typed field is always present: a scalar the driver did not report
 serializes as `null` rather than being omitted, and the `battery`, `input`, and
 `device` objects are always present even when all of their fields are `null`.
 Test typed fields for a `null` value, not for a missing key -- a `has(...)`
 check on any typed key always returns true. `status_flags` and `extra` are
-always present but never `null` (`[]` and `{}` when empty). The only field
-omitted when absent is the top-level `warning` (see the table below). Error
-bodies are the exception -- they carry `error`/`detail` and none of the typed
-keys, so a script must confirm there is no top-level `error` before relying on
-the rule above.
+always present but never `null` (`[]` and `{}` when empty). Error bodies are
+the exception -- they carry `error`/`detail` and none of the typed keys or
+`severity`, so a script must confirm there is no top-level `error` before
+relying on the rule above.
 
 `status_flags` lists flags in first-seen `ups.status` token order (whitespace normalized, duplicate tokens dropped); braid does not sort them, so the order is deterministic for a given UPS state.
 
@@ -114,29 +125,22 @@ Distinct sentinels cover the common non-OK cases:
 
 | Condition | JSON | Exit code |
 | --- | --- | --- |
-| UPS reachable with populated `ups.status` | serialized `UpscOutput` | 0 |
-| UPS reachable but `ups.status` empty | serialized `UpscOutput` plus `"warning": "ups_status_empty"` | 0 |
+| UPS reachable | serialized `UpscOutput` plus `severity` (see above) | 0 |
 | UPS query failed | `{"error": "query_failed", "detail": "exit <code>: <stderr>"}`. If stderr is blank, `detail` is just `exit <code>`. | 1 |
 | UPS invocation failed (upsc could not run -- missing on PATH, killed by signal, or other runner-level failure) | `{"error": "invocation_failed", "detail": "command failed: upsc ups: <reason>"}` | 1 |
 | UPS not enabled | `{"error": "ups_not_enabled"}` | 0 |
 
-If `error` or `warning` is present, do not treat the typed body as
-healthy UPS state. For these cases, `--json` writes only to stdout --
-stderr stays silent so the JSON sentinel can be piped into a single
-sink (`jq`, `tee`, CI logs) without a redundant human error line.
-Other failure modes, such as malformed config, still print a human
-error to stderr.
-
-The converse does not hold: the absence of `error` and `warning` does
-not by itself mean the UPS is online -- inspect `status_flags` as above.
-`ups_status_empty` fires only when `ups.status` is empty or missing (no
-flags to read), so it is not a general health signal.
+If `error` is present, the body carries no UPS state. For these cases,
+`--json` writes only to stdout -- stderr stays silent so the JSON
+sentinel can be piped into a single sink (`jq`, `tee`, CI logs) without
+a redundant human error line. Other failure modes, such as malformed
+config, still print a human error to stderr.
 
 ## Flags
 
 | Flag | Effect |
 | --- | --- |
-| `--json` | Emit parsed `upsc` model as JSON; stable shape for scripts |
+| `--json` | Emit parsed `upsc` model and braid's `severity` verdict as JSON; stable shape for scripts |
 
 ## Related
 
