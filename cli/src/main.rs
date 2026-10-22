@@ -1179,6 +1179,7 @@ fn main() {
                     &runner,
                     Path::new(&config_path),
                     status_args.json,
+                    &mut std::io::stdout(),
                 ) {
                     Ok(braid_cli::ups::UpsStatusOutcome::Done) => {}
                     Ok(braid_cli::ups::UpsStatusOutcome::JsonErrorReported) => {

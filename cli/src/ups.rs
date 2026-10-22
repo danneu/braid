@@ -135,20 +135,9 @@ enum ErrorReport<'a> {
     InvocationFailed { detail: &'a str },
 }
 
-/// Public entry for `braid ups status`; keeps main.rs's call site simple while
-/// routing through a writer-injected core for fast boundary tests.
+/// Entry for `braid ups status`. It takes the writer so main.rs owns process
+/// stdout and tests capture every byte the command emits in a buffer.
 pub fn cmd_ups_status<R: CommandRunner>(
-    runner: &R,
-    config_path: &Path,
-    json: bool,
-) -> Result<UpsStatusOutcome, UpsError> {
-    let mut out = std::io::stdout();
-    cmd_ups_status_to(runner, config_path, json, &mut out)
-}
-
-/// Writer-injected core so tests can assert the user-facing `--json` dispatch
-/// without capturing process stdout.
-fn cmd_ups_status_to<R: CommandRunner>(
     runner: &R,
     config_path: &Path,
     json: bool,
@@ -912,7 +901,7 @@ mod tests {
         );
     }
 
-    // Intent: cmd_ups_status_to selects the human or JSON success body from
+    // Intent: cmd_ups_status selects the human or JSON success body from
     // the caller's `json` flag and returns Done in both modes.
     // Why it exists: the `--json` contract lives at the command boundary, so
     // helper-only tests would miss a swapped or ignored flag.
@@ -928,7 +917,7 @@ mod tests {
         let mut buf = Vec::new();
         let mut outcome = None;
         let captured = crate::status_tag::testing::capture_with_color(false, || {
-            outcome = Some(cmd_ups_status_to(&runner, &cfg, false, &mut buf));
+            outcome = Some(cmd_ups_status(&runner, &cfg, false, &mut buf));
         });
         assert_eq!(captured, "");
         let outcome = outcome.unwrap().unwrap();
@@ -939,7 +928,7 @@ mod tests {
         );
 
         let mut buf = Vec::new();
-        let outcome = cmd_ups_status_to(&runner, &cfg, true, &mut buf).unwrap();
+        let outcome = cmd_ups_status(&runner, &cfg, true, &mut buf).unwrap();
         assert_eq!(outcome, UpsStatusOutcome::Done);
         assert_eq!(
             String::from_utf8(buf).unwrap(),
@@ -950,7 +939,7 @@ mod tests {
         );
     }
 
-    // Intent: cmd_ups_status_to selects the human or JSON not-enabled body
+    // Intent: cmd_ups_status selects the human or JSON not-enabled body
     // from the caller's `json` flag and returns Done in both modes.
     // Why it exists: hosts without a UPS still have a user-facing status
     // contract, and the fast lane should pin both exact bodies.
@@ -962,12 +951,12 @@ mod tests {
         let cfg = ups_write_config_without_ups(&dir);
 
         let mut buf = Vec::new();
-        let outcome = cmd_ups_status_to(&runner, &cfg, false, &mut buf).unwrap();
+        let outcome = cmd_ups_status(&runner, &cfg, false, &mut buf).unwrap();
         assert_eq!(outcome, UpsStatusOutcome::Done);
         snap!(String::from_utf8(buf).unwrap());
 
         let mut buf = Vec::new();
-        let outcome = cmd_ups_status_to(&runner, &cfg, true, &mut buf).unwrap();
+        let outcome = cmd_ups_status(&runner, &cfg, true, &mut buf).unwrap();
         assert_eq!(outcome, UpsStatusOutcome::Done);
         assert_eq!(
             String::from_utf8(buf).unwrap(),
@@ -978,133 +967,105 @@ mod tests {
         );
     }
 
-    // Intent: cmd_ups_status routes invocation failure to
-    // UpsError::InvocationFailed with a PATH hint.
-    // Why it exists: CLI shell at main.rs prints e.to_string() to stderr for
-    // non-JSON mode; the wording tells operators that upsc could not even run
-    // and points at the wrapper/package invariant.
-    // Scenario: MockRunner with no UpscQuery mock seeded simulates a spawn
-    // failure (CmdError::MissingMock).
+    // Intent: each upsc failure, with and without --json, produces exactly the
+    // output `braid ups status` promises. Under --json the command writes one
+    // `query_failed` or `invocation_failed` document to stdout and returns
+    // JsonErrorReported. In human mode it writes nothing to stdout and returns
+    // the error main.rs prints to stderr.
+    // Why it exists: scripts key on `.error` and read upsc's stderr from
+    // `.detail`, but only the VM lane (tests/cli/braid-status-ups.py) checked
+    // the failure bodies. A wrong sentinel, an empty body, or a detail without
+    // the stderr passed every Rust test. Rows compare text, not variants,
+    // because the text is the contract; the distinct `upsc query failed:` and
+    // `upsc invocation failed:` prefixes still pin which failure each row hit.
+    // Scenario: upsd.service is stopped (connection refused), upsc exits 1
+    // with no stderr, or upsc cannot run at all (no mock seeded), each with
+    // and without --json.
     #[test]
-    fn cmd_ups_status_invocation_failure_surfaces_typed_error() {
-        let runner = MockRunner::default();
-        let dir = tempfile::tempdir().unwrap();
-        let cfg = ups_write_config(&dir, "ups");
-        let err = cmd_ups_status(&runner, &cfg, false).expect_err("query failure expected");
-        match &err {
-            UpsError::InvocationFailed { detail } => {
-                assert_eq!(detail, &CmdError::MissingMock.to_string());
-            }
-            other => panic!("expected InvocationFailed, got {other:?}"),
+    fn cmd_ups_status_failure_output_matrix() {
+        /// What one row expects; the variant also picks the `json` flag.
+        enum Expect {
+            /// `--json`: Ok(JsonErrorReported) and exactly these stdout bytes.
+            Stdout(String),
+            /// Human mode: an error with exactly this Display, empty stdout.
+            Error(String),
         }
-        let display = err.to_string();
-        assert!(
-            display.starts_with("upsc invocation failed: "),
-            "got: {display}"
-        );
-        assert!(
-            display.contains("-- is pkgs.nut on PATH?"),
-            "got: {display}"
-        );
-        assert!(
-            !display.contains("query failed"),
-            "query-failed wording leaked: {display}"
-        );
-    }
 
-    // Intent: cmd_ups_status under --json routes invocation failure
-    // through Ok(UpsStatusOutcome::JsonErrorReported).
-    // Why it exists: pins the contract main.rs depends on -- the
-    // JSON-reported outcome tells the CLI shell to exit 1 without
-    // printing a duplicate human stderr line.
-    // Scenario: MockRunner with no UpscQuery mock seeded simulates a
-    // spawn failure (CmdError::MissingMock) under --json.
-    #[test]
-    fn cmd_ups_status_invocation_failure_json_returns_json_error_reported() {
-        let runner = MockRunner::default();
+        let missing = CmdError::MissingMock.to_string();
+        let rows = [
+            (
+                "connection refused --json",
+                Some(ups_query_connection_refused_no_newline()),
+                Expect::Stdout(
+                    "{\n  \"error\": \"query_failed\",\n  \"detail\": \
+                     \"exit 1: Error: Connection failure: Connection refused\"\n}\n"
+                        .into(),
+                ),
+            ),
+            (
+                "connection refused",
+                Some(ups_query_connection_refused_no_newline()),
+                Expect::Error(
+                    "upsc query failed: exit 1: Error: Connection failure: Connection refused"
+                        .into(),
+                ),
+            ),
+            (
+                "empty stderr --json",
+                Some(ups_query_empty_stderr_exit_1()),
+                Expect::Stdout(
+                    "{\n  \"error\": \"query_failed\",\n  \"detail\": \"exit 1\"\n}\n".into(),
+                ),
+            ),
+            (
+                "empty stderr",
+                Some(ups_query_empty_stderr_exit_1()),
+                Expect::Error("upsc query failed: exit 1".into()),
+            ),
+            (
+                "missing mock --json",
+                None,
+                Expect::Stdout(format!(
+                    "{{\n  \"error\": \"invocation_failed\",\n  \"detail\": \"{missing}\"\n}}\n"
+                )),
+            ),
+            (
+                "missing mock",
+                None,
+                Expect::Error(format!(
+                    "upsc invocation failed: {missing} -- is pkgs.nut on PATH?"
+                )),
+            ),
+        ];
+
         let dir = tempfile::tempdir().unwrap();
         let cfg = ups_write_config(&dir, "ups");
-        let outcome = cmd_ups_status(&runner, &cfg, true).expect("json branch returns Ok");
-        assert_eq!(outcome, UpsStatusOutcome::JsonErrorReported);
-    }
-
-    // Intent: cmd_ups_status returns QueryFailed with detail "exit N: <stderr>"
-    // when upsc exits non-zero.
-    // Why it exists: non-zero upsc exits carry stderr that diagnoses daemon vs
-    // name problems; the rendered detail must surface that stderr verbatim.
-    // Scenario: stubbed upsc returning exit 1 with a connection-refused stderr
-    // (the realistic shape when upsd.service is down).
-    #[test]
-    fn cmd_ups_status_non_zero_exit_is_query_failed() {
-        let (request, output) = ups_query_connection_refused_no_newline();
-        let runner = MockRunner::default().with_output(request, output);
-        let dir = tempfile::tempdir().unwrap();
-        let cfg = ups_write_config(&dir, "ups");
-        let err = cmd_ups_status(&runner, &cfg, false).expect_err("query failure expected");
-        match &err {
-            UpsError::QueryFailed { detail } => {
-                assert!(detail.starts_with("exit 1: "), "got: {detail}");
-                assert!(detail.contains("Connection failure"), "got: {detail}");
+        for (row, seeded, expect) in rows {
+            let runner = match seeded {
+                Some((request, output)) => MockRunner::default().with_output(request, output),
+                None => MockRunner::default(),
+            };
+            let json = matches!(expect, Expect::Stdout(_));
+            let mut buf = Vec::new();
+            let result = cmd_ups_status(&runner, &cfg, json, &mut buf);
+            let stdout = String::from_utf8(buf).unwrap();
+            match expect {
+                Expect::Stdout(want) => {
+                    match result {
+                        Ok(outcome) => {
+                            assert_eq!(outcome, UpsStatusOutcome::JsonErrorReported, "{row}")
+                        }
+                        Err(e) => panic!("{row}: expected Ok(JsonErrorReported), got Err({e})"),
+                    }
+                    assert_eq!(stdout, want, "{row}");
+                }
+                Expect::Error(want) => {
+                    let err = result.expect_err(row);
+                    assert_eq!(err.to_string(), want, "{row}");
+                    assert_eq!(stdout, "", "{row}");
+                }
             }
-            other => panic!("expected QueryFailed, got {other:?}"),
         }
-        assert_eq!(
-            err.to_string(),
-            "upsc query failed: exit 1: Error: Connection failure: Connection refused"
-        );
-    }
-
-    // Intent: cmd_ups_status reports a non-zero upsc exit with empty stderr
-    // without a dangling `: ` detail tail.
-    // Why it exists: the JSON-facing detail and the human UpsError wrapper are
-    // composed separately, so both must preserve the empty-stderr rule.
-    // Scenario: upsc exits 1 but a future NUT path writes no stderr.
-    #[test]
-    fn cmd_ups_status_empty_stderr_query_failed_omits_detail_tail() {
-        let (request, output) = ups_query_empty_stderr_exit_1();
-        let runner = MockRunner::default().with_output(request, output);
-        let dir = tempfile::tempdir().unwrap();
-        let cfg = ups_write_config(&dir, "ups");
-        let err = cmd_ups_status(&runner, &cfg, false).expect_err("query failure expected");
-        match &err {
-            UpsError::QueryFailed { detail } => {
-                assert_eq!(detail, "exit 1");
-            }
-            other => panic!("expected QueryFailed, got {other:?}"),
-        }
-        assert_eq!(err.to_string(), "upsc query failed: exit 1");
-    }
-
-    // Intent: emit_query_failed in --json mode returns
-    // Ok(UpsStatusOutcome::JsonErrorReported) so the CLI shell skips the
-    // human-readable error line on stderr.
-    // Why it exists: stdout-quiet contract -- scripts wrapping --json must see
-    // exactly one document on stdout and nothing on stderr.
-    // Scenario: any query failure under --json; the branch under test is the
-    // outcome variant choice, not detail formatting.
-    #[test]
-    fn emit_query_failed_json_returns_json_error_reported() {
-        let mut out = Vec::new();
-        let outcome = emit_query_failed(true, "exit 1: dummy".into(), &mut out)
-            .expect("json branch returns Ok");
-        assert_eq!(outcome, UpsStatusOutcome::JsonErrorReported);
-    }
-
-    // Intent: emit_invocation_failed in --json mode returns
-    // Ok(UpsStatusOutcome::JsonErrorReported) so the CLI shell skips the
-    // human-readable error line on stderr.
-    // Why it exists: pins the symmetric contract with emit_query_failed --
-    // both JSON-reported emit helpers route through the outcome variant
-    // rather than a typed error sentinel.
-    // Scenario: a spawn-level failure (CmdError) routed through --json;
-    // the branch under test is the outcome variant choice, not detail
-    // formatting.
-    #[test]
-    fn emit_invocation_failed_json_returns_json_error_reported() {
-        let mut out = Vec::new();
-        let outcome = emit_invocation_failed(true, CmdError::MissingMock, &mut out)
-            .expect("json branch returns Ok");
-        assert_eq!(outcome, UpsStatusOutcome::JsonErrorReported);
     }
 
     // --- Fixture-backed render snapshots ---
