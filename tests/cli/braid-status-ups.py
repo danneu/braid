@@ -228,7 +228,8 @@ assert parsed_no_ups.get("error") == "ups_not_enabled", (
 # on stdout (so `braid ups status > log.txt` captures it) with empty
 # stderr and exit 0. Both flag substrings (`braid.enable = true` and
 # `braid.ups.enable = true`) are stable; full wording lives in
-# print_not_enabled and is intentionally not snapshotted here.
+# `cli/src/ups.rs#render_not_enabled` and is intentionally not snapshotted
+# here.
 exit_code = machine.execute(
     "braid --config /tmp/no-ups.json ups status "
     ">/tmp/no_ups_human.out 2>/tmp/no_ups_human.err"

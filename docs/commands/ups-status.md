@@ -136,6 +136,12 @@ sentinel can be piped into a single sink (`jq`, `tee`, CI logs) without
 a redundant human error line. Other failure modes, such as malformed
 config, still print a human error to stderr.
 
+If braid cannot write its output to stdout, for example on a full disk
+under a redirect or after the reader closed the pipe, it prints a human
+error to stderr and exits 1, in both modes and on every row above,
+including the rows that exit 0. The body may be missing or cut short, so
+exit 0 always means stdout got the whole body.
+
 ## Flags
 
 | Flag | Effect |

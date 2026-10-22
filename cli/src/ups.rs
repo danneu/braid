@@ -27,6 +27,10 @@ pub enum UpsError {
     Query(#[from] UpsQueryError),
     #[error("failed to serialize ups status: {0}")]
     Serialize(#[source] serde_json::Error),
+    /// Built with an explicit `map_err`, not `#[from]`, so a `?` on some
+    /// other io::Error cannot be reported as a stdout failure.
+    #[error("failed to write ups status to stdout: {0}")]
+    Write(#[source] std::io::Error),
 }
 
 /// Outcome of `cmd_ups_status` so the JSON-reported case stays an
@@ -146,16 +150,32 @@ enum ErrorReport {
 }
 
 /// Entry for `braid ups status`. It takes the writer so main.rs owns process
-/// stdout and tests capture every byte the command emits in a buffer.
+/// stdout and tests capture every byte the command emits in a buffer. The
+/// body is rendered in full first and written here once, so a failed write
+/// or flush on any branch returns an error instead of a silent exit 0.
 pub fn cmd_ups_status<R: CommandRunner>(
     runner: &R,
     config_path: &Path,
     json: bool,
     out: &mut dyn std::io::Write,
 ) -> Result<UpsStatusOutcome, UpsError> {
+    let (stdout, outcome) = render_ups_status(runner, config_path, json)?;
+    out.write_all(stdout.as_bytes()).map_err(UpsError::Write)?;
+    out.flush().map_err(UpsError::Write)?;
+    Ok(outcome)
+}
+
+/// Every stdout byte `braid ups status` prints, with the outcome that goes
+/// with it. It has no writer, so no branch can drop a write result; the one
+/// write lives in `cmd_ups_status`.
+fn render_ups_status<R: CommandRunner>(
+    runner: &R,
+    config_path: &Path,
+    json: bool,
+) -> Result<(String, UpsStatusOutcome), UpsError> {
     let config = config_read(config_path)?;
     let Some(ups_cfg) = config.ups() else {
-        return print_not_enabled(json, out);
+        return Ok((render_not_enabled(json)?, UpsStatusOutcome::Done));
     };
     let parsed = match query_ups(runner, ups_cfg.name.as_str()) {
         Err(e) if json => {
@@ -164,59 +184,53 @@ pub fn cmd_ups_status<R: CommandRunner>(
                 UpsQueryError::QueryFailed { .. } => ErrorReport::QueryFailed { detail },
                 UpsQueryError::InvocationFailed(_) => ErrorReport::InvocationFailed { detail },
             };
-            emit_json(&JsonReport::Error(report), out)?;
-            return Ok(UpsStatusOutcome::JsonErrorReported);
+            return Ok((
+                render_json(&JsonReport::Error(report))?,
+                UpsStatusOutcome::JsonErrorReported,
+            ));
         }
         queried => queried?.parsed,
     };
-    if json {
-        emit_json(&JsonReport::success(&parsed), out)?;
+    let stdout = if json {
+        render_json(&JsonReport::success(&parsed))?
     } else {
-        write!(
-            out,
-            "{}",
-            format_human(
-                ups_cfg.name.as_str(),
-                &parsed,
-                status_tag::color_enabled_for_stdout()
-            )
+        format_human(
+            ups_cfg.name.as_str(),
+            &parsed,
+            status_tag::color_enabled_for_stdout(),
         )
-        .ok();
-    }
-    Ok(UpsStatusOutcome::Done)
+    };
+    Ok((stdout, UpsStatusOutcome::Done))
 }
 
-fn print_not_enabled(
-    json: bool,
-    out: &mut dyn std::io::Write,
-) -> Result<UpsStatusOutcome, UpsError> {
+/// Body for a config without a `ups` block. A host without a UPS is not an
+/// error, so the caller pairs it with `Done` in both modes.
+fn render_not_enabled(json: bool) -> Result<String, UpsError> {
     if json {
-        let payload = JsonReport::Error(ErrorReport::NotEnabled);
-        emit_json(&payload, out)?;
+        render_json(&JsonReport::Error(ErrorReport::NotEnabled))
     } else {
-        writeln!(
-            out,
+        Ok(
             "UPS support is not enabled. Set `braid.enable = true` and\n\
-             `braid.ups.enable = true` in your NixOS configuration and rebuild\n\
-             to enable preflight safety and low-battery shutdown."
+            `braid.ups.enable = true` in your NixOS configuration and rebuild\n\
+            to enable preflight safety and low-battery shutdown.\n"
+                .to_owned(),
         )
-        .ok();
     }
-    Ok(UpsStatusOutcome::Done)
 }
 
-fn emit_json(payload: &JsonReport<'_>, out: &mut dyn std::io::Write) -> Result<(), UpsError> {
+/// Shared by every `--json` branch so each body is the same pretty JSON
+/// with one trailing newline.
+fn render_json(payload: &JsonReport<'_>) -> Result<String, UpsError> {
     let text = serde_json::to_string_pretty(payload).map_err(UpsError::Serialize)?;
-    writeln!(out, "{text}").ok();
-    Ok(())
+    Ok(format!("{text}\n"))
 }
 
 /// Human render for `braid ups status`. Curated summary only -- raw
 /// extras passthrough lives in `--json`.
 ///
-/// Returns the rendered text with a trailing newline so the caller can
-/// `print!` it without trimming; the string shape is stable so tests
-/// can snapshot it without touching stdout.
+/// Returns the rendered text with a trailing newline, so it is the whole
+/// stdout body as written; the string shape is stable so tests can
+/// snapshot it without touching stdout.
 fn format_human(name: &str, parsed: &UpscOutput, color_enabled: bool) -> String {
     use std::fmt::Write;
     let mut out = String::new();
@@ -1042,6 +1056,94 @@ mod tests {
                     let err = result.expect_err(row);
                     assert_eq!(err.to_string(), want, "{row}");
                     assert_eq!(stdout, "", "{row}");
+                }
+            }
+        }
+    }
+
+    // Intent: when stdout cannot take the output, cmd_ups_status returns the
+    // write error on every branch that writes, in both modes, whether the
+    // write fails or only the final flush does. Each writer fails at one
+    // step only, so each step's error check is pinned on its own.
+    // Why it exists: each branch once dropped its write result with `.ok()`,
+    // so a failed write still returned Ok and `braid ups status` exited 0
+    // with an empty or partial body, though the exit-code table ties exit 0
+    // to an emitted body. On the --json failure branch the exit stayed 1,
+    // but the lost sentinel went unreported.
+    // Scenario: `braid ups status --json > state.json` on a full disk
+    // (ENOSPC), or a pipe whose reader already exited, for a healthy UPS, a
+    // host without a UPS, and a stopped upsd, with and without --json. Real
+    // stdout fails the write and then flushes fine: its line buffer sends
+    // whole lines straight to the fd, so nothing is left for flush to fail
+    // on, and only the write result carries the error. A writer that
+    // buffers instead takes every byte and fails only on flush. Human query
+    // failures write nothing, so they have no row.
+    #[test]
+    fn cmd_ups_status_returns_stdout_write_failure() {
+        #[derive(Clone, Copy, Debug)]
+        enum FailsAt {
+            Write,
+            Flush,
+        }
+        struct FullDisk(FailsAt);
+        impl std::io::Write for FullDisk {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                match self.0 {
+                    FailsAt::Write => Err(std::io::Error::from_raw_os_error(libc::ENOSPC)),
+                    FailsAt::Flush => Ok(buf.len()),
+                }
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                match self.0 {
+                    FailsAt::Write => Ok(()),
+                    FailsAt::Flush => Err(std::io::Error::from_raw_os_error(libc::ENOSPC)),
+                }
+            }
+        }
+
+        let seeded = |(request, output)| MockRunner::default().with_output(request, output);
+        let ups_dir = tempfile::tempdir().unwrap();
+        let ups_cfg = ups_write_config(&ups_dir, "ups");
+        let no_ups_dir = tempfile::tempdir().unwrap();
+        let no_ups_cfg = ups_write_config_without_ups(&no_ups_dir);
+        let rows = [
+            (
+                "healthy --json",
+                seeded(ups_query_healthy_minimal()),
+                &ups_cfg,
+                true,
+            ),
+            (
+                "healthy",
+                seeded(ups_query_healthy_minimal()),
+                &ups_cfg,
+                false,
+            ),
+            (
+                "not enabled --json",
+                MockRunner::default(),
+                &no_ups_cfg,
+                true,
+            ),
+            ("not enabled", MockRunner::default(), &no_ups_cfg, false),
+            (
+                "connection refused --json",
+                seeded(ups_query_connection_refused_no_newline()),
+                &ups_cfg,
+                true,
+            ),
+        ];
+
+        let want = format!(
+            "failed to write ups status to stdout: {}",
+            std::io::Error::from_raw_os_error(libc::ENOSPC)
+        );
+        for (row, runner, cfg, json) in rows {
+            for fails_at in [FailsAt::Write, FailsAt::Flush] {
+                let case = format!("{row}, fails at {fails_at:?}");
+                match cmd_ups_status(&runner, cfg, json, &mut FullDisk(fails_at)) {
+                    Ok(outcome) => panic!("{case}: expected a write error, got Ok({outcome:?})"),
+                    Err(err) => assert_eq!(err.to_string(), want, "{case}"),
                 }
             }
         }
