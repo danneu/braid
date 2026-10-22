@@ -310,8 +310,7 @@ enum RecoverCompletion {
         restore_raid1_after_commit: bool,
     },
     ReplacePoolMutation {
-        old_uuid: LuksUuid,
-        new_uuid: LuksUuid,
+        identity: journal::ReplaceIdentity,
         new_name: DiskName,
         new_target: journal::ReplaceJournalTarget,
         source: journal::ReplaceJournalSource,
@@ -708,8 +707,7 @@ impl RecoverCompletion {
                 },
             ),
             RecoverCompletion::ReplacePoolMutation {
-                old_uuid,
-                new_uuid,
+                identity,
                 new_name,
                 new_target,
                 source,
@@ -723,8 +721,7 @@ impl RecoverCompletion {
                 &plan.journal,
                 &plan.admission_membership,
                 pool,
-                old_uuid,
-                new_uuid,
+                identity,
                 new_name,
                 new_target,
                 source,
@@ -1558,32 +1555,30 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             devid: *devid,
             restore_raid1_after_commit: *restore_raid1_after_commit,
         },
-        journal::OpKind::Replace {
+        journal::OpKind::Replace(journal::ReplaceOp {
             phase: journal::ReplacePhase::PoolMutation,
-            old_uuid,
+            identity,
             new_name,
-            new_uuid,
             new_target,
             source,
             restore_raid1_after_commit,
             ..
-        } => RecoverCompletion::ReplacePoolMutation {
-            old_uuid: old_uuid.clone(),
-            new_uuid: new_uuid.clone(),
+        }) => RecoverCompletion::ReplacePoolMutation {
+            identity: identity.clone(),
             new_name: new_name.clone(),
             new_target: new_target.clone(),
             source: source.clone(),
             restore_raid1_after_commit: *restore_raid1_after_commit,
         },
-        journal::OpKind::Replace {
+        journal::OpKind::Replace(journal::ReplaceOp {
             phase: journal::ReplacePhase::PostReplaceMaintenance,
-            new_uuid,
+            identity,
             new_name,
             source,
             restore_raid1_after_commit,
             ..
-        } => RecoverCompletion::ReplacePostMaintenance {
-            new_uuid: new_uuid.clone(),
+        }) => RecoverCompletion::ReplacePostMaintenance {
+            new_uuid: identity.new_uuid().clone(),
             new_name: new_name.clone(),
             source: source.clone(),
             restore_raid1_after_commit: *restore_raid1_after_commit,
@@ -1689,10 +1684,10 @@ fn recover_mount_error(error: MountError) -> RecoverError {
 fn is_replace_pool_mutation(op: &journal::OpKind) -> bool {
     matches!(
         op,
-        journal::OpKind::Replace {
+        journal::OpKind::Replace(journal::ReplaceOp {
             phase: journal::ReplacePhase::PoolMutation,
             ..
-        }
+        })
     )
 }
 
@@ -1881,17 +1876,7 @@ fn write_replace_phase(
     phase: journal::ReplacePhase,
     target_membership: Option<PoolMembership>,
 ) -> Result<Journal, RecoverError> {
-    let journal::OpKind::Replace {
-        old_uuid,
-        old_name,
-        new_uuid,
-        new_name,
-        new_target,
-        source,
-        restore_raid1_after_commit,
-        ..
-    } = &journal.op
-    else {
+    let journal::OpKind::Replace(op) = &journal.op else {
         return Err(RecoverError::Journal(
             "cannot advance non-replace journal".into(),
         ));
@@ -1899,16 +1884,10 @@ fn write_replace_phase(
     journal::rewrite_journal(
         paths,
         journal,
-        journal::OpKind::Replace {
+        journal::OpKind::Replace(journal::ReplaceOp {
             phase,
-            old_uuid: old_uuid.clone(),
-            old_name: old_name.clone(),
-            new_uuid: new_uuid.clone(),
-            new_name: new_name.clone(),
-            new_target: new_target.clone(),
-            source: source.clone(),
-            restore_raid1_after_commit: *restore_raid1_after_commit,
-        },
+            ..op.clone()
+        }),
         target_membership,
     )
     .map_err(|e| RecoverError::Journal(e.to_string()))
@@ -1980,7 +1959,7 @@ fn journal_op_label(op: &journal::OpKind) -> &'static str {
         journal::OpKind::Add { .. } => "add",
         journal::OpKind::Remove { .. } => "remove",
         journal::OpKind::RemoveMissing { .. } => "remove-missing",
-        journal::OpKind::Replace { .. } => "replace",
+        journal::OpKind::Replace(_) => "replace",
     }
 }
 
@@ -3143,8 +3122,7 @@ fn execute_replace_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem
     journal: &Journal,
     union: &PoolMembership,
     pool: PoolState,
-    old_uuid: &LuksUuid,
-    new_uuid: &LuksUuid,
+    identity: &journal::ReplaceIdentity,
     new_name: &DiskName,
     new_target: &journal::ReplaceJournalTarget,
     source: &journal::ReplaceJournalSource,
@@ -3152,6 +3130,9 @@ fn execute_replace_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem
 ) -> Result<(), RecoverError> {
     validate_live_members_allowed(&pool, union)?;
     let live = live_member_uuids(&pool);
+    // Tells the committed topology from the pre-replace one by which UUID
+    // is live, which works only because `ReplaceIdentity` keeps them apart.
+    let (old_uuid, new_uuid) = (identity.old_uuid(), identity.new_uuid());
     let committed = live.contains(new_uuid) && !live.contains(old_uuid);
     let pre_topology =
         live_pool_matches_membership(&pool, &journal.pre_membership)? && !live.contains(new_uuid);
@@ -3318,13 +3299,20 @@ where
     };
 
     if let journal::ReplaceJournalSource::Live { old_mapper, .. } = source {
-        let journal::OpKind::Replace {
-            old_uuid, old_name, ..
-        } = &journal.op
+        let journal::OpKind::Replace(journal::ReplaceOp {
+            identity, old_name, ..
+        }) = &journal.op
         else {
             unreachable!("post-maintenance recovery runs only for Replace journals");
         };
-        close_old_mapper_best_effort(runner, fs, sleeper, old_mapper, old_name, old_uuid);
+        close_old_mapper_best_effort(
+            runner,
+            fs,
+            sleeper,
+            old_mapper,
+            old_name,
+            identity.old_uuid(),
+        );
     }
 
     let Some(dev) = pool.device_by_uuid(new_uuid) else {
@@ -3680,9 +3668,9 @@ fn recovery_guidance(
             journal::OpKind::RemoveMissing { .. } => {
                 "remove-missing completed -- missing device removed from the pool.".to_owned()
             }
-            journal::OpKind::Replace {
+            journal::OpKind::Replace(journal::ReplaceOp {
                 old_name, new_name, ..
-            } => {
+            }) => {
                 format!("replace completed -- '{old_name}' replaced by '{new_name}'.")
             }
         }
@@ -3708,7 +3696,7 @@ fn recovery_guidance(
                  Re-run braid remove-missing to retry."
                     .to_owned()
             }
-            journal::OpKind::Replace { old_name, .. } => {
+            journal::OpKind::Replace(journal::ReplaceOp { old_name, .. }) => {
                 format!(
                     "replace did not complete -- pool still has '{old_name}'. \
                      Re-run braid replace to retry."
@@ -3734,10 +3722,10 @@ fn recovery_admission_membership(
 ) -> Result<PoolMembership, membership::MembershipError> {
     if matches!(
         &journal.op,
-        journal::OpKind::Replace {
+        journal::OpKind::Replace(journal::ReplaceOp {
             phase: journal::ReplacePhase::PostReplaceMaintenance,
             ..
-        }
+        })
     ) {
         return Ok(journal.target_membership.clone());
     }
@@ -3792,14 +3780,14 @@ fn mount_membership_for_recover<'a>(
             phase: journal::RemoveMissingPhase::PostRemoveMissingMaintenance,
             ..
         } => &journal.target_membership,
-        journal::OpKind::Replace {
+        journal::OpKind::Replace(journal::ReplaceOp {
             phase: journal::ReplacePhase::PoolMutation,
             ..
-        } => admission_membership,
-        journal::OpKind::Replace {
+        }) => admission_membership,
+        journal::OpKind::Replace(journal::ReplaceOp {
             phase: journal::ReplacePhase::PostReplaceMaintenance,
             ..
-        } => &journal.target_membership,
+        }) => &journal.target_membership,
         journal::OpKind::Remove { .. } => admission_membership,
     }
 }
@@ -10486,9 +10474,12 @@ mod tests {
             .passphrase_file(None)
             .sleep_inhibitor(&f.inhibitor)
             .build();
-        let OpKind::Replace {
-            new_target, source, ..
-        } = &journal.op
+        let OpKind::Replace(journal::ReplaceOp {
+            identity,
+            new_target,
+            source,
+            ..
+        }) = &journal.op
         else {
             unreachable!("replace_journal returns Replace");
         };
@@ -10502,8 +10493,7 @@ mod tests {
             &journal,
             &union,
             pool_state_disk1_and_new(),
-            &uuid_for_name("old"),
-            &uuid_for_name("new"),
+            identity,
             &disk_name("new"),
             new_target,
             source,
@@ -10567,9 +10557,12 @@ mod tests {
             .passphrase_file(None)
             .sleep_inhibitor(&f.inhibitor)
             .build();
-        let OpKind::Replace {
-            new_target, source, ..
-        } = &journal.op
+        let OpKind::Replace(journal::ReplaceOp {
+            identity,
+            new_target,
+            source,
+            ..
+        }) = &journal.op
         else {
             unreachable!("replace_journal returns Replace");
         };
@@ -10583,8 +10576,7 @@ mod tests {
             &journal,
             &union,
             pool_state_disk1_and_old(),
-            &uuid_for_name("old"),
-            &uuid_for_name("new"),
+            identity,
             &disk_name("new"),
             new_target,
             source,
@@ -10625,9 +10617,12 @@ mod tests {
         let union = test_recovery_admission_membership(&journal);
         let runner = MockRunner::default();
         let params = f.recover_params().passphrase_file(None).build();
-        let OpKind::Replace {
-            new_target, source, ..
-        } = &journal.op
+        let OpKind::Replace(journal::ReplaceOp {
+            identity,
+            new_target,
+            source,
+            ..
+        }) = &journal.op
         else {
             unreachable!("replace_journal returns Replace");
         };
@@ -10641,8 +10636,7 @@ mod tests {
             &journal,
             &union,
             pool_state_disk1_old_and_new(),
-            &uuid_for_name("old"),
-            &uuid_for_name("new"),
+            identity,
             &disk_name("new"),
             new_target,
             source,
@@ -10742,9 +10736,12 @@ mod tests {
             );
         let inhibitor = RequestCountInhibitor::new(runner.clone());
         let params = f.recover_params().sleep_inhibitor(&inhibitor).build();
-        let OpKind::Replace {
-            new_target, source, ..
-        } = &journal.op
+        let OpKind::Replace(journal::ReplaceOp {
+            identity,
+            new_target,
+            source,
+            ..
+        }) = &journal.op
         else {
             unreachable!("replace_fresh_luks_journal returns Replace");
         };
@@ -10758,8 +10755,7 @@ mod tests {
             &journal,
             &union,
             pool_state_disk1_and_old(),
-            &uuid_for_name("old"),
-            &uuid_for_name("new"),
+            identity,
             &disk_name("new"),
             new_target,
             source,
@@ -10847,9 +10843,12 @@ mod tests {
             .passphrase_file(None)
             .sleep_inhibitor(&f.inhibitor)
             .build();
-        let OpKind::Replace {
-            new_target, source, ..
-        } = &journal.op
+        let OpKind::Replace(journal::ReplaceOp {
+            identity,
+            new_target,
+            source,
+            ..
+        }) = &journal.op
         else {
             unreachable!("replace_fresh_luks_journal returns Replace");
         };
@@ -10863,8 +10862,7 @@ mod tests {
             &journal,
             &union,
             pool_state_disk1_and_old(),
-            &uuid_for_name("old"),
-            &uuid_for_name("new"),
+            identity,
             &disk_name("new"),
             new_target,
             source,
@@ -10909,9 +10907,12 @@ mod tests {
             .passphrase_file(None)
             .sleep_inhibitor(&f.inhibitor)
             .build();
-        let OpKind::Replace {
-            new_target, source, ..
-        } = &journal.op
+        let OpKind::Replace(journal::ReplaceOp {
+            identity,
+            new_target,
+            source,
+            ..
+        }) = &journal.op
         else {
             unreachable!("replace_fresh_luks_journal returns Replace");
         };
@@ -10925,8 +10926,7 @@ mod tests {
             &journal,
             &union,
             pool_state_disk1_and_old(),
-            &uuid_for_name("old"),
-            &uuid_for_name("new"),
+            identity,
             &disk_name("new"),
             new_target,
             source,
@@ -11007,9 +11007,12 @@ mod tests {
             .passphrase_file(Some(passphrase_file.path()))
             .sleep_inhibitor(&inhibitor)
             .build();
-        let OpKind::Replace {
-            new_target, source, ..
-        } = &journal.op
+        let OpKind::Replace(journal::ReplaceOp {
+            identity,
+            new_target,
+            source,
+            ..
+        }) = &journal.op
         else {
             unreachable!("replace_fresh_luks_journal returns Replace");
         };
@@ -11023,8 +11026,7 @@ mod tests {
             &journal,
             &union,
             pool_state_disk1_and_old(),
-            &uuid_for_name("old"),
-            &uuid_for_name("new"),
+            identity,
             &disk_name("new"),
             new_target,
             source,
@@ -11127,9 +11129,12 @@ mod tests {
                 err_raw("cryptsetup luksHeaderBackup", 1, "backup failed"),
             );
         let params = f.recover_params().sleep_inhibitor(&f.inhibitor).build();
-        let OpKind::Replace {
-            new_target, source, ..
-        } = &journal.op
+        let OpKind::Replace(journal::ReplaceOp {
+            identity,
+            new_target,
+            source,
+            ..
+        }) = &journal.op
         else {
             unreachable!("replace_fresh_luks_journal returns Replace");
         };
@@ -11143,8 +11148,7 @@ mod tests {
             &journal,
             &union,
             pool_state_disk1_and_old(),
-            &uuid_for_name("old"),
-            &uuid_for_name("new"),
+            identity,
             &disk_name("new"),
             new_target,
             source,
@@ -11212,9 +11216,12 @@ mod tests {
             .passphrase_file(None)
             .sleep_inhibitor(&f.inhibitor)
             .build();
-        let OpKind::Replace {
-            new_target, source, ..
-        } = &journal.op
+        let OpKind::Replace(journal::ReplaceOp {
+            identity,
+            new_target,
+            source,
+            ..
+        }) = &journal.op
         else {
             unreachable!("returns Replace");
         };
@@ -11228,8 +11235,7 @@ mod tests {
             &journal,
             &union,
             pool_state_disk1_and_old(),
-            &uuid_for_name("old"),
-            &uuid_for_name("new"),
+            identity,
             &disk_name("new"),
             new_target,
             source,
@@ -11332,9 +11338,12 @@ mod tests {
             .passphrase_file(Some(passphrase_file.path()))
             .sleep_inhibitor(&f.inhibitor)
             .build();
-        let OpKind::Replace {
-            new_target, source, ..
-        } = &journal.op
+        let OpKind::Replace(journal::ReplaceOp {
+            identity,
+            new_target,
+            source,
+            ..
+        }) = &journal.op
         else {
             unreachable!("returns Replace");
         };
@@ -11348,8 +11357,7 @@ mod tests {
             &journal,
             &union,
             pool_state_disk1_and_old(),
-            &uuid_for_name("old"),
-            &uuid_for_name("new"),
+            identity,
             &disk_name("new"),
             new_target,
             source,
@@ -11468,9 +11476,12 @@ mod tests {
                 ok_raw_empty("cryptsetup luksHeaderBackup"),
             );
         let params = f.recover_params().sleep_inhibitor(&f.inhibitor).build();
-        let OpKind::Replace {
-            new_target, source, ..
-        } = &journal.op
+        let OpKind::Replace(journal::ReplaceOp {
+            identity,
+            new_target,
+            source,
+            ..
+        }) = &journal.op
         else {
             unreachable!("returns Replace");
         };
@@ -11484,8 +11495,7 @@ mod tests {
             &journal,
             &union,
             pool_state_disk1_and_old(),
-            &uuid_for_name("old"),
-            &uuid_for_name("new"),
+            identity,
             &disk_name("new"),
             new_target,
             source,
@@ -11544,7 +11554,7 @@ mod tests {
             .passphrase_file(None)
             .sleep_inhibitor(&f.inhibitor)
             .build();
-        let OpKind::Replace { source, .. } = &journal.op else {
+        let OpKind::Replace(journal::ReplaceOp { source, .. }) = &journal.op else {
             unreachable!("replace_journal_in_phase returns Replace");
         };
 
@@ -11603,7 +11613,7 @@ mod tests {
             .passphrase_file(None)
             .sleep_inhibitor(&f.inhibitor)
             .build();
-        let OpKind::Replace { source, .. } = &journal.op else {
+        let OpKind::Replace(journal::ReplaceOp { source, .. }) = &journal.op else {
             unreachable!("replace_journal_in_phase returns Replace");
         };
         execute_replace_post_maintenance_recovery(
@@ -11781,7 +11791,7 @@ mod tests {
             .passphrase_file(None)
             .sleep_inhibitor(&f.inhibitor)
             .build();
-        let OpKind::Replace { source, .. } = &journal.op else {
+        let OpKind::Replace(journal::ReplaceOp { source, .. }) = &journal.op else {
             unreachable!("replace_journal_in_phase returns Replace");
         };
 
@@ -11852,7 +11862,7 @@ mod tests {
                 },
             )
             .expect("insert renamed old disk member");
-        let OpKind::Replace { old_name, .. } = &mut journal.op else {
+        let OpKind::Replace(journal::ReplaceOp { old_name, .. }) = &mut journal.op else {
             unreachable!("replace_post_maintenance_journal returns Replace");
         };
         *old_name = disk_name("disk2");
@@ -11892,7 +11902,7 @@ mod tests {
             .passphrase_file(None)
             .sleep_inhibitor(&f.inhibitor)
             .build();
-        let OpKind::Replace { source, .. } = &journal.op else {
+        let OpKind::Replace(journal::ReplaceOp { source, .. }) = &journal.op else {
             unreachable!("replace_post_maintenance_journal returns Replace");
         };
 
@@ -11975,7 +11985,7 @@ mod tests {
             .passphrase_file(None)
             .sleep_inhibitor(&f.inhibitor)
             .build();
-        let OpKind::Replace { source, .. } = &journal.op else {
+        let OpKind::Replace(journal::ReplaceOp { source, .. }) = &journal.op else {
             unreachable!("replace_journal_in_phase returns Replace");
         };
 
@@ -12062,7 +12072,7 @@ mod tests {
             .passphrase_file(None)
             .sleep_inhibitor(&f.inhibitor)
             .build();
-        let OpKind::Replace { source, .. } = &journal.op else {
+        let OpKind::Replace(journal::ReplaceOp { source, .. }) = &journal.op else {
             unreachable!("replace_journal_in_phase returns Replace");
         };
 
@@ -12162,7 +12172,7 @@ mod tests {
             .passphrase_file(None)
             .sleep_inhibitor(&f.inhibitor)
             .build();
-        let OpKind::Replace { source, .. } = &journal.op else {
+        let OpKind::Replace(journal::ReplaceOp { source, .. }) = &journal.op else {
             unreachable!("replace_journal_in_phase returns Replace");
         };
 
@@ -12224,7 +12234,7 @@ mod tests {
             .passphrase_file(None)
             .sleep_inhibitor(&f.inhibitor)
             .build();
-        let OpKind::Replace { source, .. } = &journal.op else {
+        let OpKind::Replace(journal::ReplaceOp { source, .. }) = &journal.op else {
             unreachable!("replace_journal_in_phase returns Replace");
         };
 
@@ -12317,11 +12327,11 @@ mod tests {
         ]);
         let journal = journal::Journal {
             started_at: "2026-01-01T00:00:00Z".into(),
-            op: OpKind::Replace {
+            op: OpKind::Replace(journal::ReplaceOp {
                 phase: journal::ReplacePhase::PostReplaceMaintenance,
-                old_uuid: uuid_for_name("old"),
+                identity: journal::ReplaceIdentity::new(uuid_for_name("old"), new_uuid.clone())
+                    .expect("distinct replace UUIDs"),
                 old_name: disk_name("old"),
-                new_uuid: new_uuid.clone(),
                 new_name: disk_name("disk-new"),
                 new_target: journal::ReplaceJournalTarget {
                     by_id: ByIdPath::parse("/dev/disk/by-id/virtio-disk-new").unwrap(),
@@ -12333,7 +12343,7 @@ mod tests {
                     old_devid: Devid::new(2),
                 },
                 restore_raid1_after_commit: false,
-            },
+            }),
             pre_membership: pre,
             target_membership: target,
         };
@@ -12487,11 +12497,11 @@ mod tests {
         ]);
         let journal = journal::Journal {
             started_at: "2026-01-01T00:00:00Z".into(),
-            op: OpKind::Replace {
+            op: OpKind::Replace(journal::ReplaceOp {
                 phase: journal::ReplacePhase::PostReplaceMaintenance,
-                old_uuid: uuid_for_name("old"),
+                identity: journal::ReplaceIdentity::new(uuid_for_name("old"), new_uuid.clone())
+                    .expect("distinct replace UUIDs"),
                 old_name: disk_name("old"),
-                new_uuid: new_uuid.clone(),
                 new_name: disk_name("disk-new"),
                 new_target: journal::ReplaceJournalTarget {
                     by_id: ByIdPath::parse("/dev/disk/by-id/virtio-disk-new").unwrap(),
@@ -12503,7 +12513,7 @@ mod tests {
                     old_devid: Devid::new(2),
                 },
                 restore_raid1_after_commit: false,
-            },
+            }),
             pre_membership: pre,
             target_membership: target,
         };
@@ -12611,7 +12621,7 @@ mod tests {
             .passphrase_file(None)
             .sleep_inhibitor(&inhibitor)
             .build();
-        let OpKind::Replace { source, .. } = &journal.op else {
+        let OpKind::Replace(journal::ReplaceOp { source, .. }) = &journal.op else {
             unreachable!("replace_journal_in_phase returns Replace");
         };
 
@@ -13079,11 +13089,11 @@ mod tests {
         ]);
         let journal = journal::Journal {
             started_at: "2026-01-01T00:00:00Z".into(),
-            op: OpKind::Replace {
+            op: OpKind::Replace(journal::ReplaceOp {
                 phase: journal::ReplacePhase::PostReplaceMaintenance,
-                old_uuid: uuid_for_name("old"),
+                identity: journal::ReplaceIdentity::new(uuid_for_name("old"), new_uuid.clone())
+                    .expect("distinct replace UUIDs"),
                 old_name: disk_name("old"),
-                new_uuid: new_uuid.clone(),
                 new_name: disk_name("disk-new"),
                 new_target: journal::ReplaceJournalTarget {
                     by_id: ByIdPath::parse("/dev/disk/by-id/virtio-disk-new").unwrap(),
@@ -13095,7 +13105,7 @@ mod tests {
                     old_devid: Devid::new(2),
                 },
                 restore_raid1_after_commit: false,
-            },
+            }),
             pre_membership: pre,
             target_membership: target,
         };
@@ -16643,11 +16653,11 @@ mod tests {
         let pre = set_of(&["disk1", "old"]);
         let target = set_of(&["disk1", "new"]);
         let recovered = set_of(&["disk1", "new"]);
-        let op = OpKind::Replace {
+        let op = OpKind::Replace(journal::ReplaceOp {
             phase: journal::ReplacePhase::PoolMutation,
-            old_uuid: uuid_for_name("old"),
+            identity: journal::ReplaceIdentity::new(uuid_for_name("old"), uuid_for_name("new"))
+                .expect("distinct replace UUIDs"),
             old_name: disk_name("old"),
-            new_uuid: uuid_for_name("new"),
             new_name: disk_name("new"),
             new_target: journal::ReplaceJournalTarget {
                 by_id: ByIdPath::parse("/dev/disk/by-id/x").unwrap(),
@@ -16660,7 +16670,7 @@ mod tests {
                 old_mapper: MapperName::from_basename("braid-old".into()),
             },
             restore_raid1_after_commit: false,
-        };
+        });
 
         assert_eq!(
             recovery_guidance(&op, &pre, &target, &recovered),
@@ -16673,11 +16683,11 @@ mod tests {
         let pre = set_of(&["disk1", "old"]);
         let target = set_of(&["disk1", "new"]);
         let recovered = set_of(&["disk1", "old"]);
-        let op = OpKind::Replace {
+        let op = OpKind::Replace(journal::ReplaceOp {
             phase: journal::ReplacePhase::PoolMutation,
-            old_uuid: uuid_for_name("old"),
+            identity: journal::ReplaceIdentity::new(uuid_for_name("old"), uuid_for_name("new"))
+                .expect("distinct replace UUIDs"),
             old_name: disk_name("old"),
-            new_uuid: uuid_for_name("new"),
             new_name: disk_name("new"),
             new_target: journal::ReplaceJournalTarget {
                 by_id: ByIdPath::parse("/dev/disk/by-id/x").unwrap(),
@@ -16690,7 +16700,7 @@ mod tests {
                 old_mapper: MapperName::from_basename("braid-old".into()),
             },
             restore_raid1_after_commit: false,
-        };
+        });
 
         assert_eq!(
             recovery_guidance(&op, &pre, &target, &recovered),
@@ -16752,11 +16762,11 @@ mod tests {
             restore_raid1_after_commit: true,
         };
 
-        let replace_op = OpKind::Replace {
+        let replace_op = OpKind::Replace(journal::ReplaceOp {
             phase: journal::ReplacePhase::PoolMutation,
-            old_uuid: uuid_for_name("old"),
+            identity: journal::ReplaceIdentity::new(uuid_for_name("old"), uuid_for_name("new"))
+                .expect("distinct replace UUIDs"),
             old_name: disk_name("old"),
-            new_uuid: uuid_for_name("new"),
             new_name: disk_name("new"),
             new_target: journal::ReplaceJournalTarget {
                 by_id: ByIdPath::parse("/dev/disk/by-id/x").unwrap(),
@@ -16769,7 +16779,7 @@ mod tests {
                 old_mapper: MapperName::from_basename("braid-old".into()),
             },
             restore_raid1_after_commit: false,
-        };
+        });
 
         // Literal, not format!(...{:?}...) -- the quotes ARE the contract;
         // re-deriving them with the impl's own expression would let a
@@ -16838,11 +16848,11 @@ mod tests {
 
         journal::Journal {
             started_at: "2026-01-01T00:00:00Z".into(),
-            op: OpKind::Replace {
+            op: OpKind::Replace(journal::ReplaceOp {
                 phase: journal::ReplacePhase::PoolMutation,
-                old_uuid: uuid_for_name("old"),
+                identity: journal::ReplaceIdentity::new(uuid_for_name("old"), uuid_for_name("new"))
+                    .expect("distinct replace UUIDs"),
                 old_name: disk_name("old"),
-                new_uuid: uuid_for_name("new"),
                 new_name: disk_name("new"),
                 new_target: journal::ReplaceJournalTarget {
                     by_id: ByIdPath::parse("/dev/disk/by-id/virtio-new").unwrap(),
@@ -16855,7 +16865,7 @@ mod tests {
                     old_mapper: MapperName::from_basename("braid-old".into()),
                 },
                 restore_raid1_after_commit: false,
-            },
+            }),
             pre_membership: pre,
             target_membership: target,
         }
@@ -16867,12 +16877,12 @@ mod tests {
         source: journal::ReplaceJournalSource,
     ) -> journal::Journal {
         let mut journal = replace_journal();
-        let OpKind::Replace {
+        let OpKind::Replace(journal::ReplaceOp {
             phase: stored_phase,
             source: stored_source,
             restore_raid1_after_commit: stored_restore,
             ..
-        } = &mut journal.op
+        }) = &mut journal.op
         else {
             unreachable!("replace_journal returns Replace");
         };
@@ -16916,11 +16926,11 @@ mod tests {
 
     fn replace_fresh_luks_journal(enroll_key_file: std::path::PathBuf) -> journal::Journal {
         let mut journal = replace_journal();
-        let OpKind::Replace {
+        let OpKind::Replace(journal::ReplaceOp {
             new_target,
             restore_raid1_after_commit,
             ..
-        } = &mut journal.op
+        }) = &mut journal.op
         else {
             unreachable!("replace_journal returns Replace");
         };
@@ -16943,7 +16953,7 @@ mod tests {
         enroll_key_file: std::path::PathBuf,
     ) -> journal::Journal {
         let mut journal = replace_journal();
-        let OpKind::Replace { new_target, .. } = &mut journal.op else {
+        let OpKind::Replace(journal::ReplaceOp { new_target, .. }) = &mut journal.op else {
             unreachable!("replace_journal returns Replace");
         };
         if let journal::ReplaceJournalMode::ExistingLuks {

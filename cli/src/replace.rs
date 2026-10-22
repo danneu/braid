@@ -64,17 +64,30 @@ pub enum ReplaceError {
     },
     /// Pre-journal-write refusal raised when the new target's UUID
     /// (generated for fresh-LUKS or probed for existing-LUKS) collides
-    /// with a UUID already present in membership (excluding `old_uuid`,
-    /// which is being replaced) or with a UUID observed in the live
-    /// `pool.devices` set at planning time. Refused BEFORE any journal
-    /// write and BEFORE any `CryptsetupLuksFormat` so the residual blast
-    /// radius is bounded.
+    /// with a UUID already present in membership or with a UUID observed
+    /// in the live `pool.devices` set at planning time. Refused BEFORE any
+    /// journal write and BEFORE any `CryptsetupLuksFormat` so the residual
+    /// blast radius is bounded. `NewDiskIsOld` refuses `--old`'s own UUID
+    /// first, with advice that fits that case.
     #[error(
         "duplicate LUKS UUID {uuid} for new replace target: already present in {scope} -- detach the conflicting disk before retrying"
     )]
     DuplicateUuid {
         uuid: LuksUuid,
         scope: DuplicateUuidScope,
+    },
+    /// Plan-time refusal of a `--new` disk whose LUKS UUID is `--old`'s,
+    /// from `journal::ReplaceIdentity::new`. Such a disk can only be
+    /// `--old` itself or a clone, so DuplicateUuid's "detach the
+    /// conflicting disk" would point at the disk the operator named.
+    #[error(
+        "--new '{new_name}' ({new_by_id}) has LUKS UUID {uuid}, the same as --old '{old_name}' -- it is --old itself under another by-id path, or a clone of it. Use a different disk, or wipe this one so braid formats it fresh."
+    )]
+    NewDiskIsOld {
+        old_name: DiskName,
+        new_name: DiskName,
+        new_by_id: ByIdPath,
+        uuid: LuksUuid,
     },
     /// Operator passed `--luks-format-arg` containing a braid-managed
     /// cryptsetup option (`--uuid`, `--label`). Surfaced through
@@ -263,9 +276,8 @@ impl ReplaceTargetPrep {
 #[derive(Debug, Clone)]
 struct ReplaceWorkPlan {
     config: Config,
-    old_uuid: LuksUuid,
+    identity: journal::ReplaceIdentity,
     old_name: DiskName,
-    new_uuid: LuksUuid,
     new_name: DiskName,
     new_by_id: ByIdPath,
     pool: PoolState,
@@ -443,9 +455,8 @@ impl ReplacePlan {
         let ReplacePlan { notes, work_plan } = self;
         let ReplaceWorkPlan {
             config,
-            old_uuid,
+            identity,
             old_name,
-            new_uuid,
             new_name,
             new_by_id,
             pool,
@@ -459,6 +470,8 @@ impl ReplacePlan {
             new_mapper_path,
             member_verify_targets,
         } = work_plan;
+        let old_uuid = identity.old_uuid();
+        let new_uuid = identity.new_uuid();
 
         // Render accumulated notes to stderr via the shared helper
         // BEFORE any mutation. Matches the other note-carrying commands so
@@ -469,7 +482,7 @@ impl ReplacePlan {
         // Confirm
         if !params.yes {
             let old_underlying = match &replace_source {
-                ReplaceSource::Live { .. } => pool.underlying_for_uuid(&old_uuid),
+                ReplaceSource::Live { .. } => pool.underlying_for_uuid(old_uuid),
                 ReplaceSource::Missing { .. } => None,
             };
             let old_hw = old_underlying.map(|u| confirm::query_disk_hw_info(runner, u));
@@ -551,7 +564,7 @@ impl ReplacePlan {
             }
         }
 
-        verify_replace_execute_live_pool_uuid(runner, fs, config.mount_point(), &pool, &new_uuid)?;
+        verify_replace_execute_live_pool_uuid(runner, fs, config.mount_point(), &pool, new_uuid)?;
         // Pre-journal new-target identity gate (two-tier defense; see the
         // dispatcher doc). The arm-appropriate ExistingLuks identity check runs
         // here, BEFORE the inhibitor + journal, so a post-confirmation
@@ -565,7 +578,7 @@ impl ReplacePlan {
             &new_name,
             &new_mn,
             &new_by_id,
-            &new_uuid,
+            new_uuid,
             params.backing_path_resolver,
         )?;
 
@@ -602,13 +615,13 @@ impl ReplacePlan {
         let pre_membership = membership::load_membership(params.paths).map_err(|e| {
             ReplaceError::Validation(format!("failed to load pool membership: {e}"))
         })?;
-        if pre_membership.by_uuid(&old_uuid).is_none() {
+        if pre_membership.by_uuid(old_uuid).is_none() {
             return Err(absent_from_membership_error(old_name.as_str()));
         }
         let target_membership = derive_replace_target_membership(
             &pre_membership,
-            &old_uuid,
-            &new_uuid,
+            old_uuid,
+            new_uuid,
             &new_name,
             &new_by_id,
         )?;
@@ -618,16 +631,15 @@ impl ReplacePlan {
         let journal = journal::build_journal(
             pre_membership,
             target_membership.clone(),
-            journal::OpKind::Replace {
+            journal::OpKind::Replace(journal::ReplaceOp {
                 phase: journal::ReplacePhase::PoolMutation,
-                old_uuid: old_uuid.clone(),
+                identity: identity.clone(),
                 old_name: old_name.clone(),
-                new_uuid: new_uuid.clone(),
                 new_name: new_name.clone(),
                 new_target: new_target.clone(),
                 source: journal_source.clone(),
                 restore_raid1_after_commit,
-            },
+            }),
         );
         journal::write_journal_tracked(params.paths, &journal, journal_state)
             .map_err(|e| ReplaceError::Validation(e.to_string()))?;
@@ -653,7 +665,7 @@ impl ReplacePlan {
                     runner,
                     new_by_id.as_str(),
                     &passphrase,
-                    &new_uuid,
+                    new_uuid,
                     &label,
                     extra_opts,
                 )?;
@@ -779,7 +791,7 @@ impl ReplacePlan {
                     // pool data into a foreign LUKS volume. Fresh-LUKS new
                     // targets skip this gate (the `cryptsetup luksFormat`
                     // step writes the journaled UUID directly).
-                    probe_existing_luks_new_target_uuid(runner, &new_by_id, &new_uuid)?;
+                    probe_existing_luks_new_target_uuid(runner, &new_by_id, new_uuid)?;
                     ensure_luks_open(
                         runner,
                         fs,
@@ -809,7 +821,7 @@ impl ReplacePlan {
                         &new_name,
                         &new_mn,
                         &new_by_id,
-                        &new_uuid,
+                        new_uuid,
                         params.backing_path_resolver,
                     )?;
                 }
@@ -873,7 +885,7 @@ impl ReplacePlan {
                 "Warning: failed to probe pool for metadata refresh: {e}\n"
             )),
         }
-        if let Some(new_member) = target_membership.by_uuid_mut(&new_uuid)
+        if let Some(new_member) = target_membership.by_uuid_mut(new_uuid)
             && new_member.added_at.is_none()
         {
             new_member.added_at = Some(crate::util::now_iso());
@@ -884,16 +896,15 @@ impl ReplacePlan {
         let journal = journal::rewrite_journal(
             params.paths,
             &journal,
-            journal::OpKind::Replace {
+            journal::OpKind::Replace(journal::ReplaceOp {
                 phase: journal::ReplacePhase::PostReplaceMaintenance,
-                old_uuid: old_uuid.clone(),
+                identity,
                 old_name: old_name.clone(),
-                new_uuid: new_uuid.clone(),
                 new_name: new_name.clone(),
                 new_target,
                 source: journal_source,
                 restore_raid1_after_commit,
-            },
+            }),
             Some(target_membership.clone()),
         )
         .map_err(|e| ReplaceError::Validation(e.to_string()))?;
@@ -924,15 +935,16 @@ impl ReplacePlan {
         // state, demote the close to a logged-warning skip; inactive is
         // caller-classified below because it is surprising during live
         // execution but normal during recovery replay.
-        if let journal::OpKind::Replace {
+        if let journal::OpKind::Replace(journal::ReplaceOp {
             source:
                 journal::ReplaceJournalSource::Live {
                     old_mapper: mapper, ..
                 },
-            old_uuid: journaled_old_uuid,
+            identity: journaled_identity,
             ..
-        } = &journal.op
+        }) = &journal.op
         {
+            let journaled_old_uuid = journaled_identity.old_uuid();
             match probe_observed_mapper_uuid(fs, mapper, journaled_old_uuid) {
                 MapperOwnership::Owned => {
                     if close_mapper_best_effort(
@@ -1561,11 +1573,30 @@ where
         PresentConfigDiskState::PresentLuks { uuid, .. } => uuid.clone(),
     };
 
+    // Pair the UUIDs the journal will record. An equal pair means --new is
+    // --old itself under another by-id path, or a clone of it; refusing it
+    // here covers the live, null-underlying, and missing sources alike,
+    // in --dry-run and before the confirmation prompt.
+    let identity = match journal::ReplaceIdentity::new(old_uuid, new_uuid) {
+        Ok(identity) => identity,
+        Err(journal::SameReplaceUuid { uuid }) => {
+            return Err(PlanFailure::with_notes(
+                notes,
+                ReplaceError::NewDiskIsOld {
+                    old_name: old_member.name.clone(),
+                    new_name: new_name_parsed,
+                    new_by_id,
+                    uuid,
+                },
+            ));
+        }
+    };
+
     // Pre-journal-write `new_uuid` uniqueness assert. Refused BEFORE
     // any journal write and BEFORE `CryptsetupLuksFormat`. Membership
-    // check excludes `old_uuid` (which is being replaced); live-pool
-    // check inspects the planning-time `pool.devices` UUID set.
-    if let Err(e) = assert_new_uuid_unique(&new_uuid, &old_uuid, &pre_membership, &pool) {
+    // check covers every recorded member; live-pool check inspects the
+    // planning-time `pool.devices` UUID set.
+    if let Err(e) = assert_new_uuid_unique(identity.new_uuid(), &pre_membership, &pool) {
         return Err(PlanFailure::with_notes(notes, e));
     }
 
@@ -1576,8 +1607,8 @@ where
     // fresh pool.json read, so the plan stores no membership snapshot.
     if let Err(e) = derive_replace_target_membership(
         &pre_membership,
-        &old_uuid,
-        &new_uuid,
+        identity.old_uuid(),
+        identity.new_uuid(),
         &new_name_parsed,
         &new_by_id,
     ) {
@@ -1589,13 +1620,12 @@ where
     // already-loaded membership (no extra pool.json read) and only the
     // resolved strings -- not a membership snapshot -- ride on the plan.
     let member_verify_targets =
-        build_member_verify_targets(&pre_membership, &pool, &replace_source, &old_uuid);
+        build_member_verify_targets(&pre_membership, &pool, &replace_source, identity.old_uuid());
 
     let work_plan = build_replace_work_plan(ReplaceWorkPlanInput {
         config: config.clone(),
-        old_uuid,
+        identity,
         old_name: old_member.name.clone(),
-        new_uuid,
         new_name: new_name_parsed,
         new_by_id,
         new_probed,
@@ -1610,28 +1640,25 @@ where
     Ok(ReplacePlan { notes, work_plan })
 }
 
-/// Pre-journal-write refusal for a colliding `new_uuid`. Inspects
-/// membership keys (excluding `old_uuid`) and the live `pool.devices`
-/// UUID set; the first collision returns the structured
-/// `ReplaceError::DuplicateUuid`. Membership scope wins ordering ties
-/// because the membership-side collision is the more common operator
-/// failure mode (a foreign disk attached and discovered between
-/// command invocations). The mirror with `add` is intentionally
-/// asymmetric: `add` splits the identity- and live-pool concerns across
-/// `assert_target_uuid_unique` and per-caller live-pool guards (its
-/// live-pool check is caller-dependent -- backing-aware classify for a
-/// returned PresentLuks disk vs. a plain scan for a freshly-minted
-/// FreshLuks UUID). `replace` keeps one uniform scan here because its new
-/// disk is always distinct hardware -- there is no same-backing returned-disk
-/// no-op to disambiguate -- so bundling both axes in one function is
-/// right-sized for replace's semantics.
+/// Pre-journal-write refusal for a colliding `new_uuid`. Inspects every
+/// membership key and the live `pool.devices` UUID set; the first
+/// collision returns the structured `ReplaceError::DuplicateUuid`.
+/// Membership scope wins ordering ties because the membership-side
+/// collision is the more common operator failure mode (a foreign disk
+/// attached and discovered between command invocations). The mirror with
+/// `add` is intentionally asymmetric: `add` splits the identity- and
+/// live-pool concerns across `assert_target_uuid_unique` and per-caller
+/// live-pool guards (its live-pool check is caller-dependent --
+/// backing-aware classify for a returned PresentLuks disk vs. a plain scan
+/// for a freshly-minted FreshLuks UUID). `replace` has no returned-disk
+/// case to disambiguate: a `--new` disk that carries any member's UUID,
+/// `--old`'s included, is refused, so one uniform scan is right-sized.
 fn assert_new_uuid_unique(
     new_uuid: &LuksUuid,
-    old_uuid: &LuksUuid,
     membership: &PoolMembership,
     pool: &PoolState,
 ) -> Result<(), ReplaceError> {
-    if new_uuid != old_uuid && membership.by_uuid(new_uuid).is_some() {
+    if membership.by_uuid(new_uuid).is_some() {
         return Err(ReplaceError::DuplicateUuid {
             uuid: new_uuid.clone(),
             scope: DuplicateUuidScope::Membership,
@@ -1724,9 +1751,8 @@ pub enum ReplaceSource {
 
 struct ReplaceWorkPlanInput<'a> {
     config: Config,
-    old_uuid: LuksUuid,
+    identity: journal::ReplaceIdentity,
     old_name: DiskName,
-    new_uuid: LuksUuid,
     new_name: DiskName,
     new_by_id: ByIdPath,
     new_probed: PresentConfigDisk,
@@ -1814,9 +1840,8 @@ fn build_replace_work_plan(input: ReplaceWorkPlanInput<'_>) -> ReplaceWorkPlan {
 
     ReplaceWorkPlan {
         config: input.config,
-        old_uuid: input.old_uuid,
+        identity: input.identity,
         old_name: input.old_name,
-        new_uuid: input.new_uuid,
         new_name: input.new_name,
         new_by_id: input.new_by_id,
         pool: input.pool,
@@ -2075,9 +2100,9 @@ fn replace_work_plan_for_test(input: &ReplaceWorkPlanTestInput<'_>) -> ReplaceWo
     );
     build_replace_work_plan(ReplaceWorkPlanInput {
         config,
-        old_uuid,
+        identity: journal::ReplaceIdentity::new(old_uuid, new_uuid)
+            .expect("distinct replace UUIDs"),
         old_name,
-        new_uuid,
         new_name,
         new_by_id: (*input.new_by_id).clone(),
         new_probed: input.new_probed.clone(),
@@ -3767,9 +3792,9 @@ mod tests {
             notes: vec![],
             work_plan: build_replace_work_plan(ReplaceWorkPlanInput {
                 config: f.config.clone(),
-                old_uuid,
+                identity: journal::ReplaceIdentity::new(old_uuid, new_uuid)
+                    .expect("distinct replace UUIDs"),
                 old_name: disk_name("disk2"),
-                new_uuid,
                 new_name: new_name.clone(),
                 new_by_id: new_by_id.clone(),
                 new_probed: PresentConfigDisk {
@@ -4284,6 +4309,88 @@ mod tests {
     }
 
     #[test]
+    // Intent: a missing-path replace whose --new disk carries --old's own
+    //   LUKS UUID is refused at plan time, before any pending-op.json write,
+    //   sleep inhibitor, LUKS open, or btrfs replace start.
+    //
+    // Why it exists: the name-level --old == --new guard and the live-pool
+    //   UUID scan both miss this case, and the membership scan used to skip
+    //   --old's UUID. The replace then journaled a pair that recover cannot
+    //   classify (it needs old != new to tell the pre-replace topology from
+    //   the committed one), so every mutating command stayed blocked until
+    //   pending-op.json was deleted by hand. btrfs refuses the target anyway,
+    //   because it carries the mounted pool's superblock.
+    //
+    // Scenario: disk2 dropped out of the pool (devid 2 missing). The operator
+    //   re-seats it, it comes back under a new by-id path, and they run
+    //   `braid replace --old disk2 --missing-id 2 --new disk3=<that by-id>`.
+    //   disk3's `cryptsetup luksUUID` reports disk2's UUID.
+    fn cmd_replace_refuses_new_disk_with_old_luks_uuid_on_missing_path() {
+        let f = PoolFixture::one_live_one_missing();
+        let old_uuid = canonical_luks_uuid(2);
+        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()])
+            .with_dm(canonical_dm_table());
+        let replace_done = Arc::new(AtomicBool::new(false));
+        let runner = ReplacementPool::one_live_one_missing()
+            .with_mapper_closed("braid-disk3")
+            .install(MockRunner::default(), replace_done)
+            .with_handler({
+                let old_uuid = old_uuid.clone();
+                move |req| match req {
+                    CmdRequest::CryptsetupLuksUuid { device }
+                        if device == "/dev/disk/by-id/virtio-disk3" =>
+                    {
+                        Some(Ok(mock_ok(
+                            &format!("cryptsetup luksUUID {device}"),
+                            &format!("{old_uuid}\n"),
+                        )))
+                    }
+                    _ => None,
+                }
+            });
+
+        let result = cmd_replace(
+            &runner,
+            &fs,
+            &f.replace_params()
+                .old("disk2")
+                .new_disk("disk3=/dev/disk/by-id/virtio-disk3")
+                .missing_id(Some(Devid::new(2)))
+                .build(),
+        );
+
+        assert!(
+            journal::load_journal(&f.paths).unwrap().is_none(),
+            "pending-op.json must not be written for a --new disk that carries --old's UUID"
+        );
+        let requests = runner.requests();
+        assert!(
+            !requests
+                .iter()
+                .any(|r| matches!(r, CmdRequest::CryptsetupLuksOpen { .. })),
+            "no CryptsetupLuksOpen may issue: {requests:?}"
+        );
+        assert!(
+            !requests
+                .iter()
+                .any(|r| matches!(r, CmdRequest::BtrfsReplaceStart { .. })),
+            "no BtrfsReplaceStart may issue: {requests:?}"
+        );
+        assert_eq!(
+            f.inhibitor.acquire_count(),
+            0,
+            "the refusal must come before the sleep inhibitor"
+        );
+        let msg = result
+            .expect_err("replace must refuse a --new disk with --old's LUKS UUID")
+            .to_string();
+        assert!(
+            msg.contains(old_uuid.as_str()) && msg.contains("the same as --old 'disk2'"),
+            "refusal must name the shared UUID and --old, got: {msg}"
+        );
+    }
+
+    #[test]
     // Intent: --dry-run must not acquire the sleep inhibitor.
     //
     // Why it exists: dry-run takes no irreversible action and never reaches
@@ -4411,10 +4518,10 @@ mod tests {
         assert!(
             matches!(
                 journal.op,
-                journal::OpKind::Replace {
+                journal::OpKind::Replace(journal::ReplaceOp {
                     phase: journal::ReplacePhase::PostReplaceMaintenance,
                     ..
-                }
+                })
             ),
             "journal should advance after btrfs replace commits: {:?}",
             journal.op
@@ -5073,9 +5180,9 @@ mod tests {
         let new_uuid_for_test = luks_uuid.clone();
         let work_plan = build_replace_work_plan(ReplaceWorkPlanInput {
             config: Config::new(MountPoint::new("/mnt/storage".into())).unwrap(),
-            old_uuid: old_uuid.clone(),
+            identity: journal::ReplaceIdentity::new(old_uuid.clone(), new_uuid_for_test)
+                .expect("distinct replace UUIDs"),
             old_name: DiskName::parse("disk2").unwrap(),
-            new_uuid: new_uuid_for_test,
             new_name: DiskName::parse("disk3").unwrap(),
             new_by_id: ByIdPath::parse("/dev/disk/by-id/virtio-disk3").unwrap(),
             new_probed,
@@ -5312,9 +5419,9 @@ mod tests {
         let new_by_id = ByIdPath::parse("/dev/disk/by-id/virtio-disk3").unwrap();
         let work_plan = build_replace_work_plan(ReplaceWorkPlanInput {
             config: f.config.clone(),
-            old_uuid,
+            identity: journal::ReplaceIdentity::new(old_uuid, LuksUuid::new_v4())
+                .expect("distinct replace UUIDs"),
             old_name: disk_name("disk2"),
-            new_uuid: LuksUuid::new_v4(),
             new_name: new_name.clone(),
             new_by_id: new_by_id.clone(),
             new_probed: PresentConfigDisk {
@@ -6269,10 +6376,10 @@ mod tests {
         assert!(
             matches!(
                 journal.op,
-                journal::OpKind::Replace {
+                journal::OpKind::Replace(journal::ReplaceOp {
                     phase: journal::ReplacePhase::PostReplaceMaintenance,
                     ..
-                }
+                })
             ),
             "the drop must run after the post-replace journal rewrite: {:?}",
             journal.op
@@ -6451,12 +6558,12 @@ mod tests {
             .unwrap()
             .expect("journal should remain after post-replace resize failure");
         match journal.op {
-            journal::OpKind::Replace {
+            journal::OpKind::Replace(journal::ReplaceOp {
                 phase,
                 source,
                 restore_raid1_after_commit,
                 ..
-            } => {
+            }) => {
                 assert_eq!(
                     phase,
                     journal::ReplacePhase::PostReplaceMaintenance,
@@ -6782,10 +6889,10 @@ mod tests {
         assert!(
             matches!(
                 journal.op,
-                journal::OpKind::Replace {
+                journal::OpKind::Replace(journal::ReplaceOp {
                     phase: journal::ReplacePhase::PostReplaceMaintenance,
                     ..
-                }
+                })
             ),
             "journal should advance after btrfs replace commits: {:?}",
             journal.op
@@ -8933,7 +9040,7 @@ mod tests {
             fsid: None,
             null_underlying: vec![],
         };
-        let err = assert_new_uuid_unique(&colliding, &old_uuid, &pre, &pool).unwrap_err();
+        let err = assert_new_uuid_unique(&colliding, &pre, &pool).unwrap_err();
         match err {
             ReplaceError::DuplicateUuid { uuid, scope } => {
                 assert_eq!(uuid, colliding);
@@ -8984,7 +9091,7 @@ mod tests {
             fsid: None,
             null_underlying: vec![],
         };
-        let err = assert_new_uuid_unique(&colliding, &old_uuid, &pre, &pool).unwrap_err();
+        let err = assert_new_uuid_unique(&colliding, &pre, &pool).unwrap_err();
         match err {
             ReplaceError::DuplicateUuid { uuid, scope } => {
                 assert_eq!(uuid, colliding);
@@ -8995,19 +9102,18 @@ mod tests {
         }
     }
 
-    /// Seed 642: Old-UUID exclusion. The membership scope check
-    /// EXCLUDES `old_uuid` (which is being replaced), so a fresh
-    /// `new_uuid == old_uuid` (degenerate but defendable case) does
-    /// not trip the Membership-scope refusal. Sanity check on the
-    /// gate ordering.
+    /// Seed 642: no old-UUID exclusion. The membership scope check
+    /// refuses every recorded UUID, `old_uuid` included.
     //
-    // Intent: assert_new_uuid_unique tolerates `new_uuid == old_uuid`
-    //   for the Membership-scope check (excluding the row being
-    //   replaced).
-    // Why: a regression that removed the `new_uuid != old_uuid` guard
-    //   would deadlock the gate.
+    // Intent: assert_new_uuid_unique refuses `new_uuid == old_uuid`
+    //   with DuplicateUuid { scope: Membership }.
+    // Why it exists: the check used to skip `old_uuid`, which let a
+    //   missing-path replace journal an equal pair that recover cannot
+    //   classify (cmd_replace_refuses_new_disk_with_old_luks_uuid_on_missing_path).
+    // Scenario: the --new disk is --old itself under another by-id path,
+    //   so its probed UUID is --old's membership key.
     #[test]
-    fn replace_pre_write_uniqueness_excludes_old_uuid() {
+    fn replace_pre_write_uniqueness_refuses_old_uuid() {
         let old_uuid = LuksUuid::parse("99999999-9999-9999-9999-999999990642").unwrap();
         let pre = membership_from(vec![(
             old_uuid.clone(),
@@ -9027,8 +9133,14 @@ mod tests {
             fsid: None,
             null_underlying: vec![],
         };
-        assert_new_uuid_unique(&old_uuid, &old_uuid, &pre, &pool)
-            .expect("old_uuid exclusion must let new_uuid == old_uuid pass the membership scope");
+        let err = assert_new_uuid_unique(&old_uuid, &pre, &pool).unwrap_err();
+        match err {
+            ReplaceError::DuplicateUuid { uuid, scope } => {
+                assert_eq!(uuid, old_uuid);
+                assert_eq!(scope, DuplicateUuidScope::Membership);
+            }
+            other => panic!("expected DuplicateUuid {{ Membership }}, got: {other:?}"),
+        }
     }
 
     /// Seed 650: `--luks-format-arg` rejection covers `replace` for the

@@ -110,7 +110,7 @@ If a btrfs exclusive operation (a running balance, device add/remove/replace, re
 ## Safety checks / refusal cases
 
 - Refuses if the pool is not mounted
-- Refuses if `--old` and `--new` are the same disk
+- Refuses if `--old` and `--new` are the same disk: the same name, or a `--new` disk whose LUKS UUID is `--old`'s. Such a disk is `--old` itself under another by-id path (a re-seated cable, a USB dock) or a clone of it, and recover could not tell a finished replace from an unfinished one. Use a different disk, or wipe that one so braid formats it fresh.
 - Refuses if the new disk's LUKS UUID is already in use by the pool (registered membership or live btrfs devices) -- detach the conflicting disk before retrying
 - Refuses if the new disk is absent (not plugged in)
 - Refuses if the new disk's mapper capacity is smaller than the source disk's btrfs `total_bytes` (read via `BTRFS_IOC_DEV_INFO`, the same value `btrfs replace start` compares against). For existing LUKS targets, mapper capacity is derived from the LUKS2 segment `offset` and `size` (`dynamic` means `raw - offset`, fixed means the segment size). For fresh-LUKS targets, braid uses cryptsetup's default 16 MiB offset; offset-affecting `--luks-format-arg` flags (`--offset`/`-o`, `--align-payload`, `--luks2-metadata-size`, `--luks2-keyslots-size`, `--sector-size`) are rejected for this reason.

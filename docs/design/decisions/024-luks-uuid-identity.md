@@ -203,6 +203,14 @@ one.
     from the planned pool, or any live pool device has the replacement target's
     LUKS UUID, replace fails closed with the canonical pre-journal validation
     or `DuplicateUuid { scope: LivePool }` refusal.
+11. A replace's old and new LUKS UUIDs differ. An equal pair means the new
+    disk is the old disk itself under another by-id path, or a clone of it.
+    Recover tells a committed replace from an uncommitted one by which of
+    the two UUIDs is live, so an equal pair would strand `pending-op.json`.
+    `cli/src/journal.rs#ReplaceIdentity` is the only way to pair them:
+    `plan_replace` refuses an equal pair before `--dry-run` output or the
+    confirmation prompt, and `load_journal` rejects a Replace journal that
+    records one.
 
 ## Offline Disk State
 
@@ -395,6 +403,11 @@ warns rather than claiming every declared member is assembled.
 - `cli/src/replace.rs` unit tests verify `ReplacePlan::execute` re-probes the
   live pool before journal write, rejects unmounted/FSID-drifted/colliding
   live-pool state, and still proceeds when the fresh probe is clean.
+- `cli/src/replace.rs#tests::cmd_replace_refuses_new_disk_with_old_luks_uuid_on_missing_path`
+  pins that a `--new` disk carrying the missing `--old`'s LUKS UUID is refused
+  before any journal write, sleep inhibitor, LUKS open, or `btrfs replace
+  start`. `cli/src/journal.rs#tests::replace_equal_old_and_new_uuid_fails`
+  pins that `load_journal` rejects a Replace journal with an equal pair.
 - `cli/src/recover.rs` unit tests verify post-maintenance replace recovery
   re-probes the old mapper UUID before close, skips foreign mappers, and still
   closes owned active dm mappings without relying on `/dev/mapper` path nodes.

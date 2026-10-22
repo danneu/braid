@@ -203,7 +203,7 @@ pub enum ReplaceJournalSource {
 }
 
 /// New-target descriptor for `OpKind::Replace`. The mapper is derived
-/// from `OpKind::Replace.new_name` at the format/open call site, not
+/// from `ReplaceOp::new_name` at the format/open call site, not
 /// stored here; this struct never carries `mapper_name`, value-side
 /// UUID, label, or `extra_opts`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -214,7 +214,7 @@ pub struct ReplaceJournalTarget {
 }
 
 /// Mode-specific data for the new disk in `OpKind::Replace`. Identity
-/// lives at the op level as `new_uuid`; this enum carries only the
+/// lives in `ReplaceOp::identity`; this enum carries only the
 /// per-mode argv extras or adoption metadata.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -226,8 +226,8 @@ pub enum ReplaceJournalMode {
         extra_opts: LuksFormatExtraOpts,
         enroll_key_file: Option<KeyFilePath>,
     },
-    /// Adoption of an already-LUKS new disk. Identity is `new_uuid` at
-    /// the op level; only the enroll keyfile (if any) lives here.
+    /// Adoption of an already-LUKS new disk. Identity is the new UUID in
+    /// `ReplaceOp::identity`; only the enroll keyfile (if any) lives here.
     ExistingLuks {
         /// Keyfile to enroll into LUKS slot 1 if `replace --enroll DIR`
         /// was passed against an already-formatted new disk and slot 1
@@ -239,11 +239,120 @@ pub enum ReplaceJournalMode {
     },
 }
 
-/// Discriminated union of every mutating operation braid journals. The
-/// container-level `#[serde(deny_unknown_fields)]` catches unknown
-/// top-level keys alongside the `op` discriminator for every variant,
-/// pinning the contract that hand-edits cannot resurrect dropped fields
-/// such as `mapper_name`, `luks_label`, or value-side `luks_uuid`.
+/// The old and new LUKS UUIDs of one replace, which are never equal.
+/// Recover's replace classifier tells the pre-replace topology from the
+/// committed one by which of the two UUIDs is live, so an equal pair has
+/// no exit through recover. Private fields make `new` the only way to
+/// build one, for `plan_replace` and for journal parsing alike.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplaceIdentity {
+    old_uuid: LuksUuid,
+    new_uuid: LuksUuid,
+}
+
+/// `ReplaceIdentity::new` refusal. Journal parsing renders it as the
+/// `JournalError::Parse` detail; `plan_replace` maps it to an operator
+/// refusal that names the disks.
+#[derive(Debug, Error, PartialEq, Eq)]
+#[error(
+    "replace records LUKS UUID {uuid} as both old_uuid and new_uuid: the new disk is the old disk itself or a clone of it"
+)]
+pub struct SameReplaceUuid {
+    pub uuid: LuksUuid,
+}
+
+impl ReplaceIdentity {
+    /// Sole constructor. Refuses an equal pair, which is the old disk
+    /// itself under another by-id path or a clone of it.
+    pub fn new(old_uuid: LuksUuid, new_uuid: LuksUuid) -> Result<Self, SameReplaceUuid> {
+        if old_uuid == new_uuid {
+            return Err(SameReplaceUuid { uuid: new_uuid });
+        }
+        Ok(Self { old_uuid, new_uuid })
+    }
+
+    /// Membership key of the member being replaced; never equals `new_uuid`.
+    pub fn old_uuid(&self) -> &LuksUuid {
+        &self.old_uuid
+    }
+
+    /// Membership key the new disk takes; never equals `old_uuid`.
+    pub fn new_uuid(&self) -> &LuksUuid {
+        &self.new_uuid
+    }
+}
+
+/// Body of `OpKind::Replace`. `identity` holds the authoritative UUIDs
+/// consulted by every planning, recovery, and close-time check; the
+/// `*_name` fields exist for log and recovery-diagnostic rendering only.
+/// Serde goes through `ReplaceOpWire`, so parsing builds `identity` with
+/// `ReplaceIdentity::new` and the JSON keeps flat `old_uuid`/`new_uuid`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(try_from = "ReplaceOpWire", into = "ReplaceOpWire")]
+pub struct ReplaceOp {
+    pub phase: ReplacePhase,
+    pub identity: ReplaceIdentity,
+    pub old_name: DiskName,
+    pub new_name: DiskName,
+    pub new_target: ReplaceJournalTarget,
+    pub source: ReplaceJournalSource,
+    pub restore_raid1_after_commit: bool,
+}
+
+/// On-disk shape of `ReplaceOp`, the `OpKind::Replace` keys after serde
+/// strips the `op` tag. It carries its own `deny_unknown_fields` because
+/// `OpKind`'s container attribute does not reach a newtype variant.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReplaceOpWire {
+    phase: ReplacePhase,
+    old_uuid: LuksUuid,
+    old_name: DiskName,
+    new_uuid: LuksUuid,
+    new_name: DiskName,
+    new_target: ReplaceJournalTarget,
+    source: ReplaceJournalSource,
+    restore_raid1_after_commit: bool,
+}
+
+impl TryFrom<ReplaceOpWire> for ReplaceOp {
+    type Error = SameReplaceUuid;
+
+    fn try_from(wire: ReplaceOpWire) -> Result<Self, Self::Error> {
+        Ok(Self {
+            phase: wire.phase,
+            identity: ReplaceIdentity::new(wire.old_uuid, wire.new_uuid)?,
+            old_name: wire.old_name,
+            new_name: wire.new_name,
+            new_target: wire.new_target,
+            source: wire.source,
+            restore_raid1_after_commit: wire.restore_raid1_after_commit,
+        })
+    }
+}
+
+impl From<ReplaceOp> for ReplaceOpWire {
+    fn from(op: ReplaceOp) -> Self {
+        let ReplaceIdentity { old_uuid, new_uuid } = op.identity;
+        Self {
+            phase: op.phase,
+            old_uuid,
+            old_name: op.old_name,
+            new_uuid,
+            new_name: op.new_name,
+            new_target: op.new_target,
+            source: op.source,
+            restore_raid1_after_commit: op.restore_raid1_after_commit,
+        }
+    }
+}
+
+/// Discriminated union of every mutating operation braid journals.
+/// Unknown keys beside the `op` discriminator fail to parse, so hand-edits
+/// cannot resurrect dropped fields such as `mapper_name`, `luks_label`, or
+/// value-side `luks_uuid`. The container-level `deny_unknown_fields`
+/// enforces that for the struct variants; `ReplaceOpWire` enforces it for
+/// `Replace`.
 // One in-flight OpKind per CLI invocation; boxing the ~200-byte ReplaceJournalTarget variant would litter every match arm and serde derive without measurable benefit.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -263,20 +372,8 @@ pub enum OpKind {
         devid: Devid,
         restore_raid1_after_commit: bool,
     },
-    /// Replace one member with another. `old_uuid` and `new_uuid` are the
-    /// authoritative identities consulted by every planning, recovery,
-    /// and close-time check; the `*_name` fields exist for log and
-    /// recovery-diagnostic rendering only.
-    Replace {
-        phase: ReplacePhase,
-        old_uuid: LuksUuid,
-        old_name: DiskName,
-        new_uuid: LuksUuid,
-        new_name: DiskName,
-        new_target: ReplaceJournalTarget,
-        source: ReplaceJournalSource,
-        restore_raid1_after_commit: bool,
-    },
+    /// Replace one member with another.
+    Replace(ReplaceOp),
 }
 
 /// Pinned error inventory for `pending-op.json` I/O. The plan locks the
@@ -321,8 +418,9 @@ pub fn write_journal(paths: &StatePaths, journal: &Journal) -> Result<(), Journa
 
 /// Load the pending-operation journal if present. Returns `None` when the
 /// file does not exist; `Io` for any other read failure; `Parse` for any
-/// serde failure (including LuksUuidMap canonicalization rejections and
-/// `deny_unknown_fields` rejections of hand-edited extras).
+/// serde failure (including LuksUuidMap canonicalization rejections,
+/// `deny_unknown_fields` rejections of hand-edited extras, and a Replace
+/// journal whose old and new UUIDs are equal).
 pub fn load_journal(paths: &StatePaths) -> Result<Option<Journal>, JournalError> {
     let path = paths.pending_op_json();
     let contents = match std::fs::read_to_string(&path) {
@@ -690,11 +788,11 @@ mod tests {
         let journal = build_journal(
             sample_membership(),
             sample_membership(),
-            OpKind::Replace {
+            OpKind::Replace(ReplaceOp {
                 phase: ReplacePhase::PoolMutation,
-                old_uuid: u_old.clone(),
+                identity: ReplaceIdentity::new(u_old.clone(), u_new.clone())
+                    .expect("distinct replace UUIDs"),
                 old_name: DiskName::parse("disk1").unwrap(),
-                new_uuid: u_new.clone(),
                 new_name: DiskName::parse("disk2").unwrap(),
                 new_target: ReplaceJournalTarget {
                     by_id: ByIdPath::parse("/dev/disk/by-id/ata-NEW").unwrap(),
@@ -709,7 +807,7 @@ mod tests {
                     old_mapper: MapperName::from_basename("braid-disk1".into()),
                 },
                 restore_raid1_after_commit: false,
-            },
+            }),
         );
         write_journal(&paths, &journal).unwrap();
         let body = std::fs::read_to_string(paths.pending_op_json()).unwrap();
@@ -738,11 +836,11 @@ mod tests {
         let journal = build_journal(
             sample_membership(),
             sample_membership(),
-            OpKind::Replace {
+            OpKind::Replace(ReplaceOp {
                 phase: ReplacePhase::PoolMutation,
-                old_uuid: u_old.clone(),
+                identity: ReplaceIdentity::new(u_old.clone(), u_new.clone())
+                    .expect("distinct replace UUIDs"),
                 old_name: DiskName::parse("disk1").unwrap(),
-                new_uuid: u_new.clone(),
                 new_name: DiskName::parse("disk2").unwrap(),
                 new_target: ReplaceJournalTarget {
                     by_id: ByIdPath::parse("/dev/disk/by-id/ata-NEW").unwrap(),
@@ -758,7 +856,7 @@ mod tests {
                     old_devid: Devid::new(7),
                 },
                 restore_raid1_after_commit: true,
-            },
+            }),
         );
         write_journal(&paths, &journal).unwrap();
         let loaded = load_journal(&paths).unwrap().unwrap();
@@ -999,23 +1097,25 @@ mod tests {
         let paths = StatePaths::custom(tmp.path().into());
         let u_old = test_uuid(263);
         let u_new = test_uuid(264);
-        let mk_op = |phase| OpKind::Replace {
-            phase,
-            old_uuid: u_old.clone(),
-            old_name: DiskName::parse("disk1").unwrap(),
-            new_uuid: u_new.clone(),
-            new_name: DiskName::parse("disk2").unwrap(),
-            new_target: ReplaceJournalTarget {
-                by_id: ByIdPath::parse("/dev/disk/by-id/ata-Y").unwrap(),
-                mode: ReplaceJournalMode::ExistingLuks {
-                    enroll_key_file: None,
+        let mk_op = |phase| {
+            OpKind::Replace(ReplaceOp {
+                phase,
+                identity: ReplaceIdentity::new(u_old.clone(), u_new.clone())
+                    .expect("distinct replace UUIDs"),
+                old_name: DiskName::parse("disk1").unwrap(),
+                new_name: DiskName::parse("disk2").unwrap(),
+                new_target: ReplaceJournalTarget {
+                    by_id: ByIdPath::parse("/dev/disk/by-id/ata-Y").unwrap(),
+                    mode: ReplaceJournalMode::ExistingLuks {
+                        enroll_key_file: None,
+                    },
                 },
-            },
-            source: ReplaceJournalSource::Live {
-                old_devid: Devid::new(1),
-                old_mapper: MapperName::from_basename("braid-disk1".into()),
-            },
-            restore_raid1_after_commit: true,
+                source: ReplaceJournalSource::Live {
+                    old_devid: Devid::new(1),
+                    old_mapper: MapperName::from_basename("braid-disk1".into()),
+                },
+                restore_raid1_after_commit: true,
+            })
         };
         let journal = build_journal(
             sample_membership(),
@@ -1419,6 +1519,136 @@ mod tests {
         assert!(s.contains("extra"), "got: {s}");
     }
 
+    // Intent: an unknown key beside the legitimate `OpKind::Replace` keys
+    //   fails to parse.
+    // Why it exists: `OpKind`'s container-level `deny_unknown_fields` does
+    //   not reach the newtype `Replace(ReplaceOp)` variant; only
+    //   `ReplaceOpWire`'s own attribute rejects the key. Dropping it would
+    //   let hand-edits resurrect removed Replace fields silently.
+    // Scenario: a hand-edited Replace journal gains a stray `extra` key.
+    #[test]
+    fn op_kind_replace_rejects_unknown_top_level_field() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let u_old = test_uuid(287);
+        let u_new = test_uuid(288);
+        let body = format!(
+            r#"{{
+              "started_at": "2026-05-12T00:00:00Z",
+              "op": {{
+                "op": "Replace",
+                "phase": "PoolMutation",
+                "old_uuid": "{u_old}",
+                "old_name": "disk1",
+                "new_uuid": "{u_new}",
+                "new_name": "disk2",
+                "new_target": {{
+                  "by_id": "/dev/disk/by-id/ata-NEW",
+                  "mode": {{ "ExistingLuks": {{ "enroll_key_file": null }} }}
+                }},
+                "source": {{ "Missing": {{ "old_devid": 7 }} }},
+                "restore_raid1_after_commit": false,
+                "extra": "x"
+              }},
+              "pre_membership": {{ "disks": {{}} }},
+              "target_membership": {{ "disks": {{}} }}
+            }}"#
+        );
+        std::fs::write(paths.pending_op_json(), body).unwrap();
+        let err = load_journal(&paths).unwrap_err();
+        assert!(matches!(err, JournalError::Parse { .. }));
+        let s = err.to_string();
+        assert!(s.contains("extra"), "got: {s}");
+    }
+
+    // Intent: a Replace journal in the on-disk shape earlier braid versions
+    //   write loads to the expected op, and writing that op produces the
+    //   same keys in the same order.
+    // Why it exists: Replace journals parse through `ReplaceOpWire`. A
+    //   renamed wire field, or old and new UUIDs swapped symmetrically in
+    //   its conversions, would still round-trip but would strand or
+    //   misclassify an in-flight journal written before an upgrade.
+    // Scenario: replace is interrupted mid-`btrfs replace`, braid is
+    //   upgraded, and `braid recover` loads the journal the old binary wrote.
+    #[test]
+    fn replace_journal_on_disk_shape_is_stable() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let u_old = test_uuid(289);
+        let u_new = test_uuid(292);
+        let body = format!(
+            r#"{{
+              "started_at": "2026-05-12T00:00:00Z",
+              "op": {{
+                "op": "Replace",
+                "phase": "PostReplaceMaintenance",
+                "old_uuid": "{u_old}",
+                "old_name": "disk1",
+                "new_uuid": "{u_new}",
+                "new_name": "disk2",
+                "new_target": {{
+                  "by_id": "/dev/disk/by-id/ata-NEW",
+                  "mode": {{ "ExistingLuks": {{ "enroll_key_file": null }} }}
+                }},
+                "source": {{ "Missing": {{ "old_devid": 7 }} }},
+                "restore_raid1_after_commit": true
+              }},
+              "pre_membership": {{ "disks": {{}} }},
+              "target_membership": {{ "disks": {{}} }}
+            }}"#
+        );
+        std::fs::write(paths.pending_op_json(), body).unwrap();
+
+        let loaded = load_journal(&paths).unwrap().expect("Some");
+        let expected = Journal {
+            started_at: "2026-05-12T00:00:00Z".into(),
+            op: OpKind::Replace(ReplaceOp {
+                phase: ReplacePhase::PostReplaceMaintenance,
+                identity: ReplaceIdentity::new(u_old, u_new).expect("distinct replace UUIDs"),
+                old_name: DiskName::parse("disk1").unwrap(),
+                new_name: DiskName::parse("disk2").unwrap(),
+                new_target: ReplaceJournalTarget {
+                    by_id: ByIdPath::parse("/dev/disk/by-id/ata-NEW").unwrap(),
+                    mode: ReplaceJournalMode::ExistingLuks {
+                        enroll_key_file: None,
+                    },
+                },
+                source: ReplaceJournalSource::Missing {
+                    old_devid: Devid::new(7),
+                },
+                restore_raid1_after_commit: true,
+            }),
+            pre_membership: PoolMembership::empty(),
+            target_membership: PoolMembership::empty(),
+        };
+        assert_eq!(loaded, expected);
+
+        write_journal(&paths, &expected).unwrap();
+        let written = std::fs::read_to_string(paths.pending_op_json()).unwrap();
+        let positions: Vec<usize> = [
+            r#""op": "Replace""#,
+            r#""phase""#,
+            r#""old_uuid""#,
+            r#""old_name""#,
+            r#""new_uuid""#,
+            r#""new_name""#,
+            r#""new_target""#,
+            r#""source""#,
+            r#""restore_raid1_after_commit""#,
+        ]
+        .iter()
+        .map(|key| {
+            written
+                .find(key)
+                .unwrap_or_else(|| panic!("{key} missing from {written}"))
+        })
+        .collect();
+        assert!(
+            positions.is_sorted(),
+            "Replace op keys must keep their order, got: {written}"
+        );
+    }
+
     /// An unknown top-level key in `pending-op.json` alongside the valid
     /// Journal fields fails through `Journal`'s `deny_unknown_fields`.
     /// Pins the unknown-top-level-key case of the journal's
@@ -1503,7 +1733,7 @@ mod tests {
         assert!(matches!(err, JournalError::Parse { .. }));
     }
 
-    /// Invalid UUID in `OpKind::Replace.old_uuid` fails at `load_journal`.
+    /// Invalid UUID in the Replace journal's `old_uuid` fails at `load_journal`.
     #[test]
     fn replace_invalid_old_uuid_fails() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1536,7 +1766,7 @@ mod tests {
         assert!(matches!(err, JournalError::Parse { .. }));
     }
 
-    /// Invalid UUID in `OpKind::Replace.new_uuid` fails at `load_journal`.
+    /// Invalid UUID in the Replace journal's `new_uuid` fails at `load_journal`.
     #[test]
     fn replace_invalid_new_uuid_fails() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1567,6 +1797,50 @@ mod tests {
         std::fs::write(paths.pending_op_json(), body).unwrap();
         let err = load_journal(&paths).unwrap_err();
         assert!(matches!(err, JournalError::Parse { .. }));
+    }
+
+    // Intent: a Replace journal whose `old_uuid` equals its `new_uuid` fails
+    //   `load_journal` with `JournalError::Parse`, and the detail names why.
+    // Why it exists: recover's replace classifier tells the pre-replace
+    //   topology from the committed one by `old_uuid != new_uuid`. An equal
+    //   pair used to load, and recover then failed with "does not match
+    //   either ..." on every run once the target showed live.
+    // Scenario: a journal written by a replace whose --new disk was --old
+    //   itself under another by-id path, or a clone of it.
+    #[test]
+    fn replace_equal_old_and_new_uuid_fails() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = StatePaths::custom(tmp.path().into());
+        let u = test_uuid(286);
+        let body = format!(
+            r#"{{
+              "started_at": "2026-05-12T00:00:00Z",
+              "op": {{
+                "op": "Replace",
+                "phase": "PoolMutation",
+                "old_uuid": "{u}",
+                "old_name": "disk2",
+                "new_uuid": "{u}",
+                "new_name": "disk3",
+                "new_target": {{
+                  "by_id": "/dev/disk/by-id/ata-NEW",
+                  "mode": {{ "ExistingLuks": {{ "enroll_key_file": null }} }}
+                }},
+                "source": {{ "Missing": {{ "old_devid": 2 }} }},
+                "restore_raid1_after_commit": false
+              }},
+              "pre_membership": {{ "disks": {{}} }},
+              "target_membership": {{ "disks": {{}} }}
+            }}"#
+        );
+        std::fs::write(paths.pending_op_json(), body).unwrap();
+        let err = load_journal(&paths).unwrap_err();
+        assert!(matches!(err, JournalError::Parse { .. }), "got: {err:?}");
+        let s = err.to_string();
+        assert!(
+            s.contains(u.as_str()) && s.contains("both old_uuid and new_uuid"),
+            "got: {s}"
+        );
     }
 
     // -------------------------------------------------------------------
