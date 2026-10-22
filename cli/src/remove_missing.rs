@@ -17,6 +17,7 @@ use crate::repair_hint;
 use crate::state_paths::StatePaths;
 use crate::status_tag::{StatusTag, color_enabled_for_stderr, status_line};
 use crate::types::{Devid, DiskName, LuksUuid, MountPoint, PoolState};
+use std::num::NonZeroU64;
 
 #[derive(Debug, thiserror::Error)]
 pub enum RemoveMissingError {
@@ -141,11 +142,8 @@ pub struct RemoveMissingPlan {
 struct RemoveMissingWorkPlan {
     missing_id: Devid,
     target_name: DiskName,
-    remaining_present: usize,
-    missing_count: u64,
     mount_point: MountPoint,
-    // advisory plan-time gate; see `crate::pool::should_restore_raid1`
-    restore_raid1_after_commit: bool,
+    outcome: RemovalOutcome,
 }
 
 impl RemoveMissingWorkPlan {
@@ -162,10 +160,46 @@ impl RemoveMissingWorkPlan {
                 mount_point: self.mount_point.clone(),
             }],
         });
-        if self.restore_raid1_after_commit {
+        if self.outcome.restores_raid1() {
             steps.push(restore_raid1_preview_step(&self.mount_point));
         }
         steps
+    }
+}
+
+/// The pool state a removal leads to, decided once at plan time by
+/// `classify_removal_outcome`. The confirm prompt, the dry-run steps, and the
+/// journal's restore flag all read it, so execute never re-derives the choice
+/// (docs/design/decisions/022-dry-run-preview-model.md#decision). It has no
+/// variant for a state the planner refuses. Whether to restore RAID1 is an
+/// advisory plan-time gate; see `crate::pool::should_restore_raid1`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RemovalOutcome {
+    /// Clears the last missing entry and leaves `present` survivors, enough to
+    /// re-mirror, so the soft RAID1 balance is queued.
+    RestoresRedundancy { present: usize },
+    /// Other missing entries remain, so the pool stays degraded and no balance
+    /// is queued.
+    StaysDegraded {
+        present: usize,
+        remaining_missing: u64,
+    },
+}
+
+impl RemovalOutcome {
+    fn restores_raid1(self) -> bool {
+        matches!(self, Self::RestoresRedundancy { .. })
+    }
+
+    /// Missing entries before the removal. `maybe_restore_raid1` takes this
+    /// pre-op count, and the prompt shows it.
+    fn missing_before(self) -> u64 {
+        match self {
+            Self::RestoresRedundancy { .. } => 1,
+            Self::StaysDegraded {
+                remaining_missing, ..
+            } => remaining_missing + 1,
+        }
     }
 }
 
@@ -217,8 +251,7 @@ impl RemoveMissingPlan {
                 format_remove_missing_confirm(
                     self.work_plan.target_name.as_str(),
                     self.work_plan.missing_id,
-                    self.work_plan.remaining_present,
-                    self.work_plan.missing_count,
+                    self.work_plan.outcome,
                 )
             );
             params
@@ -267,7 +300,7 @@ impl RemoveMissingPlan {
             journal::OpKind::RemoveMissing {
                 phase: journal::RemoveMissingPhase::PoolMutation,
                 devid: work_plan.missing_id,
-                restore_raid1_after_commit: work_plan.restore_raid1_after_commit,
+                restore_raid1_after_commit: work_plan.outcome.restores_raid1(),
             },
         );
         journal::write_journal_tracked(params.paths, &journal, journal_state)
@@ -313,7 +346,7 @@ impl RemoveMissingPlan {
             journal::OpKind::RemoveMissing {
                 phase: journal::RemoveMissingPhase::PostRemoveMissingMaintenance,
                 devid: work_plan.missing_id,
-                restore_raid1_after_commit: work_plan.restore_raid1_after_commit,
+                restore_raid1_after_commit: work_plan.outcome.restores_raid1(),
             },
             None,
         )
@@ -328,7 +361,7 @@ impl RemoveMissingPlan {
                 runner,
                 fs,
                 &work_plan.mount_point,
-                work_plan.missing_count,
+                work_plan.outcome.missing_before(),
                 params.progress,
             )
             .map_err(RemoveMissingError::Pool)?;
@@ -427,6 +460,62 @@ fn validate_missing_id_target(pool: &PoolState, missing_id: Devid) -> Result<(),
     ))
 }
 
+/// Sole production constructor of `RemovalOutcome`, so the plan decides the
+/// post-state once and no consumer can meet a state the planner refuses. Its
+/// only refusal is the 2-disk RAID1 floor: the last missing entry with fewer
+/// than two survivors.
+fn classify_removal_outcome(
+    missing_id: Devid,
+    present: usize,
+    missing_count: NonZeroU64,
+) -> Result<RemovalOutcome, String> {
+    let remaining_missing = missing_count.get() - 1;
+    if crate::pool::should_restore_raid1(remaining_missing == 0, present) {
+        return Ok(RemovalOutcome::RestoresRedundancy { present });
+    }
+    if remaining_missing > 0 {
+        return Ok(RemovalOutcome::StaysDegraded {
+            present,
+            remaining_missing,
+        });
+    }
+
+    // Refuse the 2-device RAID1 + 1 missing case. (Zero survivors never get
+    // here: a pool with no present device is not mounted.) The kernel's
+    // btrfs_rm_device calls btrfs_check_raid_min_devices on
+    // `num_devices - 1` (where num_devices is fs_devices->num_devices,
+    // counting present + missing) and rejects with
+    // BTRFS_ERROR_DEV_RAID1_MIN_NOT_MET when that drops below devs_min=2.
+    // Per docs/design/decisions/012-intent-cli.md, remove-missing is cleanup-only;
+    // the documented repair path for a dead disk on a 2-disk pool is
+    // `braid replace --old <missing-name> --new <new-name>=...`. Pools with total_devices > 2
+    // are intentionally out of scope here -- the kernel accepts those
+    // calls, and reasoning about data integrity in multi-missing states
+    // (where the survivor is not guaranteed to mirror every chunk under
+    // btrfs RAID1's ncopies=2 layout) is left to existing/future logic.
+    //
+    // The "RAID1" label comes from device counts, not a probed profile
+    // (PoolState carries none by design). That is sound: per
+    // docs/design/decisions/001-btrfs-raid1.md, braid only ever stabilizes a
+    // 2-device pool as RAID1 (1 drive = single; the 2nd converts to RAID1),
+    // so a braid 2-device pool is RAID1 by construction. Degraded writes can
+    // add transient single chunks, which maybe_restore_raid1 re-mirrors -- it
+    // is never a stable single pool. The runtime backstop is
+    // device_remove_error (pool.rs), which decodes the kernel's real
+    // min-devices rejection regardless of profile, so correctness never
+    // rests on this label.
+    let repair_command = repair_hint::missing_replace_command(None);
+    let status_hint = repair_hint::see_missing_names_and_devids_in_status(missing_count.get());
+    Err(format!(
+        "cannot remove missing devid {missing_id} -- this is a 2-disk \
+         RAID1 pool with one disk missing, and the kernel refuses \
+         to drop a RAID1 pool below two devices. Repair the dead \
+         disk with `{repair_command}`, or run \
+         `braid add <new-name>=/dev/disk/by-id/<...>` \
+         first and then re-run `braid remove-missing`. {status_hint}",
+    ))
+}
+
 /// Plan a `braid remove-missing` run after dispatch has already checked for
 /// a pending operation and loaded config under the pool lock. Owns pool probe
 /// / mounted validation, mutation preflight, UPS preflight, missing-device
@@ -486,7 +575,7 @@ pub fn plan_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     // pools (missing_count > 0, missing_devids empty) are not mislabeled healthy.
     // Pinned by plan_remove_missing_zero_missing_precedes_live_device_validation
     // and plan_remove_missing_null_underlying_empty_missing_devids_not_no_missing.
-    if pool.missing_count == 0 {
+    let Some(missing_count) = NonZeroU64::new(pool.missing_count) else {
         return Err(PlanFailure::with_notes(
             notes,
             RemoveMissingError::Validation(format!(
@@ -494,7 +583,7 @@ pub fn plan_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
                 params.missing_id
             )),
         ));
-    }
+    };
 
     if let Err(msg) = validate_missing_id_target(&pool, params.missing_id) {
         return Err(PlanFailure::with_notes(
@@ -520,45 +609,18 @@ pub fn plan_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         ));
     }
 
-    // Pre-flight: reject the exact 2-device RAID1 + 1 missing case. The
-    // kernel's btrfs_rm_device calls btrfs_check_raid_min_devices on
-    // `num_devices - 1` (where num_devices is fs_devices->num_devices,
-    // counting present + missing) and rejects with
-    // BTRFS_ERROR_DEV_RAID1_MIN_NOT_MET when that drops below devs_min=2.
-    // Per docs/design/decisions/012-intent-cli.md, remove-missing is cleanup-only;
-    // the documented repair path for a dead disk on a 2-disk pool is
-    // `braid replace --old <missing-name> --new <new-name>=...`. Pools with total_devices > 2
-    // are intentionally out of scope here -- the kernel accepts those
-    // calls, and reasoning about data integrity in multi-missing states
-    // (where the survivor is not guaranteed to mirror every chunk under
-    // btrfs RAID1's ncopies=2 layout) is left to existing/future logic.
-    //
-    // The "RAID1" label comes from device counts, not a probed profile
-    // (PoolState carries none by design). That is sound: per
-    // docs/design/decisions/001-btrfs-raid1.md, braid only ever stabilizes a
-    // 2-device pool as RAID1 (1 drive = single; the 2nd converts to RAID1),
-    // so a braid 2-device pool is RAID1 by construction. Degraded writes can
-    // add transient single chunks, which maybe_restore_raid1 re-mirrors -- it
-    // is never a stable single pool. The runtime backstop is
-    // device_remove_error (pool.rs), which decodes the kernel's real
-    // min-devices rejection regardless of profile, so correctness never
-    // rests on this label.
-    if pool.total_devices == 2 && pool.devices.len() == 1 && pool.missing_count == 1 {
-        let repair_command = repair_hint::missing_replace_command(None);
-        let status_hint = repair_hint::see_missing_names_and_devids_in_status(pool.missing_count);
-        return Err(PlanFailure::with_notes(
-            notes,
-            RemoveMissingError::Validation(format!(
-                "cannot remove missing devid {devid} -- this is a 2-disk \
-                 RAID1 pool with one disk missing, and the kernel refuses \
-                 to drop a RAID1 pool below two devices. Repair the dead \
-                 disk with `{repair_command}`, or run \
-                 `braid add <new-name>=/dev/disk/by-id/<...>` \
-                 first and then re-run `braid remove-missing`. {status_hint}",
-                devid = params.missing_id,
-            )),
-        ));
-    }
+    // Before the membership load and the relocation-space check, so the
+    // 2-disk refusal keeps its place in the refusal order.
+    let outcome =
+        match classify_removal_outcome(params.missing_id, pool.devices.len(), missing_count) {
+            Ok(outcome) => outcome,
+            Err(msg) => {
+                return Err(PlanFailure::with_notes(
+                    notes,
+                    RemoveMissingError::Validation(msg),
+                ));
+            }
+        };
 
     // Resolve pool.json membership while planning so dry-run refuses the
     // same missing-devid identity failures as real execution.
@@ -583,23 +645,23 @@ pub fn plan_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     //
     // Skip when only 1 present device survives (devices.len() == 1). The
     // clean 2-device RAID1 + 1 missing case -- where the survivor mirrors
-    // every chunk and no relocation is needed -- is already rejected by the
-    // 2-device guard above, so the only single-survivor state that reaches
-    // here is multi-missing (total_devices > 2, >= 2 missing). There the
-    // survivor is NOT guaranteed to hold every chunk: data mirrored only
-    // across the simultaneously-dead devices is already lost and cannot be
-    // relocated, so a relocation-space preflight has nothing to prove. Per
-    // the scope block above, that case is deliberately delegated to the
-    // kernel min-devices check and device_remove_error (pool.rs), not
-    // proven safe here. Its missing members are all btrfs-MISSING: the
-    // bystander refusal above already refused a hot-unplugged one.
+    // every chunk and no relocation is needed -- is already rejected by
+    // `classify_removal_outcome` above, so the only single-survivor state
+    // that reaches here is multi-missing (total_devices > 2, >= 2 missing).
+    // There the survivor is NOT guaranteed to hold every chunk: data
+    // mirrored only across the simultaneously-dead devices is already lost
+    // and cannot be relocated, so a relocation-space preflight has nothing
+    // to prove. Per the scope note in `classify_removal_outcome`, that case
+    // is deliberately delegated to the kernel min-devices check and
+    // device_remove_error (pool.rs), not proven safe here. Its missing
+    // members are all btrfs-MISSING: the bystander refusal above already
+    // refused a hot-unplugged one.
     if pool.devices.len() >= 2
         && let Err(e) = check_relocation_space(runner, config.mount_point(), params.missing_id)
     {
         return Err(PlanFailure::with_notes(notes, e));
     }
 
-    let remaining_present = pool.devices.len();
     // target_uuid was just resolved from pre_membership via by_devid, so
     // the removal is guaranteed to match. The pool lock pins pool.json
     // for the whole command lifetime.
@@ -608,13 +670,8 @@ pub fn plan_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     let work_plan = RemoveMissingWorkPlan {
         missing_id: params.missing_id,
         target_name,
-        remaining_present,
-        missing_count: pool.missing_count,
         mount_point: config.mount_point().clone(),
-        restore_raid1_after_commit: crate::pool::should_restore_raid1(
-            pool.missing_count == 1,
-            remaining_present,
-        ),
+        outcome,
     };
     Ok(RemoveMissingPlan {
         notes,
@@ -844,20 +901,14 @@ fn validate_missing_target_usage_shape(
 #[cfg(test)]
 fn remove_missing_work_plan_for_test(
     missing_id: Devid,
-    missing_count: u64,
-    remaining_present: usize,
+    outcome: RemovalOutcome,
     mount_point: &MountPoint,
 ) -> RemoveMissingWorkPlan {
     RemoveMissingWorkPlan {
         missing_id,
         target_name: DiskName::parse("disk-test").unwrap(),
-        remaining_present,
-        missing_count,
         mount_point: mount_point.clone(),
-        restore_raid1_after_commit: crate::pool::should_restore_raid1(
-            missing_count == 1,
-            remaining_present,
-        ),
+        outcome,
     }
 }
 
@@ -865,53 +916,47 @@ fn remove_missing_work_plan_for_test(
 // Confirmation formatter
 // ---------------------------------------------------------------------------
 
-fn format_remove_missing_confirm(
-    name: &str,
-    devid: Devid,
-    remaining_present: usize,
-    missing_count: u64,
-) -> String {
+/// Renders the operator go/no-go prompt from the plan's `RemovalOutcome`, so
+/// the prompt can only describe a post-state the planner chose.
+fn format_remove_missing_confirm(name: &str, devid: Devid, outcome: RemovalOutcome) -> String {
     let mut msg = "Remove missing device from pool:\n".to_string();
     msg.push_str(&format!(
         "  {} (devid {})  missing -- no hardware info available\n",
         name, devid
     ));
-    if crate::pool::should_restore_raid1(missing_count == 1, remaining_present) {
-        msg.push_str("  Data on remaining disks will be rebalanced if redundancy is restored.\n");
-    } else if missing_count == 1 {
-        msg.push_str("  Surviving disk already has all data.\n");
-    } else {
-        let remaining_missing = missing_count.saturating_sub(1);
-        msg.push_str(&format!(
-            "  Pool will remain degraded -- {} missing {} will remain.\n",
+    match outcome {
+        RemovalOutcome::RestoresRedundancy { present } => {
+            msg.push_str(
+                "  Data on remaining disks will be rebalanced if redundancy is restored.\n",
+            );
+            msg.push_str(&format!(
+                "\nPool: {} present + {} missing -> {} disks\n",
+                present,
+                outcome.missing_before(),
+                present,
+            ));
+        }
+        RemovalOutcome::StaysDegraded {
+            present,
             remaining_missing,
-            if remaining_missing == 1 {
-                "entry"
-            } else {
-                "entries"
-            },
-        ));
-    }
-    if missing_count == 1 {
-        msg.push_str(&format!(
-            "\nPool: {} present + {} missing -> {} {}\n",
-            remaining_present,
-            missing_count,
-            remaining_present,
-            if remaining_present == 1 {
-                "disk"
-            } else {
-                "disks"
-            },
-        ));
-    } else {
-        msg.push_str(&format!(
-            "\nPool: {} present + {} missing -> {} present + {} missing\n",
-            remaining_present,
-            missing_count,
-            remaining_present,
-            missing_count.saturating_sub(1),
-        ));
+        } => {
+            msg.push_str(&format!(
+                "  Pool will remain degraded -- {} missing {} will remain.\n",
+                remaining_missing,
+                if remaining_missing == 1 {
+                    "entry"
+                } else {
+                    "entries"
+                },
+            ));
+            msg.push_str(&format!(
+                "\nPool: {} present + {} missing -> {} present + {} missing\n",
+                present,
+                outcome.missing_before(),
+                present,
+                remaining_missing,
+            ));
+        }
     }
     msg
 }
@@ -1143,7 +1188,11 @@ mod tests {
 
         let expected = format!(
             "{}\n",
-            format_remove_missing_confirm("disk3", Devid::new(3), 2, 1)
+            format_remove_missing_confirm(
+                "disk3",
+                Devid::new(3),
+                RemovalOutcome::RestoresRedundancy { present: 2 },
+            )
         );
         assert_eq!(f.confirm.prompts(), vec![expected]);
     }
@@ -2370,8 +2419,7 @@ mod tests {
     fn work_plan_steps_show_rebalance_when_clearing_last_missing() {
         let steps = remove_missing_work_plan_for_test(
             Devid::new(3),
-            1,
-            2,
+            RemovalOutcome::RestoresRedundancy { present: 2 },
             &MountPoint::new("/mnt/storage".into()),
         )
         .render_steps();
@@ -2385,35 +2433,16 @@ mod tests {
     }
 
     #[test]
-    // Intent: dry-run with 1 survivor omits rebalance step.
-    // Why: can't have RAID1 with only 1 device.
-    // Scenario: 2-disk pool, 1 died. Only 1 survivor -- no balance.
-    fn work_plan_steps_omit_rebalance_with_single_survivor() {
-        let steps = remove_missing_work_plan_for_test(
-            Devid::new(3),
-            1,
-            1,
-            &MountPoint::new("/mnt/storage".into()),
-        )
-        .render_steps();
-        assert!(
-            !steps
-                .iter()
-                .any(|s| s.description.contains("-dconvert=raid1,soft")),
-            "should not show soft balance with 1 survivor; got: {:?}",
-            steps.iter().map(|s| &s.description).collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
     // Intent: dry-run when not clearing last missing omits rebalance step.
     // Why: if more missing devices remain, balance would be premature.
     // Scenario: 4-disk pool, 2 missing, removing 1 of them.
     fn work_plan_steps_omit_rebalance_when_not_last_missing() {
         let steps = remove_missing_work_plan_for_test(
             Devid::new(3),
-            2,
-            2,
+            RemovalOutcome::StaysDegraded {
+                present: 2,
+                remaining_missing: 1,
+            },
             &MountPoint::new("/mnt/storage".into()),
         )
         .render_steps();
@@ -3446,8 +3475,12 @@ mod tests {
     // Scenario: one missing device (devid 2), last missing, 2 present -> includes balance.
     fn dry_run_render_targeted_removal_with_balance() {
         let mount_point = MountPoint::new("/mnt/storage".into());
-        let steps =
-            remove_missing_work_plan_for_test(Devid::new(2), 1, 2, &mount_point).render_steps();
+        let steps = remove_missing_work_plan_for_test(
+            Devid::new(2),
+            RemovalOutcome::RestoresRedundancy { present: 2 },
+            &mount_point,
+        )
+        .render_steps();
         let output = Step::render_dry_run(&steps);
 
         assert_eq!(
@@ -3473,20 +3506,17 @@ mod tests {
 
     #[test]
     fn remove_missing_confirm_with_rebalance() {
-        let msg = format_remove_missing_confirm("toshiba", Devid::new(2), 2, 1);
+        let msg = format_remove_missing_confirm(
+            "toshiba",
+            Devid::new(2),
+            RemovalOutcome::RestoresRedundancy { present: 2 },
+        );
         assert!(msg.contains("Remove missing device from pool:"));
         assert!(msg.contains("toshiba (devid 2)"));
         assert!(msg.contains("missing"));
         assert!(msg.contains("no hardware info available"));
         assert!(msg.contains("rebalanced if redundancy is restored"));
         assert!(msg.contains("2 present + 1 missing -> 2 disks"));
-    }
-
-    #[test]
-    fn remove_missing_confirm_single_survivor() {
-        let msg = format_remove_missing_confirm("toshiba", Devid::new(2), 1, 1);
-        assert!(msg.contains("Surviving disk already has all data"));
-        assert!(msg.contains("1 present + 1 missing -> 1 disk"));
     }
 
     // Intent: verify the confirm prompt accurately describes residual
@@ -3498,50 +3528,100 @@ mod tests {
     //   rebalanced" hint that previously promised a balance step that the
     //   planner does not actually queue when missing_count > 1.
     // Scenario: pool stays degraded after remove-missing because more than
-    //   one missing entry exists. The (1, 2) case models a 3-disk RAID1 with
-    //   2 dead drives (total_devices = remaining_present + missing_count = 3),
-    //   removing one of the two missing entries. The (2, 2) case models a
-    //   4-disk RAID1 with 2 dead drives, removing the first of two missing
-    //   entries -- this case is the one that catches a regression of the
+    //   one missing entry exists. The 1-present case models a 3-disk RAID1
+    //   with 2 dead drives (total_devices = present + missing = 3), removing
+    //   one of the two missing entries. The 2-present case models a 4-disk
+    //   RAID1 with 2 dead drives, removing the first of two missing entries
+    //   -- this case is the one that catches a regression of the
     //   rebalance-hint fix.
     #[test]
     fn remove_missing_confirm_multiple_missing() {
-        let cases: &[(usize, u64, &str, &str)] = &[
+        let cases: &[(RemovalOutcome, &str, &str)] = &[
             (
-                1,
-                2,
+                RemovalOutcome::StaysDegraded {
+                    present: 1,
+                    remaining_missing: 1,
+                },
                 "1 present + 2 missing -> 1 present + 1 missing",
                 "-> 1 disk",
             ),
             (
-                2,
-                2,
+                RemovalOutcome::StaysDegraded {
+                    present: 2,
+                    remaining_missing: 1,
+                },
                 "2 present + 2 missing -> 2 present + 1 missing",
                 "-> 2 disks",
             ),
         ];
 
-        for (rp, mc, expected_shape, forbidden_shape) in cases {
-            let msg = format_remove_missing_confirm("toshiba", Devid::new(2), *rp, *mc);
+        for (outcome, expected_shape, forbidden_shape) in cases {
+            let msg = format_remove_missing_confirm("toshiba", Devid::new(2), *outcome);
             assert!(
                 msg.contains(expected_shape),
-                "case ({rp}, {mc}): expected post-op shape {expected_shape:?} in:\n{msg}"
+                "case {outcome:?}: expected post-op shape {expected_shape:?} in:\n{msg}"
             );
             assert!(
                 msg.contains("Pool will remain degraded"),
-                "case ({rp}, {mc}): expected degraded hint in:\n{msg}"
+                "case {outcome:?}: expected degraded hint in:\n{msg}"
             );
             assert!(
                 !msg.contains("rebalanced"),
-                "case ({rp}, {mc}): unexpected rebalance promise in:\n{msg}"
-            );
-            assert!(
-                !msg.contains("Surviving disk already has all data"),
-                "case ({rp}, {mc}): unexpected single-survivor hint in:\n{msg}"
+                "case {outcome:?}: unexpected rebalance promise in:\n{msg}"
             );
             assert!(
                 !msg.contains(forbidden_shape),
-                "case ({rp}, {mc}): unexpected fully-restored shape {forbidden_shape:?} in:\n{msg}"
+                "case {outcome:?}: unexpected fully-restored shape {forbidden_shape:?} in:\n{msg}"
+            );
+        }
+    }
+
+    // Intent: the plan-time classifier maps each (present, missing) pair to
+    //   the one outcome the planner allows, and refuses the 2-disk RAID1
+    //   floor with the operator-facing message.
+    // Why it exists: it is the only production source of `RemovalOutcome`.
+    //   A slip that maps a 3-present, 1-missing pool to StaysDegraded skips
+    //   the soft RAID1 balance and leaves degraded single chunks; a slip
+    //   that lets 1 present + 1 missing through would ask the operator to
+    //   confirm a removal the kernel refuses.
+    // Scenario: 2-, 3-, and 4-disk RAID1 pools after one or two disks die,
+    //   each planned with `braid remove-missing`.
+    #[test]
+    fn classify_removal_outcome_sweeps_present_missing_pairs() {
+        let classify = |present, missing| {
+            classify_removal_outcome(Devid::new(2), present, NonZeroU64::new(missing).unwrap())
+        };
+
+        let msg = classify(1, 1).expect_err("1 present + 1 missing is the 2-disk RAID1 floor");
+        assert!(
+            msg.contains("2-disk RAID1 pool with one disk missing"),
+            "refusal must name the rejected topology; got: {msg}"
+        );
+
+        for (present, missing, expected) in [
+            (2, 1, RemovalOutcome::RestoresRedundancy { present: 2 }),
+            (3, 1, RemovalOutcome::RestoresRedundancy { present: 3 }),
+            (
+                1,
+                2,
+                RemovalOutcome::StaysDegraded {
+                    present: 1,
+                    remaining_missing: 1,
+                },
+            ),
+            (
+                2,
+                2,
+                RemovalOutcome::StaysDegraded {
+                    present: 2,
+                    remaining_missing: 1,
+                },
+            ),
+        ] {
+            assert_eq!(
+                classify(present, missing),
+                Ok(expected),
+                "({present} present, {missing} missing)"
             );
         }
     }
@@ -3666,8 +3746,7 @@ mod tests {
     fn plan_preview_renders_warn_above_steps() {
         let work_plan = remove_missing_work_plan_for_test(
             Devid::new(3),
-            1,
-            2,
+            RemovalOutcome::RestoresRedundancy { present: 2 },
             &MountPoint::new("/mnt/storage".into()),
         );
         let plan = RemoveMissingPlan {
