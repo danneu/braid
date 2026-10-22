@@ -1,11 +1,12 @@
 # Test: mutating-config-preflight-order
 #
-# What: Mutating command dispatch checks pending-op.json before loading config
-# and wraps config-read failures as "config error:".
+# What: Dispatch checks pending-op.json before loading config or pool.json for
+# every command recovery mode refuses, and the add, remove, remove-missing and
+# replace arms wrap config-read failures as "config error:".
 #
 # Why: The Rust pool-lock boundary owns read-side fences for mutating commands;
-# moving config loading into dispatch must not demote recovery guidance behind
-# a bad config file.
+# loading config or pool.json in dispatch must not demote recovery guidance
+# behind a bad config file or a missing or corrupt pool.json.
 { braid }:
 { ... }:
 {

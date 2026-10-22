@@ -706,12 +706,13 @@ fn validate_generated_keyfile_target<R: CommandRunner>(
     Ok(())
 }
 
-/// Plan a `braid enroll` run. Owns the pending-op preflight,
-/// keyfile-path validation, and pre-passphrase discovery. Per-disk
-/// skip notes land on `EnrollPlan.notes` when discovery produces at
-/// least one candidate, or on `PlanFailure::notes` when the
-/// planner bails (e.g. no candidates, mid-loop probe error, dry-run
-/// slot-1 conflict).
+/// Plan a `braid enroll` run. Owns the pending-op residual guard
+/// (dispatch's recovery gate, `cli/src/main.rs#check_recovery_gate`,
+/// refuses first), keyfile-path validation, and pre-passphrase
+/// discovery. Per-disk skip notes land on `EnrollPlan.notes` when
+/// discovery produces at least one candidate, or on
+/// `PlanFailure::notes` when the planner bails (e.g. no candidates,
+/// mid-loop probe error, dry-run slot-1 conflict).
 ///
 /// Dry-run classification: when `dry_run`, each candidate is routed
 /// through `plan_single_disk_enrollment` so the preview matches the

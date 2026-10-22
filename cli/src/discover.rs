@@ -591,7 +591,9 @@ pub fn check_discover_write_preconditions(
 ) -> Result<PoolJsonShape, DiscoverWriteError> {
     // Canonical recovery-mode guard, same as add/remove/replace/unlock
     // (ADR 017). Fail-closed on a present, corrupt, OR unreadable journal --
-    // not a bare `pending_op_json().exists()` probe.
+    // not a bare `pending_op_json().exists()` probe. Dispatch's recovery gate
+    // (`cli/src/main.rs#check_recovery_gate`) refuses first; this is the
+    // residual guard for a caller that skips dispatch.
     crate::preflight::check_no_pending_operation(paths)
         .map_err(DiscoverWriteError::PendingOperation)?;
     let pool_json_path = paths.pool_json();

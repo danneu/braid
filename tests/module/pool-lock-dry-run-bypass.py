@@ -6,8 +6,8 @@
 #   holds the lock.
 #
 # Why it exists:
-#   `lock_policy` centralizes the dispatch-time policy decision and returns
-#   None for each mutator under --dry-run. The classification is unit-tested,
+#   `dispatch_policy` centralizes the dispatch-time policy decision, and its
+#   lock is None for each mutator under --dry-run. The classification is unit-tested,
 #   but runtime bypass behavior was not exercised end-to-end for the dry-run
 #   mutators. A regression that re-introduces per-arm lock acquisition, or
 #   special-cases dry-run inside acquire_per_policy, would break the "safe to

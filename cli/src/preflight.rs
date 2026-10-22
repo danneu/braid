@@ -48,12 +48,12 @@ pub fn check_pool_unlocked_if_membership_exists(
     ))
 }
 
-/// Refuse if a pending-operation journal exists.
-/// This gate is called by the membership/mount/key-enrollment commands
-/// (`add`, `remove`, `remove-missing`, `replace`, `unlock`, `enroll`, and
-/// `discover --write`). `recover` is the only journal-clearing path; read-only
-/// diagnostics and cleanup surfaces (`status`, `doctor`, `lock`, bare
-/// `discover`) stay available.
+/// Refuse if a pending-operation journal exists: the recovery-mode check.
+/// Dispatch runs it before any command arm for every command that
+/// `cli/src/main.rs#dispatch_policy` marks `Gated`, which are the membership,
+/// mount and key-enrollment commands. `recover` is the only journal-clearing
+/// path; read-only diagnostics and cleanup surfaces stay available. Planners
+/// also call it as a residual guard for callers that skip dispatch.
 pub fn check_no_pending_operation(paths: &StatePaths) -> Result<(), String> {
     match journal::load_journal(paths) {
         Ok(Some(j)) => Err(format!(

@@ -2,7 +2,7 @@
 #
 # What: --dry-run mutators must not acquire /run/braid-pool.lock.
 #
-# Why: `lock_policy` returns None for every dry-run mutator, so dispatch must
+# Why: `dispatch_policy` yields lock None for every dry-run mutator, so dispatch must
 # pass through `acquire_per_policy` without acquiring. Pins the runtime side of
 # the classification unit test.
 { braid }:

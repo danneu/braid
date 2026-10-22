@@ -1,19 +1,29 @@
 # Test: mutating-config-preflight-order
 #
 # Intent:
-#   Mutating dispatch arms run pending-op preflight before loading config, and
-#   config-load failures use the command-style "config error:" prefix.
+#   Every command that recovery mode refuses checks pending-op.json before it
+#   reads config or pool.json, and config-load failures in the add, remove,
+#   remove-missing and replace arms use the command-style "config error:"
+#   prefix.
 #
 # Why it exists:
 #   Config loading moved out of add/remove/remove-missing/replace planners into
 #   dispatch. The recovery journal must keep priority over config errors, and
 #   add's real-run config error wording intentionally changed to match dry-run
-#   and the other mutators.
+#   and the other mutators. unlock and enroll once loaded config and pool.json
+#   in their dispatch arms before the journal check, so a missing or corrupt
+#   pool.json hid the journal behind an error that never said `braid recover`
+#   (finding 261022-0632-001).
 #
 # Scenario:
 #   An operator invokes mutating commands while pending-op.json exists, or while
 #   the configured config file is missing. The first case must tell them to run
-#   recover; the second must report a config error consistently.
+#   recover; the second must report a config error consistently. A bootstrap
+#   `braid add` is interrupted after its journal write and before pool.json is
+#   saved; at the next boot braid-auto-unlock runs `braid unlock`, and the
+#   operator runs `braid enroll`. Both must name the interrupted operation, not
+#   the missing pool.json, and a corrupt pool.json must not send the operator to
+#   `braid discover --write`, which recovery mode refuses.
 
 import shlex
 
@@ -52,12 +62,27 @@ config_error_cases = [
 ]
 
 
+# unlock and enroll load config or pool.json in dispatch, so each case pairs a
+# pending journal with one broken state file. stdin carries a passphrase so a
+# command that got past the journal check would not wait on a TTY prompt.
+recovery_gate_cases = [
+    ("unlock", "unlock --passphrase-stdin"),
+    ("unlock --dry-run", "unlock --dry-run --passphrase-stdin"),
+    ("enroll", "enroll /mnt/usb --passphrase-stdin"),
+    ("enroll --dry-run", "enroll /mnt/usb --dry-run --passphrase-stdin"),
+]
+
+
 def command(args, config):
     return "braid --config " + shlex.quote(config) + " " + args + " 2>&1"
 
 
 def run_case(args, config):
     return machine.execute(command(args, config))
+
+
+def run_case_with_stdin(args, config):
+    return machine.execute("printf x | " + command(args, config))
 
 
 def clear_pending():
@@ -80,6 +105,34 @@ def seed_locked_pool_json():
         '{"disks":{"11111111-1111-1111-1111-111111111111":{"name":"disk1","by_id":"/dev/disk/by-id/virtio-disk1"},"22222222-2222-2222-2222-222222222222":{"name":"disk2","by_id":"/dev/disk/by-id/virtio-disk2"}}}'
         "\nPOOL"
     )
+
+
+def remove_pool_json():
+    machine.succeed("rm -f /var/lib/braid/pool.json")
+
+
+def write_corrupt_pool_json():
+    machine.succeed("mkdir -p /var/lib/braid")
+    machine.succeed("printf '{not valid json}' > /var/lib/braid/pool.json")
+
+
+def assert_recovery_gate_wins(state, config):
+    for name, args in recovery_gate_cases:
+        label = name + " (" + state + ")"
+        rc, out = run_case_with_stdin(args, config)
+        assert rc == 1, label + ": expected exit 1, got " + str(rc) + "; out=" + out
+        assert "interrupted operation detected" in out, (
+            label + ": expected pending-op guidance, got: " + out
+        )
+        assert "failed to read config file" not in out, (
+            label + ": config loaded before the journal check: " + out
+        )
+        assert "failed to read pool membership file" not in out, (
+            label + ": pool.json loaded before the journal check: " + out
+        )
+        assert "discover --write" not in out, (
+            label + ": pool.json error preempted pending-op: " + out
+        )
 
 
 with subtest("Missing config reports wrapped config errors"):
@@ -133,5 +186,20 @@ with subtest("Add pending operation wins over locked-pool refusal"):
         "pending-op guidance must win, got: " + out
     )
     assert "not unlocked" not in out, "locked-pool refusal preempted pending-op: " + out
+
+with subtest("Pending operation wins over a missing config for unlock and enroll"):
+    seed_locked_pool_json()
+    write_pending()
+    assert_recovery_gate_wins("missing config", missing_config)
+
+with subtest("Pending operation wins over a missing pool.json for unlock and enroll"):
+    remove_pool_json()
+    write_pending()
+    assert_recovery_gate_wins("missing pool.json", valid_config)
+
+with subtest("Pending operation wins over a corrupt pool.json for unlock and enroll"):
+    write_corrupt_pool_json()
+    write_pending()
+    assert_recovery_gate_wins("corrupt pool.json", valid_config)
 
 machine.shutdown()

@@ -62,7 +62,7 @@ The journal provides crash safety: if braid crashes mid-operation, the journal t
 
 ### Recovery mode
 
-When `pending-op.json` exists, braid enters recovery mode. Membership, mount, and key-enrollment commands (`add`, `remove`, `remove-missing`, `replace`, `unlock`, `enroll`, `discover --write`) hard-fail; read-only diagnostic and cleanup surfaces (`status`, `doctor`, `lock`, bare `discover`) stay available. `braid recover` is the only command that clears the journal: it opens LUKS devices, mounts the pool (with `--allow-degraded` if needed), and rebuilds or repairs membership from the live btrfs pool topology -- not from LUKS label scanning, which could include labeled-but-never-added disks.
+When `pending-op.json` exists, braid enters recovery mode. Membership, mount, and key-enrollment commands hard-fail, while read-only diagnostics, `lock`, and `recover` stay available. `cli/src/main.rs#dispatch_policy` classifies each command; dispatch refuses a gated command before any command arm reads config or `pool.json`, so a missing or corrupt `pool.json` never hides the journal. `braid recover` is the only command that clears the journal: it opens LUKS devices, mounts the pool (with `--allow-degraded` if needed), and rebuilds or repairs membership from the live btrfs pool topology -- not from LUKS label scanning, which could include labeled-but-never-added disks.
 
 ### State contract
 

@@ -103,80 +103,84 @@ enum LockPolicy {
     LockSystemdStop(Duration),
 }
 
-/// Exhaustive owner of the Commands-to-lock mapping that Principle 12 relies
-/// on for acquiring before any state read.
-fn lock_policy(command: &Commands) -> LockPolicy {
+/// One dispatch decision per command: whether recovery mode refuses it, and
+/// which pool lock it takes. A gated command cannot name its own lock, so a
+/// gated real run always reads the journal under the pool lock (Principle 12).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DispatchPolicy {
+    /// Recovery mode refuses the command. A real run takes the pool lock
+    /// non-blocking; a dry run takes no lock.
+    Gated { dry_run: bool },
+    /// Recovery mode lets the command run, under the given lock discipline.
+    Ungated(LockPolicy),
+}
+
+impl DispatchPolicy {
+    /// Derives the lock so no gated real run can skip the pool lock or defer
+    /// it past the recovery gate, as `LockPlain` and `LockSystemdStop` do.
+    fn lock(self) -> LockPolicy {
+        match self {
+            DispatchPolicy::Gated { dry_run: true } => LockPolicy::None,
+            DispatchPolicy::Gated { dry_run: false } => LockPolicy::NonBlocking,
+            DispatchPolicy::Ungated(lock) => lock,
+        }
+    }
+}
+
+/// Exhaustive owner of the Commands-to-dispatch mapping: Principle 3's
+/// recovery-mode refusals and Principle 12's lock-before-state-read rule both
+/// read this table, so each new subcommand is classified once.
+fn dispatch_policy(command: &Commands) -> DispatchPolicy {
     use Commands::*;
-    use LockPolicy::*;
+    use DispatchPolicy::*;
+    use LockPolicy::{LockPlain, LockSystemdStop, MonitorSilent, NonBlocking, Timeout};
 
     match command {
-        Add(args) => {
-            if args.common.dry_run {
-                None
-            } else {
-                NonBlocking
-            }
-        }
-        Remove(args) => {
-            if args.common.dry_run {
-                None
-            } else {
-                NonBlocking
-            }
-        }
-        RemoveMissing(args) => {
-            if args.common.dry_run {
-                None
-            } else {
-                NonBlocking
-            }
-        }
-        Replace(args) => {
-            if args.common.dry_run {
-                None
-            } else {
-                NonBlocking
-            }
-        }
-        Unlock(args) => {
-            if args.dry_run {
-                None
-            } else {
-                NonBlocking
-            }
-        }
-        EnrollKeyFile(args) => {
-            if args.dry_run {
-                None
-            } else {
-                NonBlocking
-            }
-        }
-        Recover(args) => {
-            if args.dry_run {
-                None
-            } else {
-                NonBlocking
-            }
-        }
+        Add(args) => Gated {
+            dry_run: args.common.dry_run,
+        },
+        Remove(args) => Gated {
+            dry_run: args.common.dry_run,
+        },
+        RemoveMissing(args) => Gated {
+            dry_run: args.common.dry_run,
+        },
+        Replace(args) => Gated {
+            dry_run: args.common.dry_run,
+        },
+        Unlock(args) => Gated {
+            dry_run: args.dry_run,
+        },
+        EnrollKeyFile(args) => Gated {
+            dry_run: args.dry_run,
+        },
         Discover(args) => {
             if args.write {
-                NonBlocking
+                Gated { dry_run: false }
             } else {
-                None
+                Ungated(LockPolicy::None)
             }
         }
-        Ack => Timeout(Duration::from_secs(10)),
-        Monitor => MonitorSilent,
+        // `recover` is the only way out of recovery mode, so it must run
+        // while the journal exists.
+        Recover(args) => {
+            if args.dry_run {
+                Ungated(LockPolicy::None)
+            } else {
+                Ungated(NonBlocking)
+            }
+        }
+        Ack => Ungated(Timeout(Duration::from_secs(10))),
+        Monitor => Ungated(MonitorSilent),
         Lock(args) => {
             if args.dry_run {
-                None
+                Ungated(LockPolicy::None)
             } else if args.systemd_stop {
-                LockSystemdStop(Duration::from_secs(
+                Ungated(LockSystemdStop(Duration::from_secs(
                     args.deadline_secs.expect("clap requires deadline"),
-                ))
+                )))
             } else {
-                LockPlain
+                Ungated(LockPlain)
             }
         }
         SealMountpoint(args) => {
@@ -186,8 +190,15 @@ fn lock_policy(command: &Commands) -> LockPolicy {
             // lock-acquiring remediation: it serializes against an in-flight
             // unlock/lock so a concurrent mount cannot land over a just-cleared
             // bare dir. See ADR 028.
-            if args.unseal { NonBlocking } else { None }
+            if args.unseal {
+                Ungated(NonBlocking)
+            } else {
+                Ungated(LockPolicy::None)
+            }
         }
+        // scrub-resume-or-start checks the journal itself, under its scoped
+        // lock, because it answers a pending operation with Skipped (exit 4)
+        // rather than a refusal. See ADR 018.
         Status(_)
         | Doctor(_)
         | Idle
@@ -196,7 +207,16 @@ fn lock_policy(command: &Commands) -> LockPolicy {
         | ScrubResumeOrStart(_)
         | Tui(_)
         | Ups(_)
-        | Help(_) => None,
+        | Help(_) => Ungated(LockPolicy::None),
+    }
+}
+
+/// Recovery-mode gate. Dispatch runs it before any command arm, so no arm can
+/// read config or pool.json and hide the journal behind a load error.
+fn check_recovery_gate(policy: DispatchPolicy, paths: &StatePaths) -> Result<(), String> {
+    match policy {
+        DispatchPolicy::Gated { .. } => preflight::check_no_pending_operation(paths),
+        DispatchPolicy::Ungated(_) => Ok(()),
     }
 }
 
@@ -551,7 +571,12 @@ fn main() {
     let stop_coordinator = RealStopCoordinator::production();
     // Snapshot-rule ordering: Add/Unlock/Recover snapshot online state inside this lock window;
     // see docs/design/decisions/026-pool-lock-rust-owned.md.
-    let _pool_guard = acquire_per_policy(&pool_lock, lock_policy(&cli.command));
+    let policy = dispatch_policy(&cli.command);
+    let _pool_guard = acquire_per_policy(&pool_lock, policy.lock());
+    if let Err(msg) = check_recovery_gate(policy, &paths) {
+        print_cli_error(&msg);
+        std::process::exit(1);
+    }
 
     // Hoisted once: shared by add/remove/remove-missing/replace. Each command's
     // cmd_* function holds the inhibitor only across its irreversible mutation
@@ -569,10 +594,6 @@ fn main() {
                 std::io::IsTerminal::is_terminal(&std::io::stderr()),
                 false,
             );
-            if let Err(msg) = preflight::check_no_pending_operation(&paths) {
-                print_cli_error(&msg);
-                std::process::exit(1);
-            }
             let config = load_config_for_cmd_or_exit(Path::new(&config_path), 1);
             let runner = RealRunner;
             let online_ops = RealOnlineStateOps::new(&runner);
@@ -621,10 +642,6 @@ fn main() {
                 std::io::IsTerminal::is_terminal(&std::io::stderr()),
                 false,
             );
-            if let Err(msg) = preflight::check_no_pending_operation(&paths) {
-                print_cli_error(&msg);
-                std::process::exit(1);
-            }
             let config = load_config_for_cmd_or_exit(Path::new(&config_path), 1);
             let runner = RealRunner;
             let fs = RealFilesystem;
@@ -653,10 +670,6 @@ fn main() {
                 std::io::IsTerminal::is_terminal(&std::io::stderr()),
                 false,
             );
-            if let Err(msg) = preflight::check_no_pending_operation(&paths) {
-                print_cli_error(&msg);
-                std::process::exit(1);
-            }
             let config = load_config_for_cmd_or_exit(Path::new(&config_path), 1);
             let runner = RealRunner;
             let fs = RealFilesystem;
@@ -685,10 +698,6 @@ fn main() {
                 std::io::IsTerminal::is_terminal(&std::io::stderr()),
                 false,
             );
-            if let Err(msg) = preflight::check_no_pending_operation(&paths) {
-                print_cli_error(&msg);
-                std::process::exit(1);
-            }
             let config = load_config_for_cmd_or_exit(Path::new(&config_path), 1);
             let runner = RealRunner;
             let fs = RealFilesystem;
@@ -1024,8 +1033,9 @@ fn main() {
             // Fail-closed state gates run BEFORE the multi-disk cryptsetup scan,
             // so a refusal costs no probe and prints no misleading preview rows.
             // Bare discover gates on pool.json shape; `--write` refuses a
-            // pending-op journal or a healthy UUID-keyed pool.json
-            // (Corrupt/Missing are the rebuild path).
+            // healthy UUID-keyed pool.json (Corrupt/Missing are the rebuild
+            // path). The dispatch recovery gate has already refused a pending-op
+            // journal; the preconditions re-check it as a residual guard.
             // `write_discovered_membership` re-runs the `--write` gates as the
             // authoritative mutation-layer check (ADR 022 precedent).
             let pool_json = paths.pool_json();
@@ -1596,38 +1606,42 @@ mod tests {
         assert_eq!(zero.kind(), ErrorKind::ValueValidation);
     }
 
-    fn parsed_lock_policy(argv: &[&str]) -> LockPolicy {
-        let cli = Cli::try_parse_from(argv.iter().copied())
-            .unwrap_or_else(|err| panic!("argv should parse for lock policy: {argv:?}: {err:?}"));
-        lock_policy(&cli.command)
+    fn parsed_dispatch_policy(argv: &[&str]) -> DispatchPolicy {
+        let cli = Cli::try_parse_from(argv.iter().copied()).unwrap_or_else(|err| {
+            panic!("argv should parse for dispatch policy: {argv:?}: {err:?}")
+        });
+        dispatch_policy(&cli.command)
     }
 
     // Intent: every command variant and lock-affecting flag branch has a
-    // pinned dispatch lock policy.
-    // Why it exists: the policy table is now the single source of truth, so
-    // incorrect classifications must fail in Rust tests instead of only in VM
-    // coverage.
+    // pinned dispatch policy: gated or not in recovery mode, and its lock.
+    // Why it exists: the policy table is the single source of truth for both
+    // the pool lock and the recovery-mode gate, so incorrect classifications
+    // must fail in Rust tests instead of only in VM coverage. A mutator marked
+    // Ungated would run on inconsistent membership in recovery mode; status,
+    // lock or recover marked Gated would strand the operator in it.
     // Scenario: a future edit changes a dry-run, --write, or --systemd-stop
-    // branch and accidentally moves a command into the wrong locking class.
+    // branch and accidentally moves a command into the wrong class.
     #[test]
-    fn lock_policy_classifies_every_command_and_branch() {
-        use LockPolicy::*;
+    fn dispatch_policy_classifies_every_command_and_branch() {
+        use DispatchPolicy::*;
+        use LockPolicy::{LockPlain, LockSystemdStop, MonitorSilent, NonBlocking, Timeout};
+        let real = Gated { dry_run: false };
+        let dry = Gated { dry_run: true };
+        let lockless = Ungated(LockPolicy::None);
 
-        let cases: Vec<(Vec<&str>, LockPolicy)> = vec![
-            (vec!["braid", "add", "disk1=/dev/disk/by-id/x"], NonBlocking),
+        let cases: Vec<(Vec<&str>, DispatchPolicy)> = vec![
+            (vec!["braid", "add", "disk1=/dev/disk/by-id/x"], real),
             (
                 vec!["braid", "add", "disk1=/dev/disk/by-id/x", "--dry-run"],
-                None,
+                dry,
             ),
-            (vec!["braid", "remove", "disk1"], NonBlocking),
-            (vec!["braid", "remove", "disk1", "--dry-run"], None),
-            (
-                vec!["braid", "remove-missing", "--missing-id", "1"],
-                NonBlocking,
-            ),
+            (vec!["braid", "remove", "disk1"], real),
+            (vec!["braid", "remove", "disk1", "--dry-run"], dry),
+            (vec!["braid", "remove-missing", "--missing-id", "1"], real),
             (
                 vec!["braid", "remove-missing", "--missing-id", "1", "--dry-run"],
-                None,
+                dry,
             ),
             (
                 vec![
@@ -1638,7 +1652,7 @@ mod tests {
                     "--new",
                     "disk2=/dev/disk/by-id/x",
                 ],
-                NonBlocking,
+                real,
             ),
             (
                 vec![
@@ -1650,36 +1664,40 @@ mod tests {
                     "disk2=/dev/disk/by-id/x",
                     "--dry-run",
                 ],
-                None,
+                dry,
             ),
-            (vec!["braid", "unlock"], NonBlocking),
-            (vec!["braid", "unlock", "--dry-run"], None),
-            (vec!["braid", "enroll", "/mnt/usb"], NonBlocking),
-            (vec!["braid", "enroll", "/mnt/usb", "--dry-run"], None),
-            (vec!["braid", "recover"], NonBlocking),
-            (vec!["braid", "recover", "--dry-run"], None),
-            (vec!["braid", "discover", "--write"], NonBlocking),
-            (vec!["braid", "discover"], None),
-            (vec!["braid", "seal-mountpoint"], None),
-            (vec!["braid", "seal-mountpoint", "/mnt/orphan"], None),
+            (vec!["braid", "unlock"], real),
+            (vec!["braid", "unlock", "--dry-run"], dry),
+            (vec!["braid", "enroll", "/mnt/usb"], real),
+            (vec!["braid", "enroll", "/mnt/usb", "--dry-run"], dry),
+            (vec!["braid", "discover", "--write"], real),
+            (vec!["braid", "discover"], lockless),
+            (vec!["braid", "recover"], Ungated(NonBlocking)),
+            (vec!["braid", "recover", "--dry-run"], lockless),
+            (vec!["braid", "seal-mountpoint"], lockless),
+            (vec!["braid", "seal-mountpoint", "/mnt/orphan"], lockless),
             (
                 vec!["braid", "seal-mountpoint", "--unseal", "/mnt/orphan"],
-                NonBlocking,
+                Ungated(NonBlocking),
             ),
-            (vec!["braid", "lock", "--dry-run"], None),
-            (vec!["braid", "lock"], LockPlain),
+            (vec!["braid", "lock", "--dry-run"], lockless),
+            (vec!["braid", "lock"], Ungated(LockPlain)),
             (
                 vec!["braid", "lock", "--systemd-stop", "--deadline-secs", "270"],
-                LockSystemdStop(Duration::from_secs(270)),
+                Ungated(LockSystemdStop(Duration::from_secs(270))),
             ),
-            (vec!["braid", "ack"], Timeout(Duration::from_secs(10))),
-            (vec!["braid", "monitor"], MonitorSilent),
-            (vec!["braid", "status"], None),
-            (vec!["braid", "doctor"], None),
-            (vec!["braid", "idle"], None),
+            (
+                vec!["braid", "ack"],
+                Ungated(Timeout(Duration::from_secs(10))),
+            ),
+            (vec!["braid", "monitor"], Ungated(MonitorSilent)),
+            (vec!["braid", "status"], lockless),
+            (vec!["braid", "doctor"], lockless),
+            (vec!["braid", "idle"], lockless),
+            (vec!["braid", "wol-ready"], lockless),
             (
                 vec!["braid", "scrub-cancel", "--mount", "/mnt/storage"],
-                None,
+                lockless,
             ),
             (
                 vec![
@@ -1690,16 +1708,89 @@ mod tests {
                     "--fresh-for-secs",
                     "2592000",
                 ],
-                None,
+                lockless,
             ),
-            (vec!["braid", "tui"], None),
-            (vec!["braid", "ups", "status"], None),
-            (vec!["braid", "help", "status"], None),
+            (vec!["braid", "tui"], lockless),
+            (vec!["braid", "ups", "status"], lockless),
+            (vec!["braid", "help", "status"], lockless),
         ];
 
         for (argv, expected) in cases {
-            assert_eq!(parsed_lock_policy(&argv), expected, "argv: {argv:?}");
+            assert_eq!(parsed_dispatch_policy(&argv), expected, "argv: {argv:?}");
         }
+    }
+
+    // Intent: a gated real run takes the pool lock non-blocking, a gated dry
+    // run takes none, and an ungated row keeps the lock it names.
+    // Why it exists: the gate reads pending-op.json, a state read that
+    // Principle 12 puts under the pool lock on a real run.
+    // Scenario: an edit to `DispatchPolicy::lock` maps a gated real run to
+    // `LockPolicy::None`, so its journal read races another command's write.
+    #[test]
+    fn dispatch_policy_derives_the_gated_lock() {
+        assert_eq!(
+            DispatchPolicy::Gated { dry_run: false }.lock(),
+            LockPolicy::NonBlocking
+        );
+        assert_eq!(
+            DispatchPolicy::Gated { dry_run: true }.lock(),
+            LockPolicy::None
+        );
+        assert_eq!(
+            DispatchPolicy::Ungated(LockPolicy::LockPlain).lock(),
+            LockPolicy::LockPlain
+        );
+    }
+
+    fn write_pending_journal(paths: &StatePaths) {
+        let journal = braid_cli::journal::build_journal(
+            PoolMembership::empty(),
+            PoolMembership::empty(),
+            braid_cli::journal::OpKind::Add {
+                phase: braid_cli::journal::AddPhase::PoolMutation,
+                targets: braid_cli::membership::LuksUuidMap::new(),
+            },
+        );
+        braid_cli::journal::write_journal(paths, &journal).unwrap();
+    }
+
+    // Intent: the recovery gate refuses a gated command while pending-op.json
+    // exists, with the canonical recovery-mode message.
+    // Why it exists: dispatch runs this gate before any command arm, so it is
+    // the one check that keeps a config or pool.json load from hiding the
+    // journal (finding 261022-0632-001).
+    // Scenario: a bootstrap add was interrupted after its journal write and
+    // before pool.json was saved; braid-auto-unlock then runs `braid unlock`.
+    #[test]
+    fn recovery_gate_refuses_gated_command_with_pending_journal() {
+        let (_tmp, paths) = isolated_paths();
+        write_pending_journal(&paths);
+
+        for dry_run in [false, true] {
+            let err = check_recovery_gate(DispatchPolicy::Gated { dry_run }, &paths)
+                .expect_err("gated command must refuse with a pending journal");
+            assert!(
+                err.contains("interrupted operation detected"),
+                "dry_run={dry_run}: {err}"
+            );
+        }
+    }
+
+    // Intent: the recovery gate lets ungated commands run while
+    // pending-op.json exists, and lets gated commands run when it is absent.
+    // Why it exists: recover, status, doctor and lock must stay usable in
+    // recovery mode, and no journal must mean no refusal.
+    // Scenario: an operator inspects and recovers a pool after an
+    // interrupted add, then runs add again once recover cleared the journal.
+    #[test]
+    fn recovery_gate_passes_ungated_commands_and_absent_journal() {
+        let (_tmp, paths) = isolated_paths();
+        check_recovery_gate(DispatchPolicy::Gated { dry_run: false }, &paths)
+            .expect("no journal: gated command runs");
+
+        write_pending_journal(&paths);
+        check_recovery_gate(DispatchPolicy::Ungated(LockPolicy::NonBlocking), &paths)
+            .expect("journal present: ungated command runs");
     }
 
     // Intent: lock prefers the authoritative pool.json membership when it

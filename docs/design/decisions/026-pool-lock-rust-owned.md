@@ -32,12 +32,13 @@ pre-lock state read later, which would violate the stale-state invariant.
 ## Decision
 
 Rust dispatch (`cli/src/main.rs`) owns pool-operation locking. The
-`lock_policy` function in `cli/src/main.rs` is the single source of truth for
-mapping `Commands` variants to lock acquisition disciplines. Its wildcard-free
-exhaustive match makes every new subcommand choose a discipline at compile
-time. For commands whose policy acquires the pool lock, dispatch acquires
-`/run/braid-pool.lock` before loading config, loading membership, probing pool
-state, prompting, or writing journals.
+`dispatch_policy` function in `cli/src/main.rs` is the single source of truth
+for mapping `Commands` variants to lock acquisition disciplines, and for which
+commands recovery mode refuses. Its wildcard-free exhaustive match makes every
+new subcommand choose a discipline at compile time. For commands whose policy
+acquires the pool lock, dispatch acquires `/run/braid-pool.lock` before reading
+the recovery journal, loading config, loading membership, probing pool state,
+prompting, or writing journals.
 
 The shell wrapper is a pure exec shim. It only sets the module-controlled
 `PATH` and execs the packaged Rust binary.
@@ -54,8 +55,10 @@ default is 270 seconds, and the module asserts that it is strictly below
 
 Lifecycle work also lives under the Rust-held pool lock:
 
-- After every `unlock`, `add`, and `recover` attempt, success or failure,
-  dispatch runs `mark_online` as a finalizer. The `is_mountpoint` gate inside
+- After every real-run `unlock`, `add`, and `recover` attempt that gets past
+  dispatch's early exits (pool-lock contention, the recovery gate, and config
+  and pool.json loads), dispatch runs `mark_online` as a finalizer, success or
+  failure. The `is_mountpoint` gate inside
   `mark_online` short-circuits when the operation failed before mounting; the
   bootstrap-add and recover cases where the mount succeeded but a later step
   returned `Err` are exactly where this finalizer matters.
@@ -192,7 +195,7 @@ closes the mapper sooner by freeing its holder and re-running `braid lock`.
 ## Consequences
 
 - There is a single source of truth for the locked-command list and acquisition
-  discipline: `lock_policy` in Rust dispatch.
+  discipline: `dispatch_policy` in Rust dispatch.
 - The wrapper cannot drift from Rust command semantics because it no longer
   interprets subcommands.
 - Lock acquisition is the first real execution boundary for covered commands.

@@ -27,10 +27,13 @@ not the plan.
 
 ## Decision
 
-For migrated mutating commands, dispatch owns the read-side fences that must
-run under the pool lock before the planner starts: pending-operation preflight
-and config loading. The pending-operation preflight must run before config load
-so a recovery journal is never hidden behind a config parse error. The planner
+Dispatch owns the read-side fences that must run under the pool lock before
+the planner starts: pending-operation preflight and, for migrated mutating
+commands, config loading. For every command recovery mode refuses (the `Gated`
+rows of `cli/src/main.rs#dispatch_policy`), migrated or not, dispatch runs the
+pending-operation preflight once, right after acquiring the pool lock and
+before any command arm, so a recovery journal is never hidden behind a config
+or `pool.json` load error. The planner
 then owns pool state loading, live probes, accumulated preview notes, and
 construction of a typed work plan. This split finishes the Rust-owned pool-lock
 migration: the lock boundary and the config/journal reads it protects now live

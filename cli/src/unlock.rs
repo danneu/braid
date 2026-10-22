@@ -179,9 +179,11 @@ impl UnlockPlan {
 }
 
 /// Plan a `braid unlock` run. Owns everything above today's `--dry-run`
-/// gate: pending-op preflight, `mount::plan_open_pool`, conversion of
-/// every `ProbeEvent` to a `PreviewNote`, and `compile_open_steps` when
-/// an `OpenPlan` is produced. On success, accumulated probe notes live
+/// gate: the pending-op residual guard (dispatch's recovery gate,
+/// `cli/src/main.rs#check_recovery_gate`, refuses first),
+/// `mount::plan_open_pool`, conversion of every `ProbeEvent` to a
+/// `PreviewNote`, and `compile_open_steps` when an `OpenPlan` is
+/// produced. On success, accumulated probe notes live
 /// on `plan.notes` (the single render source for both preview and
 /// execute). On failure, notes move to `PlanFailure::notes` so the caller
 /// can render them to stderr before the error.
