@@ -1415,9 +1415,7 @@ fn check_wake_on_lan<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> CheckR
         Ok(out) => summarize_wol(interface, &out.stdout, &out.stderr, out.exit_status),
         Err(e) => CheckResult::fail(
             name,
-            format!(
-                "ethtool invocation failed for {interface}: {e} -- is braid.packages.ethtool on PATH?"
-            ),
+            format!("ethtool invocation failed for {interface}: {e}"),
         ),
     }
 }
@@ -1439,10 +1437,9 @@ fn check_ups_daemon_up<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> Chec
         return CheckResult::skip(name, "skipped (braid.ups not enabled)");
     };
     match crate::ups::query_ups(ctx.runner, ups_cfg.name.as_str()) {
-        Err(crate::ups::UpsQueryError::InvocationFailed(e)) => CheckResult::fail(
-            name,
-            format!("upsc invocation failed: {e} -- is pkgs.nut on PATH?"),
-        ),
+        Err(crate::ups::UpsQueryError::InvocationFailed(e)) => {
+            CheckResult::fail(name, format!("upsc invocation failed: {e}"))
+        }
         Err(crate::ups::UpsQueryError::QueryFailed { exit_code, stderr }) => CheckResult::warn(
             name,
             format!(
@@ -6973,34 +6970,50 @@ mod tests {
         assert!(runner.requests().is_empty(), "ethtool should not run");
     }
 
-    // Intent: check_wake_on_lan fails when ethtool cannot be invoked.
+    // Intent: check_wake_on_lan fails when ethtool cannot be invoked, and
+    // points at braid.packages.ethtool only when ethtool is missing.
     // Why it exists: missing wrapper wiring for braid.packages.ethtool would
-    // otherwise hide the runtime wake-path check on exactly the hosts that need it.
-    // Scenario: deployed wrapper omits ethtool from PATH.
+    // otherwise hide the runtime wake-path check on exactly the hosts that need
+    // it. The PATH hint used to be appended to every runner failure, so a
+    // signal-killed ethtool also sent the operator to PATH.
+    // Scenario: deployed wrapper omits ethtool from PATH; separately, ethtool
+    // is killed by SIGKILL while it runs.
     #[test]
     fn wake_on_lan_check_fails_when_ethtool_spawn_fails() {
-        let runner = MockRunner::default().with_handler(|request| match request {
-            CmdRequest::EthtoolShow { interface } if interface == "eno1" => Some(Err(
-                CmdError::Failed("ethtool eno1: No such file or directory".into()),
-            )),
-            _ => None,
-        });
-        let (_dir, paths) = isolated_paths();
-        let mut ctx = DoctorContext::for_test_parsed(&runner, &paths, config_with_auto_suspend());
+        let enoent = std::io::Error::from_raw_os_error(libc::ENOENT);
+        let cases: [(fn() -> CmdError, String); 2] = [
+            (
+                || CmdError::NotFound {
+                    cmd: "ethtool eno1".into(),
+                    program: "ethtool".into(),
+                    source: std::io::Error::from_raw_os_error(libc::ENOENT),
+                },
+                format!(
+                    "ethtool invocation failed for eno1: command failed: ethtool eno1: \
+                     {enoent} -- is braid.packages.ethtool on PATH?"
+                ),
+            ),
+            (
+                || CmdError::Failed("ethtool eno1: killed by signal 9 (SIGKILL)".into()),
+                "ethtool invocation failed for eno1: command failed: ethtool eno1: \
+                 killed by signal 9 (SIGKILL)"
+                    .into(),
+            ),
+        ];
+        for (error, want) in cases {
+            let runner = MockRunner::default().with_handler(move |request| match request {
+                CmdRequest::EthtoolShow { interface } if interface == "eno1" => Some(Err(error())),
+                _ => None,
+            });
+            let (_dir, paths) = isolated_paths();
+            let mut ctx =
+                DoctorContext::for_test_parsed(&runner, &paths, config_with_auto_suspend());
 
-        let r = check_wake_on_lan(&mut ctx);
+            let r = check_wake_on_lan(&mut ctx);
 
-        assert_eq!(r.status, CheckStatus::Fail, "got: {r:?}");
-        assert!(
-            r.message.contains("ethtool invocation failed"),
-            "got: {}",
-            r.message
-        );
-        assert!(
-            r.message.contains("braid.packages.ethtool"),
-            "got: {}",
-            r.message
-        );
+            assert_eq!(r.status, CheckStatus::Fail, "got: {r:?}");
+            assert_eq!(r.message, want);
+        }
     }
 
     // Intent: run_doctor registers wake_on_lan and human formatting labels it.
@@ -7161,12 +7174,14 @@ mod tests {
         );
     }
 
-    // Intent: check_ups_daemon_up fails when `upsc` cannot be invoked.
+    // Intent: check_ups_daemon_up fails when `upsc` cannot be invoked, and
+    // points at braid.packages.nut only when `upsc` is missing.
     // Why: an enabled UPS configuration whose client binary is missing
     // cannot verify the load-bearing shutdown safety path; unlike a
     // temporarily unreachable daemon, this is a packaging/wrapper fault.
+    // The hint used to name `pkgs.nut` and fire on every runner failure.
     // Scenario: `braid.ups.enable = true` but the braid wrapper does not
-    // place NUT's `upsc` binary on PATH.
+    // place NUT's `upsc` binary on PATH; separately, upsc is SIGKILLed.
     #[test]
     fn ups_daemon_check_fails_when_upsc_spawn_fails() {
         let runner = UpscSpawnFailureRunner;
@@ -7180,9 +7195,29 @@ mod tests {
             r.message
         );
         assert!(
+            r.message.ends_with(" -- is braid.packages.nut on PATH?"),
+            "a missing upsc should name the braid.packages.nut override: {}",
+            r.message
+        );
+        assert!(
             !r.message.contains("systemctl status upsd.service"),
             "invocation failures should not point at upsd: {}",
             r.message
+        );
+
+        let killed = MockRunner::default().with_handler(|request| {
+            matches!(request, CmdRequest::UpscQuery { .. }).then(|| {
+                Err(CmdError::Failed(
+                    "upsc ups: killed by signal 9 (SIGKILL)".into(),
+                ))
+            })
+        });
+        let mut ctx = ups_ctx(&killed, &paths, config_with_ups_enabled());
+        let r = check_ups_daemon_up(&mut ctx);
+        assert_eq!(r.status, CheckStatus::Fail, "got: {r:?}");
+        assert_eq!(
+            r.message,
+            "upsc invocation failed: command failed: upsc ups: killed by signal 9 (SIGKILL)"
         );
     }
 

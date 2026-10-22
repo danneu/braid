@@ -206,8 +206,9 @@ assert out_if_human == "", (
 assert err_if_human.startswith("error: upsc invocation failed:"), (
     f"expected human invocation failure prefix, got: {err_if_human!r}"
 )
-assert "-- is pkgs.nut on PATH?" in err_if_human, (
-    f"expected PATH hint in human invocation failure, got: {err_if_human!r}"
+assert "-- is braid.packages.nut on PATH?" in err_if_human, (
+    f"expected braid.packages.nut PATH hint in human invocation failure, "
+    f"got: {err_if_human!r}"
 )
 assert "upsc query failed" not in err_if_human, (
     f"query-failed wording leaked into human invocation failure: {err_if_human!r}"

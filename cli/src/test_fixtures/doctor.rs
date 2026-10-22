@@ -627,7 +627,8 @@ impl CommandRunner for PoolMissingDevicesRunner {
     }
 }
 
-/// `UpscQuery` returns `Err(CmdError::Failed)`; everything else returns
+/// `UpscQuery` returns `Err(CmdError::NotFound)`, as a wrapper without
+/// `upsc` on PATH would; everything else returns
 /// `Err(CmdError::MissingMock)`. Distinguishes spawn-failure messaging
 /// from query-failure messaging in `check_ups_daemon_up`.
 pub(crate) struct UpscSpawnFailureRunner;
@@ -635,9 +636,11 @@ pub(crate) struct UpscSpawnFailureRunner;
 impl CommandRunner for UpscSpawnFailureRunner {
     fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
         match request {
-            CmdRequest::UpscQuery { name } => Err(CmdError::Failed(format!(
-                "upsc {name}: No such file or directory"
-            ))),
+            CmdRequest::UpscQuery { name } => Err(CmdError::NotFound {
+                cmd: format!("upsc {name}"),
+                program: "upsc".into(),
+                source: std::io::Error::from_raw_os_error(libc::ENOENT),
+            }),
             _ => Err(CmdError::MissingMock),
         }
     }

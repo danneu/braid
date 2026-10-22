@@ -100,7 +100,7 @@ value. Distinct error sentinels are emitted for the common non-OK cases:
 | --- | --- | --- |
 | UPS reachable | serialized `UpscOutput` plus `severity` | 0 |
 | UPS query failed | `{"error": "query_failed", "detail": "exit <code>: <stderr>"}`. If stderr is blank, `detail` is just `exit <code>`. | 1 |
-| UPS invocation failed (upsc could not run -- missing on PATH, killed by signal, or other runner-level failure) | `{"error": "invocation_failed", "detail": "command failed: upsc ups: <reason>"}` | 1 |
+| UPS invocation failed (upsc could not run -- missing on PATH, killed by signal, or other runner-level failure) | `{"error": "invocation_failed", "detail": "command failed: upsc ups: <reason>"}`. When upsc is missing, `detail` ends with ` -- is braid.packages.nut on PATH?`. Other failures, such as a signal kill, get no hint. | 1 |
 | UPS not enabled | `{"error": "ups_not_enabled"}` | 0 |
 
 ## TUI UPS panel

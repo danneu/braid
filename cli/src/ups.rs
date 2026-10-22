@@ -24,8 +24,10 @@ pub enum UpsError {
     #[error("upsc query failed: {detail}")]
     QueryFailed { detail: String },
     /// Runner-level `upsc` failure stays distinct from non-zero UPS query
-    /// exits so wrapper/package breakage gets the right remediation hint.
-    #[error("upsc invocation failed: {detail} -- is pkgs.nut on PATH?")]
+    /// exits so wrapper/package breakage is not read as a daemon fault. The
+    /// PATH hint for a missing `upsc` arrives inside `detail`, from
+    /// `CmdError::NotFound`.
+    #[error("upsc invocation failed: {detail}")]
     InvocationFailed { detail: String },
     #[error("failed to serialize ups status: {0}")]
     Serialize(#[source] serde_json::Error),
@@ -942,16 +944,21 @@ mod tests {
     // output `braid ups status` promises. Under --json the command writes one
     // `query_failed` or `invocation_failed` document to stdout and returns
     // JsonErrorReported. In human mode it writes nothing to stdout and returns
-    // the error main.rs prints to stderr.
+    // the error main.rs prints to stderr. A missing upsc names
+    // braid.packages.nut; any other invocation failure carries no PATH hint.
     // Why it exists: scripts key on `.error` and read upsc's stderr from
     // `.detail`, but only the VM lane (tests/cli/braid-status-ups.py) checked
     // the failure bodies. A wrong sentinel, an empty body, or a detail without
-    // the stderr passed every Rust test. Rows compare text, not variants,
+    // the stderr passed every Rust test. The human invocation error also ended
+    // every runner failure with a hint naming `pkgs.nut`, not the
+    // braid.packages.nut override, so a SIGKILLed upsc sent the operator to
+    // check package wiring. Rows compare text, not variants,
     // because the text is the contract; the distinct `upsc query failed:` and
     // `upsc invocation failed:` prefixes still pin which failure each row hit.
     // Scenario: upsd.service is stopped (connection refused), upsc exits 1
-    // with no stderr, or upsc cannot run at all (no mock seeded), each with
-    // and without --json.
+    // with no stderr, upsc is killed by SIGKILL during a power event, upsc is
+    // missing from the wrapper PATH, or the runner fails with no mock seeded,
+    // each with and without --json.
     #[test]
     fn cmd_ups_status_failure_output_matrix() {
         /// What one row expects; the variant also picks the `json` flag.
@@ -962,11 +969,29 @@ mod tests {
             Error(String),
         }
 
+        let seeded = |(request, output)| MockRunner::default().with_output(request, output);
+        let killed = MockRunner::default().with_handler(|request| {
+            matches!(request, CmdRequest::UpscQuery { .. }).then(|| {
+                Err(CmdError::Failed(
+                    "upsc ups: killed by signal 9 (SIGKILL)".into(),
+                ))
+            })
+        });
+        let not_found = MockRunner::default().with_handler(|request| {
+            matches!(request, CmdRequest::UpscQuery { .. }).then(|| {
+                Err(CmdError::NotFound {
+                    cmd: "upsc ups".into(),
+                    program: "upsc".into(),
+                    source: std::io::Error::from_raw_os_error(libc::ENOENT),
+                })
+            })
+        });
+        let enoent = std::io::Error::from_raw_os_error(libc::ENOENT);
         let missing = CmdError::MissingMock.to_string();
         let rows = [
             (
                 "connection refused --json",
-                Some(ups_query_connection_refused_no_newline()),
+                seeded(ups_query_connection_refused_no_newline()),
                 Expect::Stdout(
                     "{\n  \"error\": \"query_failed\",\n  \"detail\": \
                      \"exit 1: Error: Connection failure: Connection refused\"\n}\n"
@@ -975,7 +1000,7 @@ mod tests {
             ),
             (
                 "connection refused",
-                Some(ups_query_connection_refused_no_newline()),
+                seeded(ups_query_connection_refused_no_newline()),
                 Expect::Error(
                     "upsc query failed: exit 1: Error: Connection failure: Connection refused"
                         .into(),
@@ -983,39 +1008,66 @@ mod tests {
             ),
             (
                 "empty stderr --json",
-                Some(ups_query_empty_stderr_exit_1()),
+                seeded(ups_query_empty_stderr_exit_1()),
                 Expect::Stdout(
                     "{\n  \"error\": \"query_failed\",\n  \"detail\": \"exit 1\"\n}\n".into(),
                 ),
             ),
             (
                 "empty stderr",
-                Some(ups_query_empty_stderr_exit_1()),
+                seeded(ups_query_empty_stderr_exit_1()),
                 Expect::Error("upsc query failed: exit 1".into()),
             ),
             (
+                "killed by signal --json",
+                killed.clone(),
+                Expect::Stdout(
+                    "{\n  \"error\": \"invocation_failed\",\n  \"detail\": \
+                     \"command failed: upsc ups: killed by signal 9 (SIGKILL)\"\n}\n"
+                        .into(),
+                ),
+            ),
+            (
+                "killed by signal",
+                killed,
+                Expect::Error(
+                    "upsc invocation failed: command failed: upsc ups: killed by signal 9 (SIGKILL)"
+                        .into(),
+                ),
+            ),
+            (
+                "upsc not found --json",
+                not_found.clone(),
+                Expect::Stdout(format!(
+                    "{{\n  \"error\": \"invocation_failed\",\n  \"detail\": \
+                     \"command failed: upsc ups: {enoent} -- is braid.packages.nut on PATH?\"\n}}\n"
+                )),
+            ),
+            (
+                "upsc not found",
+                not_found,
+                Expect::Error(format!(
+                    "upsc invocation failed: command failed: upsc ups: {enoent} \
+                     -- is braid.packages.nut on PATH?"
+                )),
+            ),
+            (
                 "missing mock --json",
-                None,
+                MockRunner::default(),
                 Expect::Stdout(format!(
                     "{{\n  \"error\": \"invocation_failed\",\n  \"detail\": \"{missing}\"\n}}\n"
                 )),
             ),
             (
                 "missing mock",
-                None,
-                Expect::Error(format!(
-                    "upsc invocation failed: {missing} -- is pkgs.nut on PATH?"
-                )),
+                MockRunner::default(),
+                Expect::Error(format!("upsc invocation failed: {missing}")),
             ),
         ];
 
         let dir = tempfile::tempdir().unwrap();
         let cfg = ups_write_config(&dir, "ups");
-        for (row, seeded, expect) in rows {
-            let runner = match seeded {
-                Some((request, output)) => MockRunner::default().with_output(request, output),
-                None => MockRunner::default(),
-            };
+        for (row, runner, expect) in rows {
             let json = matches!(expect, Expect::Stdout(_));
             let mut buf = Vec::new();
             let result = cmd_ups_status(&runner, &cfg, json, &mut buf);

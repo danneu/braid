@@ -1329,8 +1329,60 @@ impl CmdRequest {
 pub enum CmdError {
     #[error("command failed: {0}")]
     Failed(String),
+    /// exec found no `program`. Separate from `Failed` because only this
+    /// failure calls for checking PATH, so only it carries the hint from
+    /// `missing_program_hint`. A signal kill or a pipe error never does.
+    #[error("command failed: {cmd}: {source}{}", missing_program_hint(.program))]
+    NotFound {
+        cmd: String,
+        program: String,
+        source: std::io::Error,
+    },
     #[error("mock output missing for request")]
     MissingMock,
+}
+
+/// The ` -- ...` remediation suffix for `CmdError::NotFound`, kept in one
+/// place so no call site types an option name by hand. A name with a '/' gets
+/// none: exec never searched PATH for it, and the io error already names the
+/// path. A bare name names the `braid.packages` option whose package the
+/// wrapper puts on PATH, or only the program when no option provides it.
+fn missing_program_hint(program: &str) -> String {
+    if program.contains('/') {
+        return String::new();
+    }
+    match braid_package_option(program) {
+        Some(option) => format!(" -- is braid.packages.{option} on PATH?"),
+        None => format!(" -- is {program} on PATH?"),
+    }
+}
+
+/// The `braid.packages` option (`modules/braid/options.nix`) whose package
+/// provides `program`, for tools braid spawns by bare name.
+fn braid_package_option(program: &str) -> Option<&'static str> {
+    Some(match program {
+        "btrfs" | "mkfs.btrfs" => "btrfsProgs",
+        "cryptsetup" => "cryptsetup",
+        "lsblk" | "wipefs" | "mount" | "umount" | "mountpoint" => "utilLinux",
+        "upsc" | "upscmd" | "upsrw" => "nut",
+        "smartctl" => "smartmontools",
+        "ethtool" => "ethtool",
+        _ => return None,
+    })
+}
+
+/// Classify a failed `Command::spawn`, the one point that still has the io
+/// error kind, so callers can tell a missing program from other failures.
+fn spawn_error(cmd: &CmdArgs, cmd_str: &str, e: std::io::Error) -> CmdError {
+    if e.kind() == std::io::ErrorKind::NotFound {
+        CmdError::NotFound {
+            cmd: cmd_str.to_owned(),
+            program: cmd.program.clone(),
+            source: e,
+        }
+    } else {
+        CmdError::Failed(format!("{cmd_str}: {e}"))
+    }
 }
 
 pub trait CommandRunner: Sync {
@@ -1535,7 +1587,7 @@ impl RealRunner {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|e| CmdError::Failed(format!("{cmd_str}: {e}")))?;
+            .map_err(|e| spawn_error(cmd, &cmd_str, e))?;
 
         Ok(Box::new(RealPendingCommand { cmd_str, child }))
     }
@@ -1576,7 +1628,7 @@ impl RealRunner {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|e| CmdError::Failed(format!("{cmd_str}: {e}")))?;
+            .map_err(|e| spawn_error(cmd, &cmd_str, e))?;
 
         if let Some(mut stdin_handle) = child.stdin.take() {
             stdin_handle
@@ -1995,6 +2047,70 @@ mod tests {
 
         assert_eq!(output.exit_status, 0);
         assert_exact_child_env_dump(&output.stdout);
+    }
+
+    // Intent: a program that exec cannot find gets a PATH hint only when its
+    // name has no '/', because only such a name goes through the PATH search.
+    // Both spawn sites, with and without stdin, print the same text.
+    // Why it exists: the hint used to be typed at each call site and fired on
+    // every runner failure. It sent operators to PATH after a signal kill, and
+    // a hint on a slash path would send them there for a missing store path.
+    // Scenario: a tool braid does not package is missing from the wrapper
+    // PATH, and the beep probe's store path is gone after a rebuild.
+    #[test]
+    fn real_runner_missing_program_hint_follows_exec_path_rule() {
+        let enoent = std::io::Error::from_raw_os_error(libc::ENOENT);
+        let bare = "braid-test-no-such-program";
+        let slash = "/nonexistent/braid-test-no-such-program";
+        let cases = [
+            (
+                bare,
+                format!("command failed: {bare} arg: {enoent} -- is {bare} on PATH?"),
+            ),
+            (slash, format!("command failed: {slash} arg: {enoent}")),
+        ];
+        for (program, want) in cases {
+            let cmd = CmdArgs {
+                program: program.to_owned(),
+                args: vec!["arg".to_owned()],
+            };
+            let err = RealRunner::exec(&cmd).expect_err(program);
+            assert_eq!(err.to_string(), want, "exec {program}");
+            let err = RealRunner::exec_with_stdin(&cmd, b"").expect_err(program);
+            assert_eq!(err.to_string(), want, "exec_with_stdin {program}");
+        }
+    }
+
+    // Intent: each tool braid spawns by bare name points a missing-program
+    // error at the braid.packages option the wrapper builds PATH from.
+    // Why it exists: the hint names an override option, and the hand-typed
+    // upsc hint once named `pkgs.nut` instead, sending an operator who had
+    // overridden braid.packages.nut to the wrong knob.
+    // Scenario: an operator overrides a braid.packages option with a build
+    // that lacks the tool braid spawns, and the error must name that option.
+    #[test]
+    fn missing_program_hint_names_the_braid_packages_option() {
+        let rows = [
+            ("btrfs", " -- is braid.packages.btrfsProgs on PATH?"),
+            ("mkfs.btrfs", " -- is braid.packages.btrfsProgs on PATH?"),
+            ("cryptsetup", " -- is braid.packages.cryptsetup on PATH?"),
+            ("lsblk", " -- is braid.packages.utilLinux on PATH?"),
+            ("wipefs", " -- is braid.packages.utilLinux on PATH?"),
+            ("mount", " -- is braid.packages.utilLinux on PATH?"),
+            ("umount", " -- is braid.packages.utilLinux on PATH?"),
+            ("mountpoint", " -- is braid.packages.utilLinux on PATH?"),
+            ("upsc", " -- is braid.packages.nut on PATH?"),
+            ("upscmd", " -- is braid.packages.nut on PATH?"),
+            ("upsrw", " -- is braid.packages.nut on PATH?"),
+            ("smartctl", " -- is braid.packages.smartmontools on PATH?"),
+            ("ethtool", " -- is braid.packages.ethtool on PATH?"),
+            ("systemctl", " -- is systemctl on PATH?"),
+            ("/nix/store/abc-braid-beep-probe/bin/braid-beep-probe", ""),
+            ("./upsc", ""),
+        ];
+        for (program, want) in rows {
+            assert_eq!(missing_program_hint(program), want, "{program}");
+        }
     }
 
     // Intent: the default `CommandRunner::spawn` logs the request at spawn time
