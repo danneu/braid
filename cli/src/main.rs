@@ -235,8 +235,11 @@ enum UpsCommand {
 #[derive(Debug, Args)]
 struct UpsStatusArgs {
     /// Emit the parsed `upsc` model as JSON instead of a human summary.
-    /// Stable shape; distinct error sentinels for the not-enabled and
-    /// query-failed branches.
+    ///
+    /// Only `"severity": "online"` proves utility power. Any other
+    /// `severity`, or a top-level `error` (which replaces the UPS fields),
+    /// means it is not proven. The `ups status` page in the braid manual
+    /// lists each value and its exit code.
     #[arg(long)]
     json: bool,
 }

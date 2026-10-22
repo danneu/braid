@@ -4,10 +4,10 @@
 //! `braid ups status` on a pool without UPS is not an error. Query failure
 //! (non-zero `upsc` exit) is a hard error with `upsc`'s own stderr surfaced.
 //!
-//! `--json` emits a stable serialized `UpscOutput` (plus distinct error
-//! shapes for query-failed, invocation-failed, and not-enabled cases) so
-//! scripts can key off the parsed model without re-parsing `upsc` output
-//! themselves.
+//! `--json` emits the serialized `UpscOutput` plus braid's `severity`
+//! verdict, or a top-level `error` sentinel in its place (see `JsonReport`),
+//! so scripts can key off the parsed model and braid's judgment without
+//! re-parsing `upsc` output themselves.
 
 use crate::cmd::{CmdError, CmdRequest, CommandRunner};
 use crate::config::{ConfigError, config_read};
@@ -79,8 +79,10 @@ pub fn query_ups<R: CommandRunner>(runner: &R, name: &str) -> Result<UpscQueried
 }
 
 /// `--json` output mode for `braid ups status`. Separate from
-/// `UpscOutput` so the "not enabled" and "query failed" branches have a
-/// stable surface for scripting without piggy-backing on the parse model.
+/// `UpscOutput` so `error` sentinels have a stable surface for scripts.
+/// The `--json` help on `cli/src/main.rs#UpsStatusArgs` and
+/// `docs/commands/ups-status.md` restate the script rule, so a change to
+/// this contract must update both.
 #[derive(Debug, serde::Serialize)]
 #[serde(untagged)]
 enum JsonReport<'a> {
