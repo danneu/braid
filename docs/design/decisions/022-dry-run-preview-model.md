@@ -51,7 +51,11 @@ plan struct must not cache a rendered `Vec<Step>` alongside its work plan.
 `execute()` consumes the same typed `WorkPlan`. It must not rediscover or
 reinterpret semantic choices already made during planning. It may still perform
 execution-time validation that dry-run intentionally cannot do, such as checks
-that require a passphrase or a mapper that was closed during planning.
+that require a passphrase or a mapper that was closed during planning. It may
+also re-run its planner after the confirmation prompt, before the journal, to
+validate live state the pool lock cannot pin, and refuse unless the new plan
+equals the confirmed one. The new plan is only compared; execute still runs the
+confirmed plan (`cli/src/remove_missing.rs#RemoveMissingPlan::recheck_before_journal`).
 
 `Step` is output-only. It may describe risk, human text, and representative
 commands for dry-run rendering, but it must not become an execution source, a

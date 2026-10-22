@@ -81,7 +81,10 @@ healthy >=2-survivor case is intentionally warn-and-proceed on an
   below the chunks allocated on the missing device. **Fail-closed:** any
   probe or parse uncertainty also refuses
   (`cli/src/preflight.rs::check_raid1_relocation_space`, wired in
-  `cli/src/remove_missing.rs`).
+  `cli/src/remove_missing.rs`). Enforced at plan time *and* by a pre-journal
+  re-plan in `cli/src/remove_missing.rs#RemoveMissingPlan::recheck_before_journal`,
+  so survivor space used while the operator idles at the confirmation prompt
+  is refused with no `pending-op.json` stranded.
 - **`remove` evicting to a single survivor (2→1)** — RAID1 no longer
   applies, so braid instead checks the lone survivor can hold the
   post-conversion `data + 2 × metadata + 2 × system` (single + DUP profile).

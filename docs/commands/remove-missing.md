@@ -64,10 +64,11 @@ sudo braid remove-missing --missing-id 3 --yes
 2. Validates that the specified devid is actually a missing device (not a live one)
 3. Resolves the btrfs devid to the UUID-keyed pool member whose recorded devid matches. braid does not probe a MISSING device through its mapper, so it has no observable LUKS UUID and its recorded devid is the only binding
 4. Shows a confirmation prompt with the disk name, devid, and the resulting disk counts (e.g. `Pool: 2 present + 1 missing -> 2 disks`). This interactive prompt is skipped by `--yes` and not shown in `--dry-run`.
-5. Writes a `PoolMutation` journal and runs `btrfs device remove <devid>` to clear the missing device entry
-6. Updates pool.json to remove the member's UUID entry, then advances the journal to post-remove-missing maintenance
-7. If this was the last missing device and 2+ disks remain: runs a soft RAID1 balance (`-dconvert=raid1,soft -mconvert=raid1,soft`) to restore redundancy on any single-profile chunks created during degraded operation
-8. Clears the journal
+5. After confirmation (or straight away with `--yes`), plans again against the live pool: steps 1-3 and the pool's safety checks below. If a check now refuses, or the new plan differs from the confirmed one, braid stops before writing anything. This runs before any `--enqueue` wait (see below), so it does not cover space used while the removal is queued behind another exclusive operation, or while it runs.
+6. Writes a `PoolMutation` journal and runs `btrfs device remove <devid>` to clear the missing device entry
+7. Updates pool.json to remove the member's UUID entry, then advances the journal to post-remove-missing maintenance
+8. If this was the last missing device and 2+ disks remain: runs a soft RAID1 balance (`-dconvert=raid1,soft -mconvert=raid1,soft`) to restore redundancy on any single-profile chunks created during degraded operation
+9. Clears the journal
 
 A sleep inhibitor is held during the removal and the subsequent soft balance (if triggered).
 
@@ -90,6 +91,7 @@ If a btrfs exclusive operation (a running balance, device add/remove/replace, re
   braid does not model, or reports no positive Data/Metadata/System RAID1 row),
   when more than 1 surviving device exists
 - Refuses on a 2-disk RAID1 pool with one disk missing -- the kernel refuses to drop a RAID1 pool below two devices. Use `braid replace --old <missing-name> --new <new-name>=/dev/disk/by-id/<...>` to repair the dead disk, or `braid add` first and then re-run.
+- Refuses if the pool changed between planning and the journal write (for example, survivor space was used up or another disk dropped out while the prompt waited). Nothing was written, so re-run the command.
 - Refuses if a pending operation journal (`pending-op.json`) exists -- run `braid recover` to reconcile.
 - Refuses if another braid operation is in progress (pool lock `/run/braid-pool.lock` is held) -- retry once it finishes.
 - Refuses if a btrfs balance is *paused* on the pool -- resume or cancel it first. A paused balance holds the exclusive-operation lock indefinitely, so braid cannot wait it out.

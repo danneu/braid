@@ -20,7 +20,7 @@ pub struct Preview {
     pub steps: Vec<Step>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PreviewNote {
     Info(String),
     Warn(String),
@@ -64,7 +64,7 @@ impl<E> PlanFailure<E> {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NoteLevel {
     Ok,
     Skip,

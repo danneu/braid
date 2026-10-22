@@ -81,6 +81,19 @@ while `remove-missing` and the 2→1 `remove` path are fail-closed on any
 uncertainty, because a miss there can crash the filesystem read-only with
 `pending-op.json` already written.
 
+`remove-missing` plans again after the confirmation prompt (or straight away
+under `--yes`), above `journal::write_journal`, and refuses unless the new
+plan matches the confirmed one
+(`cli/src/remove_missing.rs#RemoveMissingPlan::recheck_before_journal`).
+Survivor space and device presence are kernel state the pool lock cannot pin,
+and the prompt has no time limit, so writes or a hot-unplug during the wait
+would otherwise reach the relocation with `pending-op.json` already written.
+Re-running the whole planner, not a chosen list of its checks, keeps every
+planner check fresh at the journal, including checks added later; execute
+still runs the confirmed plan. The gate runs before any `--enqueue` wait, so
+it does not cover space used while the removal waits behind another exclusive
+operation or while it runs. Only stopping pool writes would close that.
+
 `remove-missing` also refuses an untrusted missing-device allocation shape
 before `btrfs device remove`. Its trust check validates target identity and
 shape, not per-type completeness: the targeted missing devid must have exactly

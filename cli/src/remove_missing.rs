@@ -38,6 +38,24 @@ pub enum RemoveMissingError {
         "no member in membership has devid {devid} -- pool.json membership may need manual repair (run `braid status` to inspect)"
     )]
     NoMemberForDevid { devid: Devid },
+    /// The first plan passed but the re-plan just above the journal
+    /// (`RemoveMissingPlan::recheck_before_journal`) refused. It keeps the
+    /// planner's own text and adds that nothing was written, so the
+    /// operator knows a re-run is safe and needs no `braid recover`.
+    #[error(
+        "{source}\nbraid's first plan did not refuse this, but re-checking the pool just before writing anything did -- nothing was written; re-run `braid remove-missing`."
+    )]
+    ReplanRefused {
+        #[source]
+        source: Box<RemoveMissingError>,
+    },
+    /// The re-plan just above the journal passed but differs from the plan
+    /// that was confirmed, so the journal would record a removal the
+    /// operator did not agree to.
+    #[error(
+        "the pool changed after braid planned this removal: a re-check just before writing anything gives a different plan from the one confirmed -- nothing was written; re-run `braid remove-missing` to see the new plan."
+    )]
+    PlanChanged,
     #[error("probe error: {0}")]
     Probe(#[from] ProbeError),
     #[error("pool error: {0}")]
@@ -109,9 +127,9 @@ pub struct RemoveMissingParams<'a> {
 
 /// Dry-run preview source of truth for `braid remove-missing` plus the
 /// execute inputs pre-computed during planning. The membership snapshots
-/// are resolved under the command pool lock so `execute()` can journal the
-/// before/after state and persist the target state without reloading
-/// `pool.json`.
+/// are resolved under the command pool lock, and `execute()` journals and
+/// persists these confirmed snapshots. Its pre-journal re-plan reloads
+/// `pool.json` only to compare against them.
 pub struct RemoveMissingPlan {
     pub notes: Vec<PreviewNote>,
     work_plan: RemoveMissingWorkPlan,
@@ -119,7 +137,7 @@ pub struct RemoveMissingPlan {
     target_membership: membership::PoolMembership,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct RemoveMissingWorkPlan {
     missing_id: Devid,
     target_name: DiskName,
@@ -192,24 +210,15 @@ impl RemoveMissingPlan {
         // share one render contract for plan-derived notes.
         preview::emit_notes_to_stderr(&self.notes, PerDiskStyle::Bracketed);
 
-        let RemoveMissingPlan {
-            notes: _,
-            work_plan,
-            pre_membership,
-            target_membership,
-        } = self;
-
-        let name_to_remove = work_plan.target_name.clone();
-
         // Confirm
         if !params.yes {
             let prompt = format!(
                 "{}\n",
                 format_remove_missing_confirm(
-                    name_to_remove.as_str(),
-                    work_plan.missing_id,
-                    work_plan.remaining_present,
-                    work_plan.missing_count,
+                    self.work_plan.target_name.as_str(),
+                    self.work_plan.missing_id,
+                    self.work_plan.remaining_present,
+                    self.work_plan.missing_count,
                 )
             );
             params
@@ -238,6 +247,19 @@ impl RemoveMissingPlan {
                     "could not acquire sleep inhibitor (is logind running?): {e}"
                 ))
             })?;
+
+        // (Pre-journal) re-plan against the live pool. Above
+        // journal::write_journal so a stale plan fails clean, with no
+        // pending-op.json stranded (principle 3,
+        // docs/design/principles.md#3-safe-by-construction-operations).
+        self.recheck_before_journal(runner, fs, params)?;
+
+        let RemoveMissingPlan {
+            notes: _,
+            work_plan,
+            pre_membership,
+            target_membership,
+        } = self;
 
         let journal = journal::build_journal(
             pre_membership,
@@ -326,6 +348,57 @@ impl RemoveMissingPlan {
 
         eprintln!("Done. Missing device removed from pool.");
         Ok(())
+    }
+
+    /// Re-run `plan_remove_missing` against the live pool and require the
+    /// plan already confirmed. Survivor space, device presence, UPS power,
+    /// and the other planner inputs are live state the pool lock cannot
+    /// pin, and the confirm prompt has no time limit. Comparing a
+    /// whole fresh plan, not a hand-picked list of checks, keeps every
+    /// planner check fresh at the journal, including checks added later.
+    fn recheck_before_journal<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
+        &self,
+        runner: &R,
+        fs: &F,
+        params: &RemoveMissingParams<'_>,
+    ) -> Result<(), RemoveMissingError> {
+        let fresh = match plan_remove_missing(runner, fs, params) {
+            Ok(fresh) => fresh,
+            Err(PlanFailure { notes, error }) => {
+                self.emit_unseen_notes(&notes);
+                return Err(RemoveMissingError::ReplanRefused {
+                    source: Box::new(error),
+                });
+            }
+        };
+        self.emit_unseen_notes(&fresh.notes);
+        // Exhaustive, so a new plan field must join the comparison. Notes
+        // stay out: a busy-op or read-only-probe note can appear on an
+        // unchanged pool and changes nothing execute does.
+        let RemoveMissingPlan {
+            notes: _,
+            work_plan,
+            pre_membership,
+            target_membership,
+        } = &fresh;
+        if *work_plan != self.work_plan
+            || *pre_membership != self.pre_membership
+            || *target_membership != self.target_membership
+        {
+            return Err(RemoveMissingError::PlanChanged);
+        }
+        Ok(())
+    }
+
+    /// Print the re-plan's notes that this plan did not already print, so
+    /// the operator sees new context without repeats.
+    fn emit_unseen_notes(&self, fresh: &[PreviewNote]) {
+        let unseen: Vec<PreviewNote> = fresh
+            .iter()
+            .filter(|note| !self.notes.contains(note))
+            .cloned()
+            .collect();
+        preview::emit_notes_to_stderr(&unseen, PerDiskStyle::Bracketed);
     }
 }
 
@@ -906,7 +979,7 @@ mod tests {
         }
     }
 
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     fn acked_disk(missing_acked: bool, read_io_errs: u64) -> alert::AckedDisk {
@@ -1076,6 +1149,236 @@ mod tests {
                 .any(|c| matches!(c, CmdRequest::BtrfsDeviceRemove { .. })),
             "accepted confirm must reach BtrfsDeviceRemove: {calls:?}"
         );
+    }
+
+    /// Assert that a real run stopped before its journal: no
+    /// `pending-op.json` and no `btrfs device remove`.
+    fn assert_stopped_before_journal(f: &PoolFixture, runner: &MockRunner) {
+        let calls = runner.requests();
+        assert!(
+            !calls
+                .iter()
+                .any(|c| matches!(c, CmdRequest::BtrfsDeviceRemove { .. })),
+            "the re-check must refuse before BtrfsDeviceRemove: {calls:?}"
+        );
+        assert!(
+            journal::load_journal(&f.paths).unwrap().is_none(),
+            "the re-check must refuse before pending-op.json is written"
+        );
+    }
+
+    // Intent: a real run re-checks survivor space after the confirm prompt
+    //   and refuses before the journal when the missing device's chunks no
+    //   longer fit.
+    // Why it exists: the relocation-space preflight ran only while planning.
+    //   Space used up while the prompt waited let execute write
+    //   pending-op.json and start `btrfs device remove`, the read-only crash
+    //   ADR 012 makes remove-missing fail closed against.
+    // Scenario: devid 3 is missing from a three-disk pool. The survivors
+    //   have room when braid plans, then NAS writes fill them while the
+    //   operator reads the prompt.
+    #[test]
+    fn execute_refuses_before_journal_when_survivor_space_ran_out_at_prompt() {
+        let f = PoolFixture::three_disk_devids_pinned();
+        f.confirm.accept();
+        let tight_usage = device_usage_raw_body(&[
+            relocation_usage_live_device(
+                "/dev/mapper/braid-disk1",
+                1,
+                &[("Data", "RAID1", 503_316_480)],
+                16_777_216,
+            ),
+            relocation_usage_live_device(
+                "/dev/mapper/braid-disk2",
+                2,
+                &[("Data", "RAID1", 503_316_480)],
+                16_777_216,
+            ),
+            DeviceUsageSpec::missing(3, &[("Data", "RAID1", 67_108_864)], 0),
+        ]);
+        let usage_calls = Arc::new(AtomicUsize::new(0));
+        let (runner, _) =
+            RemoveMissingPool::three_disk_one_missing().install(MockRunner::default());
+        // The first usage read (planning) falls through to the fixture's
+        // roomy survivors; every later read sees them full.
+        let runner = runner.with_handler(move |req| match req {
+            CmdRequest::BtrfsDeviceUsageRaw { .. } => {
+                let call = usage_calls.fetch_add(1, Ordering::SeqCst);
+                (call > 0).then(|| Ok(mock_ok("btrfs device usage --raw", &tight_usage)))
+            }
+            _ => None,
+        });
+        let fs = MockFs::storage(vec![]).with_dm(canonical_dm_table());
+
+        let result =
+            cmd_remove_missing(&runner, &fs, &f.remove_missing_params().yes(false).build());
+
+        assert_stopped_before_journal(&f, &runner);
+        assert_eq!(f.confirm.prompts().len(), 1, "the operator confirmed once");
+        let msg = result
+            .expect_err("space used up during the prompt must refuse")
+            .to_string();
+        assert!(
+            msg.contains("not enough space to relocate"),
+            "the ENOSPC pre-flight refusal must name the cause: {msg}"
+        );
+        assert!(
+            msg.contains("nothing was written; re-run `braid remove-missing`"),
+            "the refusal must say nothing was written: {msg}"
+        );
+    }
+
+    // Intent: a real run re-probes the pool after the confirm prompt and
+    //   refuses before the journal when a survivor was hot-unplugged.
+    // Why it exists: the pool probe ran only while planning, so a survivor
+    //   pulled while the prompt waited reached `btrfs device remove` with
+    //   pending-op.json written, relocating chunks onto a disk that is gone.
+    // Scenario: devid 3 is missing from a three-disk pool. While the
+    //   operator reads the prompt, disk2's cable is pulled and its open
+    //   mapper reports `device: (null)`.
+    #[test]
+    fn execute_refuses_before_journal_when_survivor_hot_unplugged_at_prompt() {
+        let f = PoolFixture::three_disk_devids_pinned();
+        f.confirm.accept();
+        let disk2_status_calls = Arc::new(AtomicUsize::new(0));
+        let (runner, _) =
+            RemoveMissingPool::three_disk_one_missing().install(MockRunner::default());
+        // The first status read (planning) falls through to the fixture's
+        // live backing disk; every later read sees it gone.
+        let runner = runner.with_handler(move |req| match req {
+            CmdRequest::CryptsetupStatus { mapper } if mapper.as_str() == "braid-disk2" => {
+                let call = disk2_status_calls.fetch_add(1, Ordering::SeqCst);
+                (call > 0).then(|| {
+                    Ok(mock_ok(
+                        "cryptsetup status braid-disk2",
+                        "braid-disk2 is active and is in use.\n  type:    LUKS2\n  device:  (null)\n  mode:    read/write\n",
+                    ))
+                })
+            }
+            _ => None,
+        });
+        let fs = MockFs::storage(vec![]).with_dm(canonical_dm_table());
+
+        let result =
+            cmd_remove_missing(&runner, &fs, &f.remove_missing_params().yes(false).build());
+
+        assert_stopped_before_journal(&f, &runner);
+        assert_eq!(f.confirm.prompts().len(), 1, "the operator confirmed once");
+        let msg = result
+            .expect_err("a survivor hot-unplugged during the prompt must refuse")
+            .to_string();
+        assert!(
+            msg.contains("nothing was written; re-run `braid remove-missing`"),
+            "the refusal must say nothing was written: {msg}"
+        );
+    }
+
+    /// `MockFs` whose sysfs `exclusive_operation` reads `first` once and
+    /// `later` on every read after, to change the busy op between planning
+    /// and the pre-journal re-plan.
+    struct ExclOpChangesAfterFirstRead {
+        first: MockFs,
+        later: MockFs,
+        excl_op_reads: AtomicUsize,
+    }
+
+    impl ExclOpChangesAfterFirstRead {
+        fn new(first: &str, later: &str) -> Self {
+            let fs = |excl_op: &str| {
+                MockFs::storage(vec![])
+                    .with_dm(canonical_dm_table())
+                    .with_excl_op(excl_op)
+            };
+            Self {
+                first: fs(first),
+                later: fs(later),
+                excl_op_reads: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl Filesystem for ExclOpChangesAfterFirstRead {
+        fn exists(&self, path: &str) -> bool {
+            self.first.exists(path)
+        }
+
+        fn is_block_device(&self, path: &str) -> bool {
+            self.first.is_block_device(path)
+        }
+
+        fn list_dir(&self, path: &str) -> Result<Vec<String>, std::io::Error> {
+            self.first.list_dir(path)
+        }
+
+        fn read_to_string(&self, path: &str) -> Result<String, std::io::Error> {
+            if path.ends_with("/exclusive_operation")
+                && self.excl_op_reads.fetch_add(1, Ordering::SeqCst) > 0
+            {
+                return self.later.read_to_string(path);
+            }
+            self.first.read_to_string(path)
+        }
+
+        fn create_dir_all(&self, path: &str) -> Result<(), std::io::Error> {
+            self.first.create_dir_all(path)
+        }
+    }
+
+    // Intent: across planning and the pre-journal re-plan, each busy-op
+    //   note prints exactly once, and no note refuses the run.
+    // Why it exists: notes stay out of the re-plan comparison. A balance
+    //   that starts while the prompt waits adds a note to a pool whose plan
+    //   is unchanged, and `btrfs device remove --enqueue` queues behind it,
+    //   so refusing there would block a valid removal. A note the operator
+    //   already saw must not print a second time.
+    // Scenario: devid 3 is missing from a three-disk pool. In one run a
+    //   scheduled balance starts while the operator reads the prompt; in
+    //   the other a `device add` is in flight the whole time.
+    #[test]
+    fn execute_prints_each_replan_note_once_and_proceeds() {
+        for (first, later, note) in [
+            (
+                "none\n",
+                "balance\n",
+                "waiting for in-flight balance to finish...",
+            ),
+            (
+                "device add\n",
+                "device add\n",
+                "waiting for in-flight device add to finish...",
+            ),
+        ] {
+            let f = PoolFixture::three_disk_devids_pinned();
+            f.confirm.accept();
+            let (runner, _) =
+                RemoveMissingPool::three_disk_one_missing().install(MockRunner::default());
+            let fs = ExclOpChangesAfterFirstRead::new(first, later);
+
+            let mut result = None;
+            let stderr = crate::status_tag::testing::capture_with_color(false, || {
+                result = Some(cmd_remove_missing(
+                    &runner,
+                    &fs,
+                    &f.remove_missing_params().yes(false).build(),
+                ));
+            });
+
+            result
+                .expect("command ran")
+                .unwrap_or_else(|e| panic!("busy op {later:?} must not refuse: {e}"));
+            assert_eq!(
+                stderr.matches(note).count(),
+                1,
+                "busy op {first:?} then {later:?}: the note must print once: {stderr}"
+            );
+            let calls = runner.requests();
+            assert!(
+                calls
+                    .iter()
+                    .any(|c| matches!(c, CmdRequest::BtrfsDeviceRemove { .. })),
+                "busy op {later:?}: the removal must go ahead: {calls:?}"
+            );
+        }
     }
 
     /*
