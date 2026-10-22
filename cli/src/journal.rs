@@ -161,18 +161,26 @@ pub enum AddJournalMode {
     },
 }
 
-/// Phase marker for `OpKind::RemoveMissing`. PoolMutation gates the
-/// destructive `btrfs device remove missing`; PostRemoveMissingMaintenance
-/// gates the (optional) raid1 restore balance.
+/// Phase marker for `OpKind::RemoveMissing`. `PoolMutation` covers the work up
+/// to and including the primary btrfs membership change
+/// (`cli/src/pool.rs#pool_remove_missing_device`, which removes the journaled
+/// devid). The `PostRemoveMissingMaintenance` marker is written only after that
+/// change has committed in btrfs; it covers all remaining work before the
+/// journal clear, which recover finishes without rerunning the primary change.
+/// Order: `docs/design/decisions/017-runtime-disk-membership.md#mutation-ordering`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum RemoveMissingPhase {
     PoolMutation,
     PostRemoveMissingMaintenance,
 }
 
-/// Phase marker for `OpKind::Replace`. PoolMutation gates the
-/// `btrfs replace start` request; PostReplaceMaintenance gates the
-/// (optional) post-commit restore balance.
+/// Phase marker for `OpKind::Replace`. `PoolMutation` covers the work up to and
+/// including the primary btrfs membership change
+/// (`cli/src/pool.rs#pool_replace_device`). The `PostReplaceMaintenance` marker
+/// is written only after that change has committed in btrfs; it covers all
+/// remaining work before the journal clear, which recover finishes without
+/// rerunning the primary change.
+/// Order: `docs/design/decisions/017-runtime-disk-membership.md#mutation-ordering`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ReplacePhase {
     PoolMutation,
