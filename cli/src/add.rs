@@ -128,9 +128,9 @@ pub enum AddError {
         observed: String,
     },
     /// Operator passed `--luks-format-arg` containing a braid-managed
-    /// cryptsetup option (`--uuid`, `--label`). Surfaced through
-    /// `AddError` (rather than `LuksFormatExtraOptsError` directly) so
-    /// the CLI matches one error type at the boundary.
+    /// cryptsetup option (see `cli/src/types.rs#LuksFormatExtraOpts::parse`).
+    /// Surfaced through `AddError` (rather than `LuksFormatExtraOptsError`
+    /// directly) so the CLI matches one error type at the boundary.
     #[error("{0}")]
     ManagedFormatFlag(#[from] LuksFormatExtraOptsError),
     #[error("probe error: {0}")]
@@ -903,8 +903,9 @@ fn forced_returned_device_add_step(
 
 /// Per-invocation `braid add` configuration. `luks_format_extra_opts` is
 /// the raw CLI vector; the planner parses it into a single
-/// `LuksFormatExtraOpts` early so a managed flag (`--uuid`/`--label`) is
-/// refused before any probing, journal write, or `CryptsetupLuksFormat`.
+/// `LuksFormatExtraOpts` early so a braid-managed flag (see
+/// `cli/src/types.rs#LuksFormatExtraOpts::parse`) is refused before any
+/// probing, journal write, or `CryptsetupLuksFormat`.
 /// The same vector flows through `replace`'s symmetric path.
 pub struct AddParams<'a> {
     pub config: &'a Config,
@@ -1668,8 +1669,8 @@ pub fn plan_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     let config = params.config;
 
     // Validate `--luks-format-arg` at the CLI boundary BEFORE any
-    // probing, journal write, or `cryptsetup luksFormat`. A managed
-    // token (`--uuid`/`--label`) surfaces as
+    // probing, journal write, or `cryptsetup luksFormat`. A braid-managed
+    // token (see `cli/src/types.rs#LuksFormatExtraOpts::parse`) surfaces as
     // `AddError::ManagedFormatFlag` so the CLI matches one error type
     // at the boundary.
     let luks_format_extra_opts = match LuksFormatExtraOpts::parse(params.luks_format_extra_opts) {

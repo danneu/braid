@@ -599,8 +599,9 @@ pub fn check_fresh_target_ready<R: CommandRunner, F: Filesystem + ?Sized>(
 /// fresh-format paths, or the preserved journaled value on a recovery replay)
 /// so a mid-format crash and replay reformat under the same identity, and so
 /// the same UUID is recorded in `OpKind::Add`/`OpKind::Replace` from t=0.
-/// `extra_opts` carries already-validated user argv extras (managed flags
-/// `--uuid` and `--label` are rejected by `LuksFormatExtraOpts::parse`).
+/// `extra_opts` carries already-validated user argv extras
+/// (`cli/src/types.rs#LuksFormatExtraOpts::parse` rejects every braid-managed
+/// flag, `--uuid` and `--label` among them).
 pub fn luks_format<R: CommandRunner>(
     runner: &R,
     target: FreshTargetReady,

@@ -92,9 +92,9 @@ pub enum ReplaceError {
         uuid: LuksUuid,
     },
     /// Operator passed `--luks-format-arg` containing a braid-managed
-    /// cryptsetup option (`--uuid`, `--label`). Surfaced through
-    /// `ReplaceError` (rather than `LuksFormatExtraOptsError` directly) so
-    /// the CLI matches one error type at the boundary; mirrors
+    /// cryptsetup option (see `cli/src/types.rs#LuksFormatExtraOpts::parse`).
+    /// Surfaced through `ReplaceError` (rather than `LuksFormatExtraOptsError`
+    /// directly) so the CLI matches one error type at the boundary; mirrors
     /// `AddError::ManagedFormatFlag`.
     #[error("{0}")]
     ManagedFormatFlag(#[from] LuksFormatExtraOptsError),
@@ -253,12 +253,11 @@ pub struct ReplacePlan {
 enum ReplaceTargetPrep<C = FreshTargetChecked> {
     FreshLuks {
         check: C,
-        /// Validated `--luks-format-arg` extras. Managed flags
-        /// (`--uuid`, `--label`) are rejected by
-        /// `LuksFormatExtraOpts::parse` at the CLI boundary inside
-        /// `plan_replace`; the structured `uuid` and `label` fields on
-        /// `CmdRequest::CryptsetupLuksFormat` carry the managed
-        /// identity. No raw `--label braid-<name>` injection.
+        /// Validated `--luks-format-arg` extras. Braid-managed flags are
+        /// rejected by `cli/src/types.rs#LuksFormatExtraOpts::parse` at the
+        /// CLI boundary inside `plan_replace`; the structured `uuid` and
+        /// `label` fields on `CmdRequest::CryptsetupLuksFormat` carry the
+        /// managed identity. No raw `--label braid-<name>` injection.
         extra_opts: LuksFormatExtraOpts,
         enroll_key_file: Option<KeyFilePath>,
     },
@@ -1316,8 +1315,8 @@ where
     let config = params.config;
 
     // Validate `--luks-format-arg` at the CLI boundary BEFORE any
-    // probing, journal write, or `cryptsetup luksFormat`. A managed
-    // token (`--uuid`/`--label`) surfaces as
+    // probing, journal write, or `cryptsetup luksFormat`. A braid-managed
+    // token (see `cli/src/types.rs#LuksFormatExtraOpts::parse`) surfaces as
     // `ReplaceError::ManagedFormatFlag`; mirrors `add.rs` so the CLI
     // matches one error type at the boundary.
     let luks_format_extra_opts = match LuksFormatExtraOpts::parse(params.luks_format_extra_opts) {

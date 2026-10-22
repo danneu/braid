@@ -40,9 +40,9 @@ pub fn check_pool_unlocked_if_membership_exists(
     Err(format!(
         "pool exists but is not unlocked -- pool.json lists {n} member{}: {}.\n\
          Run `braid unlock` first, then re-run `braid add`.\n\
-         If pool.json is stale (members no longer plugged in or you intend \
-         to start over), reconcile with `braid discover` / `braid remove-missing`, \
-         or remove /var/lib/braid/pool.json manually.",
+         If pool.json is stale, back up /var/lib/braid/pool.json and move it \
+         aside, attach every intended member, then run `braid discover --write` \
+         to rebuild it.",
         if n == 1 { "" } else { "s" },
         names.join(", ")
     ))
