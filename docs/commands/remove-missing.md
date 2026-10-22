@@ -87,16 +87,13 @@ If a btrfs exclusive operation (a running balance, device add/remove/replace, re
   could put relocated data on a disk that is gone. Confirm the disk is gone,
   run `braid lock` then `braid unlock --allow-degraded` so btrfs promotes it,
   and retry.
-- Refuses if surviving disks lack space to absorb the missing device's
-  allocations (ENOSPC pre-flight), or if that pre-flight cannot run (the
-  `btrfs device usage` probe failed to spawn, returned a nonzero exit,
-  produced unparseable output, did not list the targeted missing devid, or
-  reported an untrusted missing-device allocation shape: the targeted devid is
-  listed more than once, is listed but **not as a missing device** (a real
-  device path, or a nonzero device size -- a disagreement between `btrfs
-  filesystem show` and `btrfs device usage`), carries an allocation profile
-  braid does not model, or reports no positive Data/Metadata/System RAID1 row),
-  when more than 1 surviving device exists
+- Refuses if pool.json has no member recorded at the specified devid.
+  pool.json may need manual repair; run `braid status` to inspect it.
+- When two or more present disks survive, refuses if they lack space for the
+  missing device's allocations, or if braid cannot verify that from
+  `btrfs device usage`. The error names the reason. See
+  [ADR 012](../design/decisions/012-intent-cli.md#enospc-pre-flight-check)
+  for the rules.
 - Refuses on a 2-disk RAID1 pool with one disk missing -- the kernel refuses to drop a RAID1 pool below two devices. Use `braid replace --old <missing-name> --new <new-name>=/dev/disk/by-id/<...>` to repair the dead disk, or `braid add` first and then re-run.
 - Refuses if the pool changed between planning and the journal write (for example, survivor space was used up or another disk dropped out while the prompt waited). Nothing was written, so re-run the command.
 {{#include ../_includes/mutating-command-refusals.md.inc}}
