@@ -6192,6 +6192,116 @@ mod tests {
         );
     }
 
+    // Intent: when replace cannot drop the old disk's alert state, it stops
+    //   with `AckCleanupFailed` after the post-replace journal is written and
+    //   before the resize, and keeps that journal for `braid recover`.
+    // Why it exists: ADR 014 makes this drop a correctness boundary, and one
+    //   `?` in `ReplacePlan::execute_inner` holds it. Weakened to a warning,
+    //   the way remove treats its hygiene prune, replace would finish and
+    //   clear the journal with the old disk's alert state still in place. The
+    //   next `braid ack` could then commit the old disk's counts as the new
+    //   disk's baseline, or mark the present new disk missing_acked.
+    // Scenario: devid 2 dropped out, and the operator replaces it with disk3
+    //   via `--missing-id 2`. acked-stats.json holds bytes that are not JSON,
+    //   so the drop fails right after `btrfs replace` commits.
+    #[test]
+    fn cmd_replace_alert_cleanup_failure_is_fatal_and_keeps_post_replace_journal() {
+        let f = PoolFixture::one_live_one_missing();
+        std::fs::write(f.paths.acked_stats_json(), "not json").unwrap();
+        let fs = MockFs::storage(vec![
+            "/dev/disk/by-id/virtio-disk3".into(),
+            "/dev/mapper/braid-disk3".into(),
+        ])
+        .with_dm(canonical_dm_table());
+        let replace_done = Arc::new(AtomicBool::new(false));
+        // Resize and soft balance succeed, so a run that skips the fatal
+        // drop finishes Ok instead of failing at a later step.
+        let runner = ReplacementPool::one_live_one_missing()
+            .install(MockRunner::default(), replace_done.clone())
+            .with_handler({
+                let replace_done = replace_done.clone();
+                move |req| match req {
+                    CmdRequest::BtrfsReplaceStart { .. } => {
+                        replace_done.store(true, std::sync::atomic::Ordering::Relaxed);
+                        Some(Ok(mock_ok("btrfs replace start", "")))
+                    }
+                    CmdRequest::BtrfsFilesystemResize { .. } => {
+                        Some(Ok(mock_ok("btrfs filesystem resize", "")))
+                    }
+                    CmdRequest::BtrfsBalanceRaid1Soft { .. } => {
+                        Some(Ok(mock_ok("btrfs balance raid1 soft", "")))
+                    }
+                    _ => None,
+                }
+            });
+
+        let result = cmd_replace(
+            &runner,
+            &fs,
+            &f.replace_params()
+                .old("disk2")
+                .new_disk("disk3=/dev/disk/by-id/virtio-disk3")
+                .missing_id(Some(Devid::new(2)))
+                .build(),
+        );
+
+        match result {
+            Err(ReplaceError::JournalLifecycle { source, advice }) => match *source {
+                ReplaceError::AckCleanupFailed { devid, .. } => {
+                    assert_eq!(
+                        devid,
+                        Devid::new(2),
+                        "the drop must name the replaced devid"
+                    );
+                    assert!(
+                        advice.contains("run `braid recover`"),
+                        "advice must send the operator to recover: {advice}"
+                    );
+                }
+                other => panic!("expected AckCleanupFailed source, got: {other:?}"),
+            },
+            other => panic!("expected Err(JournalLifecycle(AckCleanupFailed)), got: {other:?}"),
+        }
+
+        let journal = journal::load_journal(&f.paths)
+            .unwrap()
+            .expect("pending-op.json must survive so braid recover can retry the drop");
+        assert!(
+            matches!(
+                journal.op,
+                journal::OpKind::Replace {
+                    phase: journal::ReplacePhase::PostReplaceMaintenance,
+                    ..
+                }
+            ),
+            "the drop must run after the post-replace journal rewrite: {:?}",
+            journal.op
+        );
+
+        let saved = membership::load_membership(&f.paths)
+            .expect("pool.json must hold the membership btrfs replace committed");
+        let saved_names: Vec<&str> = saved.names().map(|n| n.as_str()).collect();
+        assert!(
+            saved_names.contains(&"disk3") && !saved_names.contains(&"disk2"),
+            "pool.json must hold the target membership: {saved_names:?}"
+        );
+
+        assert_eq!(
+            std::fs::read_to_string(f.paths.acked_stats_json()).unwrap(),
+            "not json",
+            "a failed drop must leave acked-stats.json as it was"
+        );
+
+        let log = runner.requests();
+        assert!(
+            !log.iter().any(|r| matches!(
+                r,
+                CmdRequest::BtrfsFilesystemResize { .. } | CmdRequest::BtrfsBalanceRaid1Soft { .. }
+            )),
+            "the drop must run before the resize and the soft balance: {log:?}"
+        );
+    }
+
     #[test]
     // Intent: missing-path replace skips the soft-balance runtime step
     //   when the replacement does not clear the last missing device.
