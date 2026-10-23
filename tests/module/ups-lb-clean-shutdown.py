@@ -119,6 +119,25 @@ with subtest("Previous boot ran braid-online ExecStop to completion"):
         f"braid-online.service was killed by timeout during UPS shutdown. Journal:\n{svc_log}"
     )
 
+with subtest("Previous boot ran ups-killpower"):
+    # upsmon's root parent writes POWERDOWNFLAG (/run/killpower, nixpkgs
+    # default) before SHUTDOWNCMD (reference/nut/clients/upsmon.c#doshutdown,
+    # #set_pdflag); nixpkgs' ups-killpower.service runs `upsdrvctl
+    # shutdown` late in shutdown only when that flag exists. That is the
+    # step that makes a real UPS cut and later restore output. dummy-ups
+    # cannot cut power (it logs "shutdown not supported"), so this proves
+    # the flag was written and the unit ran, not that power cycled -- the
+    # hardware half is plan/2026-10-22-1122/FU2.
+    killpower_log = machine.succeed(
+        "journalctl -b -1 -u ups-killpower.service --no-pager"
+    )
+    assert "Starting UPS Kill Power" in killpower_log, (
+        f"ups-killpower did not run during the LB shutdown. Journal:\n{killpower_log}"
+    )
+    assert "unmet condition" not in killpower_log, (
+        f"ups-killpower was skipped: POWERDOWNFLAG was not written. Journal:\n{killpower_log}"
+    )
+
 with subtest("Canary file intact on remount + btrfs reports zero errors"):
     machine.succeed(f"printf '%s\\n' {pq} | braid unlock --passphrase-stdin")
     content = machine.succeed("cat /mnt/storage/canary.txt").strip()
