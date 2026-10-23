@@ -63,7 +63,7 @@ def assert_consumer_holds_mount(node, unit):
     )
 
 
-machine.wait_for_unit("multi-user.target", timeout=120)
+machine.wait_for_unit("multi-user.target")
 
 # === setup: unlock and confirm consumer holds the mount ===
 

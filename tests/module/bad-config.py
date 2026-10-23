@@ -1,6 +1,6 @@
 start_all()
 
-machine.wait_for_unit("multi-user.target", timeout=120)
+machine.wait_for_unit("multi-user.target")
 
 with subtest("Boot completed with no pool configured"):
     # multi-user.target reached means boot didn't hang

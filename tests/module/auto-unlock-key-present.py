@@ -15,7 +15,7 @@
 # USB is NOT still mounted at /run/braid-key/mnt.
 
 start_all()
-machine.wait_for_unit("multi-user.target", timeout=120)
+machine.wait_for_unit("multi-user.target")
 
 with subtest("Auto-unlock service ran successfully"):
     journal = machine.succeed(

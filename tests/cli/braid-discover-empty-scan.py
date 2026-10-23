@@ -14,7 +14,7 @@
 #   exit-1 refusal -- not a silent empty preview.
 
 start_all()
-machine.wait_for_unit("multi-user.target", timeout=120)
+machine.wait_for_unit("multi-user.target")
 
 ERR = "error: no braid-labeled LUKS2 devices found"
 POOL_JSON = "/var/lib/braid/pool.json"

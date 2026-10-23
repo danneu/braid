@@ -23,7 +23,7 @@ passphrase = "testpassphrase"
 pq = shlex.quote(passphrase)
 
 start_all()
-machine.wait_for_unit("multi-user.target", timeout=120)
+machine.wait_for_unit("multi-user.target")
 
 machine.wait_for_unit("braid-ups-secrets.service", timeout=60)
 machine.wait_for_unit("upsd.service", timeout=60)
@@ -106,7 +106,7 @@ with subtest("Host shuts down in response to upsmon SHUTDOWNCMD"):
 
 # Second boot: verify data integrity and ExecStop journal evidence.
 machine.start()
-machine.wait_for_unit("multi-user.target", timeout=120)
+machine.wait_for_unit("multi-user.target")
 
 with subtest("Previous boot ran braid-online ExecStop to completion"):
     svc_log = machine.succeed(

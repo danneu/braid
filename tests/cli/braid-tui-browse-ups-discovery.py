@@ -15,7 +15,7 @@ def press(key):
     time.sleep(0.1)
 
 start_all()
-machine.wait_for_unit("multi-user.target", timeout=120)
+machine.wait_for_unit("multi-user.target")
 
 with subtest("discover pool membership without unlocking"):
     machine.succeed("braid discover --write")

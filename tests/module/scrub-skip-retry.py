@@ -69,7 +69,7 @@ def wait_for_exit(node, code, timeout=120):
 
 
 with subtest("build a 2-disk RAID1 pool"):
-    busy.wait_for_unit("multi-user.target", timeout=120)
+    busy.wait_for_unit("multi-user.target")
     # Take the poll timer out of the picture before the pool ever comes online.
     # Every scrub run this test observes must come from an explicit start or
     # from a poll the test itself schedules -- an OnActiveSec poke firing on

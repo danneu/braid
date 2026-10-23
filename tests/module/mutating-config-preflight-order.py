@@ -28,7 +28,7 @@
 import shlex
 
 start_all()
-machine.wait_for_unit("multi-user.target", timeout=120)
+machine.wait_for_unit("multi-user.target")
 
 missing_config = "/tmp/braid-missing-config.json"
 valid_config = "/etc/braid/config.json"

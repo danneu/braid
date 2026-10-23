@@ -95,13 +95,14 @@ let
         printf '%s\n' '${passphrase}' | braid unlock --passphrase-stdin
       '';
 
+      # Room for scrub-lifecycle.py's SCRUB_PAYLOAD_MIB on each RAID1 device.
       virtualisation.emptyDiskImages = [
         {
-          size = 1024;
+          size = 2048;
           driveConfig.deviceExtraOpts.serial = "disk1";
         }
         {
-          size = 1024;
+          size = 2048;
           driveConfig.deviceExtraOpts.serial = "disk2";
         }
       ];

@@ -43,8 +43,19 @@ TIMER = "braid-scrub.timer"
 SERVICE = "braid-scrub.service"
 MOUNT = "/mnt/storage"
 SCRUB_CANCEL_REQUESTED_FLAG = "/var/lib/braid/scrub-cancel-requested"
-# TODO: Play with these values to speed up test. This test is really slow.
-SCRUB_PAYLOAD_MIB = 32
+POOL_LOCK = "/run/braid-pool.lock"
+# The kernel keeps at most SCRUB_TOTAL_STRIPES stripes of BTRFS_STRIPE_LEN in
+# flight per device (reference/linux/fs/btrfs/scrub.c), so a read delay caps
+# each device's scrub rate at that many bytes per delay, however fast the
+# builder is. RAID1 puts a full copy of the payload on each device, so the scrub
+# stays running for at least SCRUB_PAYLOAD_MIB / (in-flight MiB per delay)
+# delays. That window is a hang guard: it only has to outlast one `braid lock`
+# or one poke. `braid lock` makes its own delayed reads before it cancels, so
+# its time-to-cancel grows with the delay just as the window does; the margin
+# comes from the payload, and a short delay keeps the lock itself fast. The
+# subtests cancel the scrub or lift the delay, so a passing run never waits the
+# window out.
+SCRUB_PAYLOAD_MIB = 512
 SCRUB_READ_DELAY_MS = 500
 SCRUB_DELAY_DISKS = ["disk1", "disk2"]
 
@@ -140,6 +151,31 @@ def wait_unit_success_after(node, unit, old_ts, timeout=120):
         " && test \"$(systemctl show {} -p Result --value)\" = success"
         " && ! systemctl is-active --quiet {}".format(unit, old_ts, unit, unit, unit),
         timeout=timeout,
+    )
+
+
+def start_slow_scrub(node):
+    """Start a real scrub through braid's service on read-delayed disks and
+    return once it is running and braid's runner has released the pool lock.
+
+    The runner holds the pool lock until its own status probe sees the scrub
+    registered. A `braid lock` sent before that is refused as contended, so
+    seeing `running` is not enough; wait for the release too.
+    """
+    dm_delay_activate(node, SCRUB_DELAY_DISKS, read_delay_ms=SCRUB_READ_DELAY_MS)
+    node.succeed("systemctl start --no-block {}".format(SERVICE))
+    node.wait_until_succeeds(
+        "btrfs scrub status --raw {} | grep -Eq 'Status:[[:space:]]+running'".format(
+            MOUNT
+        ),
+        timeout=60,
+    )
+    node.wait_until_succeeds("flock -n {} true".format(POOL_LOCK), timeout=60)
+    # The precondition every caller rests on: the scrub outlived the setup.
+    node.succeed(
+        "btrfs scrub status --raw {} | grep -Eq 'Status:[[:space:]]+running'".format(
+            MOUNT
+        )
     )
 
 
@@ -297,17 +333,9 @@ with subtest("resume: prepare dm-delay backed pool"):
         )
     )
     resume.succeed("sync")
-    dm_delay_activate(resume, SCRUB_DELAY_DISKS, read_delay_ms=SCRUB_READ_DELAY_MS)
 
 with subtest("resume: cancel preserves Aborted state across lock/unlock"):
-    resume.succeed("systemctl start --no-block {}".format(SERVICE))
-    resume.succeed(
-        "for i in $(seq 1 400); do "
-        "out=\"$(btrfs scrub status --raw /mnt/storage 2>&1 || true)\"; "
-        "if printf '%s\\n' \"$out\" | grep -Eq 'Status:[[:space:]]+running'; "
-        "then exit 0; fi; sleep 0.05; done; "
-        "printf '%s\\n' \"$out\"; exit 1"
-    )
+    start_slow_scrub(resume)
 
     resume.succeed("braid lock")
     # A real lock-time cancel makes btrfs exit 1, but the cancel-request marker
@@ -379,19 +407,7 @@ with subtest("concurrency: start a real scrub on slow disks"):
         )
     )
     concurrency.succeed("sync")
-    dm_delay_activate(
-        concurrency,
-        SCRUB_DELAY_DISKS,
-        read_delay_ms=SCRUB_READ_DELAY_MS,
-    )
-    concurrency.succeed("systemctl start --no-block {}".format(SERVICE))
-    concurrency.succeed(
-        "for i in $(seq 1 400); do "
-        "out=\"$(btrfs scrub status --raw /mnt/storage 2>&1 || true)\"; "
-        "if printf '%s\\n' \"$out\" | grep -Eq 'Status:[[:space:]]+running'; "
-        "then exit 0; fi; sleep 0.05; done; "
-        "printf '%s\\n' \"$out\"; exit 1"
-    )
+    start_slow_scrub(concurrency)
 
 with subtest("concurrency: a poke during the scrub starts no second scrub"):
     # Re-check "still running" immediately before the poke rather than trusting

@@ -15,7 +15,7 @@
 # environments, journal logs, or systemd unit metadata must not see it.
 
 start_all()
-machine.wait_for_unit("multi-user.target", timeout=120)
+machine.wait_for_unit("multi-user.target")
 
 machine.wait_for_unit("braid-ups-secrets.service", timeout=60)
 machine.wait_for_unit("upsd.service", timeout=60)

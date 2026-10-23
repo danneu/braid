@@ -12,7 +12,7 @@
 # and Rust dispatch sets root:storage 2770 before returning.
 
 start_all()
-machine.wait_for_unit("multi-user.target", timeout=120)
+machine.wait_for_unit("multi-user.target")
 
 with subtest("Bootstrap: braid add creates pool with correct permissions"):
     machine.succeed("echo -n 'testpassphrase' | braid add disk1=/dev/disk/by-id/virtio-disk1 --passphrase-stdin --yes")

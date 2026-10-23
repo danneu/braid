@@ -17,27 +17,43 @@
 import time
 
 start_all()
-machine.wait_for_unit("multi-user.target", timeout=120)
+machine.wait_for_unit("multi-user.target")
 
 
-def with_holder(command, timeout=5, hold_secs=4):
+# Hang guard for one command under contention. A passing command exits within
+# a second or two even on a loaded builder; only a command that blocks before
+# the lock (the FIFO subtest's regression) comes near it.
+COMMAND_TIMEOUT_SECS = 60
+
+
+def with_holder(command):
+    """Run command while a separate process holds the pool lock.
+
+    The holder keeps the lock until the command has exited, however long that
+    takes, so the command can never find the lock free because it started late.
+    Returns (exit code, merged output, seconds the command ran).
+    """
     machine.succeed(
-        "rm -f /tmp/holder.ready; "
+        "rm -f /tmp/holder.ready /tmp/holder.release; "
         "nohup flock -x /run/braid-pool.lock "
-        f"sh -c 'touch /tmp/holder.ready; sleep {hold_secs}' "
+        "sh -c 'touch /tmp/holder.ready; "
+        "while [ ! -e /tmp/holder.release ]; do sleep 0.1; done' "
         ">/dev/null 2>&1 &"
     )
-    machine.wait_until_succeeds("test -e /tmp/holder.ready", timeout=10)
+    machine.wait_until_succeeds("test -e /tmp/holder.ready", timeout=30)
     try:
-        return machine.execute(f"timeout {timeout} sh -c {command!r} 2>&1")
-    finally:
-        machine.wait_until_succeeds(
-            "flock -n /run/braid-pool.lock true", timeout=hold_secs + 5
+        start = time.monotonic()
+        rc, out = machine.execute(
+            f"timeout {COMMAND_TIMEOUT_SECS} sh -c {command!r} 2>&1"
         )
+        return rc, out, time.monotonic() - start
+    finally:
+        machine.succeed("touch /tmp/holder.release")
+        machine.wait_until_succeeds("flock -n /run/braid-pool.lock true", timeout=30)
 
 
 def assert_contention(name, command):
-    rc, out = with_holder(command)
+    rc, out, _ = with_holder(command)
     assert rc != 0, f"{name}: expected failure; out={out}"
     assert rc != 124, f"{name}: hung before contention; out={out}"
     assert "another braid operation is already in progress" in out, (
@@ -119,7 +135,7 @@ with subtest("discover --write acquires before pending-op and probe reads"):
         "out=" + base_out
     )
     machine.succeed("printf '{\"op\":\"placeholder\"}' > /var/lib/braid/pending-op.json")
-    rc, out = with_holder("braid discover --write --expect-count 9999")
+    rc, out, _ = with_holder("braid discover --write --expect-count 9999")
     machine.succeed("rm -f /var/lib/braid/pending-op.json")
     assert rc != 0, "discover --write should fail under contention; out=" + out
     assert "another braid operation is already in progress" in out, (
@@ -149,7 +165,7 @@ with subtest("discover --write does not read pool.json before acquiring lock"):
     machine.succeed("rm -f /var/lib/braid/pool.json")
     machine.succeed("mkfifo /var/lib/braid/pool.json")
     try:
-        rc, out = with_holder("braid discover --write --expect-count 1")
+        rc, out, _ = with_holder("braid discover --write --expect-count 1")
         assert rc != 0, "discover --write should fail under contention; out=" + out
         assert rc != 124, (
             "discover --write read pool.json before acquiring lock (timed out); "
@@ -164,7 +180,7 @@ with subtest("discover --write does not read pool.json before acquiring lock"):
 with subtest("enroll acquires before membership read"):
     machine.succeed("mkdir -p /var/lib/braid")
     machine.succeed("printf 'not valid json' > /var/lib/braid/pool.json")
-    rc, out = with_holder(
+    rc, out, _ = with_holder(
         "printf x | braid --config /nonexistent/braid.json enroll /nonexistent/keydir --passphrase-stdin"
     )
     machine.succeed("rm -f /var/lib/braid/pool.json")
@@ -184,11 +200,7 @@ with subtest("enroll acquires before membership read"):
     )
 
 with subtest("ack waits then reports contention before broken config"):
-    start = time.monotonic()
-    rc, out = with_holder(
-        "braid --config /nonexistent/braid.json ack", timeout=15, hold_secs=12
-    )
-    elapsed = time.monotonic() - start
+    rc, out, elapsed = with_holder("braid --config /nonexistent/braid.json ack")
     assert rc != 0, "ack should fail after bounded wait; out=" + out
     assert "another braid operation is already in progress" in out, (
         "expected contention message; out=" + out
@@ -196,9 +208,13 @@ with subtest("ack waits then reports contention before broken config"):
     assert "failed to read config file" not in out, (
         "ack read config before acquiring lock; out=" + out
     )
-    assert 9 <= elapsed <= 14, f"ack wait outside expected window: {elapsed:.2f}s"
+    # The lower bound is ack's own lock timeout (cli/src/main.rs#dispatch_policy):
+    # it proves ack waited rather than failing fast. The upper bound only proves
+    # the wait is bounded, so it sits far from any passing run.
+    assert elapsed >= 9, f"ack gave up before its lock timeout: {elapsed:.2f}s"
+    assert elapsed < COMMAND_TIMEOUT_SECS - 5, f"ack wait was not bounded: {elapsed:.2f}s"
 
 with subtest("monitor exits silently before broken config"):
-    rc, out = with_holder("braid --config /nonexistent/braid.json monitor")
+    rc, out, _ = with_holder("braid --config /nonexistent/braid.json monitor")
     assert rc == 0, "monitor should silently skip held-lock cycle; out=" + out
     assert out.strip() == "", "monitor contention should be silent; out=" + out

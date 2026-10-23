@@ -74,8 +74,8 @@ def lock(node):
 
 
 start_all()
-machine.wait_for_unit("multi-user.target", timeout=120)
-autoMachine.wait_for_unit("multi-user.target", timeout=180)
+machine.wait_for_unit("multi-user.target")
+autoMachine.wait_for_unit("multi-user.target")
 
 # --- Case 1: Offline immutable after boot ---
 

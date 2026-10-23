@@ -45,7 +45,7 @@ def member(pool, name):
 import shlex
 
 start_all()
-machine.wait_for_unit("multi-user.target", timeout=120)
+machine.wait_for_unit("multi-user.target")
 
 passphrase = "testpassphrase"
 pq = shlex.quote(passphrase)
@@ -447,7 +447,7 @@ machine.succeed("sync")
 
 machine.shutdown()
 machine.start()
-machine.wait_for_unit("multi-user.target", timeout=120)
+machine.wait_for_unit("multi-user.target")
 
 with subtest("ExecStop=braid lock completes during shutdown"):
     # PRIMARY: previous boot's journal proves ExecStop ran to completion.

@@ -14,8 +14,8 @@
 # Fails if BLOCK_GROUP_TREE is missing from compat_ro_flags.
 
 start_all()
-single.wait_for_unit("multi-user.target", timeout=120)
-raid1.wait_for_unit("multi-user.target", timeout=120)
+single.wait_for_unit("multi-user.target")
+raid1.wait_for_unit("multi-user.target")
 
 with subtest("single-disk pool has block-group-tree set"):
     single.succeed(

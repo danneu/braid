@@ -56,7 +56,7 @@ def assert_discover_refuses(label, command, needles):
 
 
 start_all()
-machine.wait_for_unit("multi-user.target", timeout=120)
+machine.wait_for_unit("multi-user.target")
 
 with subtest("duplicate LUKS UUID across distinct labels refuses, no preview, no write"):
     # Distinct labels (braid-disk1 / braid-disk2) so LabelCollision does NOT

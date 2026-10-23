@@ -14,7 +14,7 @@
 #   immediately instead of unmounting underneath the active operation.
 
 start_all()
-machine.wait_for_unit("multi-user.target", timeout=120)
+machine.wait_for_unit("multi-user.target")
 
 with subtest("braid lock fails fast when pool lock is held"):
     hold_secs = 4

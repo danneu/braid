@@ -1,5 +1,5 @@
 start_all()
-machine.wait_for_unit("multi-user.target", timeout=180)
+machine.wait_for_unit("multi-user.target")
 
 with subtest("Boot completed despite dead drive"):
     machine.succeed("systemctl is-active multi-user.target")

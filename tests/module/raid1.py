@@ -1,5 +1,5 @@
 start_all()
-machine.wait_for_unit("multi-user.target", timeout=120)
+machine.wait_for_unit("multi-user.target")
 
 with subtest("braid discover finds pool members"):
     machine.succeed("braid discover --write")

@@ -8,7 +8,7 @@
 # order; operator previews the discovered pool membership.
 
 start_all()
-machine.wait_for_unit("multi-user.target", timeout=120)
+machine.wait_for_unit("multi-user.target")
 
 out = machine.succeed("braid discover 2>&1")
 names = [

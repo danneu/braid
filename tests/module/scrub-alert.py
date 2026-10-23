@@ -111,7 +111,7 @@ def setup_resume_pool(node):
 # ===========================================================================
 
 with subtest("fail: unlock the pool"):
-    fail.wait_for_unit("multi-user.target", timeout=120)
+    fail.wait_for_unit("multi-user.target")
     unlock(fail)
     fail.succeed("systemctl is-active braid-online.service")
     fail.succeed("mountpoint -q /mnt/storage")
@@ -221,7 +221,7 @@ fail.shutdown()
 # ===========================================================================
 
 with subtest("cancel: prepare dm-delay pool, unlock, write payload, arm delay"):
-    cancel.wait_for_unit("multi-user.target", timeout=120)
+    cancel.wait_for_unit("multi-user.target")
     setup_resume_pool(cancel)
     unlock(cancel)
     cancel.succeed(

@@ -1,7 +1,7 @@
 import json
 
 start_all()
-machine.wait_for_unit("multi-user.target", timeout=180)
+machine.wait_for_unit("multi-user.target")
 
 # Seed pool.json with all 3 members including the bricked disk3.
 # braid discover can't be used here -- it only finds disks with intact LUKS

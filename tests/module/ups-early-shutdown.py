@@ -38,7 +38,7 @@ def set_status(status: str) -> None:
 
 
 start_all()
-machine.wait_for_unit("multi-user.target", timeout=120)
+machine.wait_for_unit("multi-user.target")
 machine.wait_for_unit("upsd.service", timeout=60)
 machine.wait_for_unit("upsmon.service", timeout=60)
 machine.wait_for_unit("upsdrv.service", timeout=60)
@@ -109,7 +109,7 @@ with subtest("A long outage keeps its deadline across a guard restart"):
     )
 
 machine.start()
-machine.wait_for_unit("multi-user.target", timeout=120)
+machine.wait_for_unit("multi-user.target")
 
 with subtest("Previous boot: guard trigger, braid-online ExecStop, killpower"):
     guard_log = machine.succeed("journalctl -b -1 -u braid-ups-guard.service --no-pager")

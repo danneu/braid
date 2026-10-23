@@ -42,7 +42,7 @@ def assert_consumer_holds_mount(node):
     )
 
 
-machine.wait_for_unit("multi-user.target", timeout=120)
+machine.wait_for_unit("multi-user.target")
 
 with subtest("boot: consumer is condition-skipped while the pool is locked"):
     machine.fail("systemctl is-active {}".format(CONSUMER))

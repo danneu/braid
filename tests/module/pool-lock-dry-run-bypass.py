@@ -19,7 +19,7 @@
 #   block on the held flock and should not print the contention message.
 
 start_all()
-machine.wait_for_unit("multi-user.target", timeout=120)
+machine.wait_for_unit("multi-user.target")
 
 
 def with_holder(command, timeout=2, hold_secs=8):

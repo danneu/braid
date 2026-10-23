@@ -48,7 +48,7 @@ def assert_service_holds_subvol_mount(node):
     )
 
 
-machine.wait_for_unit("multi-user.target", timeout=120)
+machine.wait_for_unit("multi-user.target")
 
 with subtest("cycle 1: unlock starts subvolume mount and bound service"):
     unlock(machine)

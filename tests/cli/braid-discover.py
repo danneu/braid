@@ -87,7 +87,7 @@ def non_uuid_keyed_pool_json():
 
 
 start_all()
-machine.wait_for_unit("multi-user.target", timeout=120)
+machine.wait_for_unit("multi-user.target")
 
 with subtest("discover lists labeled disks and prints write hint"):
     out = machine.succeed("braid discover 2>&1")

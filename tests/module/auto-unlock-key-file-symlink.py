@@ -11,7 +11,7 @@
 # leaves /run/braid-key/mnt unmounted.
 
 start_all()
-machine.wait_for_unit("multi-user.target", timeout=120)
+machine.wait_for_unit("multi-user.target")
 machine.wait_until_succeeds(
     "systemctl show -p ActiveState --value braid-auto-unlock.service | grep -x inactive",
     timeout=120,

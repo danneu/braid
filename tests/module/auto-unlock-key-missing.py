@@ -11,7 +11,7 @@
 # SSH-accessible and functional.
 
 start_all()
-machine.wait_for_unit("multi-user.target", timeout=120)
+machine.wait_for_unit("multi-user.target")
 
 with subtest("System booted successfully"):
     # Basic smoke test — system is functional

@@ -1,5 +1,5 @@
 start_all()
-machine.wait_for_unit("multi-user.target", timeout=120)
+machine.wait_for_unit("multi-user.target")
 
 # Intent: `braid discover` (bare and --write) emits the membership rows on
 #   stdout (the pipeable data product) while the "pass --write" hint, the

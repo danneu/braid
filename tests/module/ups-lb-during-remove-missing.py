@@ -43,7 +43,7 @@ import shlex
 import time
 
 start_all()
-machine.wait_for_unit("multi-user.target", timeout=120)
+machine.wait_for_unit("multi-user.target")
 machine.wait_for_unit("upsd.service", timeout=60)
 machine.wait_for_unit("upsmon.service", timeout=60)
 machine.wait_for_unit("upsdrv.service", timeout=60)
@@ -326,7 +326,7 @@ with subtest("Host shuts down in response to upsmon SHUTDOWNCMD"):
 # --- Phase 7: reboot, run recover. ---
 
 machine.start()
-machine.wait_for_unit("multi-user.target", timeout=120)
+machine.wait_for_unit("multi-user.target")
 for name in DELAYED_DISKS:
     dm_delay_create(machine, name)
 

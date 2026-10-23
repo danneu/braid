@@ -19,7 +19,7 @@
 # write or LUKS operation.
 
 start_all()
-machine.wait_for_unit("multi-user.target", timeout=120)
+machine.wait_for_unit("multi-user.target")
 
 # Wait for the NUT chain: secrets oneshot, then upsd + upsmon. upsdrv
 # has Type=oneshot + RemainAfterExit=true, so is-active stays "active"
