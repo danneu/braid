@@ -335,14 +335,10 @@ pub fn check_no_missing_devices(missing_count: u64, action: &str) -> Result<(), 
 /// Checks per allocation type (Data, Metadata, System) independently, because
 /// the kernel allocates chunks per type and cannot use Data space for Metadata.
 ///
-/// For RAID1, two constraints must hold:
-///   1. At least 2 remaining devices must have unallocated space (RAID1 requires
-///      two devices with capacity to write a new chunk).
-///   2. Effective RAID1 capacity = min(largest, rest) where largest is the
-///      biggest device's unallocated space and rest is the sum of all others.
-///      Each RAID1 chunk needs space on 2 devices, so a device with more
-///      free space than all others combined is bottlenecked by what those
-///      others can provide.
+/// Each type's bytes on the target must fit in the RAID1 capacity of the
+/// remaining devices' unallocated space, which `capacity::raid1_chunk_pair_capacity`
+/// owns. The fewer-than-two-devices check only gives a clearer message: the
+/// capacity rule already refuses that case.
 pub fn check_raid1_relocation_space(
     target_devs: &[&BtrfsDeviceUsageEntry],
     remaining_devs: &[&BtrfsDeviceUsageEntry],
@@ -357,9 +353,7 @@ pub fn check_raid1_relocation_space(
             continue;
         }
 
-        let mut remaining_unalloc: Vec<u64> =
-            remaining_devs.iter().map(|d| d.unallocated).collect();
-        remaining_unalloc.sort_unstable_by(|a, b| b.cmp(a));
+        let remaining_unalloc: Vec<u64> = remaining_devs.iter().map(|d| d.unallocated).collect();
 
         let devices_with_space = remaining_unalloc.iter().filter(|&&s| s > 0).count();
         if devices_with_space < 2 {
@@ -1504,10 +1498,10 @@ mod tests {
     }
 
     #[test]
-    // Intent: check_raid1_relocation_space handles 4 remaining devices with
+    // Intent: check_raid1_relocation_space handles 3 remaining devices with
     //   RAID1 capacity correctly using total/2 (no dominant device).
     // Why: When no single device dominates, capacity = total/2 is the correct formula.
-    // Scenario: 5-disk pool, target has 1GB Data; remaining [500MB, 400MB, 300MB] unallocated.
+    // Scenario: 4-disk pool, target has 1GB Data; remaining [500MB, 400MB, 300MB] unallocated.
     //   total=1200MB, largest=500MB, rest=700MB → 500 <= 700 → capacity=600MB < 1000MB → fail.
     fn raid1_space_fails_4devs_insufficient_total() {
         let target = make_dev(Devid::new(1), 0, &[("Data", 1_000_000_000)]);

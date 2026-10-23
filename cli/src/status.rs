@@ -149,20 +149,15 @@ pub struct CapacityReport {
     pub free_bytes: u64,
 }
 
-/// Estimate usable pool capacity for RAID1 given raw device sizes.
+/// Estimate usable pool capacity given raw device sizes.
 ///
-/// For RAID1, every chunk is mirrored, so total usable = sum/2 — except when
-/// drives are different sizes: the oversized portion of the largest drive can
-/// never be paired, so usable = min(sum/2, sum - max).
-///
-/// Single-disk pools have no mirroring, so the full size is usable.
+/// Two or more devices are RAID1, so `capacity::raid1_chunk_pair_capacity`
+/// owns the answer. A single-disk pool mirrors nothing, so its full size counts.
 pub fn estimate_pool_capacity(device_sizes: &[u64]) -> u64 {
-    let total: u64 = device_sizes.iter().sum();
     if device_sizes.len() < 2 {
-        return total;
+        return device_sizes.iter().sum();
     }
-    let max: u64 = device_sizes.iter().copied().max().unwrap();
-    (total / 2).min(total - max)
+    capacity::raid1_chunk_pair_capacity(device_sizes)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

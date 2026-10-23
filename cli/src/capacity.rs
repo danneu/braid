@@ -32,19 +32,17 @@ pub(crate) fn compact_data_command(mount: &str, usage: u8) -> String {
     format!("btrfs balance start -dusage={usage} {mount}")
 }
 
-/// Compute usable RAID1 chunk-pair capacity from sorted per-device headroom.
+/// Usable RAID1 capacity of per-device bytes, given in any order.
 ///
-/// The caller supplies unallocated bytes in descending order so preflight and
-/// advisory paths can share the same RAID1 bottleneck calculation.
-pub fn raid1_chunk_pair_capacity(unallocated_desc: &[u64]) -> u64 {
-    if unallocated_desc.len() < 2 {
-        return 0;
-    }
-
-    let largest = unallocated_desc[0];
-    let rest: u64 = unallocated_desc[1..].iter().sum();
-    let total = largest + rest;
-    if largest > rest { rest } else { total / 2 }
+/// The one owner of the RAID1 pairing rule, so preflights and advisories cannot
+/// drift apart. Each RAID1 chunk takes equal space on two different devices, so
+/// capacity is half the total, but never more than the other devices can pair
+/// with the largest one. A lone device has nothing to pair with, so it gives 0.
+pub fn raid1_chunk_pair_capacity(per_device: &[u64]) -> u64 {
+    let total: u64 = per_device.iter().sum();
+    let largest = per_device.iter().copied().max().unwrap_or(0);
+    let rest = total - largest;
+    rest.min(total / 2)
 }
 
 /// Sentinel `margin` for pools where the chunk-pair predicate does not apply
@@ -135,13 +133,12 @@ pub fn evaluate_enospc_risk(
                     .map(|(_, device)| device.device_size)
                     .sum();
                 let survivor_threshold = enospc_risk_threshold(survivor_total);
-                let mut survivor_unallocated: Vec<u64> = devices
+                let survivor_unallocated: Vec<u64> = devices
                     .iter()
                     .enumerate()
                     .filter(|(index, _)| *index != lost_index)
                     .map(|(_, device)| device.unallocated)
                     .collect();
-                survivor_unallocated.sort_unstable_by(|a, b| b.cmp(a));
                 raid1_chunk_pair_capacity(&survivor_unallocated) as i64 - survivor_threshold as i64
             })
             .min()
@@ -280,6 +277,17 @@ mod tests {
     #[test]
     fn raid1_chunk_pair_capacity_balanced_three_disk() {
         assert_eq!(raid1_chunk_pair_capacity(&[6, 4, 4]), 7);
+    }
+
+    // Intent: raid1_chunk_pair_capacity finds the largest device itself, so
+    //   input order does not change the result.
+    // Why it exists: the helper once read the first element as the largest,
+    //   so unsorted input overcounted, and the fail-closed remove-missing
+    //   preflight trusts this number.
+    // Scenario: headroom [1, 10, 1] pairs only 2 bytes, not half the total (6).
+    #[test]
+    fn raid1_chunk_pair_capacity_unordered_input() {
+        assert_eq!(raid1_chunk_pair_capacity(&[1, 10, 1]), 2);
     }
 
     // Intent: enospc_risk_advisory stays silent for a single-device pool.
