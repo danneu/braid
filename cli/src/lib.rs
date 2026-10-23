@@ -76,5 +76,6 @@ pub mod tui;
 pub mod types;
 pub mod unlock;
 pub mod ups;
+pub mod ups_guard;
 pub mod util;
 pub mod wol;

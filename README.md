@@ -178,7 +178,7 @@ every command: [command reference](docs/commands/).
   warning. Either can run a custom notify command
 - **Fail-closed mutations** -- an interrupted command leaves a marker that
   blocks further mutations until `braid recover` finishes the job or refuses
-- **UPS safety** -- with UPS support enabled, NUT drives orderly poweroff on low battery, mutating commands refuse to start unless UPS utility power is verified, and `braid ups status` / the TUI show live UPS state
+- **UPS safety** -- with UPS support enabled, braid shuts down through NUT after 5 minutes on battery or below 50 % charge (on low battery at the latest), mutating commands refuse to start unless UPS utility power is verified, and `braid ups status` / the TUI show live UPS state
 - **TUI dashboard** -- `braid tui` shows pool health, disk status, balance progress, SMART data, and (when enabled) chassis fan telemetry plus UPS state
 
 ## Why braid

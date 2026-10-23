@@ -213,8 +213,10 @@ Monitors all visible SATA devices (not only braid pool members). Requires a boar
 | `braid.ups.name` | string | `"ups"` | UPS identifier for `upsd`/`upsc` |
 | `braid.ups.driver` | string | `"usbhid-ups"` | NUT driver; the USB default covers most home-NAS UPSes |
 | `braid.ups.port` | string | `"auto"` | Driver port; `auto` finds the first matching USB UPS |
+| `braid.ups.shutdownAfter` | null or positive int | `300` | Seconds on battery before braid shuts down; `null` = off |
+| `braid.ups.shutdownBelowCharge` | null or int 1-99 | `50` | Charge percent on battery below which braid shuts down; `null` = off |
 
-When enabled, NUT triggers an orderly poweroff on low battery (unwinding `braid-online.service` -> `braid lock` -> unmount) and pool-mutating commands (`add`/`remove`/`remove-missing`/`replace`) refuse to start unless the UPS reports verified utility power (`OL`). Only `name` is written to `/etc/braid/config.json`, so `braid ups status` and the TUI know which UPS to query; `driver` and `port` configure the NUT driver only. Non-USB drivers (`apcsmart`, `snmp-ups`) are an escape hatch and not first-class.
+When enabled, the host shuts down through NUT after `shutdownAfter` on battery, below `shutdownBelowCharge`, or on low battery, whichever comes first (unwinding `braid-online.service` -> `braid lock` -> unmount), and pool-mutating commands (`add`/`remove`/`remove-missing`/`replace`) refuse to start unless the UPS reports verified utility power (`OL`). `name` and the two shutdown options are written to `/etc/braid/config.json`, so `braid ups status`, the TUI, and the shutdown guard know which UPS to query and when to act; `driver` and `port` configure the NUT driver only. Non-USB drivers (`apcsmart`, `snmp-ups`) are an escape hatch and not first-class.
 
 See [UPS](ups.md) for the setup workflow and live status.
 
@@ -288,6 +290,8 @@ braid = {
     name = "ups";          # default
     driver = "usbhid-ups"; # default
     port = "auto";         # default
+    shutdownAfter = 300;   # default; null = off
+    shutdownBelowCharge = 50;  # default; null = off
   };
 };
 ```

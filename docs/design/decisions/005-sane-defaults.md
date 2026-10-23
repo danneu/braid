@@ -42,6 +42,8 @@ Create a `braid.*` option when:
 | `braid.autoScrub.enable` | `true` | Scrub detects bit rot before it compounds. Every NAS should do this. Wrapped in a braid option for lifecycle binding to `braid-online.service`. |
 | `braid.autoScrub.intervalDays` | `30` | Btrfs community consensus, unchanged as a cadence. Weekly is aggressive for spinning disks; quarterly risks undetected corruption on a small RAID1. TrueNAS defaults to weekly (ZFS); Synology doesn't enable it by default. Monthly is the sweet spot. What changed is the anchor, not the number: this is 30 days since btrfs last recorded a scrub -- a hand scrub counts -- not a calendar boundary ([ADR 035](035-scrub-scheduling-by-freshness.md)). |
 | `braid.poolAccessGroup` | `"storage"` | Mount root set to `root:storage 2770`. Users in the group can read/write the mount root. Setgid ensures new entries inherit the group. Same pattern as TrueNAS/OMV. Does not override per-file umask. |
+| `braid.ups.shutdownAfter` | `300` (seconds) | When UPS support is on, shut down after this long on battery instead of waiting for the firmware's late low-battery signal. Short outages ride through; long ones end with about half the battery left on a typical home-NAS UPS. Either value can only shut down earlier than low battery, so a wrong default errs toward safety. See [ADR 020](020-ups-integration.md#early-shutdown-on-battery-timer-and-charge-floor). |
+| `braid.ups.shutdownBelowCharge` | `50` (percent) | Shut down on battery once charge drops below this, whichever comes first with `shutdownAfter`. Covers an aging battery or a grown load that drains faster than the timer assumes. |
 
 ## Alternatives considered
 
@@ -61,6 +63,7 @@ Rejected. TrueNAS runs ZFS on always-on servers. Braid targets home NAS with spi
 
 - `modules/braid/options.nix` — declares the option defaults (`braid.autoScrub`, `braid.poolAccessGroup`)
 - `modules/braid/storage.nix` — realizes `braid.autoScrub` into the scrub lifecycle units (`braid-scrub` timer and service), both bound to `braid-online.service`
+- `modules/braid/ups.nix` — declares the UPS shutdown-policy defaults (`braid.ups.shutdownAfter`, `braid.ups.shutdownBelowCharge`)
 - `cli/src/online_state.rs` — `mark_online()` applies the mount-root permissions from `braid.poolAccessGroup` (`root:<group> 2770`)
 - [ADR 035: Scrub scheduling by freshness](035-scrub-scheduling-by-freshness.md) — what the 30-day cadence is measured from
 - [Resilient by default](003-resilient-boot.md) — related philosophy: protect by default, no toggles

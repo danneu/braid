@@ -38,6 +38,54 @@ pub struct FanControl {
 #[serde(deny_unknown_fields)]
 pub struct Ups {
     pub name: UpsName,
+    /// Absent in configs that predate the shutdown policy; that reads as no
+    /// early shutdown, the behavior those configs had.
+    #[serde(default)]
+    pub shutdown: UpsShutdownPolicy,
+}
+
+/// The on-battery shutdown policy from `braid.ups.shutdownAfter` and
+/// `braid.ups.shutdownBelowCharge`, carried in config.json so the guard reads
+/// it the same way every other braid consumer reads module settings. A null
+/// field turns that trigger off.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpsShutdownPolicy {
+    pub after_secs: Option<std::num::NonZeroU64>,
+    pub below_charge_pct: Option<ChargeFloorPct>,
+}
+
+impl UpsShutdownPolicy {
+    /// True when at least one trigger is on, which is exactly when the module
+    /// installs the guard.
+    pub fn is_enabled(&self) -> bool {
+        self.after_secs.is_some() || self.below_charge_pct.is_some()
+    }
+}
+
+/// A charge floor in percent. 0 could never trip and 100 would trip on every
+/// reading short of a full battery, so the module and this type both accept
+/// only 1-99.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "u8")]
+pub struct ChargeFloorPct(u8);
+
+impl ChargeFloorPct {
+    pub fn get(self) -> u8 {
+        self.0
+    }
+}
+
+impl TryFrom<u8> for ChargeFloorPct {
+    type Error = String;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        if (1..=99).contains(&value) {
+            Ok(Self(value))
+        } else {
+            Err(format!("charge floor must be 1-99 percent, got {value}"))
+        }
+    }
 }
 
 /// Module-owned auto-suspend config mirrored into the CLI so runtime
@@ -371,6 +419,54 @@ mod tests {
         let cfg: Config = serde_json::from_str(raw).expect("config should parse");
         let u = cfg.ups().expect("ups should be Some");
         assert_eq!(u.name.as_str(), "ups");
+        assert!(!u.shutdown.is_enabled());
+    }
+
+    // Intent: Config deserializes the shutdown policy cli.nix writes, with a
+    //   null field turning that trigger off.
+    // Why it exists: the guard reads its triggers only from this block
+    //   (plan/2026-10-22-1122/D3); a schema mismatch would leave the guard
+    //   with no policy or fail every UPS-aware command at config load.
+    // Scenario: the defaults (300 s, 50 %), and a host that set
+    //   shutdownBelowCharge = null.
+    #[test]
+    fn parses_ups_shutdown_policy() {
+        let raw = r#"{
+            "mount_point": "/mnt/storage",
+            "ups": { "name": "ups", "shutdown": { "after_secs": 300, "below_charge_pct": 50 } }
+        }"#;
+        let cfg: Config = serde_json::from_str(raw).expect("config should parse");
+        let policy = &cfg.ups().unwrap().shutdown;
+        assert_eq!(policy.after_secs.map(|s| s.get()), Some(300));
+        assert_eq!(policy.below_charge_pct.map(ChargeFloorPct::get), Some(50));
+
+        let raw = r#"{
+            "mount_point": "/mnt/storage",
+            "ups": { "name": "ups", "shutdown": { "after_secs": 300, "below_charge_pct": null } }
+        }"#;
+        let cfg: Config = serde_json::from_str(raw).expect("config should parse");
+        let policy = &cfg.ups().unwrap().shutdown;
+        assert!(policy.below_charge_pct.is_none());
+        assert!(policy.is_enabled());
+    }
+
+    // Intent: Config rejects a zero timer and a charge floor outside 1-99.
+    // Why it exists: the module rejects these at eval time; a hand-edited
+    //   config.json must not get past the CLI with a timer that fires at once
+    //   or a floor that can never or always trip.
+    // Scenario: after_secs = 0, below_charge_pct = 0, 100.
+    #[test]
+    fn rejects_out_of_range_ups_shutdown_policy() {
+        for shutdown in [
+            r#"{ "after_secs": 0, "below_charge_pct": null }"#,
+            r#"{ "after_secs": null, "below_charge_pct": 0 }"#,
+            r#"{ "after_secs": null, "below_charge_pct": 100 }"#,
+        ] {
+            let raw = format!(
+                r#"{{ "mount_point": "/mnt/storage", "ups": {{ "name": "ups", "shutdown": {shutdown} }} }}"#
+            );
+            serde_json::from_str::<Config>(&raw).expect_err(shutdown);
+        }
     }
 
     // Intent: Config rejects UPS names outside the shared Rust/Nix grammar.

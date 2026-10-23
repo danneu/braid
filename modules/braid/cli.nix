@@ -32,6 +32,10 @@ let
     // lib.optionalAttrs cfg.ups.enable {
       ups = {
         name = cfg.ups.name;
+        shutdown = {
+          after_secs = cfg.ups.shutdownAfter;
+          below_charge_pct = cfg.ups.shutdownBelowCharge;
+        };
       };
     }
     // lib.optionalAttrs cfg.autoSuspend.enable {

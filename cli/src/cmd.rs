@@ -393,6 +393,12 @@ pub enum CmdRequest {
     },
     /// `upsc -L localhost` -- discovery entry point for configured UPS names.
     UpscListUpses,
+    /// `upsmon -c fsd` -- tells the running upsmon to set forced shutdown on
+    /// the UPS and run its normal shutdown, which writes POWERDOWNFLAG before
+    /// SHUTDOWNCMD (reference/nut/clients/upsmon.c#forceshutdown). The UPS
+    /// guard's only way to shut the host down; it exits non-zero when no
+    /// running upsmon could be signalled.
+    UpsmonFsd,
 }
 
 #[derive(Debug)]
@@ -1380,6 +1386,10 @@ impl CmdRequest {
                 program: "upsc".to_owned(),
                 args: vec!["-L".into(), "localhost".into()],
             },
+            CmdRequest::UpsmonFsd => CmdArgs {
+                program: "upsmon".to_owned(),
+                args: vec!["-c".into(), "fsd".into()],
+            },
         }
     }
 
@@ -1441,7 +1451,7 @@ fn braid_package_option(program: &str) -> Option<&'static str> {
         "btrfs" | "mkfs.btrfs" => "btrfsProgs",
         "cryptsetup" => "cryptsetup",
         "lsblk" | "wipefs" | "mount" | "umount" | "mountpoint" => "utilLinux",
-        "upsc" | "upscmd" | "upsrw" => "nut",
+        "upsc" | "upscmd" | "upsrw" | "upsmon" => "nut",
         "smartctl" => "smartmontools",
         "ethtool" => "ethtool",
         _ => return None,
@@ -2556,6 +2566,7 @@ mod tests {
                 vec!["-l", "ups"],
             ),
             (CmdRequest::UpscListUpses, "upsc", vec!["-L", "localhost"]),
+            (CmdRequest::UpsmonFsd, "upsmon", vec!["-c", "fsd"]),
         ];
 
         for (request, program, args) in cases {

@@ -250,6 +250,11 @@ struct UpsArgs {
 enum UpsCommand {
     /// Show current UPS status, battery charge, runtime, load, and device info
     Status(UpsStatusArgs),
+    /// Internal: run by `braid-ups-guard.service` as the upsmon user. Polls
+    /// the UPS and forces a shutdown through upsmon when the configured
+    /// on-battery timer or charge floor trips. Hidden from `braid --help`.
+    #[command(hide = true)]
+    Guard,
 }
 
 #[derive(Debug, Args)]
@@ -559,6 +564,11 @@ fn main() {
     let needs_root = match &cli.command {
         Commands::Tui(args) if args.demo => false,
         Commands::Help(_) => false,
+        // Runs as the upsmon user so it can signal upsmon with no
+        // capabilities; it touches no pool state.
+        Commands::Ups(UpsArgs {
+            command: UpsCommand::Guard,
+        }) => false,
         _ => true,
     };
 
@@ -1209,6 +1219,15 @@ fn main() {
                     Err(e) => {
                         print_cli_error(&e.to_string());
                         std::process::exit(1);
+                    }
+                }
+            }
+            UpsCommand::Guard => {
+                match braid_cli::ups_guard::cmd_ups_guard(RealRunner, Path::new(&config_path)) {
+                    Ok(never) => match never {},
+                    Err(e) => {
+                        print_cli_error(&e.to_string());
+                        std::process::exit(2);
                     }
                 }
             }

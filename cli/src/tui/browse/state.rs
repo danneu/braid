@@ -1344,6 +1344,7 @@ mod tests {
     fn ups() -> Ups {
         Ups {
             name: crate::types::UpsName::parse("ups").unwrap(),
+            shutdown: Default::default(),
         }
     }
 

@@ -30,6 +30,11 @@
           name = "ups";
           driver = "dummy-ups";
           port = "ups.dev";
+          # The VM boots on battery and stays there. With the default
+          # shutdown policy the guard would power it off partway through a
+          # slow run; this test is about preflight, not early shutdown.
+          shutdownAfter = null;
+          shutdownBelowCharge = null;
         };
       };
 

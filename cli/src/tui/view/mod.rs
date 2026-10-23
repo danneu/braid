@@ -2864,6 +2864,7 @@ pub(crate) mod tests {
         let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(sample_pool()));
         model.ups_config = Some(crate::config::Ups {
             name: crate::types::UpsName::parse("ups").unwrap(),
+            shutdown: Default::default(),
         });
         model.ups = Some(UpsSnapshot {
             flags: Vec::new(),

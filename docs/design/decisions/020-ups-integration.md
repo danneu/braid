@@ -68,6 +68,14 @@ When NUT fires the low-battery (LB) event, upsmon runs `systemctl poweroff`. sys
 
 This is not "alert only." The host genuinely shuts down, because the only safe state during a prolonged power outage is off. An alert-only policy would require the user to react in time, which defeats the point of unattended operation.
 
+### Early shutdown: on-battery timer and charge floor
+
+Firmware LB is the latest possible moment to shut down -- often about two minutes of estimated runtime left, after a deep discharge, on a battery whose estimate drifts as it ages. So braid also shuts down early: `braid.ups.shutdownAfter` (seconds on battery) and `braid.ups.shutdownBelowCharge` (percent), whichever comes first, both on by default. LB stays the backstop and is unchanged.
+
+`braid-ups-guard.service` runs `braid ups guard` (`cli/src/ups_guard.rs`). It polls `upsc` and, when a trigger holds, runs `upsmon -c fsd`. It never powers the host off itself: upsmon sets FSD, writes `POWERDOWNFLAG`, and runs `SHUTDOWNCMD`, so the shutdown, the braid-online unwinding, and ups-killpower are the same path as LB. The on-battery clock starts on the first `OB` reading and stops only on an `online` verdict from `UpsSeverity`; a failed or unproven reading changes nothing. The clock is a `CLOCK_BOOTTIME` value in the unit's preserved runtime directory, so it survives a guard restart, counts time spent suspended, and resets at boot. The guard runs as the upsmon user with no capabilities: signalling upsmon needs only the same uid. It is not pool-bound. Its policy reaches it through `/etc/braid/config.json`.
+
+Rejected: NUT's `ignorelb` with `battery.*.low` overrides, which drops the device's own LB and stops the driver if the UPS stops reporting charge or runtime; upssched timers, which see events but not charge and would make braid own `NOTIFYFLAG`; writing firmware thresholds with `upsrw`, which depends on the device and lives outside the NixOS config; and a guard that runs `systemctl poweroff` itself, which skips `POWERDOWNFLAG` so the UPS never cycles power. Full rationale: `plans/impl/2026-10-22-1122-ups-on-battery-shutdown-policy.md`.
+
 ### Reject pool-mutating commands unless UPS reports utility power (preflight hygiene only)
 
 When `braid.ups.enable = true`, `braid add`, `braid remove`, `braid remove-missing`, and `braid replace` query UPS status at preflight and refuse with a `Validation`-shaped error unless the UPS status can be trusted as explicitly on utility power. The check is fail-closed: it refuses on `upsc` invocation or query failure (dead upsd, unknown UPS name, or exec failure), an empty or missing `ups.status`, any critical flag (`LB`, `TESTFAIL`, `COMMBAD`, `FSD` -- the same set the TUI paints red), on-battery (`OB`), or any status set missing `OL`. Known non-critical advisory states such as `OL RB`, and unknown tokens co-present with `OL` and no known blocker, still pass because utility power is explicitly present. The check sits alongside the existing preflight checks, before any journal write.
@@ -107,6 +115,8 @@ braid = {
     name = "ups";               # identifier used by upsd and upsc
     driver = "usbhid-ups";      # USB default; covers the vast majority of UPSes
     port = "auto";              # usbhid-ups's standard "find the device" value
+    shutdownAfter = 300;        # seconds on battery before early shutdown; null = off
+    shutdownBelowCharge = 50;   # percent charge floor on battery; null = off
   };
 };
 ```
@@ -117,9 +127,9 @@ Defaults applied internally, not surfaced as options in v1:
 - `SHUTDOWNCMD = systemctl poweroff`
 - upsmon credentials per "Upsmon credential lifecycle"
 
-Note: `NOTIFYCMD` is intentionally not configured in v1 -- alert-model integration is deferred (see "Alert-model integration is deferred" above).
+Note: `NOTIFYCMD` is intentionally not configured in v1 -- alert-model integration is deferred (see "Alert-model integration is deferred" above). The early-shutdown guard polls instead of using `NOTIFYCMD`, so users' own NUT notification setups stay theirs.
 
-The configured `name` is also written to `/etc/braid/config.json` so that `braid ups status` and the TUI do not have to guess which UPS to query.
+The configured `name` and shutdown policy are also written to `/etc/braid/config.json` so that `braid ups status`, the TUI, and the guard do not have to guess which UPS to query.
 
 ## Deferred
 
@@ -136,12 +146,12 @@ Each of these blocked the flip from `Draft` to `Active`. All three are now close
 
 1. **Recovery-proof for mid-mutation power loss (primary blocker).** Resolved by the four VM tests in `plans/impl/2026-04-21-forced-shutdown-recovery-proof.md`'s matrix: `ups-lb-during-replace`, `ups-lb-during-remove`, `ups-lb-during-remove-missing`, and `ups-lb-during-balanced-add`. Each fires `OB LB` via `upsrw` while a different mutation class is in flight, lets `systemctl poweroff` run, reboots the VM, and runs `braid recover`. The idle/no-paused recovery path still asserts the post-recover state matches what the original mutation would have produced -- including no orphaned LUKS mappers, no `MISSING` btrfs entries, no remaining single-profile chunks where RAID1 was intended, and a cleared `pending-op.json`. The crash-paused owed RAID1 subcase is intentionally narrower: `ups-lb-during-remove-missing` and the paused branch of `ups-lb-during-balanced-add` now assert that recover preserves `pending-op.json`, leaves single-profile chunks visible, and asks for manual btrfs inspection instead of replaying a balance. The Pre-M11 audit also surfaced two `cli/src/recover.rs` gaps that the same plan landed before the matrix ran: `pool_resize_device` is now replayed for `OpKind::Replace`, and the owed RAID1 balance is replayed for `OpKind::Add`, `OpKind::RemoveMissing`, and `OpKind::Replace` only when btrfs balance status is idle -- for an add into an existing pool the same hard convert live add runs, otherwise the soft restore; see [balance-soft](../../internals/btrfs/balance-soft.md#recover-replay) for the underflow rationale behind the fail-closed branch.
 2. **Shutdown ordering for ordinary mounted operation.** Resolved by `tests/module/ups-lb-clean-shutdown.{nix,py}` (Plan 1's M7). The VM test mounts an idle pool, fires `OB LB` via `upsrw`, and asserts `braid-online.service`'s ExecStop completes (and is not killed by `TimeoutStopSec`) before poweroff. The default `TimeoutStopSec = 5min` is sufficient for a single-disk pool; larger pools should retain that headroom.
-3. **Battery-low threshold.** Resolved with the upstream NUT default. Plan 1's M7 (`ups-lb-clean-shutdown`) passed without raising `battery.runtime.low` from its driver-dependent default (often 120s). That test deliberately imports `tests/module/lib/ups-fixture.nix` with `upsmonTimings = null` so upsmon runs at upstream POLLFREQ/POLLFREQALERT/FINALDELAY = 5/5/5 -- the runtime-budget claim is therefore backed by representative timings, not the squeezed 1/1/0 cadence the Plan 3 matrix tests use to keep the LB-detection window narrower than an in-flight mutation. Larger real-world pools that risk exceeding the default budget can override `power.ups.upsmon.settings` (or the driver's `battery.runtime.low`) at the deployment level; braid does not need a dedicated option for v1.
+3. **Battery-low threshold.** Resolved by not depending on it. Plan 1's M7 (`ups-lb-clean-shutdown`) showed the driver's LB, at upstream upsmon timings (POLLFREQ/POLLFREQALERT/FINALDELAY = 5/5/5, via `tests/module/lib/ups-fixture.nix` with `upsmonTimings = null`), leaves enough time for a clean shutdown of an idle pool. But LB fires late and on the firmware's terms, and `battery.runtime.low` / `battery.charge.low` set in `ups.conf` only publish a value: NUT raises LB from them only under `ignorelb` (`reference/nut/drivers/dstate.c#status_commit`). Early shutdown is therefore braid's own policy -- see "Early shutdown: on-battery timer and charge floor" above, proven by `tests/module/ups-early-shutdown.{nix,py}` -- and LB is only the backstop.
 
 ## Consequences
 
 - enabling UPS support is one line of Nix, plus two optional strings for non-default drivers
-- for ordinary mounted operation, the host powers off cleanly on low battery without user intervention
+- for ordinary mounted operation, the host powers off cleanly without user intervention: early, after `shutdownAfter` on battery or below `shutdownBelowCharge`, and on low battery at the latest
 - pool-mutating commands refuse to start unless utility power (`OL`) is verified, narrowing the journal-recovery surface to the mid-mutation case
 - mid-mutation power loss is a supported recovery case, not a guarantee: `braid recover` is load-bearing for `replace` / `remove` / `remove-missing` / balanced `add` interrupted by LB-driven shutdown, and VM tests prove both the idle/no-paused success path and the crash-paused owed RAID1 fail-closed path
 - live UPS state is visible in `braid ups status` and the TUI; users not actively watching those surfaces do not get asynchronous notifications in v1 (alert-model integration deferred to a future ADR)

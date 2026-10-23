@@ -8,10 +8,12 @@ braid NAS via NUT ([Network UPS Tools](https://networkupstools.org/)).
 Enabling UPS support (`braid.enable = true` plus `braid.ups.enable = true`)
 turns on three behaviors:
 
-- **Orderly poweroff on low battery.** When the UPS reports critical, NUT's
-  `upsmon` invokes `systemctl poweroff`. systemd unwinds
-  `braid-online.service`'s ExecStop, which runs `braid lock` and cleanly
-  unmounts the pool before the battery exhausts.
+- **Orderly poweroff in a long outage.** After `shutdownAfter` on battery,
+  or once the charge drops below `shutdownBelowCharge` on battery, braid
+  shuts the host down through NUT. The UPS's own low-battery signal still shuts it down if it
+  comes first. systemd unwinds `braid-online.service`'s ExecStop, which runs
+  `braid lock` and cleanly unmounts the pool while the battery still has
+  charge to spare. See [Shutdown policy](#shutdown-policy).
 - **Preflight refusal without verified utility power.** `braid add` /
   `remove` / `remove-missing` / `replace` check UPS state at startup and
   refuse to begin a pool mutation unless the UPS reports verified utility
@@ -39,8 +41,9 @@ hatch but are not tested.
 }
 ```
 
-Defaults: `name = "ups"`, `driver = "usbhid-ups"`, `port = "auto"`. Rebuild
-and plug the UPS's USB cable in; NUT's auto-detect finds the device.
+Defaults: `name = "ups"`, `driver = "usbhid-ups"`, `port = "auto"`,
+`shutdownAfter = 300`, `shutdownBelowCharge = 50`. Rebuild and plug the UPS's
+USB cable in; NUT's auto-detect finds the device.
 
 Override the driver or port for non-USB UPSes:
 
@@ -118,23 +121,81 @@ The panel polls on the same 5-second cadence as the
 [TUI fans panel](fan-control.md#tui-fans-panel). Press `r` to refresh both
 pool and UPS probes immediately.
 
-## What happens on low battery
+## Shutdown policy
 
-1. `upsmon` sees `ups.status: OB LB`, declares the UPS critical.
-2. `upsmon` runs its configured `SHUTDOWNCMD`. braid overrides the
-   nixpkgs default (`shutdown now`) with `systemctl poweroff`.
-3. systemd walks its shutdown sequence. `braid-online.service` stops
-   with ExecStop running `braid lock`, which unmounts the pool and
-   closes LUKS.
-4. The host powers off before the battery exhausts.
+braid shuts the host down at the first of three moments:
 
-Under the default upsmon timings (`POLLFREQ = POLLFREQALERT = 5`,
-`FINALDELAY = 5`) the window between LB detection and poweroff is
-~10 seconds, plus however long `braid lock` takes. The default
-`battery.runtime.low` in most UPS drivers is around 120 seconds, which
-is enough headroom for a single-disk pool's clean teardown. Larger
-pools may need a wider `battery.runtime.low` (set at the NUT level,
-not through braid).
+1. **On battery for `shutdownAfter` seconds** (default 300).
+2. **On battery with `battery.charge` below `shutdownBelowCharge` percent**
+   (default 50).
+3. **The UPS reports low battery (`OB LB`)** -- the firmware's own
+   last-resort signal.
+
+```nix
+braid.ups = {
+  enable = true;
+  shutdownAfter = 300;      # seconds on battery; null turns the timer off
+  shutdownBelowCharge = 50; # percent; null turns the floor off
+};
+```
+
+The timer lets short outages ride through. The charge floor covers an aging
+battery or a grown load that drains faster than the timer assumes. Low
+battery is the backstop, and fires late: often with about two minutes of
+estimated runtime left.
+
+### Sizing `shutdownAfter`
+
+Measure the UPS's runtime at the NAS's real load (`braid ups status` shows
+`Runtime` while on utility power), then:
+
+```
+shutdownAfter <= runtime x 0.5 - clean-shutdown time - 60 s margin
+```
+
+Keeping about half the battery in reserve is kinder to it and leaves room
+for an estimate that drifts as the battery ages. If the result is under
+about two minutes, the UPS is too small for the load. Setting
+`battery.runtime.low` or `battery.charge.low` in NUT does not shut down
+earlier: NUT raises low battery from those values only with the driver's
+`ignorelb` flag, which braid does not use because it ignores the UPS's own
+low-battery signal.
+
+### How it works
+
+`braid-ups-guard.service` polls the UPS every few seconds. The clock starts
+on the first poll that shows `OB` and stops only when the UPS reports
+utility power (`OL`); a failed query or an unrecognized status leaves it
+running. A guard restart, such as a `nixos-rebuild switch`, keeps the
+outage's original deadline, and time spent suspended counts.
+
+When a trigger holds, the guard logs one line naming the reason and runs
+`upsmon -c fsd`. From there the shutdown is the same as on low battery:
+
+1. `upsmon` sets forced shutdown (`FSD`) on the UPS, writes
+   `/run/killpower`, and runs `systemctl poweroff`.
+2. systemd stops `braid-online.service`, whose ExecStop runs `braid lock`,
+   which unmounts the pool and closes LUKS.
+3. Late in shutdown, `ups-killpower.service` tells the UPS to cut its
+   output and restore it when mains returns, so a host set to power on
+   after AC loss boots by itself.
+
+```sh
+# Why did the NAS shut down? (previous boot)
+journalctl -b -1 -u braid-ups-guard
+```
+
+If mains returns while the host is shutting down, a UPS that ignores
+`shutdown.return` once on utility power may leave the host off until you
+power it on.
+
+### Turning it off
+
+Set both options to `null` to shut down only on low battery, as before;
+the guard is then not installed. Under the default upsmon timings
+(`POLLFREQ = POLLFREQALERT = 5`, `FINALDELAY = 5`) the window between low
+battery and poweroff is about 10 seconds plus however long `braid lock`
+takes.
 
 ## Mutation refusal when utility power is not verified
 
@@ -204,7 +265,7 @@ UPS shutdown path to unmount).
 There is no asynchronous notification when the UPS goes on battery or
 loses comms in v1. Operators who are not actively watching `braid ups
 status` or the TUI will not see those conditions -- only the orderly
-shutdown on LB is automatic.
+shutdown (see [Shutdown policy](#shutdown-policy)) is automatic.
 
 This is deliberate: integrating UPS events into braid's shared alert
 model requires splitting `AlertCause` by persistence semantics

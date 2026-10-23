@@ -685,6 +685,7 @@ mod tests {
         let mut model = model();
         model.ups_config = Some(Ups {
             name: crate::types::UpsName::parse("ups").unwrap(),
+            shutdown: Default::default(),
         });
         model.ups = Some(ups_snapshot());
         model.browse.select_next();
@@ -701,6 +702,7 @@ mod tests {
         let mut model = model();
         model.ups_config = Some(Ups {
             name: crate::types::UpsName::parse("ups").unwrap(),
+            shutdown: Default::default(),
         });
         let mut snap = ups_snapshot();
         snap.flags = vec![
@@ -717,6 +719,7 @@ mod tests {
         let mut model = model();
         model.ups_config = Some(Ups {
             name: crate::types::UpsName::parse("ups").unwrap(),
+            shutdown: Default::default(),
         });
         model.ups = Some(ups_snapshot());
         model.browse.select_next();
@@ -730,6 +733,7 @@ mod tests {
         let mut model = model();
         model.ups_config = Some(Ups {
             name: crate::types::UpsName::parse("ups").unwrap(),
+            shutdown: Default::default(),
         });
         model.browse.select_next();
         model.browse.focus = BrowseFocus::Command;
@@ -752,6 +756,7 @@ mod tests {
         let mut model = model();
         model.ups_config = Some(Ups {
             name: crate::types::UpsName::parse("ups").unwrap(),
+            shutdown: Default::default(),
         });
         model.browse.select_next();
         model.browse.focus = BrowseFocus::Command;
@@ -775,6 +780,7 @@ mod tests {
         let mut model = model();
         model.ups_config = Some(Ups {
             name: crate::types::UpsName::parse("ups").unwrap(),
+            shutdown: Default::default(),
         });
         model.browse.select_next();
         model.browse.focus = BrowseFocus::Command;

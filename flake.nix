@@ -979,6 +979,14 @@
               linuxSystem
               ;
           };
+          eval-ups-shutdown-policy = import ./tests/eval/ups-shutdown-policy.nix {
+            inherit
+              pkgs
+              linuxPkgs
+              nixpkgs
+              linuxSystem
+              ;
+          };
           eval-grammar-parity = import ./tests/eval/grammar-parity.nix { inherit pkgs; };
           eval-nixos-module-default-supplies-package = import ./tests/eval/nixos-module-default-package.nix {
             inherit pkgs self nixpkgs;
@@ -997,6 +1005,11 @@
           );
           ups-lb-clean-shutdown = pkgs.testers.nixosTest (
             import ./tests/module/ups-lb-clean-shutdown.nix {
+              braid = linuxCrane.braid-cli-unwrapped;
+            }
+          );
+          ups-early-shutdown = pkgs.testers.nixosTest (
+            import ./tests/module/ups-early-shutdown.nix {
               braid = linuxCrane.braid-cli-unwrapped;
             }
           );

@@ -416,6 +416,7 @@ mod tests {
     fn sample_ups_config() -> crate::config::Ups {
         crate::config::Ups {
             name: crate::types::UpsName::parse("ups").unwrap(),
+            shutdown: Default::default(),
         }
     }
 
