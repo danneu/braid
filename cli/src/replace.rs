@@ -195,13 +195,19 @@ pub enum ReplaceError {
     /// post-replace journal survives and `braid recover` replays the drop. A
     /// skipped drop would let `braid ack` commit the old disk's counts as the
     /// new disk's baseline, or mark the present new disk acknowledged-missing
-    /// after `--missing-id` (ADR 014).
+    /// after `--missing-id` (ADR 014). It holds the alert error itself, not
+    /// free text, so only an alert-state failure can carry the
+    /// delete-the-alert-files remedy.
     #[error(
-        "pool was modified, but alert baseline cleanup failed for devid {devid}: {detail}\n\
+        "pool was modified, but alert baseline cleanup failed for devid {devid}: {source}\n\
          rm /var/lib/braid/acked-stats.json and /var/lib/braid/alert-latch.json before \
          trusting `braid monitor`."
     )]
-    AckCleanupFailed { devid: Devid, detail: String },
+    AckCleanupFailed {
+        devid: Devid,
+        #[source]
+        source: alert::AlertStateError,
+    },
 }
 
 pub struct ReplaceParams<'a> {
@@ -920,12 +926,8 @@ impl ReplacePlan {
         // the present new disk acknowledged-missing. Runs after the
         // post-replace journal is written, so a failure leaves `braid recover`
         // to replay it.
-        alert::drop_ghost_alert_state_for_devids(params.paths, &[devid]).map_err(|e| {
-            ReplaceError::AckCleanupFailed {
-                devid,
-                detail: e.to_string(),
-            }
-        })?;
+        alert::drop_ghost_alert_state_for_devids(params.paths, &[devid])
+            .map_err(|source| ReplaceError::AckCleanupFailed { devid, source })?;
 
         // Live-only: best-effort close of old mapper. Runs BEFORE the resize
         // so a resize failure does not `?` out and strand the old dm slot

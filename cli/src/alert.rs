@@ -592,6 +592,24 @@ pub fn drop_all_ghost_alert_state(paths: &StatePaths) -> Result<(), AlertStateEr
     Ok(())
 }
 
+/// Shared wording for the devids a failed ghost drop covered, so the command
+/// errors that report the failure name them alike. Empty means the drop
+/// covered every disk, as bootstrap's does, and adds nothing.
+pub(crate) fn ghost_drop_devid_context(devids: &[Devid]) -> String {
+    match devids {
+        [] => String::new(),
+        [devid] => format!(": devid {devid}"),
+        _ => format!(
+            ": devids {}",
+            devids
+                .iter()
+                .map(Devid::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
 /// Strip the evidence of latched causes on the devids `stale` selects: the
 /// counters of `BtrfsDeviceErrors` and the `still_missing` of `MissingDevice`.
 /// The causes stay latched until ack, but their evidence belongs to the disk

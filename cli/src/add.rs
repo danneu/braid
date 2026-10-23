@@ -62,12 +62,23 @@ pub enum AddError {
         source: Box<AddError>,
         advice: String,
     },
+    /// Add changed the pool, then dropping alert state failed (ADR 014). It
+    /// holds the alert error itself, not free text, so only an alert-state
+    /// failure can carry the delete-the-alert-files remedy; a pool or probe
+    /// failure cannot be mislabeled with it. `devids` is empty for a drop
+    /// that covers every disk.
     #[error(
-        "pool was modified, but alert baseline cleanup failed at {stage}: {detail}\n\
+        "pool was modified, but alert baseline cleanup failed at {stage}{}: {source}\n\
          rm /var/lib/braid/acked-stats.json and /var/lib/braid/alert-latch.json before \
-         trusting `braid monitor`."
+         trusting `braid monitor`.",
+        alert::ghost_drop_devid_context(.devids)
     )]
-    AckCleanupFailed { stage: &'static str, detail: String },
+    AckCleanupFailed {
+        stage: &'static str,
+        devids: Vec<Devid>,
+        #[source]
+        source: alert::AlertStateError,
+    },
     /// Post-mutation, pre-persist failure in the live-pool add loop:
     /// `btrfs device add` already committed membership, but the follow-up
     /// `probe_pool` failed (or did not yet list the new device), so braid
@@ -1514,10 +1525,11 @@ impl AddPlan {
             // Fresh pool identity: every previous acked baseline and all
             // latched evidence (error counts and still-missing flags) belong
             // to the old pool.
-            alert::drop_all_ghost_alert_state(params.paths).map_err(|e| {
+            alert::drop_all_ghost_alert_state(params.paths).map_err(|source| {
                 AddError::AckCleanupFailed {
                     stage: "bootstrap",
-                    detail: e.to_string(),
+                    devids: Vec::new(),
+                    source,
                 }
             })?;
 
@@ -1558,9 +1570,10 @@ impl AddPlan {
                     }
                 })?;
                 alert::drop_ghost_alert_state_for_devids(params.paths, &[dev.devid]).map_err(
-                    |e| AddError::AckCleanupFailed {
+                    |source| AddError::AckCleanupFailed {
                         stage: "live-pool add",
-                        detail: format!("devid {}: {e}", dev.devid),
+                        devids: vec![dev.devid],
+                        source,
                     },
                 )?;
                 pool_after = Some(probe);

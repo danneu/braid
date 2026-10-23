@@ -61,12 +61,23 @@ pub enum RecoverError {
         source: Box<RecoverError>,
         advice: String,
     },
+    /// Recovery changed the pool, then dropping alert state failed (ADR 014).
+    /// It holds the alert error itself, not free text, so only an alert-state
+    /// failure can carry the delete-the-alert-files remedy; a pool or probe
+    /// failure cannot be mislabeled with it. `devids` is empty for a drop
+    /// that covers every disk.
     #[error(
-        "pool was modified by recovery, but alert baseline cleanup failed at {stage}: {detail}\n\
+        "pool was modified by recovery, but alert baseline cleanup failed at {stage}{}: {source}\n\
          pending-op.json is preserved; rm /var/lib/braid/acked-stats.json and \
-         /var/lib/braid/alert-latch.json before trusting `braid monitor`."
+         /var/lib/braid/alert-latch.json before trusting `braid monitor`.",
+        alert::ghost_drop_devid_context(.devids)
     )]
-    AckCleanupFailed { stage: &'static str, detail: String },
+    AckCleanupFailed {
+        stage: &'static str,
+        devids: Vec<Devid>,
+        #[source]
+        source: alert::AlertStateError,
+    },
     /// Journaled-snapshot corruption: the same `devid` resolves to two or
     /// more UUIDs inside `journal.pre_membership` / `journal.target_membership`.
     /// Surfaces in canonical lexicographic UUID order.
@@ -1265,10 +1276,11 @@ fn execute_generic_live_pool_recovery<R: CommandRunner + Sync, F: Filesystem + ?
     eprintln!("pool.json written from live pool state.");
 
     if plan.journal.is_bootstrap_add() {
-        alert::drop_all_ghost_alert_state(params.paths).map_err(|e| {
+        alert::drop_all_ghost_alert_state(params.paths).map_err(|source| {
             RecoverError::AckCleanupFailed {
                 stage: "bootstrap-recovery",
-                detail: e.to_string(),
+                devids: Vec::new(),
+                source,
             }
         })?;
     }
@@ -2825,18 +2837,24 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
                 }
             }
             pool = probe::probe_pool(runner, fs, mount_point)?;
-            let dev =
-                pool.device_by_uuid(target_uuid)
-                    .ok_or_else(|| RecoverError::AckCleanupFailed {
-                        stage: "live-pool add recovery",
-                        detail: format!("{}: not found in pool after replayed add", target.name),
-                    })?;
-            alert::drop_ghost_alert_state_for_devids(params.paths, &[dev.devid]).map_err(|e| {
-                RecoverError::AckCleanupFailed {
-                    stage: "live-pool add recovery",
-                    detail: format!("devid {}: {e}", dev.devid),
-                }
+            // The disk was just added through an open mapper. Unlike the
+            // committed check, which accepts a null-backed target, this lookup
+            // requires btrfs to list the target as present. A miss is a btrfs
+            // anomaly, so fail closed with the journal kept and let a rerun
+            // probe again. Alert state is untouched at this point.
+            let dev = pool.device_by_uuid(target_uuid).ok_or_else(|| {
+                RecoverError::Failed(format!(
+                    "recover add replay: target '{}' is not in the live pool after btrfs device add",
+                    target.name
+                ))
             })?;
+            alert::drop_ghost_alert_state_for_devids(params.paths, &[dev.devid]).map_err(
+                |source| RecoverError::AckCleanupFailed {
+                    stage: "live-pool add recovery",
+                    devids: vec![dev.devid],
+                    source,
+                },
+            )?;
             // Per-target fail-closed gate: a foreign device surfacing mid-batch
             // stops further pool_add_device here rather than at the terminal
             // binding, which remains the final admission gate.
@@ -2945,10 +2963,11 @@ fn sweep_recovered_add_acked_stats(
     paths: &StatePaths,
     target_devids: &[Devid],
 ) -> Result<(), RecoverError> {
-    alert::drop_ghost_alert_state_for_devids(paths, target_devids).map_err(|e| {
+    alert::drop_ghost_alert_state_for_devids(paths, target_devids).map_err(|source| {
         RecoverError::AckCleanupFailed {
             stage: "live-pool add recovery (target sweep)",
-            detail: e.to_string(),
+            devids: target_devids.to_vec(),
+            source,
         }
     })?;
     Ok(())
@@ -3474,10 +3493,11 @@ where
     // btrfs handed the replaced devid to the new disk: replay replace's
     // fail-closed drop of the old disk's alert state, which a crash may have
     // cut off (ADR 014's acked-stats hygiene).
-    alert::drop_ghost_alert_state_for_devids(params.paths, &[dev.devid]).map_err(|e| {
+    alert::drop_ghost_alert_state_for_devids(params.paths, &[dev.devid]).map_err(|source| {
         RecoverError::AckCleanupFailed {
             stage: "replace recovery",
-            detail: format!("devid {}: {e}", dev.devid),
+            devids: vec![dev.devid],
+            source,
         }
     })?;
     eprintln!(
@@ -7495,12 +7515,83 @@ mod tests {
         )
         .unwrap_err();
 
-        match err {
+        match &err {
             RecoverError::AckCleanupFailed { stage, .. } => {
                 assert!(stage.starts_with("live-pool add recovery"));
             }
             other => panic!("expected AckCleanupFailed, got {other:?}"),
         }
+        // The operator still sees which devid and which alert file failed.
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("devid 4: failed to parse")
+                && rendered.contains(&f.paths.acked_stats_json().display().to_string()),
+            "cleanup failure must name the devid and the failing file: {rendered}"
+        );
+        assert!(f.paths.pending_op_json().exists());
+    }
+
+    // Intent: when the probe after a replayed `btrfs device add` does not
+    //   list the target, add recovery fails closed with a pool error that
+    //   names the target, keeps pending-op.json, and gives no alert-file
+    //   remedy.
+    // Why it exists: this branch used to return `AckCleanupFailed`, which
+    //   tells the operator to delete acked-stats.json and alert-latch.json
+    //   although alert state was never touched (hunt finding
+    //   261022-1230-010). Live add calls the same case `PostAddProbeFailed`.
+    // Scenario: recovery replays disk2's add and btrfs accepts it, but the
+    //   next `btrfs filesystem show` lists only disk1.
+    #[test]
+    fn live_add_recovery_replayed_target_missing_from_probe_fails_without_alert_remedy() {
+        let f = PoolFixture::empty();
+        let journal = recoverable_pool_mutation_add_journal();
+        journal::write_journal(&f.paths, &journal).unwrap();
+        let union = test_recovery_admission_membership(&journal);
+        let targets = match &journal.op {
+            OpKind::Add { targets, .. } => targets,
+            _ => unreachable!("test journal is Add"),
+        };
+        let runner = with_one_disk_pool_probe(replay_returned_disk2_runner_base());
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
+        let params = f.recover_params().build();
+
+        let err = execute_add_pool_mutation_recovery(
+            &runner,
+            &MockFs::new(&["/dev/disk/by-id/virtio-disk2", "/dev/mapper/braid-disk2"])
+                .with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111")
+                .with_luks_dm("braid-disk2", "22222222-2222-2222-2222-222222222222"),
+            &resolver,
+            &params,
+            AddPoolReplayCtx {
+                credential: None,
+                journal: &journal,
+                union: &union,
+                targets,
+                pool: pool_state_one_disk(),
+                owed_balance: OwedRaid1Balance::Grow,
+            },
+        )
+        .unwrap_err();
+
+        assert!(
+            runner.requests().iter().any(|r| matches!(
+                r,
+                CmdRequest::BtrfsDeviceAdd { device, .. }
+                    if device == "/dev/mapper/braid-disk2"
+            )),
+            "replay must reach pool_add_device for disk2 before the probe misses it"
+        );
+        match &err {
+            RecoverError::Failed(msg) => assert!(
+                msg.contains("'disk2'") && msg.contains("not in the live pool after"),
+                "expected the replay miss to name disk2, got {msg}"
+            ),
+            other => panic!("expected RecoverError::Failed for the replay miss, got {other:?}"),
+        }
+        assert!(
+            !err.to_string().contains("acked-stats.json"),
+            "a replay miss must not tell the operator to delete alert state: {err}"
+        );
         assert!(f.paths.pending_op_json().exists());
     }
 
