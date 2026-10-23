@@ -45,9 +45,9 @@ sudo braid remove toshiba3 --yes
 ## What happens under the hood
 
 1. Probes the pool to verify the disk is a live member
-2. Checks that remaining disks have enough free space to absorb the data being migrated
-3. Shows a confirmation prompt with the disk's name and devid, its model/size/serial (best-effort from the live backing device via lsblk -- omitted if unavailable), and the resulting disk count (e.g. `Pool: 3 disks -> 2 disks`). This interactive prompt is skipped by `--yes` and not shown in `--dry-run`.
-4. If removing the second-to-last disk (going from 2 to 1): first balances the pool from RAID1 to single profile, then removes the device
+2. Checks that the remaining disks have room for the data being migrated (see the space rule under Safety checks below)
+3. Shows a confirmation prompt with the disk's name and devid, its model/size/serial (best-effort from the live backing device via lsblk -- omitted if unavailable), and the resulting disk count (e.g. `Pool: 3 disks -> 2 disks`). When one disk would remain, the prompt also carries a `WARNING:` line that the pool loses RAID1 redundancy. This interactive prompt, warning included, is skipped by `--yes` and not shown in `--dry-run`; dry-run shows the redundancy loss as the balance step of step 4 instead (see [ADR 022](../design/decisions/022-dry-run-preview-model.md#confirmation-ui)).
+4. If removing the second-to-last disk (going from 2 to 1): first balances the pool off RAID1, then removes the device. Data converts to single, and metadata and system convert to DUP (two copies on the one disk), which `braid status` then shows. See [btrfs balance profiles](../internals/btrfs/balance-profiles.md) for why metadata keeps two copies.
 5. Runs `btrfs device remove` to migrate all data off the disk (this is the long-running step)
 6. Closes the LUKS mapper on the removed disk
 7. Updates pool.json to remove the member's UUID entry
@@ -65,8 +65,15 @@ If a btrfs exclusive operation (a running balance, device add/remove/replace, re
 - Refuses if the named disk is otherwise not a live member of the pool. If missing devices are detected, it suggests `braid replace --old <missing-name> --new <new-name>=/dev/disk/by-id/<...>`, and also `braid remove-missing` unless that command would refuse the pool's shape (the last missing disk of a 2-disk RAID1 pool)
 - Refuses to remove the last disk from the pool
 - Refuses if there are missing devices in the pool (resolve those first)
-- Refuses if remaining disks lack space to absorb the removed disk's data (ENOSPC pre-flight)
-- Warns when removal leaves a single disk (no RAID1 redundancy)
+- Refuses if the remaining disks lack space for the removed disk's data
+  (ENOSPC pre-flight). When one disk would remain, braid also refuses
+  whenever it cannot verify the survivor's space. When two or more would
+  remain and braid cannot run `btrfs device usage` or read its output, it
+  prints a `[warn]` row and goes ahead, because btrfs then stops cleanly on
+  ENOSPC. A nonzero exit from btrfs refuses on both paths. The error names
+  the reason. See
+  [ADR 012](../design/decisions/012-intent-cli.md#enospc-pre-flight-check)
+  for the policy.
 {{#include ../_includes/mutating-command-refusals.md.inc}}
 
 ## Related commands

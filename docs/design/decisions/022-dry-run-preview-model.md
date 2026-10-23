@@ -87,10 +87,11 @@ belongs to this class because it gates the operator's final decision about an
 explicitly requested action, rather than reporting a discovered precondition.
 
 For `remove` 2->1, dry-run still surfaces the redundancy-loss consequence as
-the `RAID1 -> single` balance step. For `replace`, the 1-disk warning is
-confirmation-only context for a pool that is non-redundant before and after;
-dry-run previews the replacement steps, and no redundancy-changing step exists
-for that warning.
+the `RAID1 -> ...` balance step, labeled with the profiles
+`cli/src/cmd.rs#ONE_DISK_PROFILES` converts to. For `replace`, the 1-disk
+warning is confirmation-only context for a pool that is non-redundant before
+and after; dry-run previews the replacement steps, and no redundancy-changing
+step exists for that warning.
 
 Long-running side-effect-free probes that run while building a preview may emit
 `[wait]` / `[ok]` / `[skip]` status rows to stderr per

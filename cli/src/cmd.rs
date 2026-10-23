@@ -1,4 +1,5 @@
 use crate::luks::LUKS_DATA_OFFSET_BYTES;
+use crate::parse::types::BtrfsProfile;
 use crate::types::{
     Devid, LuksFormatExtraOpts, LuksLabel, LuksUuid, MapperName, MountPoint, MountpointCheckPath,
 };
@@ -108,6 +109,8 @@ pub enum CmdRequest {
     BtrfsBalanceRaid1Soft {
         mount_point: MountPoint,
     },
+    /// Pre-remove convert of a pool shrinking to one disk; its target is
+    /// `ONE_DISK_PROFILES`.
     BtrfsBalanceSingle {
         mount_point: MountPoint,
     },
@@ -525,6 +528,45 @@ fn luks_format_argv(
     }
 }
 
+/// Target of one balance convert. Two profiles fix the whole target because
+/// system chunks follow metadata
+/// (`docs/internals/btrfs/balance-profiles.md#system-chunks-follow-metadata-automatically`).
+pub(crate) struct ConvertProfiles {
+    data: BtrfsProfile,
+    metadata: BtrfsProfile,
+}
+
+/// Profiles a 2->1 `braid remove` converts the pool to before
+/// `btrfs device remove`. The `CmdRequest::BtrfsBalanceSingle` argv and every
+/// operator label for that conversion read this one value, so no label can
+/// name a profile the balance does not write. Why metadata keeps two copies:
+/// `docs/internals/btrfs/balance-profiles.md`.
+pub(crate) const ONE_DISK_PROFILES: ConvertProfiles = ConvertProfiles {
+    data: BtrfsProfile::Single,
+    metadata: BtrfsProfile::Dup,
+};
+
+impl ConvertProfiles {
+    /// The `-dconvert=` and `-mconvert=` balance filters. btrfs-progs 6.19.1,
+    /// `common/parse-utils.c` (`parse_bg_profile`) matches the profile name
+    /// case-insensitively; braid passes it lowercase.
+    fn convert_filters(&self) -> [String; 2] {
+        let filter = |prefix: &str, profile: &BtrfsProfile| {
+            format!("{prefix}={}", profile.to_string().to_ascii_lowercase())
+        };
+        [
+            filter("-dconvert", &self.data),
+            filter("-mconvert", &self.metadata),
+        ]
+    }
+
+    /// Operator label for the convert target. It names each profile the way
+    /// `braid status` and `btrfs filesystem df` do.
+    pub(crate) fn label(&self) -> String {
+        format!("{} data, {} metadata", self.data, self.metadata)
+    }
+}
+
 impl CmdRequest {
     pub fn to_argv(&self) -> CmdArgs {
         match self {
@@ -766,19 +808,21 @@ impl CmdRequest {
                     mount_point.as_str().to_owned(),
                 ],
             },
-            CmdRequest::BtrfsBalanceSingle { mount_point } => CmdArgs {
-                program: "btrfs".to_owned(),
-                args: vec![
-                    "balance".into(),
-                    "start".into(),
-                    "--enqueue".into(),
-                    "-dconvert=single".into(),
-                    // Important: use dup for metadata when converting to single
-                    "-mconvert=dup".into(),
-                    "-f".into(),
-                    mount_point.as_str().to_owned(),
-                ],
-            },
+            CmdRequest::BtrfsBalanceSingle { mount_point } => {
+                let [data_filter, metadata_filter] = ONE_DISK_PROFILES.convert_filters();
+                CmdArgs {
+                    program: "btrfs".to_owned(),
+                    args: vec![
+                        "balance".into(),
+                        "start".into(),
+                        "--enqueue".into(),
+                        data_filter,
+                        metadata_filter,
+                        "-f".into(),
+                        mount_point.as_str().to_owned(),
+                    ],
+                }
+            }
             CmdRequest::BtrfsBalancePause { mount_point } => CmdArgs {
                 program: "btrfs".to_owned(),
                 args: vec![

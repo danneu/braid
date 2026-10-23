@@ -5,6 +5,7 @@ use crate::btrfs_ioctl::BtrfsDevInfo;
 use crate::capacity;
 use crate::cmd::CmdRequest;
 use crate::cmd::CommandRunner;
+use crate::cmd::ONE_DISK_PROFILES;
 use crate::confirm;
 use crate::filesystem::Filesystem;
 use crate::journal;
@@ -358,7 +359,8 @@ pub fn check_raid1_relocation_space(
 }
 
 /// Check that the surviving device can hold all live data after a 2->1
-/// eviction (RAID1 data -> single, RAID1 metadata/system -> DUP).
+/// eviction (RAID1 data -> single, RAID1 metadata/system -> DUP). The demand
+/// model below assumes those `ONE_DISK_PROFILES`; change the two together.
 ///
 /// Uses logical usage from `btrfs filesystem df` rather than per-device
 /// allocations, so it is correct regardless of current profile mix
@@ -390,10 +392,11 @@ pub fn check_single_survivor_capacity(
     let usable = survivor.device_size.saturating_sub(survivor.device_slack);
     if needed > usable {
         return Err(format!(
-            "not enough space on surviving device after RAID1 -> single conversion.\n  \
+            "not enough space on surviving device after RAID1 -> {} conversion.\n  \
              data + 2 * metadata + 2 * system: {}\n  \
              surviving device usable capacity:  {}\n\n\
              Free up space by deleting files first, or `braid add` a larger disk.",
+            ONE_DISK_PROFILES.label(),
             format_bytes(needed),
             format_bytes(usable),
         ));

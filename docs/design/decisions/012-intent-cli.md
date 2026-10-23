@@ -79,7 +79,9 @@ The `>=2`-survivor `remove` path treats relocation-probe uncertainty as
 warn-and-proceed -- a miss falls through to btrfs's clean instant-ENOSPC --
 while `remove-missing` and the 2→1 `remove` path are fail-closed on any
 uncertainty, because a miss there can crash the filesystem read-only with
-`pending-op.json` already written.
+`pending-op.json` already written. A nonzero exit from `btrfs device usage`
+is btrfs refusing, not probe uncertainty, so it refuses on every `remove`
+path (`cli/src/remove.rs#check_eviction_space`).
 
 `remove-missing` plans again after the confirmation prompt (or straight away
 under `--yes`), above `journal::write_journal`, and refuses unless the new

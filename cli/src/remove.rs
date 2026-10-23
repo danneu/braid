@@ -1,5 +1,5 @@
 use crate::alert;
-use crate::cmd::{CmdRequest, CommandRunner, Step};
+use crate::cmd::{CmdRequest, CommandRunner, ONE_DISK_PROFILES, Step};
 use crate::config::Config;
 use crate::confirm;
 use crate::filesystem::Filesystem;
@@ -250,8 +250,7 @@ impl RemoveWorkPlan {
         if self.remaining == 1 {
             steps.push(Step {
                 risk: "long",
-                description: "btrfs balance -dconvert=single -mconvert=dup -f (RAID1 -> single)"
-                    .into(),
+                description: format!("btrfs balance (RAID1 -> {})", ONE_DISK_PROFILES.label()),
                 commands: vec![CmdRequest::BtrfsBalanceSingle {
                     mount_point: self.mount_point.clone(),
                 }],
@@ -346,7 +345,7 @@ impl RemovePlan {
             if work_plan.remaining == 1 {
                 // Confirmation UI only: this is the go/no-go gate. The
                 // dry-run preview already shows the consequence as the
-                // `RAID1 -> single` balance step; see `preview()`.
+                // `RAID1 -> ...` balance step; see `preview()`.
                 prompt.push_str("WARNING: Pool will have 1 disk -- no RAID1 redundancy.\n\n");
             }
             params
@@ -484,16 +483,17 @@ impl RemovePlan {
         // the same mapper between plan and execute.
         let color_enabled = color_enabled_for_stderr();
         if work_plan.remaining == 1 {
+            let target = ONE_DISK_PROFILES.label();
             emit_status(&status_line(
                 StatusTag::Wait,
                 color_enabled,
-                "pool: balancing RAID1 to single profile...",
+                &format!("pool: balancing RAID1 to {target}..."),
             ));
             pool_balance_single(runner, &work_plan.mount_point, params.progress)?;
             emit_status(&status_line(
                 StatusTag::Ok,
                 color_enabled,
-                "pool: balanced to single profile",
+                &format!("pool: balanced to {target}"),
             ));
         }
         let device_path = work_plan.target_mapper.dev_path();
@@ -1711,8 +1711,9 @@ mod tests {
     //   pinned only here on the production path; no `cmd.rs` test covers it.
     //
     // Scenario: operator previews removing disk2 from a healthy 2-disk
-    //   pool. The preview must show the RAID1 -> single balance step, while
-    //   keeping the go/no-go redundancy warning exclusive to confirmation.
+    //   pool. The preview must show the RAID1 balance step with the profiles
+    //   it converts to (single data, DUP metadata), while keeping the go/no-go
+    //   redundancy warning exclusive to confirmation.
     fn plan_remove_2to1_preview_omits_confirmation_only_redundancy_warning() {
         let f = PoolFixture::two_disk_healthy();
         let runner = RemovalPool::two_disk().install(MockRunner::default());
@@ -1735,10 +1736,6 @@ mod tests {
         );
 
         assert!(
-            rendered.contains("RAID1 -> single"),
-            "2->1 preview must still show the redundancy-loss balance step, got:\n{rendered}",
-        );
-        assert!(
             !rendered.contains("WARNING:"),
             "2->1 dry-run preview must not leak confirmation-only WARNING lines, got:\n{rendered}",
         );
@@ -1754,9 +1751,12 @@ mod tests {
             "2->1 preview must render balance + device-remove + close; got {:?}",
             preview.steps
         );
+        // The step label is pinned literally, so a label that misnames a
+        // profile the argv converts to (e.g. `single` for metadata) fails here.
         assert_exact_lines_in_order(
             &rendered,
             &[
+                "[long] btrfs balance (RAID1 -> single data, DUP metadata)",
                 "$ btrfs balance start --enqueue '-dconvert=single' '-mconvert=dup' -f /mnt/storage",
                 "$ btrfs device remove --enqueue /dev/mapper/braid-disk2 /mnt/storage",
                 "$ cryptsetup close braid-disk2",
@@ -1766,7 +1766,7 @@ mod tests {
 
     #[test]
     // Intent: a clean 3->2 dry-run preview through `plan_remove(...)` emits
-    //   exactly the device-remove + close steps -- no RAID1 -> single balance
+    //   exactly the device-remove + close steps -- no RAID1 balance step
     //   and no preflight notes.
     //
     // Why it exists: the balance step is conditional on `remaining == 1`. A
@@ -1801,8 +1801,8 @@ mod tests {
         );
         let rendered = preview.render();
         assert!(
-            !rendered.contains("RAID1 -> single"),
-            "3->2 preview must NOT render the balance-to-single step, got:\n{rendered}",
+            !rendered.contains("btrfs balance"),
+            "3->2 preview must NOT render the pre-remove balance step, got:\n{rendered}",
         );
         assert_exact_lines_in_order(
             &rendered,

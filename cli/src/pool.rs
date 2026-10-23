@@ -1,4 +1,4 @@
-use crate::cmd::{CmdError, CmdRequest, CommandRunner, RawCommandOutput, Step};
+use crate::cmd::{CmdError, CmdRequest, CommandRunner, ONE_DISK_PROFILES, RawCommandOutput, Step};
 use crate::filesystem::Filesystem;
 use crate::probe::probe_pool;
 use crate::progress::{
@@ -486,7 +486,7 @@ fn pool_balance_raid1<R: CommandRunner + Sync>(
     Ok(())
 }
 
-/// Balance pool to single profile (pre-remove conversion) with progress.
+/// Pre-remove convert to `ONE_DISK_PROFILES`, with progress.
 pub fn pool_balance_single<R: CommandRunner + Sync>(
     runner: &R,
     mount_point: &MountPoint,
@@ -502,7 +502,7 @@ pub fn pool_balance_single<R: CommandRunner + Sync>(
     )?;
     if result.exit_status != 0 {
         return Err(balance_error(
-            "btrfs balance to single",
+            &format!("btrfs balance to {}", ONE_DISK_PROFILES.label()),
             mount_point,
             &result,
         ));

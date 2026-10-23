@@ -197,16 +197,16 @@ with subtest("Interactive 2->1 remove: piping 'yes' at the real prompt proceeds 
     machine.succeed(
         "printf 'yes\\n' | braid remove disk2 >/tmp/rm2.out 2>/tmp/rm2.err"
     )
-    # Principle 13: 2->1 remove triggers pool_balance_single (RAID1 -> single)
-    # and pool_remove_device. Pin the [wait]/[ok] rows.
+    # Principle 13: 2->1 remove triggers pool_balance_single (RAID1 to single
+    # data, DUP metadata) and pool_remove_device. Pin the [wait]/[ok] rows.
     rm2_err = machine.succeed("cat /tmp/rm2.err")
     assert "WARNING: Pool will have 1 disk -- no RAID1 redundancy." in rm2_err, (
         f"interactive accept must still show the no-RAID1 warning; got: {rm2_err!r}"
     )
-    bal_wait = "[wait] pool: balancing RAID1 to single profile..."
-    bal_ok = "[ok]   pool: balanced to single profile"
+    bal_wait = "[wait] pool: balancing RAID1 to single data, DUP metadata..."
+    bal_ok = "[ok]   pool: balanced to single data, DUP metadata"
     assert bal_wait in rm2_err and bal_ok in rm2_err, (
-        f"expected RAID1->single balance wait/ok pair, got: {rm2_err!r}"
+        f"expected RAID1 to single data, DUP metadata balance wait/ok pair, got: {rm2_err!r}"
     )
     assert rm2_err.find(bal_wait) < rm2_err.find(bal_ok), (
         f"balance wait must precede balance ok, got: {rm2_err!r}"
@@ -236,10 +236,11 @@ with subtest("Interactive 2->1 remove: piping 'yes' at the real prompt proceeds 
         f"trailing close must follow device-remove ok, got: {rm2_err!r}"
     )
 
-with subtest("Pool has 1 device with single profile after redundancy removal"):
+with subtest("Pool has 1 device with single data and DUP metadata/system after redundancy removal"):
     # btrfs RAID1 requires ≥2 devices, so removing the second-to-last device
-    # must first balance to single profile before the device remove can succeed.
-    # Verify both the device count and that the profile converted to single.
+    # must first convert off RAID1 before the device remove can succeed.
+    # Verify the device count and the exact profiles the [ok] row above names:
+    # data is single, metadata and system are DUP (system follows -mconvert).
     fi_show = machine.succeed("btrfs fi show /mnt/storage")
     print(f"Pool after redundancy removal:\n{fi_show}")
     devid_count = fi_show.count("devid")
@@ -247,7 +248,8 @@ with subtest("Pool has 1 device with single profile after redundancy removal"):
     assert "braid-disk1" in fi_show, f"disk1 missing:\n{fi_show}"
 
     df_output = machine.succeed("btrfs fi df /mnt/storage")
-    assert "single" in df_output.lower(), f"Expected single profile after 2→1 remove:\n{df_output}"
+    for row in ["Data, single", "Metadata, DUP", "System, DUP"]:
+        assert row in df_output, f"Expected '{row}' after 2→1 remove:\n{df_output}"
     assert "raid1" not in df_output.lower(), f"RAID1 profile should not remain after 2→1 remove:\n{df_output}"
 
 with subtest("LUKS mapper closed after redundancy removal"):
