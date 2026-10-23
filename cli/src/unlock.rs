@@ -192,9 +192,9 @@ pub fn plan_unlock<R: CommandRunner, F: Filesystem + ?Sized>(
     fs: &F,
     params: &UnlockParams<'_>,
 ) -> Result<UnlockPlan, PlanFailure<UnlockError>> {
-    // `plan_add` also runs `check_pool_unlocked_if_membership_exists`
-    // here; unlock skips it because unlock never mutates pool.json
-    // membership topology. Execute may refresh runtime metadata
+    // `plan_add` also runs `cli/src/add.rs#decide_add_pool_target` here;
+    // unlock skips it because unlock never mutates pool.json membership
+    // topology. Execute may refresh runtime metadata
     // (devid, added_at) after mount, but the set of members is
     // authoritative on entry. See the "Contract:" block in
     // `UnlockPlan::execute`.

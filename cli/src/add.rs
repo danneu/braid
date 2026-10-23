@@ -17,7 +17,9 @@ use crate::luks::{
     read_passphrase_with,
 };
 use crate::mapper_close::{CloseContext, TrackedMapper, close_mapper_best_effort};
-use crate::membership::{self, DiskMember, LuksUuidMap, PoolMembership};
+use crate::membership::{
+    self, CoverageGap, DiskMember, LiveCoverage, LuksUuidMap, PoolMembership, UnlistedMapper,
+};
 use crate::parse::btrfs_filesystem_show::{DeviceBtrfsProbe, classify_btrfs_probe};
 use crate::parse::{parse_btrfs_filesystem_show, parse_cryptsetup_luks_uuid};
 use crate::pool::{
@@ -615,6 +617,147 @@ impl AddTargetWork {
     }
 }
 
+/// Whether `plan_add` found a pool.json file. Kept because `braid discover
+/// --write` refuses any valid pool.json, so the refusal for a mounted pool
+/// with no members must say whether to move a file aside first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PoolJsonFile {
+    Missing,
+    Present,
+}
+
+/// What `braid add` may build on. Only `decide_add_pool_target` returns one
+/// outside tests, so the live branch, which writes pool.json, runs only on
+/// proof that pool.json covers the mounted pool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AddPoolTarget {
+    /// Nothing is mounted at braid.mountPoint and pool.json lists no members.
+    Bootstrap,
+    /// A pool is mounted, and pool.json lists every open mapper in it.
+    Live(LiveCoverage),
+}
+
+#[cfg(test)]
+impl AddPoolTarget {
+    /// Test-only target from mount state alone, for tests that pin work-plan
+    /// classification rather than the gate.
+    fn unchecked(pool: &PoolState) -> Self {
+        if pool.mounted {
+            AddPoolTarget::Live(LiveCoverage::unchecked())
+        } else {
+            AddPoolTarget::Bootstrap
+        }
+    }
+}
+
+/// The stale-pool.json route. It is the route discover's own `ValidUuidKeyed`
+/// refusal gives, because `discover --write` refuses any valid pool.json.
+const STALE_POOL_JSON_ROUTE: &str = "If pool.json is stale, back up /var/lib/braid/pool.json \
+     and move it aside, attach every intended member, then run `braid discover --write` to \
+     rebuild it.";
+
+/// The one decision over the pool at braid.mountPoint and pool.json that lets
+/// add bootstrap or live-add. `plan_add` runs it, so `--dry-run` refuses the
+/// same way, and execute runs it again on the pre-journal probe. A missing
+/// pool.json is a bootstrap only when nothing is mounted (decision 017's state
+/// contract). The live arm needs `membership::check_live_coverage`, so add
+/// never writes a pool.json that drops a live member or adds a disk to a
+/// filesystem pool.json does not describe.
+fn decide_add_pool_target(
+    pool: &PoolState,
+    membership: &PoolMembership,
+    pool_json: PoolJsonFile,
+    mount_point: &MountPoint,
+) -> Result<AddPoolTarget, AddError> {
+    if !pool.mounted {
+        if membership.is_empty() {
+            return Ok(AddPoolTarget::Bootstrap);
+        }
+        return Err(AddError::Validation(format_locked_pool_refusal(membership)));
+    }
+    match membership::check_live_coverage(pool, membership) {
+        Ok(coverage) => Ok(AddPoolTarget::Live(coverage)),
+        Err(CoverageGap::NoMembers) => Err(AddError::Validation(
+            format_mounted_without_members_refusal(pool_json, mount_point),
+        )),
+        Err(CoverageGap::Unlisted(mappers)) => Err(AddError::Validation(
+            format_unlisted_mappers_refusal(&mappers, mount_point),
+        )),
+    }
+}
+
+/// Refusal for a locked pool: pool.json lists members, but nothing is mounted.
+/// Without it a fresh-disk add would bootstrap a new pool and overwrite
+/// pool.json, orphaning the locked members.
+fn format_locked_pool_refusal(membership: &PoolMembership) -> String {
+    let n = membership.len();
+    let mut names: Vec<&str> = membership.names().map(|n| n.as_str()).collect();
+    names.sort();
+    format!(
+        "pool exists but is not unlocked -- pool.json lists {n} member{}: {}.\n\
+         Run `braid unlock` first, then re-run `braid add`.\n\
+         If a member is gone, run `braid unlock --allow-degraded`, then `braid replace` \
+         or `braid remove-missing` to repair the pool.\n\
+         {STALE_POOL_JSON_ROUTE}",
+        if n == 1 { "" } else { "s" },
+        names.join(", ")
+    )
+}
+
+/// Refusal for a mounted pool when pool.json is missing or lists no members:
+/// the live branch would write a pool.json that lists only the new disks.
+fn format_mounted_without_members_refusal(
+    pool_json: PoolJsonFile,
+    mount_point: &MountPoint,
+) -> String {
+    let (state, route) = match pool_json {
+        PoolJsonFile::Missing => (
+            "is missing",
+            "Attach every intended member, then run `braid discover --write` to rebuild it",
+        ),
+        PoolJsonFile::Present => (
+            "lists no members",
+            "Back up /var/lib/braid/pool.json and move it aside, attach every intended member, \
+             then run `braid discover --write` to rebuild it",
+        ),
+    };
+    format!(
+        "a pool is mounted at {mount_point}, but pool.json {state} -- braid add will not \
+         add disks to a pool it has no membership for.\n\
+         {route}, and re-run `braid add`."
+    )
+}
+
+/// Refusal for a mounted pool that holds open mappers pool.json does not list:
+/// the mount is another filesystem, or pool.json is stale. Names each one, so
+/// the operator can tell which.
+fn format_unlisted_mappers_refusal(mappers: &[UnlistedMapper], mount_point: &MountPoint) -> String {
+    let listed: Vec<String> = mappers
+        .iter()
+        .map(|unlisted| {
+            format!(
+                "{} (LUKS UUID {}{})",
+                unlisted.mapper,
+                unlisted.luks_uuid,
+                if unlisted.null_backed {
+                    ", no backing disk"
+                } else {
+                    ""
+                }
+            )
+        })
+        .collect();
+    format!(
+        "the pool mounted at {mount_point} holds {} device{} that pool.json does not list: {}.\n\
+         Either the mount is another filesystem, or pool.json is stale. Run `braid doctor` \
+         to inspect the pool.\n\
+         {STALE_POOL_JSON_ROUTE}",
+        mappers.len(),
+        if mappers.len() == 1 { "" } else { "s" },
+        listed.join(", ")
+    )
+}
+
 /// Plan-time preview prediction of the add pool phase. This is preview-only:
 /// `AddPlan::execute` makes the authoritative balance call independently from
 /// the fresh post-add `pool_after` probe (`pool_can_host_raid1`) and may
@@ -643,10 +786,15 @@ enum PreviewedBalance {
     NotApplicable,
 }
 
-/// Decide the add preview phase once from the planning pool snapshot and target
-/// count so the dry-run steps and skip note share one source.
-fn add_preview_phase(pool: &PoolState, target_count: usize) -> AddPreviewPhase {
-    if !pool.mounted {
+/// Decide the add preview phase once from the pool target, the planning pool
+/// snapshot and the target count so the dry-run steps and skip note share one
+/// source.
+fn add_preview_phase(
+    pool_target: &AddPoolTarget,
+    pool: &PoolState,
+    target_count: usize,
+) -> AddPreviewPhase {
+    if let AddPoolTarget::Bootstrap = pool_target {
         return AddPreviewPhase::Bootstrap;
     }
 
@@ -1018,6 +1166,9 @@ pub struct AddPlan {
     pub probed: Vec<PresentConfigDisk>,
     pub pool: PoolState,
     pub pool_membership: PoolMembership,
+    /// Carried so execute's re-run of `decide_add_pool_target` words its
+    /// refusals as planning did.
+    pool_json: PoolJsonFile,
 }
 
 impl AddPlan {
@@ -1281,6 +1432,16 @@ impl AddPlan {
             &fresh_pool,
             params.backing_path_resolver,
         )?;
+        // The pool phase below branches on this decision, not on the plan's,
+        // so the pool.json the live branch writes rests on the probe taken
+        // just before the journal. After the recheck, so a target that turned
+        // up in the pool keeps its target-specific refusal.
+        let pool_target = decide_add_pool_target(
+            &fresh_pool,
+            &self.pool_membership,
+            self.pool_json,
+            mount_point,
+        )?;
 
         // Fresh-target readiness, execute tier: re-check every fresh target
         // after the prompt and passphrase and before the inhibitor + journal,
@@ -1508,159 +1669,168 @@ impl AddPlan {
             .map(|target| target.mapper_path.clone())
             .collect();
 
-        if !self.pool.mounted {
-            if mapper_paths.len() >= 2 {
-                // Bootstrap with mkfs.btrfs RAID1
-                pool_bootstrap_mount_raid1(runner, fs, &mapper_paths, mount_point)?;
-                eprintln!("Pool created (RAID1) and mounted at {}", mount_point);
-            } else {
-                // Single disk bootstrap
-                pool_bootstrap_mount(runner, fs, &mapper_paths[0], mount_point)?;
-                eprintln!(
-                    "Pool created (data single; metadata/system DUP -- no RAID1 disk redundancy) and mounted at {}",
-                    mount_point
-                );
-            }
-
-            // Fresh pool identity: every previous acked baseline and all
-            // latched evidence (error counts and still-missing flags) belong
-            // to the old pool.
-            alert::drop_all_ghost_alert_state(params.paths).map_err(|source| {
-                AddError::AckCleanupFailed {
-                    stage: "bootstrap",
-                    devids: Vec::new(),
-                    source,
+        match pool_target {
+            AddPoolTarget::Bootstrap => {
+                if mapper_paths.len() >= 2 {
+                    // Bootstrap with mkfs.btrfs RAID1
+                    pool_bootstrap_mount_raid1(runner, fs, &mapper_paths, mount_point)?;
+                    eprintln!("Pool created (RAID1) and mounted at {}", mount_point);
+                } else {
+                    // Single disk bootstrap
+                    pool_bootstrap_mount(runner, fs, &mapper_paths[0], mount_point)?;
+                    eprintln!(
+                        "Pool created (data single; metadata/system DUP -- no RAID1 disk redundancy) and mounted at {}",
+                        mount_point
+                    );
                 }
-            })?;
 
-            // Bootstrap post-commit persist: write pool.json after mkfs + mount.
-            // Enrich with live metadata (devid) from pool probe, best-effort:
-            // if the probe itself fails, warn and save the target membership
-            // unenriched. Pinned by
-            // cmd_add_bootstrap_warns_when_post_mount_probe_errors.
-            let mut final_membership = journal.target_membership.clone();
-            match probe_pool(runner, fs, mount_point) {
-                Ok(pool_after) => {
-                    membership::enrich_from_pool_state(&mut final_membership, &pool_after);
-                }
-                Err(e) => crate::status_tag::emit_status(&format!(
-                    "Warning: failed to probe pool for metadata refresh: {e}\n"
-                )),
-            }
-            membership::save_membership(&final_membership, params.paths)?;
-            // Order matters: save_membership before clear_journal. If
-            // save_membership fails, the journal survives and recover can
-            // reconstruct pool.json from the live pool.
-            journal::clear_journal(params.paths)
-                .map_err(|e| AddError::Validation(e.to_string()))?;
-        } else {
-            // Add each to existing pool
-            let mut pool_after: Option<PoolState> = None;
-            for target in &needs_pool_add {
-                pool_add_device(runner, &target.mapper_path, mount_point, target.force)?;
-                eprintln!("Device added to pool: {}", target.mapper_path);
-                let probe = probe_pool(runner, fs, mount_point).map_err(|e| {
-                    AddError::PostAddProbeFailed {
-                        detail: format!("{}: {e}", target.name),
-                    }
-                })?;
-                let dev = probe.device_by_uuid(&target.luks_uuid).ok_or_else(|| {
-                    AddError::PostAddProbeFailed {
-                        detail: format!("{}: not found in pool after add", target.name),
-                    }
-                })?;
-                alert::drop_ghost_alert_state_for_devids(params.paths, &[dev.devid]).map_err(
-                    |source| AddError::AckCleanupFailed {
-                        stage: "live-pool add",
-                        devids: vec![dev.devid],
+                // Fresh pool identity: every previous acked baseline and all
+                // latched evidence (error counts and still-missing flags) belong
+                // to the old pool.
+                alert::drop_all_ghost_alert_state(params.paths).map_err(|source| {
+                    AddError::AckCleanupFailed {
+                        stage: "bootstrap",
+                        devids: Vec::new(),
                         source,
-                    },
-                )?;
-                pool_after = Some(probe);
-            }
+                    }
+                })?;
 
-            // Membership is committed by btrfs device add. Persist it before
-            // the long post-add balance while leaving the journal in place so
-            // recovery still knows the balance is owed if interrupted.
-            let pool_after = pool_after.expect(
-                "needs_pool_add is non-empty in the live-pool branch: \
+                // Bootstrap post-commit persist: write pool.json after mkfs + mount.
+                // Enrich with live metadata (devid) from pool probe, best-effort:
+                // if the probe itself fails, warn and save the target membership
+                // unenriched. Pinned by
+                // cmd_add_bootstrap_warns_when_post_mount_probe_errors.
+                let mut final_membership = journal.target_membership.clone();
+                match probe_pool(runner, fs, mount_point) {
+                    Ok(pool_after) => {
+                        membership::enrich_from_pool_state(&mut final_membership, &pool_after);
+                    }
+                    Err(e) => crate::status_tag::emit_status(&format!(
+                        "Warning: failed to probe pool for metadata refresh: {e}\n"
+                    )),
+                }
+                membership::save_membership(&final_membership, params.paths)?;
+                // Order matters: save_membership before clear_journal. If
+                // save_membership fails, the journal survives and recover can
+                // reconstruct pool.json from the live pool.
+                journal::clear_journal(params.paths)
+                    .map_err(|e| AddError::Validation(e.to_string()))?;
+            }
+            // The coverage proof is why this branch may write pool.json from
+            // `journal.target_membership`: every open mapper in the pool is in it.
+            AddPoolTarget::Live(_coverage) => {
+                // Add each to existing pool
+                let mut pool_after: Option<PoolState> = None;
+                for target in &needs_pool_add {
+                    pool_add_device(runner, &target.mapper_path, mount_point, target.force)?;
+                    eprintln!("Device added to pool: {}", target.mapper_path);
+                    let probe = probe_pool(runner, fs, mount_point).map_err(|e| {
+                        AddError::PostAddProbeFailed {
+                            detail: format!("{}: {e}", target.name),
+                        }
+                    })?;
+                    let dev = probe.device_by_uuid(&target.luks_uuid).ok_or_else(|| {
+                        AddError::PostAddProbeFailed {
+                            detail: format!("{}: not found in pool after add", target.name),
+                        }
+                    })?;
+                    alert::drop_ghost_alert_state_for_devids(params.paths, &[dev.devid]).map_err(
+                        |source| AddError::AckCleanupFailed {
+                            stage: "live-pool add",
+                            devids: vec![dev.devid],
+                            source,
+                        },
+                    )?;
+                    pool_after = Some(probe);
+                }
+
+                // Membership is committed by btrfs device add. Persist it before
+                // the long post-add balance while leaving the journal in place so
+                // recovery still knows the balance is owed if interrupted.
+                let pool_after = pool_after.expect(
+                    "needs_pool_add is non-empty in the live-pool branch: \
                  journal_targets.is_empty() short-circuits earlier, and \
                  journal_targets and needs_pool_add are populated in lockstep",
-            );
-            // End-state post-condition over every journaled member against
-            // the final pool probe. The per-target loop above proves each add
-            // in its own immediate probe and extracts the devid for ghost
-            // cleanup; it does not prove an earlier add is still present after
-            // a later add. Fail before save_membership: enrich_from_pool_state
-            // skips missing members, which would persist a vanished disk with
-            // no devid and then balance a degraded pool. This shares
-            // PostAddProbeFailed per docs/dev/safety-heuristics.md: same
-            // post-commit lifecycle point and same braid recover remediation,
-            // regardless of detection site.
-            for (uuid, target) in journal_targets.iter() {
-                if pool_after.device_by_uuid(uuid).is_none() {
-                    return Err(AddError::PostAddProbeFailed {
-                        detail: format!(
-                            "{}: no longer present in the live pool after all disks were added",
-                            target.name
-                        ),
-                    });
+                );
+                // End-state post-condition over every journaled member against
+                // the final pool probe. The per-target loop above proves each add
+                // in its own immediate probe and extracts the devid for ghost
+                // cleanup; it does not prove an earlier add is still present after
+                // a later add. Fail before save_membership: enrich_from_pool_state
+                // skips missing members, which would persist a vanished disk with
+                // no devid and then balance a degraded pool. This shares
+                // PostAddProbeFailed per docs/dev/safety-heuristics.md: same
+                // post-commit lifecycle point and same braid recover remediation,
+                // regardless of detection site.
+                for (uuid, target) in journal_targets.iter() {
+                    if pool_after.device_by_uuid(uuid).is_none() {
+                        return Err(AddError::PostAddProbeFailed {
+                            detail: format!(
+                                "{}: no longer present in the live pool after all disks were added",
+                                target.name
+                            ),
+                        });
+                    }
                 }
-            }
-            let mut final_membership = journal.target_membership.clone();
-            membership::enrich_from_pool_state(&mut final_membership, &pool_after);
-            membership::save_membership(&final_membership, params.paths)?;
+                let mut final_membership = journal.target_membership.clone();
+                membership::enrich_from_pool_state(&mut final_membership, &pool_after);
+                membership::save_membership(&final_membership, params.paths)?;
 
-            // The phase advance carries the committed membership as the
-            // journal target, as recover's advance does
-            // (`cli/src/recover.rs#write_add_phase`): a recovery from
-            // PostAddBalanceRaid1 then binds each new disk at the devid btrfs
-            // gave it, even if that disk is MISSING by then.
-            let mut balance_journal = journal.clone();
-            if let journal::OpKind::Add { phase, .. } = &mut balance_journal.op {
-                *phase = journal::AddPhase::PostAddBalanceRaid1;
-            }
-            balance_journal.target_membership = final_membership;
-            journal::write_journal_tracked(params.paths, &balance_journal, journal_state)
-                .map_err(|e| AddError::Validation(e.to_string()))?;
-
-            // Authoritative live gate for the hard post-add convert. The
-            // preview step is only a plan-time predictor; this final probe
-            // closes the confirmation/passphrase/format/add window where an
-            // existing member can go missing or return before the balance.
-            match pool_can_host_raid1(&pool_after, mount_point) {
-                Ok(host) => {
-                    eprint!(
-                        "{}",
-                        status_line(
-                            StatusTag::Wait,
-                            color_enabled,
-                            "pool: balancing to RAID1...",
-                        )
-                    );
-                    OwedRaid1Balance::Grow.run(runner, host, params.progress)?;
-                    eprint!(
-                        "{}",
-                        status_line(StatusTag::Ok, color_enabled, "pool: RAID1 balance complete",)
-                    );
+                // The phase advance carries the committed membership as the
+                // journal target, as recover's advance does
+                // (`cli/src/recover.rs#write_add_phase`): a recovery from
+                // PostAddBalanceRaid1 then binds each new disk at the devid btrfs
+                // gave it, even if that disk is MISSING by then.
+                let mut balance_journal = journal.clone();
+                if let journal::OpKind::Add { phase, .. } = &mut balance_journal.op {
+                    *phase = journal::AddPhase::PostAddBalanceRaid1;
                 }
-                Err(Raid1HostRefusal::Degraded) => {
-                    // Live pool is degraded: skip the hard convert and announce
-                    // it. The plan-time Skip note was filtered from the replay
-                    // above, so this is the one real-run source for the
-                    // balance-skip line.
-                    preview::emit_notes_to_stderr(
-                        &[PreviewNote::Skip(OwedRaid1Balance::Grow.skip_line().into())],
-                        PerDiskStyle::Bracketed,
-                    );
-                }
-                Err(Raid1HostRefusal::TooFewDevices) => {}
-            }
+                balance_journal.target_membership = final_membership;
+                journal::write_journal_tracked(params.paths, &balance_journal, journal_state)
+                    .map_err(|e| AddError::Validation(e.to_string()))?;
 
-            // Leave the journal until the balance completes; interruption
-            // after the membership commit still needs recovery replay.
-            journal::clear_journal(params.paths)
-                .map_err(|e| AddError::Validation(e.to_string()))?;
+                // Authoritative live gate for the hard post-add convert. The
+                // preview step is only a plan-time predictor; this final probe
+                // closes the confirmation/passphrase/format/add window where an
+                // existing member can go missing or return before the balance.
+                match pool_can_host_raid1(&pool_after, mount_point) {
+                    Ok(host) => {
+                        eprint!(
+                            "{}",
+                            status_line(
+                                StatusTag::Wait,
+                                color_enabled,
+                                "pool: balancing to RAID1...",
+                            )
+                        );
+                        OwedRaid1Balance::Grow.run(runner, host, params.progress)?;
+                        eprint!(
+                            "{}",
+                            status_line(
+                                StatusTag::Ok,
+                                color_enabled,
+                                "pool: RAID1 balance complete",
+                            )
+                        );
+                    }
+                    Err(Raid1HostRefusal::Degraded) => {
+                        // Live pool is degraded: skip the hard convert and announce
+                        // it. The plan-time Skip note was filtered from the replay
+                        // above, so this is the one real-run source for the
+                        // balance-skip line.
+                        preview::emit_notes_to_stderr(
+                            &[PreviewNote::Skip(OwedRaid1Balance::Grow.skip_line().into())],
+                            PerDiskStyle::Bracketed,
+                        );
+                    }
+                    Err(Raid1HostRefusal::TooFewDevices) => {}
+                }
+
+                // Leave the journal until the balance completes; interruption
+                // after the membership commit still needs recovery replay.
+                journal::clear_journal(params.paths)
+                    .map_err(|e| AddError::Validation(e.to_string()))?;
+            }
         }
 
         eprintln!("{}", format_add_done(&self.work_plan.target_names()));
@@ -1672,7 +1842,8 @@ impl AddPlan {
 /// operation and loaded config under the pool lock. Owns disk-spec parsing,
 /// duplicate-name validation, the distinct-whole-disk target check
 /// (`cli/src/target_disk.rs#check_whole_disk_targets`), keyfile path validation,
-/// membership load, conflict validation, pool probe, mutation preflight,
+/// membership load, conflict validation, pool probe, the bootstrap-or-live
+/// decision (`decide_add_pool_target`), mutation preflight,
 /// per-disk probe, UPS preflight, the missing-devices warning, the keyfile-asymmetry
 /// warning, and the semantic add work planner. On success, every accumulated
 /// note lives on `plan.notes`; on failure after note accumulation, notes
@@ -1747,14 +1918,15 @@ pub fn plan_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
 
     // Load existing membership (or empty if pool.json absent). A
     // hard-corrupt pool.json fails closed via `MembershipError::Corrupt`;
-    // a missing file is the legitimate bootstrap case and maps to
-    // `PoolMembership::empty()`.
-    let pool_membership = match membership::load_membership(params.paths) {
-        Ok(m) => m,
+    // a missing file maps to `PoolMembership::empty()`, which
+    // `decide_add_pool_target` accepts as a bootstrap only when nothing is
+    // mounted.
+    let (pool_membership, pool_json) = match membership::load_membership(params.paths) {
+        Ok(m) => (m, PoolJsonFile::Present),
         Err(membership::MembershipError::Io { source, .. })
             if source.kind() == std::io::ErrorKind::NotFound =>
         {
-            PoolMembership::empty()
+            (PoolMembership::empty(), PoolJsonFile::Missing)
         }
         Err(e) => return Err(PlanFailure::empty(e.into())),
     };
@@ -1811,12 +1983,15 @@ pub fn plan_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         Err(e) => return Err(PlanFailure::empty(AddError::Probe(e))),
     };
 
-    // Refuse if pool.json lists members but pool isn't unlocked. Catches the
-    // silent-bootstrap case where a fresh disk + locked pool would otherwise
-    // overwrite pool.json and orphan the existing locked members.
-    if let Err(msg) = preflight::check_pool_unlocked_if_membership_exists(&pool_membership, &pool) {
-        return Err(PlanFailure::empty(AddError::Validation(msg)));
-    }
+    // Bootstrap only when nothing is mounted and pool.json lists no members;
+    // live add only on proof that pool.json lists every open mapper in the
+    // mounted pool. Refuses a locked pool, and a mounted pool that pool.json
+    // is missing for or does not cover, before any disk probe or prompt.
+    let pool_target =
+        match decide_add_pool_target(&pool, &pool_membership, pool_json, config.mount_point()) {
+            Ok(target) => target,
+            Err(e) => return Err(PlanFailure::empty(e)),
+        };
 
     if pool.mounted {
         let fsid = pool.fsid.as_ref().expect("mounted pool must have FSID");
@@ -1889,6 +2064,7 @@ pub fn plan_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             luks_format_extra_opts: &luks_format_extra_opts,
             backing_path_resolver: params.backing_path_resolver,
             pool_membership: &pool_membership,
+            pool_target: &pool_target,
         },
     );
 
@@ -1991,6 +2167,7 @@ pub fn plan_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         probed,
         pool,
         pool_membership,
+        pool_json,
     };
 
     Ok(plan)
@@ -2041,6 +2218,9 @@ struct AddStepsInput<'a> {
     /// Borrowed pool membership for the pre-journal-write uniqueness
     /// assert on freshly generated / probed UUIDs.
     pool_membership: &'a PoolMembership,
+    /// The gate's decision, so the preview phase follows it rather than
+    /// mount state alone.
+    pool_target: &'a AddPoolTarget,
 }
 
 /// Build the credential prelude from the sorted work targets so the
@@ -2329,7 +2509,7 @@ fn build_add_work_plan<R: CommandRunner, F: Filesystem + ?Sized>(
         }
     }
 
-    let preview_phase = add_preview_phase(input.pool, targets.len());
+    let preview_phase = add_preview_phase(input.pool_target, input.pool, targets.len());
     Ok(AddWorkPlan {
         prelude: build_add_credential_prelude(input, &targets),
         targets,
@@ -3089,7 +3269,21 @@ mod tests {
             state: probed_state,
         }];
         let targets = vec![target];
-        let preview_phase = add_preview_phase(&pool, targets.len());
+        let preview_phase =
+            add_preview_phase(&AddPoolTarget::unchecked(&pool), &pool, targets.len());
+        // disk1 is the member the execute probes in these tests show live, so
+        // execute's re-run of the gate passes and each test reaches the guard
+        // it pins.
+        let mut pool_membership = PoolMembership::empty();
+        pool_membership
+            .insert(
+                crate::test_fixtures::canonical_luks_uuid(1),
+                DiskMember::new(
+                    DiskName::parse("disk1").unwrap(),
+                    ByIdPath::parse("/dev/disk/by-id/virtio-disk1").unwrap(),
+                ),
+            )
+            .expect("test fixture insert");
         AddPlan {
             notes: vec![],
             work_plan: AddWorkPlan {
@@ -3111,7 +3305,8 @@ mod tests {
             by_ids: vec![by_id],
             probed,
             pool,
-            pool_membership: PoolMembership::empty(),
+            pool_membership,
+            pool_json: PoolJsonFile::Present,
         }
     }
 
@@ -3759,6 +3954,7 @@ mod tests {
                 backing_path_resolver:
                     crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
                 pool_membership: &PoolMembership::empty(),
+                pool_target: &AddPoolTarget::unchecked(&pool),
             },
         );
         assert!(result.is_err());
@@ -3802,6 +3998,7 @@ mod tests {
                 backing_path_resolver:
                     crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
                 pool_membership: &PoolMembership::empty(),
+                pool_target: &AddPoolTarget::unchecked(&pool),
             },
         );
         assert!(result.is_err());
@@ -3837,6 +4034,7 @@ mod tests {
                 backing_path_resolver:
                     crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
                 pool_membership: &PoolMembership::empty(),
+                pool_target: &AddPoolTarget::unchecked(&pool),
             },
         )
         .unwrap()
@@ -3876,6 +4074,7 @@ mod tests {
                 backing_path_resolver:
                     crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
                 pool_membership: &PoolMembership::empty(),
+                pool_target: &AddPoolTarget::unchecked(&pool),
             },
         );
         assert!(result.is_err());
@@ -3911,6 +4110,7 @@ mod tests {
                 backing_path_resolver:
                     crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
                 pool_membership: &PoolMembership::empty(),
+                pool_target: &AddPoolTarget::unchecked(&pool),
             },
         )
         .unwrap()
@@ -3973,7 +4173,7 @@ mod tests {
         let mut pool_membership = PoolMembership::empty();
         pool_membership
             .insert(
-                crate::test_fixtures::test_uuid(500),
+                crate::test_fixtures::canonical_luks_uuid(1),
                 membership::DiskMember {
                     name: DiskName::parse("disk1").unwrap(),
                     by_id: ByIdPath::parse("/dev/disk/by-id/virtio-disk1").unwrap(),
@@ -4001,6 +4201,7 @@ mod tests {
                 backing_path_resolver:
                     crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
                 pool_membership: &PoolMembership::empty(),
+                pool_target: &AddPoolTarget::unchecked(&pool),
             },
         )
         .expect("planning should use cached LUKS label");
@@ -4020,6 +4221,7 @@ mod tests {
             probed,
             pool,
             pool_membership,
+            pool_json: PoolJsonFile::Present,
         };
         let inhibitor = crate::inhibit::RecordingInhibitor::new();
         let confirm = crate::confirm::RecordingConfirm::new();
@@ -4182,6 +4384,7 @@ mod tests {
                 backing_path_resolver:
                     crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
                 pool_membership: &PoolMembership::empty(),
+                pool_target: &AddPoolTarget::unchecked(&pool),
             },
         )
         .unwrap_err()
@@ -4816,7 +5019,7 @@ mod tests {
         let mut pool_membership = membership::PoolMembership::empty();
         pool_membership
             .insert(
-                crate::test_fixtures::test_uuid(501),
+                crate::test_fixtures::canonical_luks_uuid(1),
                 membership::DiskMember {
                     name: DiskName::parse("disk1").unwrap(),
                     by_id: ByIdPath::parse("/dev/disk/by-id/virtio-disk1").unwrap(),
@@ -4863,6 +5066,7 @@ mod tests {
                 backing_path_resolver:
                     crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
                 pool_membership: &PoolMembership::empty(),
+                pool_target: &AddPoolTarget::unchecked(&pool),
             },
         )
         .expect("closed recoverable target should plan");
@@ -4876,6 +5080,7 @@ mod tests {
             probed,
             pool,
             pool_membership,
+            pool_json: PoolJsonFile::Present,
         };
 
         let captured = crate::status_tag::testing::capture_with_color(false, || {
@@ -5058,20 +5263,12 @@ mod tests {
             fsid: Some(Fsid::parse(POOL_FSID).unwrap()),
             null_underlying: vec![],
         };
-        let mut plan = plan_for_execute_target(
+        // plan_for_execute_target's pool.json lists disk1, with no devid.
+        let plan = plan_for_execute_target(
             AddTargetWork::Fresh(target.clone()),
             journal_targets_with(target_uuid.clone(), fresh_journal_target(&target)),
             pool,
         );
-        plan.pool_membership
-            .insert(
-                disk1_uuid.clone(),
-                DiskMember::new(
-                    DiskName::parse("disk1").unwrap(),
-                    ByIdPath::parse("/dev/disk/by-id/virtio-disk1").unwrap(),
-                ),
-            )
-            .unwrap();
         let config = test_config();
 
         let result = plan.execute(
@@ -5781,8 +5978,11 @@ mod tests {
         let state_tmp = tempfile::tempdir().unwrap();
         let paths = StatePaths::custom(state_tmp.path().into());
         let mut m = membership::PoolMembership::empty();
+        // disk1's key is the LUKS UUID the live runners' braid-disk1 mapper
+        // records, so a live-add test passes the coverage gate on a real
+        // match.
         m.insert(
-            crate::test_fixtures::test_uuid(502),
+            crate::test_fixtures::canonical_luks_uuid(1),
             membership::DiskMember {
                 name: DiskName::parse("disk1").unwrap(),
                 by_id: ByIdPath::parse("/dev/disk/by-id/virtio-disk1").unwrap(),
@@ -5804,6 +6004,22 @@ mod tests {
         std::fs::write(&pass_path, b"test-passphrase\n").unwrap();
 
         (state_tmp, paths, tmp, config_path, pass_path)
+    }
+
+    /// Add `disk<n>` (by-id `virtio-disk<n>`, canonical UUID `n`) to the
+    /// pool.json that `add_test_setup` wrote, for a test whose live pool shows
+    /// that disk as a member.
+    fn add_canonical_member(paths: &StatePaths, n: u64) {
+        let mut m = membership::load_membership(paths).unwrap();
+        m.insert(
+            crate::test_fixtures::canonical_luks_uuid(n),
+            DiskMember::new(
+                DiskName::parse(&format!("disk{n}")).unwrap(),
+                ByIdPath::parse(&format!("/dev/disk/by-id/virtio-disk{n}")).unwrap(),
+            ),
+        )
+        .expect("test fixture insert");
+        membership::save_membership(&m, paths).unwrap();
     }
 
     use std::sync::Arc;
@@ -6365,10 +6581,13 @@ mod tests {
     }
 
     // Intent: a plan-degraded real `cmd_add` emits the degraded balance-skip
-    //   note once, from the plan notes, and never again from execute.
+    //   note once, from the plan notes, and never again from execute. The add
+    //   succeeds although no pool.json member records the MISSING devid.
     // Why it exists: the execute-time newly-degraded branch must stay mutually
     //   exclusive with the plan-degraded branch or operators see duplicate
-    //   `[skip]` explanations.
+    //   `[skip]` explanations. The coverage gate checks open mappers only, so
+    //   a MISSING devid that pool.json cannot name must not block a degraded
+    //   add (finding 261022-1230-004).
     // Scenario: the mounted pool has disk1 present and one missing member at
     //   planning time; disk2 is added successfully, the pool remains degraded,
     //   and the hard RAID1 balance is skipped.
@@ -7135,6 +7354,7 @@ mod tests {
     //   The command succeeds as a no-op without ever writing pending-op.json.
     fn no_journal_on_noop_add() {
         let (_state_tmp, paths, _tmp, config_path, pass_path) = add_test_setup();
+        add_canonical_member(&paths, 2);
         let fs = MockFs::storage(vec![
             "/dev/disk/by-id/virtio-disk2".into(),
             "/dev/mapper/braid-disk2".into(),
@@ -7907,9 +8127,9 @@ mod tests {
         let (_state_tmp, paths, _tmp, config_path, pass_path) = add_test_setup();
         // The named contract here is the braid-labeled-LUKS bootstrap guard,
         // which only fires inside add work-plan rendering. Clear the
-        // pre-seeded pool.json so the earlier locked-pool-with-membership
-        // refusal (check_pool_unlocked_if_membership_exists) doesn't preempt
-        // it; that earlier refusal has its own dedicated test
+        // pre-seeded pool.json so the earlier locked-pool refusal
+        // (`decide_add_pool_target`) doesn't preempt it; that earlier refusal
+        // has its own dedicated test
         // (cmd_add_refuses_when_pool_locked_with_membership).
         membership::save_membership(&membership::PoolMembership::empty(), &paths).unwrap();
         let fs = MockFs::unmounted(vec!["/dev/disk/by-id/virtio-disk2".into()])
@@ -8409,6 +8629,7 @@ mod tests {
                 backing_path_resolver:
                     crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
                 pool_membership: &PoolMembership::empty(),
+                pool_target: &AddPoolTarget::unchecked(&pool),
             },
         )
         .unwrap()
@@ -8516,6 +8737,7 @@ mod tests {
             luks_format_extra_opts: &extra_opts,
             backing_path_resolver: crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
             pool_membership: &membership,
+            pool_target: &AddPoolTarget::unchecked(&pool),
         };
 
         let prelude = build_add_credential_prelude(&input, &[]);
@@ -8577,6 +8799,7 @@ mod tests {
             luks_format_extra_opts: &extra_opts,
             backing_path_resolver: crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
             pool_membership: &membership,
+            pool_target: &AddPoolTarget::unchecked(&pool),
         };
 
         // Each call mints a fresh `LuksUuid::new_v4()` internally.
@@ -8642,6 +8865,7 @@ mod tests {
                 backing_path_resolver:
                     crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
                 pool_membership: &PoolMembership::empty(),
+                pool_target: &AddPoolTarget::unchecked(&pool),
             },
         )
         .unwrap()
@@ -8746,6 +8970,7 @@ mod tests {
                 backing_path_resolver:
                     crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
                 pool_membership: &PoolMembership::empty(),
+                pool_target: &AddPoolTarget::unchecked(&pool),
             },
         )
         .unwrap()
@@ -8828,6 +9053,7 @@ mod tests {
                 backing_path_resolver:
                     crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
                 pool_membership: &PoolMembership::empty(),
+                pool_target: &AddPoolTarget::unchecked(&pool),
             },
         )
         .unwrap()
@@ -8892,6 +9118,7 @@ mod tests {
                 backing_path_resolver:
                     crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
                 pool_membership: &PoolMembership::empty(),
+                pool_target: &AddPoolTarget::unchecked(&pool),
             },
         )
         .unwrap()
@@ -8940,6 +9167,7 @@ mod tests {
                 backing_path_resolver:
                     crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
                 pool_membership: &PoolMembership::empty(),
+                pool_target: &AddPoolTarget::unchecked(&pool),
             },
         )
         .unwrap()
@@ -9784,6 +10012,383 @@ mod tests {
         );
     }
 
+    // --- decide_add_pool_target: the four arms ---
+
+    /// pool.json naming `disk<n>` (by-id `virtio-disk<n>`) at canonical UUID
+    /// `n` for each `n`.
+    fn canonical_membership(disks: &[u64]) -> PoolMembership {
+        let mut m = PoolMembership::empty();
+        for &n in disks {
+            m.insert(
+                crate::test_fixtures::canonical_luks_uuid(n),
+                DiskMember::new(
+                    DiskName::parse(&format!("disk{n}")).unwrap(),
+                    ByIdPath::parse(&format!("/dev/disk/by-id/virtio-disk{n}")).unwrap(),
+                ),
+            )
+            .expect("test fixture insert");
+        }
+        m
+    }
+
+    /// A mounted pool with `present` rows, open mappers whose disk is gone,
+    /// and btrfs-MISSING devids with no open mapper, all as `(mapper, uuid
+    /// digit)` pairs or devids.
+    fn mounted_pool(
+        present: &[(&str, u64)],
+        null_backed: &[(&str, u64)],
+        missing: &[u64],
+    ) -> PoolState {
+        let devices: Vec<PoolDevice> = present
+            .iter()
+            .enumerate()
+            .map(|(i, (mapper, n))| PoolDevice {
+                mapper: MapperName::from_basename((*mapper).to_owned()),
+                luks_uuid: crate::test_fixtures::canonical_luks_uuid(*n),
+                devid: Devid::new(i as u64 + 1),
+                underlying: format!("/dev/vd{}", (b'b' + i as u8) as char),
+            })
+            .collect();
+        let null_underlying: Vec<NullUnderlyingDevice> = null_backed
+            .iter()
+            .enumerate()
+            .map(|(i, (mapper, n))| NullUnderlyingDevice {
+                mapper: MapperName::from_basename((*mapper).to_owned()),
+                luks_uuid: crate::test_fixtures::canonical_luks_uuid(*n),
+                devid: Devid::new((devices.len() + i) as u64 + 1),
+            })
+            .collect();
+        let missing_count = (null_underlying.len() + missing.len()) as u64;
+        PoolState {
+            mounted: true,
+            total_devices: devices.len() as u64 + missing_count,
+            devices,
+            missing_count,
+            missing_devids: missing.iter().copied().map(Devid::new).collect(),
+            fsid: Some(Fsid::parse(POOL_FSID).unwrap()),
+            null_underlying,
+        }
+    }
+
+    fn decide_refusal(
+        pool: &PoolState,
+        membership: &PoolMembership,
+        pool_json: PoolJsonFile,
+    ) -> String {
+        match decide_add_pool_target(
+            pool,
+            membership,
+            pool_json,
+            &MountPoint::new("/mnt/storage".into()),
+        ) {
+            Ok(target) => panic!("expected a refusal, got {target:?}"),
+            Err(AddError::Validation(msg)) => msg,
+            Err(other) => panic!("expected a Validation refusal, got {other:?}"),
+        }
+    }
+
+    // Intent: with nothing mounted and no members in pool.json, add
+    //   bootstraps, whether pool.json is missing or lists no members.
+    // Why it exists: a fresh system has no pool.json and nothing mounted; the
+    //   gate must not block the first `braid add`.
+    // Scenario: brand-new system, operator runs `braid add disk1=...`.
+    #[test]
+    fn add_pool_target_bootstraps_when_nothing_mounted_and_no_members() {
+        for pool_json in [PoolJsonFile::Missing, PoolJsonFile::Present] {
+            let target = decide_add_pool_target(
+                &pool_unmounted(),
+                &PoolMembership::empty(),
+                pool_json,
+                &MountPoint::new("/mnt/storage".into()),
+            )
+            .unwrap();
+            assert_eq!(target, AddPoolTarget::Bootstrap, "{pool_json:?}");
+        }
+    }
+
+    // Intent: when pool.json lists members and nothing is mounted, add
+    //   refuses, names the locked members, and gives routes that work in
+    //   this state.
+    // Why it exists: the silent-bootstrap bug. Without it, `braid add
+    //   <fresh-disk>` against a locked 2-member pool bootstrapped a new pool
+    //   and overwrote pool.json, orphaning the existing members. The advice
+    //   once pointed to `braid discover` and `braid remove-missing`, which
+    //   both refuse here.
+    // Scenario: 2-disk pool, both LUKS-locked, operator forgets `braid
+    //   unlock` and runs `braid add disk3=...`.
+    #[test]
+    fn add_pool_target_refuses_locked_pool_with_members() {
+        let err = decide_refusal(
+            &pool_unmounted(),
+            &canonical_membership(&[1, 2]),
+            PoolJsonFile::Present,
+        );
+        assert!(err.contains("not unlocked"), "got: {err}");
+        assert!(err.contains("2 members: disk1, disk2."), "got: {err}");
+        assert!(err.contains("braid unlock"), "got: {err}");
+        assert!(
+            err.contains("`braid unlock --allow-degraded`, then `braid replace`"),
+            "a gone member needs the degraded-unlock route, got: {err}"
+        );
+        assert!(
+            err.contains("move it aside") && err.contains("braid discover --write"),
+            "a stale pool.json needs the move-aside route, got: {err}"
+        );
+    }
+
+    // Intent: a mounted pool with no members in pool.json refuses, and says
+    //   to move an existing empty pool.json aside before `discover --write`.
+    // Why it exists: finding 261022-1230-004. Add treated a missing or empty
+    //   pool.json as a bootstrap, then live-added and wrote a pool.json that
+    //   listed only the new disks. `discover --write` refuses any valid
+    //   pool.json, even an empty one, so that case needs the move-aside step.
+    // Scenario: the state dir is lost, or pool.json is reset to
+    //   `{"disks":{}}`, while disk1 stays mounted.
+    #[test]
+    fn add_pool_target_refuses_mounted_pool_without_members() {
+        let pool = mounted_pool(&[("braid-disk1", 1)], &[], &[]);
+        let missing = decide_refusal(&pool, &PoolMembership::empty(), PoolJsonFile::Missing);
+        assert!(
+            missing.contains("mounted at /mnt/storage, but pool.json is missing"),
+            "got: {missing}"
+        );
+        assert!(missing.contains("braid discover --write"), "got: {missing}");
+        assert!(
+            !missing.contains("move it aside"),
+            "a missing file has nothing to move aside, got: {missing}"
+        );
+
+        let empty = decide_refusal(&pool, &PoolMembership::empty(), PoolJsonFile::Present);
+        assert!(empty.contains("pool.json lists no members"), "got: {empty}");
+        assert!(
+            empty.contains("move it aside") && empty.contains("braid discover --write"),
+            "got: {empty}"
+        );
+    }
+
+    // Intent: a mounted pool goes live only when pool.json lists every open
+    //   mapper, present or null-backed; a btrfs-MISSING devid that no member
+    //   records does not block it.
+    // Why it exists: the live branch writes pool.json from this membership,
+    //   so the proof must cover what btrfs holds through an open mapper.
+    //   Refusing an unclaimed MISSING devid would block a degraded add whose
+    //   remedy, `discover --write`, cannot restore that member either.
+    // Scenario: disk1 is present, disk2's mapper is open with its disk
+    //   unplugged, and devid 3 is MISSING with no devid recorded in pool.json.
+    #[test]
+    fn add_pool_target_goes_live_when_pool_json_lists_every_open_mapper() {
+        let pool = mounted_pool(&[("braid-disk1", 1)], &[("braid-disk2", 2)], &[3]);
+        let target = decide_add_pool_target(
+            &pool,
+            &canonical_membership(&[1, 2]),
+            PoolJsonFile::Present,
+            &MountPoint::new("/mnt/storage".into()),
+        )
+        .unwrap();
+        assert!(matches!(target, AddPoolTarget::Live(_)), "got {target:?}");
+    }
+
+    // Intent: a mounted pool that holds open mappers pool.json does not list
+    //   refuses, and names each one with its LUKS UUID.
+    // Why it exists: finding 261022-1230-004. Add treated any btrfs on LUKS
+    //   at braid.mountPoint as the pool. It could add a disk to a foreign
+    //   filesystem, or write a pool.json that left out a live member, either
+    //   one present or one whose disk is gone.
+    // Scenario: pool.json lists disk1, but the mount also holds braid-x
+    //   (present) and braid-y (open mapper, disk unplugged), which pool.json
+    //   does not list.
+    #[test]
+    fn add_pool_target_refuses_unlisted_open_mappers() {
+        let pool = mounted_pool(
+            &[("braid-disk1", 1), ("braid-x", 8)],
+            &[("braid-y", 9)],
+            &[],
+        );
+        let err = decide_refusal(&pool, &canonical_membership(&[1]), PoolJsonFile::Present);
+        assert!(
+            err.contains("holds 2 devices that pool.json does not list"),
+            "got: {err}"
+        );
+        assert!(
+            err.contains(&format!(
+                "braid-x (LUKS UUID {})",
+                crate::test_fixtures::canonical_luks_uuid(8)
+            )),
+            "got: {err}"
+        );
+        assert!(
+            err.contains(&format!(
+                "braid-y (LUKS UUID {}, no backing disk)",
+                crate::test_fixtures::canonical_luks_uuid(9)
+            )),
+            "got: {err}"
+        );
+        assert!(!err.contains("braid-disk1"), "disk1 is listed, got: {err}");
+        assert!(err.contains("braid doctor"), "got: {err}");
+        assert!(
+            err.contains("move it aside") && err.contains("braid discover --write"),
+            "got: {err}"
+        );
+    }
+
+    // Intent: execute re-runs the coverage gate on the pre-journal probe, so
+    //   an open mapper that joins the pool after planning refuses with
+    //   nothing written.
+    // Why it exists: the pool.json the live branch writes must rest on the
+    //   probe taken just before the journal, not on the plan-time probe.
+    // Scenario: add planned disk2 against a pool whose pool.json lists disk1.
+    //   While the operator typed the passphrase, `foreign-x` was added to the
+    //   mounted filesystem by hand.
+    #[test]
+    fn execute_reruns_coverage_gate_before_journal() {
+        const UUID: &str = "33333333-3333-3333-3333-333333333333";
+        const BY_ID: &str = "/dev/disk/by-id/virtio-disk2";
+        let target = fresh_target("disk2", BY_ID, UUID);
+        let journal_targets =
+            journal_targets_with(target.luks_uuid.clone(), fresh_journal_target(&target));
+        let plan = plan_for_execute_target(
+            AddTargetWork::Fresh(target),
+            journal_targets,
+            pool_mounted_with_fsid(POOL_FSID),
+        );
+        let (_state_tmp, paths, _tmp, pass_path) = execute_fixture();
+        let devices = [
+            (
+                "braid-disk1",
+                1,
+                "/dev/vdb",
+                "11111111-1111-1111-1111-111111111111",
+            ),
+            (
+                "foreign-x",
+                2,
+                "/dev/vde",
+                "99999999-9999-9999-9999-999999999999",
+            ),
+        ];
+        let runner = RequestRecordingRunner::new(pool_probe_runner(POOL_FSID, &devices));
+        let fs = MockFs::storage(vec![BY_ID.into()]).with_dm(pool_probe_dm(&devices));
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let confirm = crate::confirm::RecordingConfirm::new();
+        let resolver =
+            crate::test_fixtures::MockBackingPathResolver::default().with_path(BY_ID, "/dev/vdc");
+
+        let err = plan
+            .execute(
+                &runner,
+                &fs,
+                &AddParams {
+                    config: &test_config(),
+                    disk_specs: &[],
+                    dry_run: false,
+                    yes: true,
+                    passphrase_stdin: false,
+                    passphrase_file: Some(pass_path.as_path()),
+                    enroll_key_file: None,
+                    luks_format_extra_opts: &[],
+                    progress: ProgressOutput::Off,
+                    paths: &paths,
+                    sleep_inhibitor: &inhibitor,
+                    confirm: &confirm,
+                    passphrase_reader: &RealTty,
+                    backing_path_resolver: &resolver,
+                },
+            )
+            .expect_err("an unlisted mapper that joined after planning must refuse execute");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("foreign-x (LUKS UUID 99999999-9999-9999-9999-999999999999)"),
+            "got: {msg}"
+        );
+        assert_eq!(inhibitor.acquire_count(), 0);
+        assert!(journal::load_journal(&paths).unwrap().is_none());
+        assert!(
+            !runner
+                .requests()
+                .iter()
+                .any(|r| matches!(r, CmdRequest::CryptsetupLuksFormat { .. })),
+            "the execute gate must refuse before luksFormat"
+        );
+    }
+
+    // Intent: with no pool.json, `braid add` into a mounted pool refuses
+    //   before the journal: no pending-op.json, no luksFormat, and no
+    //   pool.json written.
+    // Why it exists: finding 261022-1230-004. plan_add mapped a missing
+    //   pool.json to an empty membership, and the live-add branch then wrote a
+    //   pool.json that listed only the new disk. The next `braid unlock` opened
+    //   only that disk, dropping disk1 from the pool braid manages.
+    // Scenario: the state dir is lost while the pool stays mounted with disk1
+    //   live; the operator runs `braid add disk2=...` with a fresh disk2.
+    #[test]
+    fn cmd_add_refuses_mounted_pool_without_pool_json_before_journal() {
+        let (_state_tmp, paths, _tmp, config_path, pass_path) = fresh_add_setup();
+        let base_runner = AddFullPathRunner::live();
+        let fs = base_runner.fs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
+        let runner = RequestRecordingRunner::new(base_runner);
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let confirm = crate::confirm::RecordingConfirm::new();
+
+        let result = cmd_add(
+            &runner,
+            &fs,
+            &AddParams {
+                config: &read_test_config(&config_path),
+                disk_specs: &["disk2=/dev/disk/by-id/virtio-disk2".into()],
+                dry_run: false,
+                yes: true,
+                passphrase_stdin: false,
+                passphrase_file: Some(pass_path.as_path()),
+                enroll_key_file: None,
+                luks_format_extra_opts: &[],
+                progress: ProgressOutput::Off,
+                paths: &paths,
+                sleep_inhibitor: &inhibitor,
+                confirm: &confirm,
+                passphrase_reader: &RealTty,
+                backing_path_resolver:
+                    crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
+            },
+        );
+
+        let err = match result {
+            Ok(()) => panic!(
+                "add into a mounted pool with no pool.json must refuse; pool.json now: {:?}",
+                std::fs::read_to_string(paths.pool_json()).ok()
+            ),
+            Err(err) => err.to_string(),
+        };
+        assert!(
+            err.contains("pool.json is missing"),
+            "refusal must say pool.json is missing, got: {err}"
+        );
+        assert!(
+            err.contains("braid discover --write"),
+            "refusal must point to discover --write, got: {err}"
+        );
+        assert!(
+            !paths.pool_json().exists(),
+            "a refused add must not write pool.json"
+        );
+        assert!(
+            journal::load_journal(&paths).unwrap().is_none(),
+            "the refusal must come before the journal"
+        );
+        let requests = runner.requests();
+        assert!(
+            !requests
+                .iter()
+                .any(|request| matches!(request, CmdRequest::CryptsetupLuksFormat { .. })),
+            "a refused add must not format disk2: {requests:?}"
+        );
+        assert_eq!(
+            inhibitor.acquire_count(),
+            0,
+            "the refusal must come before the sleep inhibitor"
+        );
+    }
+
     /*
      * Intent: `braid add` for a fresh disk into a LIVE mounted pool
      *   reads the passphrase ONCE (no confirm), then `verify_passphrase`
@@ -10005,8 +10610,30 @@ mod tests {
             format!("/dev/vd{}", (b'b' + index as u8) as char)
         }
 
+        /// The canonical fixture UUID of pool member `index`, so the
+        /// `add_test_setup` pool.json key for disk1 matches the live probe.
         fn pool_uuid(index: usize) -> String {
-            format!("11111111-1111-1111-1111-11111111111{index}")
+            crate::test_fixtures::canonical_luks_uuid(index as u64 + 1)
+                .as_str()
+                .to_owned()
+        }
+
+        /// Write a pool.json that lists every member this runner's mounted
+        /// pool shows, so plan_add passes the coverage gate on a real match.
+        fn save_pool_json(&self, paths: &StatePaths) {
+            let mut members = PoolMembership::empty();
+            for index in 0..self.keyfile_probes.len() {
+                members
+                    .insert(
+                        LuksUuid::parse(&Self::pool_uuid(index)).unwrap(),
+                        DiskMember::new(
+                            DiskName::parse(&format!("disk{}", index + 1)).unwrap(),
+                            ByIdPath::parse(&Self::by_id_for_index(index)).unwrap(),
+                        ),
+                    )
+                    .expect("test fixture insert");
+            }
+            membership::save_membership(&members, paths).unwrap();
         }
 
         fn disk_index_from_by_id(by_id: &str) -> Option<usize> {
@@ -10554,6 +11181,7 @@ mod tests {
             AddPlanKeyfileProbe::Failure,
             AddPlanKeyfileProbe::Occupied,
         ]);
+        runner.save_pool_json(&fixture.paths);
         let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk3".into()])
             .with_sysfs_disks(&["vdd"])
             .with_dm(runner.dm_table());
@@ -10741,6 +11369,7 @@ mod tests {
                 "/dev/disk/by-id/virtio-disk2",
                 AddPlanTargetProbe::AlreadyInPoolSlot1Empty,
             );
+        runner.save_pool_json(&fixture.paths);
         let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk2".into()])
             .with_sysfs_disks(&["vdc"])
             .with_dm(runner.dm_table());
@@ -10855,6 +11484,7 @@ mod tests {
     #[test]
     fn plan_add_already_in_pool_is_note_only_success() {
         let (_state_tmp, paths, _tmp, config_path, pass_path) = add_test_setup();
+        add_canonical_member(&paths, 2);
         let fs = MockFs::storage(vec![
             "/dev/disk/by-id/virtio-disk2".into(),
             "/dev/mapper/braid-disk2".into(),
@@ -11100,12 +11730,13 @@ mod tests {
     #[test]
     fn add_preview_phase_decision_table() {
         let whole = pool_mounted_with_fsid("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+        let live = AddPoolTarget::Live(LiveCoverage::unchecked());
         assert_eq!(
-            add_preview_phase(&pool_unmounted(), 1),
+            add_preview_phase(&AddPoolTarget::Bootstrap, &pool_unmounted(), 1),
             AddPreviewPhase::Bootstrap
         );
         assert_eq!(
-            add_preview_phase(&whole, 1),
+            add_preview_phase(&live, &whole, 1),
             AddPreviewPhase::LiveAdd(PreviewedBalance::Run)
         );
 
@@ -11114,11 +11745,11 @@ mod tests {
         degraded.missing_devids = vec![Devid::new(2)];
         degraded.total_devices = 2;
         assert_eq!(
-            add_preview_phase(&degraded, 1),
+            add_preview_phase(&live, &degraded, 1),
             AddPreviewPhase::LiveAdd(PreviewedBalance::SkipDegraded)
         );
         assert_eq!(
-            add_preview_phase(&whole, 0),
+            add_preview_phase(&live, &whole, 0),
             AddPreviewPhase::LiveAdd(PreviewedBalance::NotApplicable)
         );
     }
@@ -11186,6 +11817,7 @@ mod tests {
                 "/dev/disk/by-id/virtio-disk2",
                 AddPlanTargetProbe::AlreadyInPoolSlot1Empty,
             );
+        runner.save_pool_json(&fixture.paths);
         let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk2".into()])
             .with_sysfs_disks(&["vdc"])
             .with_dm(runner.dm_table());
@@ -11688,6 +12320,7 @@ mod tests {
                 backing_path_resolver:
                     crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
                 pool_membership: &PoolMembership::empty(),
+                pool_target: &AddPoolTarget::unchecked(&pool),
             },
         );
         match result {
@@ -11779,6 +12412,7 @@ mod tests {
                 luks_format_extra_opts: &LuksFormatExtraOpts::default(),
                 backing_path_resolver: &resolver,
                 pool_membership: &PoolMembership::empty(),
+                pool_target: &AddPoolTarget::unchecked(&pool),
             },
         )
         .expect("same UUID and same backing should be a no-op");
@@ -11835,6 +12469,7 @@ mod tests {
                 luks_format_extra_opts: &LuksFormatExtraOpts::default(),
                 backing_path_resolver: &resolver,
                 pool_membership: &PoolMembership::empty(),
+                pool_target: &AddPoolTarget::unchecked(&pool),
             },
         );
 
@@ -11891,6 +12526,7 @@ mod tests {
                 luks_format_extra_opts: &LuksFormatExtraOpts::default(),
                 backing_path_resolver: &resolver,
                 pool_membership: &PoolMembership::empty(),
+                pool_target: &AddPoolTarget::unchecked(&pool),
             },
         )
         .expect("same UUID and same backing should be a no-op");
@@ -11959,6 +12595,7 @@ mod tests {
                 luks_format_extra_opts: &LuksFormatExtraOpts::default(),
                 backing_path_resolver: &resolver,
                 pool_membership: &PoolMembership::empty(),
+                pool_target: &AddPoolTarget::unchecked(&pool),
             },
         )
         .expect("fresh target should keep mixed add from being a no-op");
@@ -12034,6 +12671,7 @@ mod tests {
                 luks_format_extra_opts: &LuksFormatExtraOpts::default(),
                 backing_path_resolver: &resolver,
                 pool_membership: &PoolMembership::empty(),
+                pool_target: &AddPoolTarget::unchecked(&pool),
             },
         );
 
@@ -12123,6 +12761,7 @@ mod tests {
                 backing_path_resolver:
                     crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
                 pool_membership: &PoolMembership::empty(),
+                pool_target: &AddPoolTarget::unchecked(&pool),
             },
         )
         .expect("planning should succeed for three fresh disks");
@@ -12397,6 +13036,7 @@ mod tests {
                 backing_path_resolver:
                     crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
                 pool_membership: &membership,
+                pool_target: &AddPoolTarget::unchecked(&pool),
             },
         );
         match result {
@@ -12487,6 +13127,7 @@ mod tests {
                 backing_path_resolver:
                     crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
                 pool_membership: &PoolMembership::empty(),
+                pool_target: &AddPoolTarget::unchecked(&pool),
             },
         );
         let body = result

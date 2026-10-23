@@ -2,9 +2,9 @@
 #
 # Intent: `braid add` for a fresh disk against an existing locked pool
 # (members in pool.json, no /dev/mapper/braid-* open) refuses BEFORE any
-# destructive step. The new check_pool_unlocked_if_membership_exists
-# preflight lives between the pool probe and the mounted-only checks in
-# plan_add; without it, the bootstrap branch in add work-plan rendering
+# destructive step. The locked-pool arm of decide_add_pool_target runs
+# between the pool probe and the mounted-only checks in plan_add;
+# without it, the bootstrap branch in add work-plan rendering
 # would mkfs.btrfs the new disk single-profile and overwrite pool.json,
 # orphaning the existing locked members.
 #

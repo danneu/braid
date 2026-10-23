@@ -9,7 +9,6 @@ use crate::confirm;
 use crate::filesystem::Filesystem;
 use crate::journal;
 use crate::luks::LUKS_DATA_OFFSET_BYTES;
-use crate::membership::PoolMembership;
 use crate::mount_check::{self, mount_entry_at_via_fs};
 use crate::parse::parse_cryptsetup_luks_dump;
 use crate::parse::types::{
@@ -19,34 +18,9 @@ use crate::preview::PreviewNote;
 use crate::repair_hint;
 use crate::state_paths::StatePaths;
 use crate::status::format_bytes;
-use crate::types::{Devid, Fsid, MountPoint, PoolState};
+use crate::types::{Devid, Fsid, MountPoint};
 use crate::ups::{UpsQueryError, query_ups};
 use crate::util::detail_suffix;
-
-/// Refuse if pool.json lists members but the pool is not mounted (locked).
-/// Catches the silent-bootstrap case where `braid add` against a locked pool
-/// would otherwise overwrite pool.json with a one-disk pool, orphaning the
-/// existing locked members.
-pub fn check_pool_unlocked_if_membership_exists(
-    membership: &PoolMembership,
-    pool: &PoolState,
-) -> Result<(), String> {
-    if pool.mounted || membership.is_empty() {
-        return Ok(());
-    }
-    let n = membership.len();
-    let mut names: Vec<&str> = membership.names().map(|n| n.as_str()).collect();
-    names.sort();
-    Err(format!(
-        "pool exists but is not unlocked -- pool.json lists {n} member{}: {}.\n\
-         Run `braid unlock` first, then re-run `braid add`.\n\
-         If pool.json is stale, back up /var/lib/braid/pool.json and move it \
-         aside, attach every intended member, then run `braid discover --write` \
-         to rebuild it.",
-        if n == 1 { "" } else { "s" },
-        names.join(", ")
-    ))
-}
 
 /// Refuse if a pending-operation journal exists: the recovery-mode check.
 /// Dispatch runs it before any command arm for every command that
@@ -2173,99 +2147,5 @@ mod tests {
         let err = require_mutation_preflight(&fs, &fsid(), &mp()).unwrap_err();
         assert!(err.contains("read-only"), "expected 'read-only' in: {err}");
         assert_read_only_hint_has_both_remedies(&err);
-    }
-
-    // --- check_pool_unlocked_if_membership_exists ---
-
-    fn pool_mounted_for_test() -> PoolState {
-        PoolState {
-            mounted: true,
-            devices: vec![],
-            missing_count: 0,
-            missing_devids: vec![],
-            total_devices: 0,
-            fsid: Some(Fsid::parse(FSID).unwrap()),
-            null_underlying: vec![],
-        }
-    }
-
-    fn pool_unmounted_for_test() -> PoolState {
-        PoolState {
-            mounted: false,
-            devices: vec![],
-            missing_count: 0,
-            missing_devids: vec![],
-            total_devices: 0,
-            fsid: None,
-            null_underlying: vec![],
-        }
-    }
-
-    fn membership_with(names: &[&str]) -> PoolMembership {
-        use crate::membership::DiskMember;
-        use crate::types::{ByIdPath, DiskName, LuksUuid};
-        let mut m = PoolMembership::empty();
-        for (idx, n) in names.iter().enumerate() {
-            let member = DiskMember::new(
-                DiskName::parse(n).expect("valid fixture disk name"),
-                ByIdPath::parse(&format!("/dev/disk/by-id/virtio-{n}"))
-                    .expect("valid fixture by-id"),
-            );
-            m.insert(
-                LuksUuid::parse(&format!("00000000-0000-0000-0000-{:012x}", idx + 1))
-                    .expect("valid fixture UUID"),
-                member,
-            )
-            .expect("insert fixture member");
-        }
-        m
-    }
-
-    /* Intent: check_pool_unlocked_if_membership_exists is a no-op when
-     * pool.json has no members, regardless of mount state.
-     * Why it exists: bootstrap of a fresh system has empty pool.json and
-     * an unmounted pool; the check must not block legitimate first-add.
-     * Scenario: brand-new system, operator runs `braid add disk1=...`.
-     */
-    #[test]
-    fn pool_unlocked_check_passes_when_membership_empty() {
-        let m = PoolMembership::empty();
-        assert!(check_pool_unlocked_if_membership_exists(&m, &pool_unmounted_for_test()).is_ok());
-        assert!(check_pool_unlocked_if_membership_exists(&m, &pool_mounted_for_test()).is_ok());
-    }
-
-    /* Intent: check_pool_unlocked_if_membership_exists is a no-op when the
-     * pool is mounted, regardless of membership.
-     * Why it exists: an unlocked, mounted pool is the steady state in
-     * which `braid add` legitimately mutates membership.
-     * Scenario: operator unlocked the pool, now adds a disk.
-     */
-    #[test]
-    fn pool_unlocked_check_passes_when_pool_mounted() {
-        let m = membership_with(&["disk1", "disk2"]);
-        assert!(check_pool_unlocked_if_membership_exists(&m, &pool_mounted_for_test()).is_ok());
-    }
-
-    /* Intent: check_pool_unlocked_if_membership_exists rejects when
-     * pool.json lists members but the pool is not mounted, naming the
-     * locked members so the operator can verify which pool they have.
-     * Why it exists: this is the core regression for the silent-bootstrap
-     * bug. Without this check, `braid add <fresh-disk>` against a locked
-     * 2-member pool overwrites pool.json and orphans the existing members.
-     * Scenario: 2-disk pool, both LUKS-locked, operator forgets `braid
-     * unlock` and runs `braid add disk3=...`.
-     */
-    #[test]
-    fn pool_unlocked_check_rejects_when_pool_locked_with_members() {
-        let m = membership_with(&["disk1", "disk2"]);
-        let err =
-            check_pool_unlocked_if_membership_exists(&m, &pool_unmounted_for_test()).unwrap_err();
-        assert!(err.contains("not unlocked"), "got: {err}");
-        assert!(err.contains("disk1"), "expected disk1 named, got: {err}");
-        assert!(err.contains("disk2"), "expected disk2 named, got: {err}");
-        assert!(
-            err.contains("braid unlock"),
-            "expected unlock remediation, got: {err}"
-        );
     }
 }

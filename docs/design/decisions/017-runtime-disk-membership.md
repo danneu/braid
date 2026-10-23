@@ -69,6 +69,7 @@ When `pending-op.json` exists, braid enters recovery mode. Membership, mount, an
 - `pool.json` is authoritative. `unlock` requires it.
 - `unlock` enriches `pool.json` metadata (`devid`, `added_at`, and current by-id observations where appropriate) after mount via live btrfs state, but never changes membership (disk set).
 - If `pool.json` is missing or corrupt, `unlock` and the mutating membership commands fail with a clear error directing the user to `braid add` or `braid discover --write`.
+- `add` treats a missing `pool.json`, or one that lists no members, as a bootstrap only when nothing is mounted at the pool mount point. With a pool mounted it refuses and directs the user to `braid discover --write`. It adds to a mounted pool only when `pool.json` lists the LUKS UUID of every open mapper in that pool, present or null-backed (`cli/src/membership.rs#check_live_coverage`), so the `pool.json` it writes drops no live member and add never joins a disk to a filesystem `pool.json` does not describe. A btrfs-MISSING devid with no open mapper is not checked, so a degraded add still runs when no member records that devid.
 - `braid lock` -- the user-facing command, the `braid-online.service` ExecStop reentry, and `braid lock --dry-run` -- tolerates a missing or corrupt `pool.json`: it warns and proceeds with empty membership. The per-candidate dm UUID check in `build_close_sets_*` (`cli/src/lock.rs`) is the fail-closed guard, so cleanup remains complete and correct. No lock pathway hard-fails on an unloadable `pool.json`; dry-run folds the warning into its stdout preview while the real paths emit it to stderr (see [ADR 026](026-pool-lock-rust-owned.md#lock-tolerates-missing-or-corrupt-membership)).
 - If `pool.json` is readable but stale (a member fails to probe), `unlock` warns and proceeds with the members it can probe. It never rewrites `pool.json`.
 - If a member's UUID key doesn't match the probed device's LUKS UUID, `unlock` fatally errors. This catches swapped, reformatted, or corrupted drives before any LUKS open or mount is attempted.
@@ -117,7 +118,7 @@ The NixOS module no longer generates data-pool `fileSystems`, LUKS entries, or `
 
 ## See
 
-- `cli/src/membership.rs` -- load/save/validate membership, `DiskMember`, `PoolMembership`, `enrich_from_pool_state`, `foreign_luks_uuids` (pure helper consumed by `braid doctor`'s `foreign_luks_uuid` check)
+- `cli/src/membership.rs` -- load/save/validate membership, `DiskMember`, `PoolMembership`, `enrich_from_pool_state`, `foreign_luks_uuids` (pure helper consumed by `braid doctor`'s `foreign_luks_uuid` check), `check_live_coverage` (the proof `braid add` needs before it adds to a mounted pool)
 - `cli/src/journal.rs` — pending-operation journal (pre/target membership snapshots)
 - `cli/src/recover.rs` — rebuild membership from live pool state
 - `cli/src/preflight.rs` — `check_no_pending_operation` recovery mode guard

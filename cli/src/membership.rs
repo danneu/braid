@@ -810,6 +810,23 @@ pub enum BindingProjectionError {
     Membership(#[from] MembershipError),
 }
 
+/// Every open mapper the live pool holds, present or null-backed, with the
+/// LUKS UUID it records. The one reading of the pool's UUID side, so
+/// `bind_live_pool` and `check_live_coverage` agree on which devices btrfs
+/// holds through an open mapper.
+fn open_mappers(
+    pool: &PoolState,
+) -> impl Iterator<Item = (&MapperName, &LuksUuid, MemberBinding<'_>)> {
+    pool.devices
+        .iter()
+        .map(|dev| (&dev.mapper, &dev.luks_uuid, MemberBinding::Present(dev)))
+        .chain(
+            pool.null_underlying
+                .iter()
+                .map(|dev| (&dev.mapper, &dev.luks_uuid, MemberBinding::NullBacked(dev))),
+        )
+}
+
 /// Bind `pool` to `reference`. A present or null-backed device binds by the
 /// LUKS UUID its mapper records. A btrfs-MISSING devid with no open mapper
 /// binds to the one unbound member that records it; a UUID-bound member
@@ -825,16 +842,7 @@ pub fn bind_live_pool<'a>(
         .collect();
     let mut seen_mapper: BTreeMap<LuksUuid, &MapperName> = BTreeMap::new();
     let mut live_devids: BTreeSet<Devid> = BTreeSet::new();
-    let live = pool
-        .devices
-        .iter()
-        .map(|dev| (&dev.mapper, &dev.luks_uuid, MemberBinding::Present(dev)))
-        .chain(
-            pool.null_underlying
-                .iter()
-                .map(|dev| (&dev.mapper, &dev.luks_uuid, MemberBinding::NullBacked(dev))),
-        );
-    for (mapper, uuid, binding) in live {
+    for (mapper, uuid, binding) in open_mappers(pool) {
         let Some(slot) = members.get_mut(uuid) else {
             return Err(LiveBindingError::Foreign {
                 mapper: mapper.clone(),
@@ -941,6 +949,73 @@ impl<'a> LiveBinding<'a> {
             }
         }
         Ok(projected)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// check_live_coverage -- a membership that lists every open mapper
+// ---------------------------------------------------------------------------
+
+/// Proof that a membership has members and lists the LUKS UUID of every open
+/// mapper in a live pool, present or null-backed. Only `check_live_coverage`
+/// mints one, so code that writes pool.json from that membership cannot drop a
+/// device btrfs holds through an open mapper.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LiveCoverage(());
+
+#[cfg(test)]
+impl LiveCoverage {
+    /// Test-only proof for tests that pin planning logic, not the coverage
+    /// check itself.
+    pub(crate) fn unchecked() -> Self {
+        LiveCoverage(())
+    }
+}
+
+/// An open mapper in the live pool whose LUKS UUID a membership does not list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnlistedMapper {
+    pub mapper: MapperName,
+    pub luks_uuid: LuksUuid,
+    /// True when the mapper is open but its backing disk is gone.
+    pub null_backed: bool,
+}
+
+/// Why a membership does not cover a live pool.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CoverageGap {
+    /// The membership lists no members, so it proves nothing about the pool,
+    /// even one whose probe shows no open mapper.
+    NoMembers,
+    /// Every open mapper whose LUKS UUID the membership does not list, in
+    /// probe order: present devices first, then null-backed ones.
+    Unlisted(Vec<UnlistedMapper>),
+}
+
+/// Check that `membership` covers `pool`: it has members, and every open
+/// mapper btrfs holds records a LUKS UUID that is a key. btrfs-MISSING devids
+/// with no open mapper are left out on purpose. Refusing one that no member
+/// records would block work on a degraded pool, and `discover --write` scans
+/// only attached disks, so it could not restore that member's entry either.
+pub fn check_live_coverage(
+    pool: &PoolState,
+    membership: &PoolMembership,
+) -> Result<LiveCoverage, CoverageGap> {
+    if membership.is_empty() {
+        return Err(CoverageGap::NoMembers);
+    }
+    let unlisted: Vec<UnlistedMapper> = open_mappers(pool)
+        .filter(|(_, uuid, _)| membership.by_uuid(uuid).is_none())
+        .map(|(mapper, uuid, binding)| UnlistedMapper {
+            mapper: mapper.clone(),
+            luks_uuid: uuid.clone(),
+            null_backed: matches!(binding, MemberBinding::NullBacked(_)),
+        })
+        .collect();
+    if unlisted.is_empty() {
+        Ok(LiveCoverage(()))
+    } else {
+        Err(CoverageGap::Unlisted(unlisted))
     }
 }
 
