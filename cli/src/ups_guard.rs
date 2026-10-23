@@ -32,6 +32,8 @@ const POLL_INTERVAL: Duration = Duration::from_secs(5);
 /// more than one poll.
 const QUERY_WAIT: Duration = Duration::from_secs(4);
 
+/// Setup failures only. Once the loop runs, every fault is logged and retried
+/// rather than returned, so systemd's restart is the last resort, not the plan.
 #[derive(Debug, thiserror::Error)]
 pub enum GuardError {
     #[error("config error: {0}")]
@@ -192,6 +194,7 @@ impl ClockFile {
         }
     }
 
+    /// `None` removes the file, so "no file" and "no outage" stay one state.
     pub fn store(&self, since: Option<Duration>) -> Result<(), String> {
         let result = match since {
             Some(since) => crate::state_io::atomic_write(
