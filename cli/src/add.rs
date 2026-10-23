@@ -738,6 +738,7 @@ impl AddWorkPlan {
                         &target.by_id,
                         target.enroll_key_file.as_ref(),
                         &header_backup_path,
+                        None,
                     );
                     steps.push(Step {
                         risk: "safe",
@@ -758,6 +759,7 @@ impl AddWorkPlan {
                             &target.by_id,
                             Some(kf),
                             &header_backup_path,
+                            None,
                         );
                     }
                     steps.push(forced_returned_device_add_step(
@@ -786,6 +788,7 @@ impl AddWorkPlan {
                             &target.by_id,
                             Some(kf),
                             &header_backup_path,
+                            None,
                         );
                     }
                     steps.push(forced_returned_device_add_step(

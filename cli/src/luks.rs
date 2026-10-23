@@ -663,19 +663,22 @@ pub(crate) fn luks_header_backup_path(headers_dir: &Path, mapper: &MapperName) -
 }
 
 /// Keeps the optional slot-1 enrollment and required post-mutation header
-/// backup preview wording and order shared across add, replace, and enroll.
-/// Callers decide whether a backup-only sequence applies by invoking this
-/// helper when `key_file` is `None`.
+/// backup preview wording and order shared across add, replace, enroll and
+/// recover. Callers decide whether a backup-only sequence applies by invoking
+/// this helper when `key_file` is `None`. `suffix` is appended to both rows,
+/// for a caller whose rows run only under a runtime condition.
 pub(crate) fn push_enrollment_preview_steps(
     steps: &mut Vec<Step>,
     by_id: &ByIdPath,
     key_file: Option<&KeyFilePath>,
     header_backup_path: &HeaderBackupPath,
+    suffix: Option<&str>,
 ) {
+    let suffix = suffix.unwrap_or_default();
     if let Some(key_file) = key_file {
         steps.push(Step {
             risk: "safe",
-            description: format!("enroll keyfile -> LUKS slot 1 on {by_id}"),
+            description: format!("enroll keyfile -> LUKS slot 1 on {by_id}{suffix}"),
             commands: vec![CmdRequest::CryptsetupLuksAddKeyFile {
                 device: by_id.as_str().to_owned(),
                 key_file_path: key_file.as_path().display().to_string(),
@@ -685,7 +688,7 @@ pub(crate) fn push_enrollment_preview_steps(
     steps.push(Step {
         risk: "safe",
         description: format!(
-            "LUKS header backup -> {}",
+            "LUKS header backup -> {}{suffix}",
             header_backup_path.as_path().display()
         ),
         commands: vec![CmdRequest::CryptsetupLuksHeaderBackup {
@@ -1569,7 +1572,13 @@ mod tests {
         );
 
         let mut enrolled = Vec::new();
-        push_enrollment_preview_steps(&mut enrolled, &by_id, Some(&key_file), &header_backup_path);
+        push_enrollment_preview_steps(
+            &mut enrolled,
+            &by_id,
+            Some(&key_file),
+            &header_backup_path,
+            None,
+        );
         assert_eq!(
             Step::render_dry_run(&enrolled),
             "[safe] enroll keyfile -> LUKS slot 1 on /dev/disk/by-id/disk1\n\
@@ -1579,7 +1588,7 @@ $ cryptsetup luksHeaderBackup --header-backup-file /var/lib/braid/luks-headers/b
         );
 
         let mut backup_only = Vec::new();
-        push_enrollment_preview_steps(&mut backup_only, &by_id, None, &header_backup_path);
+        push_enrollment_preview_steps(&mut backup_only, &by_id, None, &header_backup_path, None);
         assert_eq!(
             Step::render_dry_run(&backup_only),
             "[safe] LUKS header backup -> /var/lib/braid/luks-headers/braid-disk1.luksheader\n\

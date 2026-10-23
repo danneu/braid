@@ -293,7 +293,9 @@ enum RecoverWorkAction {
         reopen_names: Vec<DiskName>,
         any_missing_member: bool,
     },
-    Complete(RecoverCompletion),
+    // Boxed because a completion is far larger than every other action
+    // (clippy::large_enum_variant).
+    Complete(Box<RecoverCompletion>),
 }
 
 /// How recover finishes the journaled op once the pool is mounted. Each arm
@@ -323,6 +325,7 @@ enum RecoverCompletion {
         new_name: DiskName,
         new_target: journal::ReplaceJournalTarget,
         source: journal::ReplaceJournalSource,
+        uncommitted_writes: Option<UncommittedReplaceWrites>,
         owed_balance: Option<OwedRaid1Balance>,
     },
     ReplacePostMaintenance {
@@ -575,9 +578,13 @@ impl RecoverCompletion {
             }
             RecoverCompletion::ReplacePoolMutation {
                 new_name,
+                uncommitted_writes,
                 owed_balance,
                 ..
             } => {
+                if let Some(writes) = uncommitted_writes {
+                    writes.render_into(&plan.luks_headers_dir, steps);
+                }
                 render_recovery_tail(
                     plan,
                     steps,
@@ -723,6 +730,7 @@ impl RecoverCompletion {
                 new_name,
                 new_target,
                 source,
+                uncommitted_writes,
                 owed_balance,
             } => execute_replace_pool_mutation_recovery(
                 runner,
@@ -737,6 +745,7 @@ impl RecoverCompletion {
                 new_name,
                 new_target,
                 source,
+                uncommitted_writes.as_ref(),
                 *owed_balance,
             ),
             RecoverCompletion::ReplacePostMaintenance {
@@ -776,6 +785,79 @@ impl RecoverCompletion {
 struct ReplaceResizePreview<'a> {
     new_name: &'a DiskName,
     skipped_if_replacement_not_committed: bool,
+}
+
+/// The LUKS writes recover owes the new disk when a replace did not commit,
+/// chosen once in `plan_recover` from the journaled target mode. The dry-run
+/// rows and `finish_uncommitted_replace_recovery` both read this one value,
+/// so the preview cannot leave out a write the replay runs (ADR 022).
+#[derive(Debug)]
+struct UncommittedReplaceWrites {
+    by_id: ByIdPath,
+    mapper: MapperName,
+    enroll_key_file: Option<KeyFilePath>,
+    /// A fresh disk with no LUKS header never reached luksFormat, so the
+    /// replay skips these writes for it.
+    skipped_without_luks_header: bool,
+}
+
+impl UncommittedReplaceWrites {
+    /// `None` for an existing-LUKS disk with no keyfile to enroll: replace
+    /// planned no LUKS write on it, so recover owes none and asks for no
+    /// passphrase. A fresh disk always owes its header backup.
+    fn plan(new_name: &DiskName, new_target: &journal::ReplaceJournalTarget) -> Option<Self> {
+        let (enroll_key_file, skipped_without_luks_header) = match &new_target.mode {
+            journal::ReplaceJournalMode::ExistingLuks {
+                enroll_key_file: None,
+            } => return None,
+            journal::ReplaceJournalMode::ExistingLuks {
+                enroll_key_file: Some(key_file),
+            } => (Some(key_file.clone()), false),
+            // The uncommitted branch never reformats, so `extra_opts` plays
+            // no part in its writes.
+            journal::ReplaceJournalMode::FreshLuks {
+                extra_opts: _,
+                enroll_key_file,
+            } => (enroll_key_file.clone(), true),
+        };
+        Some(Self {
+            by_id: new_target.by_id.clone(),
+            mapper: config::mapper_name(new_name),
+            enroll_key_file,
+            skipped_without_luks_header,
+        })
+    }
+
+    fn render_into(&self, luks_headers_dir: &std::path::Path, steps: &mut Vec<Step>) {
+        let suffix = if self.skipped_without_luks_header {
+            " (skipped if replacement committed, or if the new disk shows no LUKS header)"
+        } else {
+            " (skipped if replacement committed)"
+        };
+        luks::push_enrollment_preview_steps(
+            steps,
+            &self.by_id,
+            self.enroll_key_file.as_ref(),
+            &luks::luks_header_backup_path(luks_headers_dir, &self.mapper),
+            Some(suffix),
+        );
+    }
+
+    /// Runs the writes in the order `render_into` shows them. The caller has
+    /// already checked the new disk's identity and the passphrase, and holds
+    /// the sleep inhibitor.
+    fn execute<R: CommandRunner>(
+        &self,
+        runner: &R,
+        passphrase: &Passphrase,
+        paths: &StatePaths,
+    ) -> Result<(), RecoverError> {
+        if let Some(key_file) = &self.enroll_key_file {
+            ensure_keyfile_enrolled(runner, self.by_id.as_str(), passphrase, key_file)?;
+        }
+        luks::backup_luks_header(runner, self.by_id.as_str(), &self.mapper, paths)?;
+        Ok(())
+    }
 }
 
 /// Render add-recovery replay steps in DiskName-sorted order.
@@ -942,6 +1024,13 @@ fn render_recovery_tail(
         commands: vec![],
     });
 
+    // On a replace journaled before it committed, the resize and the owed
+    // balance both run only if the replacement committed, so one fact marks
+    // both rows.
+    let balance_condition = resize
+        .as_ref()
+        .is_some_and(|resize| resize.skipped_if_replacement_not_committed)
+        .then_some("if replacement did not commit");
     if let Some(resize) = resize {
         let suffix = if resize.skipped_if_replacement_not_committed {
             format!(
@@ -970,7 +1059,7 @@ fn render_recovery_tail(
             ),
             commands: vec![],
         });
-        steps.push(owed_balance.replay_preview_step(&plan.mount_point, None));
+        steps.push(owed_balance.replay_preview_step(&plan.mount_point, balance_condition));
     }
 
     steps.push(Step {
@@ -1592,6 +1681,7 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             new_name: new_name.clone(),
             new_target: new_target.clone(),
             source: source.clone(),
+            uncommitted_writes: UncommittedReplaceWrites::plan(new_name, new_target),
             owed_balance: restore_raid1_after_commit.then_some(OwedRaid1Balance::RestoreSingle),
         },
         journal::OpKind::Replace(journal::ReplaceOp {
@@ -1632,7 +1722,7 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             owed_balance: None,
         },
     };
-    actions.push(RecoverWorkAction::Complete(completion));
+    actions.push(RecoverWorkAction::Complete(Box::new(completion)));
 
     let work_plan = RecoverWorkPlan {
         open_plan,
@@ -3016,9 +3106,9 @@ fn verify_replace_fresh_prep_passphrase<R: CommandRunner>(
 }
 
 /// Finish-time inputs for the uncommitted replace recovery branch: bundles
-/// the credential, journal slice, pool snapshot, and incoming-disk
-/// identifiers needed to retry the prep-only steps without touching the
-/// live pool.
+/// the credential, journal slice, pool snapshot, incoming-disk identifiers,
+/// and the planned LUKS writes needed to retry the prep-only steps without
+/// touching the live pool.
 struct ReplaceFinishCtx<'a> {
     credential: Option<&'a OpenCredential>,
     journal: &'a Journal,
@@ -3026,6 +3116,7 @@ struct ReplaceFinishCtx<'a> {
     new_uuid: &'a LuksUuid,
     new_name: &'a DiskName,
     new_target: &'a journal::ReplaceJournalTarget,
+    writes: Option<&'a UncommittedReplaceWrites>,
 }
 
 fn finish_uncommitted_replace_recovery<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
@@ -3041,23 +3132,23 @@ fn finish_uncommitted_replace_recovery<R: CommandRunner + Sync, F: Filesystem + 
         new_uuid,
         new_name,
         new_target,
+        writes,
     } = ctx;
-    match &new_target.mode {
-        journal::ReplaceJournalMode::ExistingLuks { enroll_key_file } => {
-            // Identity probe before any mutation. Wrong disk replugged
-            // or header zeroed -> preserve the journal; matches the
-            // FreshLuks `luks_label` guard at finish-time. We use LUKS
-            // UUID (not a braid label) because ExistingLuks targets
-            // carry no braid label by definition.
-            let probed = probe::probe_config_disk(
-                runner,
-                fs,
-                new_name,
-                &new_target.by_id,
-                params.backing_path_resolver,
-            )?;
+    // Identity probe before any write. Wrong disk replugged or header
+    // zeroed -> preserve the journal.
+    let probed = probe::probe_config_disk(
+        runner,
+        fs,
+        new_name,
+        &new_target.by_id,
+        params.backing_path_resolver,
+    )?;
+    let luks_header_present = match &new_target.mode {
+        journal::ReplaceJournalMode::ExistingLuks { .. } => {
+            // We use LUKS UUID (not a braid label) because ExistingLuks
+            // targets carry no braid label by definition.
             match &probed.state {
-                ConfigDiskState::PresentLuks { uuid, .. } if uuid == new_uuid => {}
+                ConfigDiskState::PresentLuks { uuid, .. } if uuid == new_uuid => true,
                 ConfigDiskState::PresentLuks { uuid, .. } => {
                     return Err(RecoverError::Failed(format!(
                         "recover replace target '{}' LUKS UUID mismatch: \
@@ -3080,59 +3171,13 @@ fn finish_uncommitted_replace_recovery<R: CommandRunner + Sync, F: Filesystem + 
                     )));
                 }
             }
-
-            if let Some(key_file) = enroll_key_file {
-                // Replay the planned keyfile enrollment + header backup.
-                // Identical credential discipline to the FreshLuks arm
-                // below: passphrase is verified against existing pool
-                // members AND the new disk before any LUKS mutation, so
-                // wrong-passphrase aborts with the journal preserved.
-                let passphrase = recover_passphrase(credential, params, "replace recovery")?;
-                verify_replace_fresh_prep_passphrase(
-                    runner,
-                    pool,
-                    &journal.pre_membership,
-                    new_name,
-                    &new_target.by_id,
-                    passphrase.expose_secret(),
-                )?;
-                let _guard = params
-                    .sleep_inhibitor
-                    .acquire("finishing interrupted replace preparation")
-                    .map_err(|e| {
-                        RecoverError::Failed(format!("could not acquire sleep inhibitor: {e}"))
-                    })?;
-                ensure_keyfile_enrolled(
-                    runner,
-                    new_target.by_id.as_str(),
-                    passphrase.expose_secret(),
-                    key_file,
-                )?;
-                let mapper = config::mapper_name(new_name);
-                luks::backup_luks_header(runner, new_target.by_id.as_str(), &mapper, params.paths)?;
-            }
-
-            membership::save_membership(&journal.pre_membership, params.paths)?;
-            journal::clear_journal(params.paths)
-                .map_err(|e| RecoverError::Journal(e.to_string()))?;
         }
-        journal::ReplaceJournalMode::FreshLuks {
-            enroll_key_file, ..
-        } => {
-            let probed = probe::probe_config_disk(
-                runner,
-                fs,
-                new_name,
-                &new_target.by_id,
-                params.backing_path_resolver,
-            )?;
+        journal::ReplaceJournalMode::FreshLuks { .. } => {
             let expected_label = config::luks_label_for(new_name);
             match probed.state {
-                ConfigDiskState::PresentNotLuks => {
-                    membership::save_membership(&journal.pre_membership, params.paths)?;
-                    journal::clear_journal(params.paths)
-                        .map_err(|e| RecoverError::Journal(e.to_string()))?;
-                }
+                // Replace stopped before luksFormat: the disk holds nothing
+                // braid wrote, so there is no prep to finish.
+                ConfigDiskState::PresentNotLuks => false,
                 ConfigDiskState::PresentLuks { uuid, label, .. } => {
                     if label.as_deref() != Some(expected_label.as_str()) {
                         return Err(RecoverError::Failed(format!(
@@ -3146,40 +3191,7 @@ fn finish_uncommitted_replace_recovery<R: CommandRunner + Sync, F: Filesystem + 
                             new_target.by_id, new_uuid, uuid
                         )));
                     }
-
-                    let passphrase = recover_passphrase(credential, params, "replace recovery")?;
-                    verify_replace_fresh_prep_passphrase(
-                        runner,
-                        pool,
-                        &journal.pre_membership,
-                        new_name,
-                        &new_target.by_id,
-                        passphrase.expose_secret(),
-                    )?;
-                    let _guard = params
-                        .sleep_inhibitor
-                        .acquire("finishing interrupted replace preparation")
-                        .map_err(|e| {
-                            RecoverError::Failed(format!("could not acquire sleep inhibitor: {e}"))
-                        })?;
-                    if let Some(key_file) = enroll_key_file {
-                        ensure_keyfile_enrolled(
-                            runner,
-                            new_target.by_id.as_str(),
-                            passphrase.expose_secret(),
-                            key_file,
-                        )?;
-                    }
-                    let mapper = config::mapper_name(new_name);
-                    luks::backup_luks_header(
-                        runner,
-                        new_target.by_id.as_str(),
-                        &mapper,
-                        params.paths,
-                    )?;
-                    membership::save_membership(&journal.pre_membership, params.paths)?;
-                    journal::clear_journal(params.paths)
-                        .map_err(|e| RecoverError::Journal(e.to_string()))?;
+                    true
                 }
                 ConfigDiskState::Absent => {
                     return Err(RecoverError::Failed(format!(
@@ -3189,8 +3201,30 @@ fn finish_uncommitted_replace_recovery<R: CommandRunner + Sync, F: Filesystem + 
                 }
             }
         }
+    };
+
+    if luks_header_present && let Some(writes) = writes {
+        // The passphrase is verified against the existing pool members AND
+        // the new disk before any LUKS write, so a wrong passphrase aborts
+        // with the journal preserved.
+        let passphrase = recover_passphrase(credential, params, "replace recovery")?;
+        verify_replace_fresh_prep_passphrase(
+            runner,
+            pool,
+            &journal.pre_membership,
+            new_name,
+            &new_target.by_id,
+            passphrase.expose_secret(),
+        )?;
+        let _guard = params
+            .sleep_inhibitor
+            .acquire("finishing interrupted replace preparation")
+            .map_err(|e| RecoverError::Failed(format!("could not acquire sleep inhibitor: {e}")))?;
+        writes.execute(runner, passphrase.expose_secret(), params.paths)?;
     }
 
+    membership::save_membership(&journal.pre_membership, params.paths)?;
+    journal::clear_journal(params.paths).map_err(|e| RecoverError::Journal(e.to_string()))?;
     eprintln!(
         "replace did not complete -- pool still has the pre-replace topology. \
          Re-run braid replace to retry."
@@ -3212,6 +3246,7 @@ fn execute_replace_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem
     new_name: &DiskName,
     new_target: &journal::ReplaceJournalTarget,
     source: &journal::ReplaceJournalSource,
+    uncommitted_writes: Option<&UncommittedReplaceWrites>,
     owed_balance: Option<OwedRaid1Balance>,
 ) -> Result<(), RecoverError> {
     validate_live_members_allowed(&pool, union)?;
@@ -3271,6 +3306,7 @@ fn execute_replace_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem
                 new_uuid,
                 new_name,
                 new_target,
+                writes: uncommitted_writes,
             },
         );
     }
@@ -10860,6 +10896,7 @@ mod tests {
             &disk_name("new"),
             new_target,
             source,
+            UncommittedReplaceWrites::plan(&disk_name("new"), new_target).as_ref(),
             None,
         )
         .expect("committed replace should finish post maintenance");
@@ -10943,6 +10980,7 @@ mod tests {
             &disk_name("new"),
             new_target,
             source,
+            UncommittedReplaceWrites::plan(&disk_name("new"), new_target).as_ref(),
             None,
         )
         .expect("uncommitted replace should restore pre state and clear journal");
@@ -11003,6 +11041,7 @@ mod tests {
             &disk_name("new"),
             new_target,
             source,
+            UncommittedReplaceWrites::plan(&disk_name("new"), new_target).as_ref(),
             None,
         )
         .unwrap_err();
@@ -11122,6 +11161,7 @@ mod tests {
             &disk_name("new"),
             new_target,
             source,
+            UncommittedReplaceWrites::plan(&disk_name("new"), new_target).as_ref(),
             None,
         )
         .expect("fresh prepared target should be reconciled without replace start");
@@ -11229,6 +11269,7 @@ mod tests {
             &disk_name("new"),
             new_target,
             source,
+            UncommittedReplaceWrites::plan(&disk_name("new"), new_target).as_ref(),
             None,
         )
         .unwrap_err();
@@ -11293,6 +11334,7 @@ mod tests {
             &disk_name("new"),
             new_target,
             source,
+            UncommittedReplaceWrites::plan(&disk_name("new"), new_target).as_ref(),
             None,
         )
         .unwrap_err();
@@ -11393,6 +11435,7 @@ mod tests {
             &disk_name("new"),
             new_target,
             source,
+            UncommittedReplaceWrites::plan(&disk_name("new"), new_target).as_ref(),
             None,
         )
         .unwrap_err();
@@ -11515,6 +11558,7 @@ mod tests {
             &disk_name("new"),
             new_target,
             source,
+            UncommittedReplaceWrites::plan(&disk_name("new"), new_target).as_ref(),
             None,
         )
         .unwrap_err();
@@ -11602,6 +11646,7 @@ mod tests {
             &disk_name("new"),
             new_target,
             source,
+            UncommittedReplaceWrites::plan(&disk_name("new"), new_target).as_ref(),
             None,
         )
         .unwrap_err();
@@ -11724,6 +11769,7 @@ mod tests {
             &disk_name("new"),
             new_target,
             source,
+            UncommittedReplaceWrites::plan(&disk_name("new"), new_target).as_ref(),
             None,
         )
         .unwrap_err();
@@ -11862,6 +11908,7 @@ mod tests {
             &disk_name("new"),
             new_target,
             source,
+            UncommittedReplaceWrites::plan(&disk_name("new"), new_target).as_ref(),
             None,
         )
         .expect("happy path replays enrollment + clears journal");
@@ -20581,6 +20628,35 @@ mod tests {
             .render()
     }
 
+    /// Dry-run plan for `journal` under `f`'s state paths, so a test can
+    /// name the header backup path the preview derives from them.
+    fn recover_dry_run_plan(
+        f: &PoolFixture,
+        journal: journal::Journal,
+        fs: MockFs,
+        runner: MockRunner,
+    ) -> RecoverPlan {
+        journal::write_journal(&f.paths, &journal).unwrap();
+        let params = f
+            .recover_params()
+            .passphrase_file(None)
+            .allow_degraded(true)
+            .dry_run(true)
+            .build();
+        plan_recover(&runner, &fs, &params).expect("plan_recover should plan a dry-run preview")
+    }
+
+    fn recover_dry_run_steps(
+        f: &PoolFixture,
+        journal: journal::Journal,
+        fs: MockFs,
+        runner: MockRunner,
+    ) -> Vec<Step> {
+        recover_dry_run_plan(f, journal, fs, runner)
+            .work_plan
+            .render_steps()
+    }
+
     fn rendered_step_block<'a>(rendered: &'a str, needle: &str) -> &'a str {
         let needle_pos = rendered
             .find(needle)
@@ -21337,6 +21413,302 @@ mod tests {
             !rendered.contains("$ btrfs balance status") && !rendered.contains("-dconvert=raid1"),
             "live-source replace preview must not include RAID1 balance replay: {rendered:?}",
         );
+    }
+
+    // Intent: an uncommitted-replace dry-run shows the keyfile enrollment and
+    //   LUKS header backup recover runs on the new disk, ahead of the pool.json
+    //   write, each marked as skipped if the replacement committed.
+    // Why it exists: finish_uncommitted_replace_recovery runs luksAddKey and
+    //   luksHeaderBackup on the new disk before it clears the journal, but the
+    //   ReplacePoolMutation preview rendered only the committed branch's tail,
+    //   so `recover --dry-run` hid a keyslot write.
+    // Scenario: `braid replace --enroll DIR` onto a fresh disk crashed after
+    //   the journal write; the operator runs `braid recover --dry-run`.
+    #[test]
+    fn plan_recover_dry_run_replace_pool_mutation_previews_uncommitted_luks_writes() {
+        let f = PoolFixture::empty();
+        let key_file = std::path::PathBuf::from("/run/keys/braid-new.key");
+        let steps = recover_dry_run_steps(
+            &f,
+            replace_fresh_luks_journal(key_file.clone()),
+            MockFs::new(&["/dev/disk/by-id/virtio-disk1", "/dev/disk/by-id/virtio-new"]),
+            closed_replace_dry_run_runner(),
+        );
+
+        let add_key = CmdRequest::CryptsetupLuksAddKeyFile {
+            device: "/dev/disk/by-id/virtio-new".into(),
+            key_file_path: key_file.display().to_string(),
+        };
+        let backup = CmdRequest::CryptsetupLuksHeaderBackup {
+            device: "/dev/disk/by-id/virtio-new".into(),
+            backup_path: f
+                .paths
+                .luks_headers_dir()
+                .join("braid-new.luksheader")
+                .display()
+                .to_string(),
+        };
+        let step_running = |command: &CmdRequest| {
+            steps
+                .iter()
+                .position(|step| step.commands.contains(command))
+                .unwrap_or_else(|| panic!("dry-run must preview {command:?}: {steps:#?}"))
+        };
+        let add_key_pos = step_running(&add_key);
+        let backup_pos = step_running(&backup);
+        let write_pos = steps
+            .iter()
+            .position(|step| step.description.starts_with("write recovered pool.json"))
+            .unwrap_or_else(|| panic!("missing pool.json write: {steps:#?}"));
+        assert!(
+            add_key_pos < backup_pos && backup_pos < write_pos,
+            "enroll then backup must precede the pool.json write: {steps:#?}"
+        );
+        for pos in [add_key_pos, backup_pos] {
+            assert!(
+                steps[pos]
+                    .description
+                    .contains("skipped if replacement committed"),
+                "uncommitted-only LUKS row must name its commit condition: {:?}",
+                steps[pos]
+            );
+        }
+    }
+
+    // Intent: an uncommitted-replace dry-run marks the owed RAID1 balance as
+    //   skipped if the replacement did not commit, next to the shared gate's
+    //   condition.
+    // Why it exists: recover runs the owed balance only on the committed
+    //   branch, but the preview named only the degraded / <2 devices skip, so
+    //   it over-reported the balance for an uncommitted replace.
+    // Scenario: a replace that owes the RAID1 restore crashed before btrfs
+    //   replace committed; the operator runs `braid recover --dry-run`.
+    #[test]
+    fn plan_recover_dry_run_replace_pool_mutation_balance_names_commit_condition() {
+        let journal = replace_journal_in_phase(
+            journal::ReplacePhase::PoolMutation,
+            true,
+            journal::ReplaceJournalSource::Live {
+                old_devid: Devid::new(2),
+                old_mapper: MapperName::from_basename("braid-old".into()),
+            },
+        );
+        let rendered = render_recover_dry_run(
+            journal,
+            MockFs::new(&["/dev/disk/by-id/virtio-disk1", "/dev/disk/by-id/virtio-new"]),
+            closed_replace_dry_run_runner(),
+            true,
+        );
+
+        assert!(
+            rendered.contains(
+                "btrfs balance -dconvert=raid1,soft -mconvert=raid1,soft /mnt/storage \
+                 (skipped if replacement did not commit, or if the pool is degraded or has <2 devices)"
+            ),
+            "replace PoolMutation balance row must name the commit condition: {rendered:?}",
+        );
+    }
+
+    // Intent: for every replace target mode, the uncommitted branch of
+    //   replace recovery issues exactly the luksAddKey and luksHeaderBackup
+    //   requests its dry-run previews, in the same order, and an
+    //   existing-LUKS disk with no keyfile gets no LUKS write, no passphrase
+    //   read and no credential check.
+    // Why it exists: the preview and the replay both read the planned
+    //   UncommittedReplaceWrites, so a write added outside that value would
+    //   reach the disk unpreviewed again.
+    // Scenario: replace crashed before btrfs replace committed, for each of
+    //   ExistingLuks and FreshLuks, with and without --enroll; the new disk
+    //   reads as LUKS with the journaled UUID and braid label, and the
+    //   keyfile does not open it yet.
+    #[test]
+    fn uncommitted_replace_recovery_runs_exactly_the_previewed_luks_writes() {
+        let key_dir = tempfile::TempDir::new().unwrap();
+        let key_file = write_valid_keyfile(&key_dir, "braid-new.key");
+        let fresh_without_key_file = {
+            let mut journal = replace_fresh_luks_journal(key_file.clone());
+            let OpKind::Replace(journal::ReplaceOp { new_target, .. }) = &mut journal.op else {
+                unreachable!("replace_fresh_luks_journal returns Replace");
+            };
+            let journal::ReplaceJournalMode::FreshLuks {
+                enroll_key_file, ..
+            } = &mut new_target.mode
+            else {
+                unreachable!("replace_fresh_luks_journal returns FreshLuks");
+            };
+            *enroll_key_file = None;
+            journal
+        };
+        let cases = [
+            ("existing LUKS without keyfile", replace_journal(), 0),
+            (
+                "existing LUKS with keyfile",
+                replace_existing_luks_with_enroll_journal(key_file.clone()),
+                2,
+            ),
+            ("fresh LUKS without keyfile", fresh_without_key_file, 1),
+            (
+                "fresh LUKS with keyfile",
+                replace_fresh_luks_journal(key_file.clone()),
+                2,
+            ),
+        ];
+        let is_luks_write = |request: &CmdRequest| {
+            matches!(
+                request,
+                CmdRequest::CryptsetupLuksAddKeyFile { .. }
+                    | CmdRequest::CryptsetupLuksHeaderBackup { .. }
+            )
+        };
+
+        for (case, journal, expected_writes) in cases {
+            let f = PoolFixture::empty();
+            let plan = recover_dry_run_plan(
+                &f,
+                journal,
+                MockFs::new(&["/dev/disk/by-id/virtio-disk1", "/dev/disk/by-id/virtio-new"]),
+                closed_replace_dry_run_runner(),
+            );
+            let previewed: Vec<CmdRequest> = plan
+                .work_plan
+                .render_steps()
+                .into_iter()
+                .flat_map(|step| step.commands)
+                .filter(is_luks_write)
+                .collect();
+            assert_eq!(
+                previewed.len(),
+                expected_writes,
+                "{case}: previewed LUKS writes: {previewed:?}"
+            );
+            let Some(RecoverWorkAction::Complete(completion)) = plan.work_plan.actions.last()
+            else {
+                panic!("{case}: recover plan must end in a completion");
+            };
+            let RecoverCompletion::ReplacePoolMutation {
+                identity,
+                new_name,
+                new_target,
+                source,
+                uncommitted_writes,
+                owed_balance,
+            } = completion.as_ref()
+            else {
+                panic!("{case}: replace PoolMutation journal must plan a ReplacePoolMutation");
+            };
+
+            let runner = MockRunner::default()
+                .with_output(
+                    CmdRequest::CryptsetupLuksUuid {
+                        device: "/dev/disk/by-id/virtio-new".into(),
+                    },
+                    cryptsetup_uuid_ok(
+                        "/dev/disk/by-id/virtio-new",
+                        "33333333-3333-3333-3333-333333333333",
+                    ),
+                )
+                .with_output(
+                    CmdRequest::CryptsetupLuksDumpText {
+                        device: "/dev/disk/by-id/virtio-new".into(),
+                    },
+                    luks_dump_label("braid-new"),
+                )
+                .with_mapper_closed("braid-new")
+                .with_output_stdin(
+                    CmdRequest::CryptsetupTestPassphrase {
+                        device: "/dev/vda".into(),
+                    },
+                    TEST_PASSPHRASE_BYTES.to_vec(),
+                    ok_raw_empty("cryptsetup open --test-passphrase"),
+                )
+                .with_output_stdin(
+                    CmdRequest::CryptsetupTestPassphrase {
+                        device: "/dev/vdb".into(),
+                    },
+                    TEST_PASSPHRASE_BYTES.to_vec(),
+                    ok_raw_empty("cryptsetup open --test-passphrase"),
+                )
+                .with_output_stdin(
+                    CmdRequest::CryptsetupTestPassphrase {
+                        device: "/dev/disk/by-id/virtio-new".into(),
+                    },
+                    TEST_PASSPHRASE_BYTES.to_vec(),
+                    ok_raw_empty("cryptsetup open --test-passphrase"),
+                )
+                .with_output(
+                    CmdRequest::CryptsetupTestKeyFile {
+                        device: "/dev/disk/by-id/virtio-new".into(),
+                        key_file_path: key_file.display().to_string(),
+                    },
+                    err_raw("cryptsetup open --test-passphrase --key-file", 2, "No key"),
+                )
+                // Accept any LUKS write, so a request that differs from the
+                // preview fails the comparison below, not a mock lookup.
+                .with_handler(move |request| {
+                    is_luks_write(request).then(|| Ok(ok_raw_empty("cryptsetup luks write")))
+                });
+            // A disk owed no LUKS write gets no passphrase source, so a read
+            // fails the run at once instead of prompting.
+            let no_passphrase = ScriptedPassphraseReader::new(Vec::<String>::new());
+            let params = if expected_writes == 0 {
+                f.recover_params()
+                    .passphrase_file(None)
+                    .tty(&no_passphrase)
+                    .build()
+            } else {
+                f.recover_params().build()
+            };
+
+            execute_replace_pool_mutation_recovery(
+                &runner,
+                &MockFs::new(&["/dev/disk/by-id/virtio-new"]),
+                &MockByIdResolver::default(),
+                &params,
+                None,
+                &plan.work_plan.journal,
+                &plan.work_plan.admission_membership,
+                pool_state_disk1_and_old(),
+                identity,
+                new_name,
+                new_target,
+                source,
+                uncommitted_writes.as_ref(),
+                *owed_balance,
+            )
+            .unwrap_or_else(|e| panic!("{case}: uncommitted replace recovery failed: {e}"));
+
+            let requests = runner.requests();
+            // The header backup writer stages to `<path>.tmp` and renames it
+            // over the previewed path (`cli/src/luks.rs#backup_luks_header_to`).
+            let issued: Vec<CmdRequest> = requests
+                .iter()
+                .filter(|request| is_luks_write(request))
+                .cloned()
+                .map(|request| match request {
+                    CmdRequest::CryptsetupLuksHeaderBackup {
+                        device,
+                        backup_path,
+                    } => CmdRequest::CryptsetupLuksHeaderBackup {
+                        device,
+                        backup_path: backup_path
+                            .strip_suffix(".tmp")
+                            .unwrap_or_else(|| panic!("{case}: backup must stage to .tmp"))
+                            .to_owned(),
+                    },
+                    other => other,
+                })
+                .collect();
+            assert_eq!(issued, previewed, "{case}: replay and preview disagree");
+            if expected_writes == 0 {
+                assert!(
+                    !requests
+                        .iter()
+                        .any(|r| matches!(r, CmdRequest::CryptsetupTestPassphrase { .. })),
+                    "{case}: a disk owed no LUKS write needs no credential check: {requests:?}"
+                );
+            }
+            assert!(!f.paths.pending_op_json().exists(), "{case}: journal kept");
+        }
     }
 
     /* Intent

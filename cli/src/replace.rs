@@ -334,6 +334,7 @@ impl ReplaceWorkPlan {
                     &self.new_by_id,
                     enroll_key_file.as_ref(),
                     &header_backup_path,
+                    None,
                 );
                 steps.push(Step {
                     risk: "safe",
@@ -356,6 +357,7 @@ impl ReplaceWorkPlan {
                         &self.new_by_id,
                         Some(kf),
                         &header_backup_path,
+                        None,
                     );
                 }
                 if !mapper_open {

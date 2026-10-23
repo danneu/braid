@@ -470,6 +470,7 @@ pub fn compile_enroll_steps(
             &c.by_id,
             Some(key_file_path),
             &backup_path,
+            None,
         );
     }
 
