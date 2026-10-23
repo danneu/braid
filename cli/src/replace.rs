@@ -623,10 +623,10 @@ impl ReplacePlan {
             })?;
 
         // (Confirm/passphrase/inhibitor-window guard) Re-load pool.json and
-        // re-derive target_membership here, mirroring RemovePlan::execute:
-        // journaling/saving the plan-time snapshot would persist a stale
-        // membership if pool.json was rewritten during the
-        // confirmation/passphrase/inhibitor window. Reject if old drifted out;
+        // re-derive target_membership here: journaling/saving the plan-time
+        // snapshot would persist a stale membership if pool.json was
+        // rewritten during the confirmation/passphrase/inhibitor window.
+        // Reject if old drifted out;
         // derive_replace_target_membership's insert re-runs the four-axis
         // uniqueness invariant against the fresh read. Pinned by
         // replace_execute_rejects_when_pool_json_drifts_after_planning.
@@ -4190,7 +4190,7 @@ mod tests {
 
     // Intent: `ReplacePlan::execute` re-loads pool.json after the inhibitor
     //   and rejects a drift that dropped the old member out of membership,
-    //   before journaling -- mirroring RemovePlan::execute's drift guard.
+    //   before journaling.
     // Why it exists: execute journals/saves from the re-derived membership;
     //   without a fresh by_uuid re-check, a pool.json rewrite during the
     //   confirmation/passphrase/inhibitor window would let the derive run

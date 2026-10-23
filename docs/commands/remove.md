@@ -46,13 +46,14 @@ sudo braid remove toshiba3 --yes
 
 1. Probes the pool to verify the disk is a live member
 2. Checks that the remaining disks have room for the data being migrated (see the space rule under Safety checks below)
-3. Shows a confirmation prompt with the disk's name and devid, its model/size/serial (best-effort from the live backing device via lsblk -- omitted if unavailable), and the resulting disk count (e.g. `Pool: 3 disks -> 2 disks`). When one disk would remain, the prompt also carries a `WARNING:` line that the pool loses RAID1 redundancy. This interactive prompt, warning included, is skipped by `--yes` and not shown in `--dry-run`; dry-run shows the redundancy loss as the balance step of step 4 instead (see [ADR 022](../design/decisions/022-dry-run-preview-model.md#confirmation-ui)).
-4. If removing the second-to-last disk (going from 2 to 1): first balances the pool off RAID1, then removes the device. Data converts to single, and metadata and system convert to DUP (two copies on the one disk), which `braid status` then shows. See [btrfs balance profiles](../internals/btrfs/balance-profiles.md) for why metadata keeps two copies.
-5. Runs `btrfs device remove` to migrate all data off the disk (this is the long-running step)
-6. Closes the LUKS mapper on the removed disk
-7. Updates pool.json to remove the member's UUID entry
+3. Shows a confirmation prompt with the disk's name and devid, its model/size/serial (best-effort from the live backing device via lsblk -- omitted if unavailable), and the resulting disk count (e.g. `Pool: 3 disks -> 2 disks`). When one disk would remain, the prompt also carries a `WARNING:` line that the pool loses RAID1 redundancy. This interactive prompt, warning included, is skipped by `--yes` and not shown in `--dry-run`; dry-run shows the redundancy loss as the balance step of step 5 instead (see [ADR 022](../design/decisions/022-dry-run-preview-model.md#confirmation-ui)).
+4. After confirmation (or straight away with `--yes`), plans again against the live pool: steps 1-2 and the pool's safety checks below. If a check now refuses, or the new plan differs from the confirmed one, braid stops before writing anything. This runs before any `--enqueue` wait (see below), so it does not cover changes while the removal is queued behind another exclusive operation, or while it runs.
+5. If removing the second-to-last disk (going from 2 to 1): first balances the pool off RAID1, then removes the device. Data converts to single, and metadata and system convert to DUP (two copies on the one disk), which `braid status` then shows. See [btrfs balance profiles](../internals/btrfs/balance-profiles.md) for why metadata keeps two copies.
+6. Runs `btrfs device remove` to migrate all data off the disk (this is the long-running step)
+7. Closes the LUKS mapper on the removed disk
+8. Updates pool.json to remove the member's UUID entry
 
-The step-6 mapper close is best-effort. Because btrfs has already committed the device removal, braid never fails the remove on the close: a failed close prints a `[warn] disk <name>: lock failed` row, and a close-time ownership probe that cannot prove the mapper is the expected disk -- inactive, a probe failure, or a foreign LUKS UUID -- skips the close with a `Warning:` line. A clean exit therefore does not guarantee the mapper is closed. The probe reads the LUKS UUID the kernel recorded when the mapper was opened, not the disk's header, so the mapper still closes when the removed disk is already gone.
+The step-7 mapper close is best-effort. Because btrfs has already committed the device removal, braid never fails the remove on the close: a failed close prints a `[warn] disk <name>: lock failed` row, and a close-time ownership probe that cannot prove the mapper is the expected disk -- inactive, a probe failure, or a foreign LUKS UUID -- skips the close with a `Warning:` line. A clean exit therefore does not guarantee the mapper is closed. The probe reads the LUKS UUID the kernel recorded when the mapper was opened, not the disk's header, so the mapper still closes when the removed disk is already gone.
 
 A sleep inhibitor is held during data migration and cleanup.
 
@@ -74,6 +75,7 @@ If a btrfs exclusive operation (a running balance, device add/remove/replace, re
   the reason. See
   [ADR 012](../design/decisions/012-intent-cli.md#enospc-pre-flight-check)
   for the policy.
+- Refuses if the pool changed between planning and the journal write (for example, survivor space was used up, a balance was paused, or a disk dropped out while the prompt waited). Nothing was written, so re-run the command.
 {{#include ../_includes/mutating-command-refusals.md.inc}}
 
 ## Related commands

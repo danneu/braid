@@ -444,8 +444,8 @@ mod tests {
     // Intent: the reopen hint names only the reopen command the caller can
     // run, adds `--allow-degraded` to the disk-back step only while another
     // member is btrfs-MISSING, and always ends with the caller's next step.
-    // Why it exists: one helper owns this route for remove's plan-time,
-    // pre-journal and post-journal refusals and for doctor. A wrong switch
+    // Why it exists: one helper owns this route for remove's plan-time and
+    // post-journal refusals and for doctor. A wrong switch
     // sends the operator to `braid unlock` with a journal (it refuses), or to
     // a plain unlock that refuses a degraded pool.
     // Scenario: one or two hot-unplugged members, with or without a dead

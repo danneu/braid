@@ -17,11 +17,16 @@
 # stream routing.
 #
 # Scenario: 3-disk RAID1 pool, all present. A PATH wrapper intercepts
-# every `btrfs device usage --raw` call and fails it -- `braid
-# remove` only calls that request once (from `check_eviction_space`),
-# so the first-call failure is what trips the soft-warn branch. The
-# real btrfs is invoked for every other subcommand so the remove
-# itself can actually complete during the real-run phase.
+# every `btrfs device usage --raw` call and answers it with output
+# braid cannot parse, which trips the soft-warn branch of
+# `check_eviction_space`. `--dry-run` makes that request once, in the
+# plan. The real run makes it twice: once in the plan and once in the
+# pre-journal re-plan (`cli/src/remove.rs#RemovePlan::recheck_before_journal`).
+# The shim fails every call the same way, and the re-plan prints only
+# notes the plan has not shown (`cli/src/preview.rs#emit_unseen_notes`),
+# so the warning still prints once. The real btrfs is invoked for every
+# other subcommand so the remove itself can actually complete during
+# the real-run phase.
 
 import base64
 import re

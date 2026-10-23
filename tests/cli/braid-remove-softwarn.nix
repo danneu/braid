@@ -16,9 +16,13 @@
 # be caught by a human noticing drift in their SSH session.
 #
 # The test forces the soft-warn branch by wrapping `btrfs` on PATH
-# with a counter-based shim that errors on every `btrfs device usage
-# --raw` call -- `braid remove` only invokes that request once, from
-# `check_eviction_space`, so the first-call failure is enough.
+# with a shim that answers every `btrfs device usage --raw` call with
+# output braid cannot parse. `--dry-run` makes that request once, in
+# the plan. A real run makes it twice: once in the plan and once in the
+# pre-journal re-plan (`cli/src/remove.rs#RemovePlan::recheck_before_journal`).
+# The shim fails every call the same way, and the re-plan prints only
+# notes the plan has not shown (`cli/src/preview.rs#emit_unseen_notes`),
+# so the warning still prints once.
 #
 # Dependencies: braid add (builds the test pool).
 { braid }:

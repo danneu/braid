@@ -398,13 +398,13 @@ impl RemoveMissingPlan {
         let fresh = match plan_remove_missing(runner, fs, params) {
             Ok(fresh) => fresh,
             Err(PlanFailure { notes, error }) => {
-                self.emit_unseen_notes(&notes);
+                preview::emit_unseen_notes(&self.notes, &notes);
                 return Err(RemoveMissingError::ReplanRefused {
                     source: Box::new(error),
                 });
             }
         };
-        self.emit_unseen_notes(&fresh.notes);
+        preview::emit_unseen_notes(&self.notes, &fresh.notes);
         // Exhaustive, so a new plan field must join the comparison. Notes
         // stay out: a busy-op or read-only-probe note can appear on an
         // unchanged pool and changes nothing execute does.
@@ -421,17 +421,6 @@ impl RemoveMissingPlan {
             return Err(RemoveMissingError::PlanChanged);
         }
         Ok(())
-    }
-
-    /// Print the re-plan's notes that this plan did not already print, so
-    /// the operator sees new context without repeats.
-    fn emit_unseen_notes(&self, fresh: &[PreviewNote]) {
-        let unseen: Vec<PreviewNote> = fresh
-            .iter()
-            .filter(|note| !self.notes.contains(note))
-            .cloned()
-            .collect();
-        preview::emit_notes_to_stderr(&unseen, PerDiskStyle::Bracketed);
     }
 }
 

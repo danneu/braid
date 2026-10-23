@@ -83,18 +83,35 @@ uncertainty, because a miss there can crash the filesystem read-only with
 is btrfs refusing, not probe uncertainty, so it refuses on every `remove`
 path (`cli/src/remove.rs#check_eviction_space`).
 
-`remove-missing` plans again after the confirmation prompt (or straight away
-under `--yes`), above `journal::write_journal`, and refuses unless the new
-plan matches the confirmed one
-(`cli/src/remove_missing.rs#RemoveMissingPlan::recheck_before_journal`).
-Survivor space and device presence are kernel state the pool lock cannot pin,
-and the prompt has no time limit, so writes or a hot-unplug during the wait
-would otherwise reach the relocation with `pending-op.json` already written.
-Re-running the whole planner, not a chosen list of its checks, keeps every
-planner check fresh at the journal, including checks added later; execute
-still runs the confirmed plan. The gate runs before any `--enqueue` wait, so
-it does not cover space used while the removal waits behind another exclusive
-operation or while it runs. Only stopping pool writes would close that.
+`remove` and `remove-missing` plan again after the confirmation prompt (or
+straight away under `--yes`), above `journal::write_journal`, and refuse
+unless the new plan matches the confirmed one
+(`cli/src/remove.rs#RemovePlan::recheck_before_journal`,
+`cli/src/remove_missing.rs#RemoveMissingPlan::recheck_before_journal`).
+Survivor space, device presence, a paused balance, a read-only mount and UPS
+power are state the pool lock cannot pin, and the prompt has no time limit,
+so a change during the wait would otherwise reach the btrfs mutation with
+`pending-op.json` already written: a relocation that crashes the pool
+read-only, an `--enqueue` that waits forever behind a paused balance, or a
+migration that starts on battery. Re-running the whole planner, not a chosen
+list of its checks, keeps every planner check fresh at the journal, including
+checks added later; execute still runs the confirmed plan. The gate runs
+before any `--enqueue` wait, so it does not cover changes while the removal
+waits behind another exclusive operation or while it runs. Only stopping pool
+writes would close that.
+
+The `remove` re-plan reverses two earlier choices for the `>=2`-survivor path,
+which re-checked no space before the journal:
+`plans/impl/2026-06-03-remove-execute-survivor-capacity-recheck.md` called an
+execute-time re-check there unnecessary, and
+`plans/impl/2026-06-16-remove-multi-survivor-no-recheck.md` pinned that no
+space probe runs at all. Their premise was that `btrfs device remove` ENOSPCs
+cleanly. That holds for the filesystem but not for braid: when device remove
+fails, execute keeps `pending-op.json`, so the operator must run
+`braid recover` before anything else. A refusal before the journal writes
+nothing. The re-plan keeps the `>=2` error policy, so a probe that fails to
+spawn or parse still warns and proceeds; only a nonzero btrfs exit or a
+confirmed shortfall refuses, as at plan time. Do not restore the pin.
 
 Before the space check, `remove-missing` refuses while any member other than
 the target is hot-unplugged but btrfs has not yet promoted it to MISSING
@@ -135,10 +152,10 @@ Single-survivor cases use a path-specific check:
   logical usage -- `data + 2 * metadata + 2 * system`, reflecting the
   post-balance single + DUP profile on one device -- and compares it
   to the survivor's `device_size - device_slack`. This check runs at
-  plan time **and** is re-run as a pre-journal gate in `execute`
-  (above `journal::write_journal`), closing the plan/execute drift
-  window -- a survivor over-committed by writes during the
-  confirmation + inhibitor wait is caught before the irreversible `-f`
+  plan time **and** again in the pre-journal re-plan
+  (`cli/src/remove.rs#RemovePlan::recheck_before_journal`), closing the
+  plan/execute drift window -- a survivor over-committed by writes during
+  the confirmation + inhibitor wait is caught before the irreversible `-f`
   balance and fails clean, with no `pending-op.json` stranded.
 - **`remove-missing` on a 2-device RAID1 pool with 1 missing
   (`pool.total_devices == 2 && pool.devices.len() == 1 && pool.missing_count == 1`):**

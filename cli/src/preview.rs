@@ -209,6 +209,19 @@ pub fn emit_notes_to_stderr(notes: &[PreviewNote], style: PerDiskStyle) {
     crate::status_tag::emit_status(&render_notes_for_stderr_with(notes, style, color_enabled));
 }
 
+/// Emit the notes of a pre-journal re-plan that its confirmed plan did not
+/// already print, so the operator sees new context once and nothing twice.
+/// The commands that re-plan before the journal share it, so their re-plans
+/// print notes by one rule.
+pub(crate) fn emit_unseen_notes(shown: &[PreviewNote], fresh: &[PreviewNote]) {
+    let unseen: Vec<PreviewNote> = fresh
+        .iter()
+        .filter(|note| !shown.contains(note))
+        .cloned()
+        .collect();
+    emit_notes_to_stderr(&unseen, PerDiskStyle::Bracketed);
+}
+
 impl Preview {
     /// Render the preview to a single string in the canonical order:
     ///

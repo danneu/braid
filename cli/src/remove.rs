@@ -8,9 +8,7 @@ use crate::journal;
 use crate::mapper_close::{CloseContext, close_mapper_best_effort};
 use crate::membership;
 use crate::parse::{ParseError, parse_btrfs_device_usage, parse_btrfs_df_json};
-use crate::pool::{
-    DeviceIdentity, TopologyDrift, pool_balance_single, pool_remove_device, validate_pool_topology,
-};
+use crate::pool::{DeviceIdentity, pool_balance_single, pool_remove_device, validate_pool_topology};
 use crate::preflight;
 use crate::preview::{self, PerDiskStyle, PlanFailure, Preview, PreviewNote};
 use crate::probe::{ProbeError, probe_pool};
@@ -41,6 +39,24 @@ pub enum RemoveError {
     MembershipPersistFailure(String),
     #[error("pool was modified and membership persisted, but journal clear failed: {0}")]
     JournalClearFailure(String),
+    /// The first plan passed but the re-plan just above the journal
+    /// (`RemovePlan::recheck_before_journal`) refused. It keeps the
+    /// planner's own text and adds that nothing was written, so the
+    /// operator knows a re-run is safe and needs no `braid recover`.
+    #[error(
+        "{source}\nbraid's first plan did not refuse this, but re-checking the pool just before writing anything did -- nothing was written; re-run `braid remove`."
+    )]
+    ReplanRefused {
+        #[source]
+        source: Box<RemoveError>,
+    },
+    /// The re-plan just above the journal passed but differs from the plan
+    /// that was confirmed, so the journal would record a removal the
+    /// operator did not agree to.
+    #[error(
+        "the pool changed after braid planned this removal: a re-check just before writing anything gives a different plan from the one confirmed -- nothing was written; re-run `braid remove` to see the new plan."
+    )]
+    PlanChanged,
     #[error("probe error: {0}")]
     Probe(#[from] ProbeError),
     #[error("pool error: {0}")]
@@ -63,8 +79,9 @@ fn map_journal_clear_failure(e: journal::JournalError) -> RemoveError {
     RemoveError::JournalClearFailure(e.to_string())
 }
 
-/// Shared pool.json drift error so the planner and executor reject the
-/// same absent-name state before journaling can record a misleading remove.
+/// pool.json refusal for a name no member has. The planner raises it, so a
+/// pool.json rewrite during the prompt also refuses at the pre-journal
+/// re-plan instead of journaling a remove that removes nothing.
 fn absent_from_membership_error(name: &str) -> RemoveError {
     RemoveError::Validation(format!(
         "'{name}' not found in pool.json membership -- \
@@ -102,22 +119,11 @@ fn not_live_member_error(name: &str, pool: &PoolState) -> String {
     msg
 }
 
-/// Reopen route for a target whose mapper reads `device: (null)` at an
-/// execute-time topology check. The caller picks `reopen` by whether the
-/// journal exists yet.
-fn target_hot_unplug_route(drift: &TopologyDrift, reopen: repair_hint::ReopenWith) -> String {
-    repair_hint::hot_unplug_reopen(
-        &drift.observed_null_underlying_devids,
-        &drift.observed_missing_devids,
-        reopen,
-        "Then re-run `braid remove`.",
-    )
-}
-
 /// Resolve a user-typed `--name` argument to its `(LuksUuid, DiskName)`
-/// pair via `PoolMembership::by_name`. Used at the planning and execute
-/// boundaries so identity decisions flow through `LuksUuid` and the
-/// display name follows from the persisted member, not from raw CLI bytes.
+/// pair via `PoolMembership::by_name`. Used at the planning boundary (and so
+/// again by the pre-journal re-plan) so identity decisions flow through
+/// `LuksUuid` and the display name follows from the persisted member, not
+/// from raw CLI bytes.
 fn resolve_target_in_membership(
     membership: &membership::PoolMembership,
     raw_name: &str,
@@ -153,19 +159,29 @@ pub struct RemoveParams<'a> {
 
 /// Dry-run preview source of truth for `braid remove` plus the execute
 /// inputs pre-computed during planning. `preview()` renders accumulated
-/// notes plus steps from the semantic work plan; `execute()` consumes
-/// the preflight state (target device, remaining/total counts, mount
-/// point) and renders any accumulated notes to stderr via the shared
+/// notes plus steps from the semantic work plan; `execute()` renders any
+/// accumulated notes to stderr via the shared
 /// `preview::render_notes_for_stderr` helper (canonical `[warn] <body>`
-/// wording) before mutating. The 1-disk `WARNING:` (no RAID1 redundancy)
-/// is confirmation UI, not a `PreviewNote`: it stays behind the
-/// `!params.yes` gate and never appears in `--dry-run` or `--yes` runs.
+/// wording) before mutating. The membership snapshots are resolved under
+/// the command pool lock, and `execute()` journals and persists these
+/// confirmed snapshots. Its pre-journal re-plan reloads `pool.json` only to
+/// compare against them. The 1-disk `WARNING:` (no RAID1 redundancy) is
+/// confirmation UI, not a `PreviewNote`: it stays behind the `!params.yes`
+/// gate and never appears in `--dry-run` or `--yes` runs.
 pub struct RemovePlan {
     pub notes: Vec<PreviewNote>,
     work_plan: RemoveWorkPlan,
+    /// `pool.json` as planned, with every live member's btrfs devid pinned
+    /// in. Recovery may bind a MISSING device, which has no mapper and so
+    /// no observable LUKS UUID, only through this persisted devid, never by
+    /// mapper-name correlation.
+    pre_membership: membership::PoolMembership,
+    /// `pre_membership` without the target: the journal's end state and
+    /// the `pool.json` written after `btrfs device remove` commits.
+    target_membership: membership::PoolMembership,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct RemoveWorkPlan {
     /// Persisted disk name resolved from the user-typed `--name` via
     /// `PoolMembership::by_name`. Used for log/progress rendering and as
@@ -188,19 +204,22 @@ struct RemoveWorkPlan {
     /// a by-id handle (decision 024: present-device probes use live paths).
     /// Display-only: its sole consumer is the best-effort confirm-prompt
     /// hardware line (`confirm::query_disk_hw_info`) behind the interactive
-    /// `!params.yes` gate; no mutation, journal, or validation reads it.
+    /// `!params.yes` gate; no mutation or journal reads it. It still joins
+    /// the pre-journal re-plan comparison with the rest of the work plan,
+    /// so a backing path that changes during the prompt refuses the run.
     /// Snapshotted rather than re-resolved because `execute()` holds no
     /// `PoolState` to call `underlying_for_uuid` on (contrast replace.rs).
     target_underlying: String,
     remaining: usize,
     total: usize,
     mount_point: MountPoint,
-    /// Identity snapshot of every present pool device at planning time,
-    /// consumed by `validate_pool_topology` at execute time (pre- and
-    /// post-journal). Full identity (mapper, devid, luks_uuid) -- not just
-    /// cardinality or mapper name -- so a same-count survivor swap or a
-    /// same-mapper replacement both fail the validation rather than
-    /// slipping through with stale capacity-preflight assumptions.
+    /// Identity snapshot of every present pool device at planning time.
+    /// The pre-journal re-plan compares it, and the post-journal
+    /// `validate_pool_topology` gate checks the live pool against it.
+    /// Full identity (mapper, devid, luks_uuid) -- not just cardinality or
+    /// mapper name -- so a same-count survivor swap or a same-mapper
+    /// replacement both refuse rather than slipping through with stale
+    /// capacity-preflight assumptions.
     expected_present_identities: BTreeMap<MapperName, DeviceIdentity>,
 }
 
@@ -322,27 +341,22 @@ impl RemovePlan {
         // share one render contract for plan-derived notes.
         preview::emit_notes_to_stderr(&self.notes, PerDiskStyle::Bracketed);
 
-        let RemovePlan {
-            notes: _,
-            work_plan,
-        } = self;
-
         // Confirm
         if !params.yes {
-            let hw = confirm::query_disk_hw_info(runner, &work_plan.target_underlying);
+            let hw = confirm::query_disk_hw_info(runner, &self.work_plan.target_underlying);
             let mut prompt = format!(
                 "{}\n",
                 format_remove_confirm(
                     &RemoveConfirmDisk {
-                        name: work_plan.name.as_str(),
+                        name: self.work_plan.name.as_str(),
                         hw: Some(&hw),
-                        devid: work_plan.target_devid,
+                        devid: self.work_plan.target_devid,
                     },
-                    work_plan.remaining,
-                    work_plan.total,
+                    self.work_plan.remaining,
+                    self.work_plan.total,
                 )
             );
-            if work_plan.remaining == 1 {
+            if self.work_plan.remaining == 1 {
                 // Confirmation UI only: this is the go/no-go gate. The
                 // dry-run preview already shows the consequence as the
                 // `RAID1 -> ...` balance step; see `preview()`.
@@ -375,69 +389,19 @@ impl RemovePlan {
                 ))
             })?;
 
-        // (Pre-journal) topology drift validation -- clean failure if the
-        // world changed between plan_remove and here. Above journal::write_journal
-        // so failure does NOT strand pending-op.json (principle 3,
-        // docs/design/principles.md#3-safe-by-construction-operations). The
-        // hot-unplug variant reopens with `braid unlock`, because no journal
-        // exists yet and `braid recover` would refuse.
-        validate_pool_topology(
-            runner,
-            fs,
-            &work_plan.mount_point,
-            work_plan.target_mapper.as_str(),
-            &work_plan.expected_present_identities,
-        )
-        .map_err(|drift| {
-            let detail = drift.detail();
-            let suffix = if drift.is_target_hot_unplug() {
-                format!(
-                    "The remove did not start. {}",
-                    target_hot_unplug_route(&drift, repair_hint::ReopenWith::Unlock)
-                )
-            } else {
-                "Resolve the drift and re-run `braid remove`.".to_owned()
-            };
-            RemoveError::Validation(format!("{detail}. {suffix}"))
-        })?;
+        // (Pre-journal) re-plan against the live pool. Above
+        // journal::write_journal so a stale plan fails clean, with no
+        // pending-op.json stranded (principle 3,
+        // docs/design/principles.md#3-safe-by-construction-operations).
+        self.recheck_before_journal(runner, fs, params)?;
 
-        // (Pre-journal) survivor-capacity re-check for the fail-closed 2->1 branch.
-        // Capacity validated at plan time can go stale across the confirmation prompt +
-        // inhibitor-acquire window while the pool keeps taking writes. Re-running it here
-        // -- above journal::write_journal -- catches an over-committed survivor before the
-        // irreversible `-f` balance and fails CLEAN (no stranded pending-op.json), because
-        // no mutation has happened yet (principle 3,
-        // docs/design/principles.md#3-safe-by-construction-operations). The >=2-survivor
-        // branch is intentionally NOT re-checked: `btrfs device remove` ENOSPCs cleanly
-        // there (see check_eviction_space docstring).
-        if work_plan.remaining == 1 {
-            check_single_survivor(runner, &work_plan.mount_point, work_plan.target_devid)?;
-        }
+        let RemovePlan {
+            notes: _,
+            work_plan,
+            pre_membership,
+            target_membership,
+        } = self;
 
-        // Build target membership and write journal before irreversible disk op.
-        let pre_membership = membership::load_membership(params.paths)
-            .map_err(|e| RemoveError::Validation(format!("failed to load pool membership: {e}")))?;
-        // (Confirm/inhibitor-window guard) This fresh load is the journal's
-        // pre_membership below, so re-check the target still exists: a concurrent
-        // pool.json rewrite during the confirmation prompt or inhibitor acquire
-        // would otherwise let remove_by_uuid silently no-op and journal a
-        // misleading "removed nothing." Pinned by
-        // execute_rejects_when_pool_json_drifts_after_planning.
-        if pre_membership.by_uuid(&work_plan.target_uuid).is_none() {
-            return Err(absent_from_membership_error(work_plan.name.as_str()));
-        }
-        // Pin every live member's btrfs devid into the journal. Recovery is
-        // allowed to use persisted devid as the fallback binding for a btrfs
-        // MISSING device, which has no mapper and so no observable LUKS UUID,
-        // but must not fall back to mapper-name correlation.
-        let mut pre_membership = pre_membership;
-        for identity in work_plan.expected_present_identities.values() {
-            if let Some(member) = pre_membership.by_uuid_mut(&identity.luks_uuid) {
-                member.devid = Some(identity.devid);
-            }
-        }
-        let mut target_membership = pre_membership.clone();
-        target_membership.remove_by_uuid(&work_plan.target_uuid);
         let journal = journal::build_journal(
             pre_membership,
             target_membership.clone(),
@@ -450,7 +414,7 @@ impl RemovePlan {
             .map_err(|e| RemoveError::Validation(e.to_string()))?;
 
         // (Post-journal) last-moment safety gate: catch drift in the small
-        // window between the pre-journal probe and pool_balance_single.
+        // window between the pre-journal re-plan and pool_balance_single.
         // BtrfsBalanceSingle ships -f, which skips btrfs-progs' missing-device
         // safety timeout (reference/btrfs-progs/cmds/balance.c:558-561).
         // Without this gate, a disk going MISSING here could subject the pool
@@ -469,7 +433,12 @@ impl RemovePlan {
             // The journal exists now, so `braid unlock` would refuse; `braid
             // recover` is both the reopen and the journal's resolution.
             let suffix = if drift.is_target_hot_unplug() {
-                target_hot_unplug_route(&drift, repair_hint::ReopenWith::Recover)
+                repair_hint::hot_unplug_reopen(
+                    &drift.observed_null_underlying_devids,
+                    &drift.observed_missing_devids,
+                    repair_hint::ReopenWith::Recover,
+                    "Then re-run `braid remove`.",
+                )
             } else {
                 "Pool topology changed after the operation entered recovery mode.".to_owned()
             };
@@ -553,15 +522,58 @@ impl RemovePlan {
         eprintln!("Done. Disk '{}' removed from pool.", work_plan.name);
         Ok(())
     }
+
+    /// Re-run `plan_remove` against the live pool and require the plan
+    /// already confirmed. Device presence and identity, survivor space, the
+    /// btrfs exclusive op, the mount flags, UPS power, and the other planner
+    /// inputs are live state the pool lock cannot pin, and the confirm
+    /// prompt has no time limit. Comparing a whole fresh plan, not a
+    /// hand-picked list of checks, keeps every planner check fresh at the
+    /// journal, including checks added later.
+    fn recheck_before_journal<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
+        &self,
+        runner: &R,
+        fs: &F,
+        params: &RemoveParams<'_>,
+    ) -> Result<(), RemoveError> {
+        let fresh = match plan_remove(runner, fs, params) {
+            Ok(fresh) => fresh,
+            Err(PlanFailure { notes, error }) => {
+                preview::emit_unseen_notes(&self.notes, &notes);
+                return Err(RemoveError::ReplanRefused {
+                    source: Box::new(error),
+                });
+            }
+        };
+        preview::emit_unseen_notes(&self.notes, &fresh.notes);
+        // Exhaustive, so a new plan field must join the comparison. Notes
+        // stay out: a busy-op, soft-warn, or read-only-probe note can appear
+        // on an unchanged pool and changes nothing execute does.
+        let RemovePlan {
+            notes: _,
+            work_plan,
+            pre_membership,
+            target_membership,
+        } = &fresh;
+        if *work_plan != self.work_plan
+            || *pre_membership != self.pre_membership
+            || *target_membership != self.target_membership
+        {
+            return Err(RemoveError::PlanChanged);
+        }
+        Ok(())
+    }
 }
 
 /// Plan a `braid remove` run after dispatch has already checked for a pending
 /// operation and loaded config under the pool lock. Owns pool probe / mounted
 /// validation, mutation preflight, UPS preflight, target device lookup,
-/// missing-device guard, work-plan construction, and the eviction-space
-/// preflight. On success, accumulated notes move into `plan.notes`; on
-/// post-preflight failure, accumulated notes stay on `PlanFailure::notes` so
-/// `cmd_remove` can render them before returning the error.
+/// missing-device guard, work-plan construction, the eviction-space
+/// preflight, and the membership snapshots the journal records. On success,
+/// accumulated notes move into `plan.notes`; on post-preflight failure,
+/// accumulated notes stay on `PlanFailure::notes` so `cmd_remove` can render
+/// them before returning the error. `RemovePlan::recheck_before_journal` runs
+/// it again before the journal, so every check here holds at the journal.
 pub fn plan_remove<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
@@ -693,9 +705,24 @@ pub fn plan_remove<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         }
     }
 
-    let plan = RemovePlan { notes, work_plan };
+    // Pin every live member's btrfs devid into the snapshot the journal
+    // records; see `RemovePlan::pre_membership`. target_uuid was just
+    // resolved from this membership, so the removal below always matches.
+    let mut pre_membership = pre_membership;
+    for identity in work_plan.expected_present_identities.values() {
+        if let Some(member) = pre_membership.by_uuid_mut(&identity.luks_uuid) {
+            member.devid = Some(identity.devid);
+        }
+    }
+    let mut target_membership = pre_membership.clone();
+    target_membership.remove_by_uuid(&work_plan.target_uuid);
 
-    Ok(plan)
+    Ok(RemovePlan {
+        notes,
+        work_plan,
+        pre_membership,
+        target_membership,
+    })
 }
 
 /// Plan-then-execute device removal; dry-run renders the same typed plan.
@@ -835,13 +862,11 @@ pub(crate) fn check_eviction_space<R: CommandRunner>(
         })
 }
 
-/// Shared single-survivor (2->1) capacity helper, invoked at both the
-/// planning preflight (`check_eviction_space`) and the pre-journal execute
-/// gate (`RemovePlan::execute`). Takes `target_devid: Devid` rather than a
-/// live `PoolDevice` so the executor -- which holds only
-/// `work_plan.target_devid`, not a probed device -- can re-run the exact same
-/// check across the plan/execute gap. Fail-closed on every input uncertainty;
-/// see `check_eviction_space` docstring for the rationale.
+/// The single-survivor (2->1) branch of `check_eviction_space`, kept apart
+/// because its error policy differs. It reads only the target's devid: the
+/// survivor is whichever `btrfs device usage` stanza is not the target.
+/// Fail-closed on every input uncertainty; see `check_eviction_space`
+/// docstring for the rationale.
 fn check_single_survivor<R: CommandRunner>(
     runner: &R,
     mount_point: &MountPoint,
@@ -1430,8 +1455,9 @@ mod tests {
     // after the inhibitor has been acquired.
     //
     // Why it exists: a concurrent pool.json rewrite in the confirmation or
-    // inhibitor window would otherwise let target_membership.disks.remove
-    // silently no-op and write a misleading journal.
+    // inhibitor window would otherwise journal a remove of a member that is
+    // gone. The pre-journal re-plan reloads pool.json and refuses the
+    // absent name with the planner's own text.
     //
     // Scenario: plan_remove sees disk1+disk2+disk3 in pool.json and live
     // btrfs, then pool.json is rewritten to disk2+disk3 before execute.
@@ -1451,14 +1477,15 @@ mod tests {
         let result = plan.execute(&runner, &fs, &params);
 
         match result {
-            Err(RemoveError::Validation(msg)) => {
+            Err(RemoveError::ReplanRefused { source }) => {
+                let msg = source.to_string();
                 assert!(
                     msg.contains("not found in pool.json membership"),
                     "expected pool.json membership error: {msg}"
                 );
                 assert!(msg.contains("disk1"), "expected disk1 in error: {msg}");
             }
-            Err(other) => panic!("expected Validation error, got: {other:?}"),
+            Err(other) => panic!("expected ReplanRefused, got: {other:?}"),
             Ok(()) => panic!("expected execute-time drift rejection"),
         }
         assert!(
@@ -1478,11 +1505,11 @@ mod tests {
     }
 
     // Intent: RemovePlan::execute re-runs the 2->1 single-survivor capacity
-    // check before journaling, so a survivor that had room at plan time but
-    // was over-committed by execute time is refused cleanly.
+    // check before journaling, through its pre-journal re-plan, so a
+    // survivor that had room at plan time but was over-committed by execute
+    // time is refused cleanly.
     //
-    // Why it exists: the plan-time check (check_eviction_space) is the only
-    // capacity gate today; the confirmation prompt + inhibitor-acquire window
+    // Why it exists: the confirmation prompt + inhibitor-acquire window
     // lets the pool keep taking writes, so a survivor can drift over capacity
     // between plan and the irreversible `-f` balance. Without a pre-journal
     // re-check, the balance crashes the fs read-only mid-migration with
@@ -1506,8 +1533,8 @@ mod tests {
         let plan =
             plan_remove(&healthy, &fs, &params).expect("plan succeeds with healthy survivor");
 
-        // Over-committed runner: healthy probe topology (so validate_pool_topology
-        // passes) but the survivor usage + df report it over capacity.
+        // Over-committed runner: healthy probe topology (so the re-plan's
+        // topology matches) but the survivor usage + df report it over capacity.
         let overcommitted = RemovalPool::two_disk()
             .install(MockRunner::default())
             .with_handler(|req| match req {
@@ -1525,13 +1552,14 @@ mod tests {
         let result = plan.execute(&overcommitted, &fs, &params);
 
         match result {
-            Err(RemoveError::Validation(msg)) => {
+            Err(RemoveError::ReplanRefused { source }) => {
+                let msg = source.to_string();
                 assert!(
                     msg.contains("not enough space on surviving device"),
                     "expected survivor-capacity refusal: {msg}"
                 );
             }
-            Err(other) => panic!("expected Validation error, got: {other:?}"),
+            Err(other) => panic!("expected ReplanRefused, got: {other:?}"),
             Ok(()) => panic!("expected execute-time survivor-capacity rejection"),
         }
         assert!(
@@ -1552,25 +1580,24 @@ mod tests {
         );
     }
 
-    // Intent: a redundancy-preserving remove (3->2, remaining >= 2) issues no
-    // execute-time survivor-capacity probe -- the >= 2 path is intentionally
-    // not re-checked, unlike the fail-closed 2->1 path.
+    // Intent: a redundancy-preserving remove (3->2, remaining >= 2) re-probes
+    // survivor space before the journal, and a probe that cannot run still
+    // warns and proceeds, as it does at plan time.
     //
-    // Why it exists: the execute-time capacity re-check is gated on
-    // remaining == 1 and is fail-closed by design; the >= 2 branch is
-    // warn-and-proceed and leans on `btrfs device remove` ENOSPCing cleanly.
-    // The positive half is pinned by execute_rechecks_survivor_capacity_before_journal;
-    // this pins the negative half. Without it, a consistency refactor could add
-    // a hard re-check to the >= 2 execute path and refuse valid removes on
-    // transient probe errors. If placed after journal::write_journal, it would
-    // also strand pending-op.json, with no test to catch it.
+    // Why it exists: finding 261022-1230-015 reversed the earlier pin that a
+    // 3->2 execute issues no space probe at all
+    // (plans/impl/2026-06-16-remove-multi-survivor-no-recheck.md). The
+    // pre-journal re-plan runs the whole planner, space probe included. What
+    // must survive from that pin is the >= 2 policy: only a nonzero btrfs
+    // exit or a confirmed shortfall refuses, never a probe that fails to
+    // spawn or parse, so a transient probe hiccup cannot block a valid
+    // remove. The warning prints once and does not join the plan comparison.
     //
     // Scenario: an operator removes one disk from a healthy three-disk pool.
-    // Two survivors remain, so execute proceeds from the pre-journal topology
-    // gate straight to `btrfs device remove` with no survivor-capacity probe;
-    // the journal is written and then cleared on success, nothing stranded.
+    // At the re-plan, `btrfs device usage` cannot be spawned. execute warns,
+    // runs `btrfs device remove`, and clears the journal on success.
     #[test]
-    fn execute_skips_survivor_capacity_recheck_for_multi_survivor() {
+    fn execute_rechecks_multi_survivor_space_and_proceeds_on_probe_spawn_error() {
         let f = PoolFixture::three_disk_healthy();
         let fs = MockFs::storage(vec![]).with_dm(canonical_dm_table());
         let params = f.remove_params().build();
@@ -1579,20 +1606,33 @@ mod tests {
         let plan =
             plan_remove(&plan_runner, &fs, &params).expect("plan succeeds on healthy 3-disk pool");
 
-        // Use a separate fresh runner so requests() captures only execute-phase
+        // A separate runner, so requests() captures only execute-phase
         // requests; the plan-time >= 2 capacity probe stays on plan_runner.
-        let exec_runner = RemovalPool::three_disk().install(MockRunner::default());
-        plan.execute(&exec_runner, &fs, &params)
-            .expect("3->2 execute succeeds on a healthy pool");
+        let exec_runner = RemovalPool::three_disk()
+            .install(MockRunner::default())
+            .with_handler(|req| match req {
+                CmdRequest::BtrfsDeviceUsageRaw { .. } => Some(Err(CmdError::MissingMock)),
+                _ => None,
+            });
+        let mut result = None;
+        let stderr = crate::status_tag::testing::capture_with_color(false, || {
+            result = Some(plan.execute(&exec_runner, &fs, &params));
+        });
 
+        result
+            .expect("execute ran")
+            .expect("a usage probe that cannot spawn must not refuse a 3->2 remove");
         let calls = exec_runner.requests();
         assert!(
-            !calls.iter().any(|c| matches!(
-                c,
-                CmdRequest::BtrfsDeviceUsageRaw { .. } | CmdRequest::BtrfsFilesystemDfJson { .. }
-            )),
-            "the remaining >= 2 execute path must not re-probe survivor capacity \
-             (it relies on btrfs device remove ENOSPCing cleanly): {calls:?}"
+            calls
+                .iter()
+                .any(|c| matches!(c, CmdRequest::BtrfsDeviceUsageRaw { .. })),
+            "the 3->2 re-plan must re-probe survivor space: {calls:?}"
+        );
+        assert_eq!(
+            stderr.matches("[warn] ENOSPC pre-flight check failed:").count(),
+            1,
+            "the re-plan's soft warning must print once: {stderr}"
         );
         assert!(
             calls
@@ -1604,6 +1644,67 @@ mod tests {
             !f.paths.pending_op_json().exists(),
             "a successful 3->2 remove must clear the journal -- nothing stranded",
         );
+    }
+
+    // Intent: a 3->2 remove whose survivors filled up during the confirm
+    //   prompt refuses before the journal.
+    // Why it exists: finding 261022-1230-015. A 3->2 execute used to skip the
+    //   space check. It journaled, `btrfs device remove` hit ENOSPC, and
+    //   execute kept pending-op.json (journal_survives_evict_failure), so the
+    //   operator had to run `braid recover` before anything else. The
+    //   pre-journal re-plan refuses the same shortfall with nothing written.
+    // Scenario: an operator removes disk2 from a three-disk pool with room
+    //   to spare. While they read the prompt, a backup fills disk1 and disk3.
+    #[test]
+    fn execute_refuses_before_journal_when_multi_survivors_filled_at_prompt() {
+        let f = PoolFixture::three_disk_healthy();
+        let fs = MockFs::storage(vec![]).with_dm(canonical_dm_table());
+        let params = f.remove_params().build();
+        let plan_runner = RemovalPool::three_disk().install(MockRunner::default());
+        let plan =
+            plan_remove(&plan_runner, &fs, &params).expect("plan succeeds on healthy 3-disk pool");
+
+        let full_survivor = |path: &str, devid: u64| {
+            DeviceUsageSpec::live(
+                path,
+                devid,
+                1_073_741_824,
+                &[("Data", "RAID1", 1_072_693_248)],
+                1_048_576,
+            )
+        };
+        let full_usage = device_usage_raw_body(&[
+            full_survivor("/dev/mapper/braid-disk1", 1),
+            DeviceUsageSpec::live(
+                "/dev/mapper/braid-disk2",
+                2,
+                1_073_741_824,
+                &[("Data", "RAID1", 52_428_800)],
+                1_021_313_024,
+            ),
+            full_survivor("/dev/mapper/braid-disk3", 3),
+        ]);
+        let exec_runner = RemovalPool::three_disk()
+            .install(MockRunner::default())
+            .with_handler(move |req| match req {
+                CmdRequest::BtrfsDeviceUsageRaw { .. } => Some(Ok(mock_ok(
+                    "btrfs device usage --raw /mnt/storage",
+                    &full_usage,
+                ))),
+                _ => None,
+            });
+
+        let msg = plan
+            .execute(&exec_runner, &fs, &params)
+            .expect_err("survivors filled during the prompt must refuse")
+            .to_string();
+
+        assert_stopped_before_journal(&f, &exec_runner);
+        assert!(
+            msg.contains("not enough space to relocate Data chunks"),
+            "the refusal must name the shortfall: {msg}"
+        );
+        assert!(msg.contains(NOTHING_WRITTEN), "{msg}");
     }
 
     #[test]
@@ -1930,6 +2031,148 @@ mod tests {
             0,
             "dry-run must NOT acquire the sleep inhibitor"
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // Pre-journal re-plan: planner checks of live state the pool lock cannot
+    // pin must hold again after the confirm prompt, before the journal.
+    // ---------------------------------------------------------------------
+
+    /// The line every pre-journal re-plan refusal ends with.
+    const NOTHING_WRITTEN: &str = "nothing was written; re-run `braid remove`";
+
+    /// Assert that a real run stopped before its journal: no
+    /// `pending-op.json`, and neither `btrfs balance` nor
+    /// `btrfs device remove` ran.
+    fn assert_stopped_before_journal(f: &PoolFixture, runner: &MockRunner) {
+        let calls = runner.requests();
+        assert!(
+            !calls.iter().any(|c| matches!(
+                c,
+                CmdRequest::BtrfsBalanceSingle { .. } | CmdRequest::BtrfsDeviceRemove { .. }
+            )),
+            "the re-check must refuse before any btrfs mutation: {calls:?}"
+        );
+        assert!(
+            journal::load_journal(&f.paths).unwrap().is_none(),
+            "the re-check must refuse before pending-op.json is written"
+        );
+    }
+
+    // Intent: a real run re-checks the btrfs exclusive op after the confirm
+    //   prompt and refuses before the journal when a balance was paused.
+    // Why it exists: finding 261022-1230-015. remove checked for a paused
+    //   balance only while planning. A balance paused during the prompt made
+    //   `btrfs balance start --enqueue` or `btrfs device remove --enqueue`
+    //   wait forever, with pending-op.json written and the inhibitor held.
+    // Scenario: the operator starts a 2->1 remove on an idle pool. While
+    //   they read the prompt, someone pauses a balance they had started.
+    #[test]
+    fn execute_refuses_before_journal_when_balance_paused_at_prompt() {
+        let f = PoolFixture::two_disk_healthy();
+        let runner = RemovalPool::two_disk().install(MockRunner::default());
+        let params = f.remove_params().build();
+        let idle = MockFs::storage(vec![]).with_dm(canonical_dm_table());
+        let plan = plan_remove(&runner, &idle, &params).expect("plan on an idle pool");
+
+        let paused = MockFs::storage(vec![])
+            .with_dm(canonical_dm_table())
+            .with_excl_op("balance paused\n");
+        let result = plan.execute(&runner, &paused, &params);
+
+        let msg = result
+            .expect_err("a balance paused during the prompt must refuse")
+            .to_string();
+        assert_stopped_before_journal(&f, &runner);
+        assert!(
+            msg.contains("a btrfs balance is paused"),
+            "the refusal must name the paused balance: {msg}"
+        );
+        assert!(msg.contains(NOTHING_WRITTEN), "{msg}");
+    }
+
+    // Intent: a real run re-checks the mount flags after the confirm prompt
+    //   and refuses before the journal when the pool went read-only.
+    // Why it exists: finding 261022-1230-015. The read-only check ran only
+    //   while planning, so a pool forced read-only during the prompt failed
+    //   the first btrfs mutation and stranded pending-op.json for a refusal
+    //   the planner makes cleanly (principle 3).
+    // Scenario: the operator starts a 3->2 remove. While they read the
+    //   prompt, btrfs hits an error and forces the pool read-only.
+    #[test]
+    fn execute_refuses_before_journal_when_pool_turned_read_only_at_prompt() {
+        let f = PoolFixture::three_disk_healthy();
+        let runner = RemovalPool::three_disk().install(MockRunner::default());
+        let params = f.remove_params().build();
+        let rw = MockFs::storage(vec![]).with_dm(canonical_dm_table());
+        let plan = plan_remove(&runner, &rw, &params).expect("plan on a rw pool");
+
+        let ro = MockFs::storage(vec![])
+            .with_dm(canonical_dm_table())
+            .with_mountinfo(
+                "36 35 0:32 / /mnt/storage ro shared:1 - btrfs /dev/mapper/braid-disk1 ro\n",
+            );
+        let result = plan.execute(&runner, &ro, &params);
+
+        let msg = result
+            .expect_err("a pool forced read-only during the prompt must refuse")
+            .to_string();
+        assert_stopped_before_journal(&f, &runner);
+        assert!(
+            msg.contains("pool is mounted read-only"),
+            "the refusal must name the read-only mount: {msg}"
+        );
+        assert!(msg.contains(NOTHING_WRITTEN), "{msg}");
+    }
+
+    // Intent: a real run re-checks UPS power after the confirm prompt and
+    //   refuses before the journal when the UPS went on battery.
+    // Why it exists: finding 261022-1230-015. The UPS check ran only while
+    //   planning, so utility power lost during the prompt started an
+    //   hours-long migration on battery, which ADR 020 exists to refuse.
+    // Scenario: the operator starts a 2->1 remove on utility power. While
+    //   they read the prompt, the power fails and the UPS reports OB.
+    #[test]
+    fn execute_refuses_before_journal_when_ups_on_battery_at_prompt() {
+        let ups_status = |status: &'static str| {
+            move |req: &CmdRequest| match req {
+                CmdRequest::UpscQuery { name } => Some(Ok(mock_ok(
+                    &format!("upsc {name}"),
+                    &format!("ups.status: {status}\n"),
+                ))),
+                _ => None,
+            }
+        };
+        let f = PoolFixture::two_disk_healthy();
+        let config: Config = serde_json::from_value(serde_json::json!({
+            "mount_point": "/mnt/storage",
+            "ups": { "name": "ups" },
+        }))
+        .expect("valid UPS test config");
+        let params = RemoveParams {
+            config: &config,
+            ..f.remove_params().build()
+        };
+        let fs = MockFs::storage(vec![]).with_dm(canonical_dm_table());
+        let on_line = RemovalPool::two_disk()
+            .install(MockRunner::default())
+            .with_handler(ups_status("OL"));
+        let plan = plan_remove(&on_line, &fs, &params).expect("plan on utility power");
+
+        let on_battery = RemovalPool::two_disk()
+            .install(MockRunner::default())
+            .with_handler(ups_status("OB"));
+        let result = plan.execute(&on_battery, &fs, &params);
+
+        let msg = result
+            .expect_err("a UPS on battery after the prompt must refuse")
+            .to_string();
+        assert_stopped_before_journal(&f, &on_battery);
+        assert!(
+            msg.contains("UPS reports on-battery"),
+            "the refusal must name the UPS state: {msg}"
+        );
+        assert!(msg.contains(NOTHING_WRITTEN), "{msg}");
     }
 
     // --- Confirmation formatter tests ---
@@ -2786,8 +3029,9 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------
-    // Drift-detection regression tests for validate_pool_topology, wired
-    // pre-journal and post-journal in RemovePlan::execute.
+    // Drift-detection regression tests for RemovePlan::execute: the
+    // pre-journal re-plan (RemovePlan::recheck_before_journal) and the
+    // post-journal validate_pool_topology gate.
     // ---------------------------------------------------------------------
 
     /// Three-disk `btrfs filesystem show` baseline; matches the planning
@@ -2841,21 +3085,19 @@ mod tests {
         }
     }
 
-    /* Intent: pre-journal validate_pool_topology rejects topology drift
-     * detected before journal::write_journal -- the command exits cleanly,
-     * no mutation runs, no pending-op.json is written, and the error tells
-     * the user to re-run `braid remove`.
+    /* Intent: the pre-journal re-plan rejects topology drift detected
+     * before journal::write_journal -- the command exits cleanly, no
+     * mutation runs, no pending-op.json is written, and the error keeps the
+     * planner's text and tells the user to re-run `braid remove`.
      *
-     * Why it exists: pins (a) ADR 022 -- if the helper re-introduces its
-     * own probe, the no-mutation assertion flips; (b) principle 3 -- if
-     * validation moves below journal::write_journal, the pending-op.json
-     * assertion flips; (c) drift detection -- if the topology-match check
-     * is dropped, is_err() flips.
+     * Why it exists: pins (a) principle 3 -- if the re-check moves below
+     * journal::write_journal, the pending-op.json assertion flips; (b)
+     * drift detection -- if the re-plan is dropped, is_err() flips.
      *
      * Scenario: while the user paused at the `yes` prompt, a third disk
      * went MISSING (here: shrank from 3-disk show to 2-disk show between
      * planning and execute). The planner would have rejected this case at
-     * check_no_missing_devices; the execute-time gate enforces it.
+     * check_no_missing_devices; the re-plan runs that check again.
      */
     #[test]
     fn pre_journal_drift_fails_clean_without_journal() {
@@ -2868,7 +3110,7 @@ mod tests {
         let runner = RemovalPool::three_disk()
             .install(MockRunner::default())
             // Planning probe sees the healthy 3-disk pool; the next probe
-            // (pre-journal validation) sees disk3 MISSING.
+            // (the pre-journal re-plan) sees disk3 MISSING.
             .with_handler(show_sequence_handler(vec![
                 THREE_DISK_SHOW_BASE,
                 TWO_DISK_DRIFT,
@@ -2877,6 +3119,10 @@ mod tests {
 
         let result = cmd_remove(&runner, &fs, &f.remove_params().build());
         let err = result.expect_err("pre-journal drift must fail the command");
+        assert!(
+            matches!(err, RemoveError::ReplanRefused { .. }),
+            "expected ReplanRefused, got: {err:?}"
+        );
         let msg = err.to_string();
 
         let calls = runner.requests();
@@ -2891,10 +3137,14 @@ mod tests {
         );
         assert!(
             journal::load_journal(&f.paths).unwrap().is_none(),
-            "pre-journal validation failure must NOT leave a pending-op.json",
+            "pre-journal re-plan failure must NOT leave a pending-op.json",
         );
         assert!(
-            msg.contains("re-run `braid remove`"),
+            msg.contains("pool has 1 missing device"),
+            "the re-plan must keep the planner's missing-device refusal; got: {msg}",
+        );
+        assert!(
+            msg.contains(NOTHING_WRITTEN),
             "pre-journal drift error must direct user to re-run remove; got: {msg}",
         );
     }
@@ -2911,7 +3161,7 @@ mod tests {
      * (balance.c:558-561). Without this gate, a disk going MISSING here
      * could subject the pool to a dangerous profile conversion.
      *
-     * Scenario: pre-journal validation passed; between then and the
+     * Scenario: the pre-journal re-plan passed; between then and the
      * balance command, a previously flapping disk went MISSING. The
      * post-journal gate aborts the balance and preserves the journal.
      */
@@ -2924,7 +3174,7 @@ mod tests {
              \t*** Some devices missing\n";
         let f = PoolFixture::three_disk_healthy();
         // Probe 1 = planning probe (3 disks). Probe 2 = pre-journal
-        // validation probe (3 disks, passes). Probe 3 = post-journal
+        // re-plan probe (3 disks, passes). Probe 3 = post-journal
         // validation probe (disk3 went MISSING).
         let runner = RemovalPool::three_disk()
             .install(MockRunner::default())
@@ -2964,11 +3214,13 @@ mod tests {
     }
 
     /* Intent: same-count survivor swap (one mapper added, one removed
-     * between plan and execute) is rejected by pre-journal validation.
+     * between plan and execute) is rejected by the pre-journal re-plan as a
+     * changed plan.
      *
      * Why: pins the mapper-set-drift case that a cardinality-only check
      * would have missed. The plan's identity snapshot includes
-     * braid-disk3; the validation probe sees braid-disk4 instead.
+     * braid-disk3; the re-plan's probe sees braid-disk4 instead, which
+     * every planner check accepts, so only the plan comparison refuses.
      *
      * Scenario: between plan and execute, disk3 was unplugged and a new
      * disk4 was plugged in and auto-unlocked. Same count, different set.
@@ -2991,15 +3243,11 @@ mod tests {
 
         let err = cmd_remove(&runner, &fs, &f.remove_params().build())
             .expect_err("same-count swap must be rejected");
-        let msg = err.to_string();
         assert!(
-            msg.contains("braid-disk3"),
-            "expected disk3 in error: {msg}"
+            matches!(err, RemoveError::PlanChanged),
+            "expected PlanChanged, got: {err:?}"
         );
-        assert!(
-            msg.contains("braid-disk4"),
-            "expected disk4 in error: {msg}"
-        );
+        assert!(err.to_string().contains(NOTHING_WRITTEN), "{err}");
         assert!(
             journal::load_journal(&f.paths).unwrap().is_none(),
             "pre-journal swap failure must NOT leave a pending-op.json",
@@ -3017,11 +3265,13 @@ mod tests {
     }
 
     /* Intent: same-mapper replacement (mapper name unchanged, devid or
-     * luks_uuid differs) is rejected by pre-journal validation.
+     * luks_uuid differs) is rejected by the pre-journal re-plan as a
+     * changed plan.
      *
      * Why: pins the identity-drift case that a `BTreeSet<MapperName>`
-     * comparison would have missed; `BTreeMap<MapperName, DeviceIdentity>`
-     * catches it on the value-equality flip.
+     * comparison would have missed; the work plan's
+     * `BTreeMap<MapperName, DeviceIdentity>` catches it on the
+     * value-equality flip.
      *
      * Scenario: operator ran `cryptsetup close` + `cryptsetup open` on a
      * different LUKS device under the same `braid-disk3` mapper between
@@ -3029,16 +3279,15 @@ mod tests {
      */
     #[test]
     fn pre_journal_same_mapper_replacement_rejected() {
-        // The validation probe sees braid-disk3 mapped to devid 99 with
-        // a different underlying / luks_uuid.
+        // The re-plan's probe sees braid-disk3 mapped to devid 99.
         const REPLACED_SHOW: &str = "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\
             \tTotal devices 3 FS bytes used 16.17MiB\n\
             \tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\
             \tdevid    2 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk2\n\
             \tdevid    99 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk3\n";
         let f = PoolFixture::three_disk_healthy();
-        // Override CryptsetupStatus + LuksUuid for braid-disk3 on the
-        // second pass so the LUKS identity differs from the planner snapshot.
+        // The second show pass moves braid-disk3 to devid 99, so its
+        // identity differs from the planner snapshot.
         let runner = RemovalPool::three_disk()
             .install(MockRunner::default())
             .with_handler(show_sequence_handler(vec![
@@ -3049,15 +3298,11 @@ mod tests {
 
         let err = cmd_remove(&runner, &fs, &f.remove_params().build())
             .expect_err("same-mapper replacement must be rejected");
-        let msg = err.to_string();
         assert!(
-            msg.contains("braid-disk3"),
-            "expected disk3 in error: {msg}"
+            matches!(err, RemoveError::PlanChanged),
+            "expected PlanChanged, got: {err:?}"
         );
-        assert!(
-            msg.contains("identity changed") || msg.contains("devid"),
-            "error must signal identity drift: {msg}"
-        );
+        assert!(err.to_string().contains(NOTHING_WRITTEN), "{err}");
         assert!(
             journal::load_journal(&f.paths).unwrap().is_none(),
             "pre-journal replacement failure must NOT leave a pending-op.json",
@@ -3083,15 +3328,17 @@ mod tests {
      * preserve or reference recovery state. It also must not offer
      * re-plugging alone as a fix (finding 261022-1230-017): re-plugging
      * never rebinds the mapper, so a re-run would only hit plan_remove's
-     * hot-unplug refusal.
+     * hot-unplug refusal. The text comes from that plan-time refusal, which
+     * the pre-journal re-plan raises again (finding 261022-1230-015), so
+     * the route has one source.
      *
-     * Scenario: between plan_remove and the pre-journal probe, the target
+     * Scenario: between plan_remove and the pre-journal re-plan, the target
      * disk was hot-unplugged -- cryptsetup reports `device: (null)`.
      */
     #[test]
     fn pre_journal_target_hot_unplug_message() {
         let f = PoolFixture::three_disk_healthy();
-        // Two show calls: planning, pre-journal validation. Flip the
+        // Two show calls: planning, the pre-journal re-plan. Flip the
         // target's cryptsetup status to (null) for the second probe only.
         use std::sync::atomic::{AtomicUsize, Ordering};
         let show_counter = std::sync::Arc::new(AtomicUsize::new(0));
@@ -3122,6 +3369,10 @@ mod tests {
 
         let err = cmd_remove(&runner, &fs, &f.remove_params().build())
             .expect_err("pre-journal hot-unplug must fail");
+        assert!(
+            matches!(err, RemoveError::ReplanRefused { .. }),
+            "expected ReplanRefused, got: {err:?}"
+        );
         let msg = err.to_string();
 
         assert!(msg.contains("braid-disk2"), "expected target mapper: {msg}");
@@ -3171,13 +3422,13 @@ mod tests {
      * position. The old text sent the operator through recover, lock, and
      * unlock before the re-run.
      *
-     * Scenario: pre-journal validation passed; between then and the
+     * Scenario: the pre-journal re-plan passed; between then and the
      * post-journal validation, the target's underlying was hot-unplugged.
      */
     #[test]
     fn post_journal_target_hot_unplug_message() {
         let f = PoolFixture::three_disk_healthy();
-        // Three show calls: planning, pre-journal validation, post-journal
+        // Three show calls: planning, the pre-journal re-plan, post-journal
         // validation. We flip cryptsetup status to (null) for braid-disk2
         // ONLY after the second probe has finished.
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -3194,7 +3445,7 @@ mod tests {
             })
             .with_handler(move |req| match req {
                 CmdRequest::CryptsetupStatus { mapper } if mapper.as_str() == "braid-disk2" => {
-                    // First two probes (planning + pre-journal): healthy.
+                    // First two probes (planning + re-plan): healthy.
                     // Probe #3 (post-journal): hot-unplugged.
                     let phase = show_counter_for_status.load(Ordering::SeqCst);
                     let device = if phase >= 3 { "(null)" } else { "/dev/vdc" };

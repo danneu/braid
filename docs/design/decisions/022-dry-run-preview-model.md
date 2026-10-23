@@ -58,7 +58,8 @@ that require a passphrase or a mapper that was closed during planning. It may
 also re-run its planner after the confirmation prompt, before the journal, to
 validate live state the pool lock cannot pin, and refuse unless the new plan
 equals the confirmed one. The new plan is only compared; execute still runs the
-confirmed plan (`cli/src/remove_missing.rs#RemoveMissingPlan::recheck_before_journal`).
+confirmed plan (`cli/src/remove.rs#RemovePlan::recheck_before_journal`,
+`cli/src/remove_missing.rs#RemoveMissingPlan::recheck_before_journal`).
 
 `Step` is output-only. It may describe risk, human text, and representative
 commands for dry-run rendering, but it must not become an execution source, a

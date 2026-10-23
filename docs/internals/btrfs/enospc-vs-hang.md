@@ -89,16 +89,19 @@ healthy >=2-survivor case is intentionally warn-and-proceed on an
   applies, so braid instead checks the lone survivor can hold the
   post-conversion `data + 2 × metadata + 2 × system` (single + DUP profile).
   **Fail-closed** (`cli/src/preflight.rs#check_single_survivor_capacity`).
-  Enforced at plan time *and* re-validated as a pre-journal gate in
-  `cli/src/remove.rs#RemovePlan::execute`, closing the drift window where the
-  pool keeps taking writes while the operator idles at the confirmation
-  prompt — an over-committed survivor is then refused before the irreversible
-  `-f` balance, still with no `pending-op.json` stranded.
+  Enforced at plan time *and* by a pre-journal re-plan in
+  `cli/src/remove.rs#RemovePlan::recheck_before_journal`, closing the drift
+  window where the pool keeps taking writes while the operator idles at the
+  confirmation prompt — an over-committed survivor is then refused before the
+  irreversible `-f` balance, still with no `pending-op.json` stranded.
 - **`remove` with >=2 survivors (healthy)** — same RAID1 relocation check,
   but **warn-and-proceed** on probe/parse uncertainty. A best-effort miss
   here falls through to `btrfs device remove`, which hits the *clean*
   failure mode 1 (instant ENOSPC), not the failure-mode-2 abort, so the
-  filesystem stays intact.
+  filesystem stays intact. The same pre-journal re-plan runs this check
+  again, so survivors filled during the prompt are refused before the
+  journal instead of failing `btrfs device remove` with `pending-op.json`
+  already written.
 - **`replace` is not subject to this failure mode.** `btrfs replace`
   rebuilds onto the new disk instead of relocating onto survivors; its
   preflight refuses a new disk smaller than the one being replaced

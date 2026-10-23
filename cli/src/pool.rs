@@ -30,9 +30,7 @@ pub struct DeviceIdentity {
 }
 
 /// Structured drift summary returned by `validate_pool_topology` on
-/// mismatch. Position-neutral: the caller chooses where to invoke the
-/// validation (pre-journal clean-failure vs. post-journal recovery
-/// handoff) and wraps the returned drift with the appropriate
+/// mismatch. The caller wraps the returned drift with its own
 /// remediation. The struct exposes the derived `target_present` and
 /// `target_null_underlying` flags, and the devid sets a reopen hint needs,
 /// so callers can route the hot-unplug case without re-probing.
@@ -143,17 +141,13 @@ impl TopologyDrift {
 /// mismatch, or per-mapper identity drift (devid or luks_uuid changed
 /// for the same mapper name).
 ///
-/// **Position-dependent failure semantics.** The helper itself is
-/// position-neutral: the caller chooses where to call it and wraps the
-/// returned drift with the appropriate remediation:
-/// - Pre-`journal::write_journal` (clean failure path): caller wraps
-///   with "re-run `braid remove`". Failure here is a "command never
-///   started" exit and must NOT strand `pending-op.json`
-///   (principle 3, `docs/design/principles.md#3-safe-by-construction-operations`).
-/// - Post-`journal::write_journal` (recovery-handoff path): caller
-///   wraps with "run `braid recover` to reconcile". Failure here
-///   intentionally preserves `pending-op.json` so the recovery flow
-///   can replay/reconcile.
+/// **Post-journal gate.** It guards the window between
+/// `journal::write_journal` and the first btrfs mutation, so its caller
+/// wraps the drift with the `braid recover` remediation, and a failure
+/// intentionally preserves `pending-op.json` so the recovery flow can
+/// replay/reconcile. Before the journal a command re-runs its whole
+/// planner instead, which covers these checks and every other planner
+/// check (docs/design/decisions/012-intent-cli.md#enospc-pre-flight-check).
 pub fn validate_pool_topology<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
