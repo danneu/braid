@@ -243,7 +243,7 @@ Two clarifications:
 
 ## doctor checks
 
-`braid doctor` adds two UPS-adjacent checks when UPS support is enabled:
+`braid doctor` adds these UPS-adjacent checks when UPS support is enabled:
 
 - **ups daemon** -- fails if `upsc` is missing or cannot be spawned,
   because braid cannot verify the enabled UPS shutdown path. It warns
@@ -255,6 +255,18 @@ Two clarifications:
   the UPS shutdown path does not unmount the pool, and the safety
   guarantee silently breaks. Fix by running `systemctl start
   braid-online.service` or `braid unlock`.
+- **ups guard** -- fails if `braid-ups-guard.service` is not active
+  while `shutdownAfter` or `shutdownBelowCharge` is set. Without the
+  guard, early shutdown is off and only the UPS's own low-battery
+  signal shuts the host down. Fix with `journalctl -u braid-ups-guard`
+  and `systemctl start braid-ups-guard.service`. Skipped when both
+  options are null.
+- **ups floor** -- warns if `shutdownBelowCharge` is set but the UPS
+  does not report `battery.charge`, so the charge floor can never fire
+  and only the timer and low battery remain. Check `braid ups status`;
+  if the UPS cannot report charge, set `shutdownBelowCharge = null`
+  and rely on `shutdownAfter`. Skipped when the floor is null or the
+  UPS query fails (the **ups daemon** check reports that).
 
 Both checks skip when UPS support is disabled, and the braid-online check
 additionally skips when the pool is not mounted (there is nothing for the

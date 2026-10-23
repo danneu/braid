@@ -224,4 +224,4 @@ backstop.
 
 - [x] C1. test(ups): prove killpower runs on the low-battery shutdown path
 - [x] C2. feat(ups)!: shut down early on battery with braid.ups.shutdownAfter and shutdownBelowCharge
-- [ ] C3. feat(doctor): report an inactive UPS guard and an unenforceable charge floor
+- [x] C3. feat(doctor): report an inactive UPS guard and an unenforceable charge floor

@@ -40,6 +40,8 @@ Output:
 [skip] alert beep      skipped (pass --beep to play the audible alert test beep)
 [skip] ups daemon      skipped (braid.ups not enabled)
 [skip] braid-online    skipped (braid.ups not enabled)
+[skip] ups guard       skipped (braid.ups not enabled)
+[skip] ups floor       skipped (braid.ups not enabled)
 [ok]   mountpoint seal  pool is mounted -- the live filesystem governs writes
 [skip] wake-on-lan     skipped (braid.autoSuspend not enabled)
 ```
@@ -98,6 +100,8 @@ Prints a JSON object with `status` (one of `ok`, `warn`, `fail`, `skip`) and a `
 | `beep_path` | PC speaker alert beep is configured; with `--beep`, the alert beep command succeeds |
 | `ups_daemon` | With UPS enabled, `upsc` is available and can query the UPS daemon; missing or spawn-failed `upsc` is a failure, daemon unreachable/non-zero `upsc` is a warning |
 | `braid_online_active` | With UPS enabled and the pool mounted, `braid-online.service` is active so shutdown unmounts the pool. Standalone CLI installs (no NixOS module) skip this -- there is no `braid-online.service` to verify. |
+| `ups_guard_active` | With UPS enabled and `shutdownAfter` or `shutdownBelowCharge` set, `braid-ups-guard.service` is active, so early shutdown can fire. **Fail** when it is not running -- only the UPS's own low-battery signal is left; **Warn** while it is activating. Skips when both options are null (no guard is installed). See [UPS](../guides/ups.md#shutdown-policy). |
+| `ups_charge_floor` | With `shutdownBelowCharge` set, the UPS reports a readable `battery.charge`. **Warn** when it does not, since the floor can then never fire. Skips when the floor is null or the UPS query fails (`ups_daemon` reports that). |
 | `mountpoint_immutable` | On `systemd_lifecycle` installs, verifies the offline-pool mountpoint seal -- the immutable attribute braid sets on the mount point while the pool is unmounted, so a stray write fails with `EPERM` instead of landing on the root filesystem and being hidden once the pool mounts (see [seal-mountpoint](seal-mountpoint.md)). **Warn** when the pool is offline but the mount point is mutable (it re-seals on the next boot or `nixos-rebuild switch`; run `braid seal-mountpoint` to re-seal now); **Fail** when the pool is mounted but the mount point inode is immutable (a live pool root must never be sealed -- a tripwire for a bug or external interference). **Ok** when the offline mount point is sealed, or when the pool is mounted (the live filesystem governs writes). **Skip** on standalone CLI installs (`systemd_lifecycle` unset, no NixOS module), where the boot-time seal this check verifies is not present, or when the mount-state / immutable-attribute probe is indeterminate. |
 | `wake_on_lan` | With auto-suspend enabled, `ethtool <interface>` reports magic-packet wake support and active `Wake-on: g`; disabled, unsupported, missing, or unparseable WoL state is a failure |
 
@@ -121,7 +125,7 @@ Prints a JSON object with `status` (one of `ok`, `warn`, `fail`, `skip`) and a `
 4. For each declared disk, runs `smartctl --json -A -l selftest <device>` -- the member's live backing device when it is assembled into the mounted pool, otherwise its persisted by-id path (including a member that is missing or unassembled on a degraded but mounted pool) -- and parses the self-test log to detect active failures and report the age of the most recent passing entry. See [ADR-024](../design/decisions/024-luks-uuid-identity.md#benefits) for why present members are probed by live path rather than by-id.
 5. If the braid monitor NixOS module is configured, reports the alert beep check as skipped by default.
 6. With `--beep`, plays a short test beep through the canonical beep wrapper.
-7. If UPS support is enabled, checks `upsc` and the mounted-pool `braid-online.service` shutdown hook.
+7. If UPS support is enabled, checks `upsc`, the mounted-pool `braid-online.service` shutdown hook, that `braid-ups-guard.service` is running when early shutdown is configured, and that the UPS reports the charge a charge floor needs.
 8. On `systemd_lifecycle` installs, probes whether the pool mount point is mounted and whether its inode carries the immutable attribute, then classifies the pair: offline+mutable -> Warn with a re-seal hint, mounted+immutable -> Fail, and the healthy pairs -> Ok. Standalone CLI installs (`systemd_lifecycle` unset, no NixOS module) skip it -- the boot seal exists only under the module. See [ADR 028](../design/decisions/028-immutable-unmounted-mountpoint.md).
 9. If auto-suspend is enabled, runs `ethtool <interface>` to verify runtime Wake-on-LAN state.
 10. Aggregates results and prints a summary.

@@ -1542,6 +1542,99 @@ fn check_braid_online_active_when_mounted<R: CommandRunner>(
     }
 }
 
+/// The early-shutdown guard's unit, named once for the doctor check.
+const UPS_GUARD_UNIT: &str = "braid-ups-guard.service";
+
+/// UPS doctor check: the early-shutdown guard is running whenever a
+/// shutdown trigger is configured.
+///
+/// A dead guard leaves only the firmware's late low-battery shutdown, which
+/// the operator believes they replaced with `shutdownAfter` /
+/// `shutdownBelowCharge`; that silent downgrade is the same class of fault as
+/// an inactive braid-online, so it fails. `activating` warns because a
+/// restart is plausibly transient. Not pool-bound, so it does not care
+/// whether the pool is mounted.
+fn check_ups_guard_active<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> CheckResult {
+    let name = "ups_guard_active";
+    let Some(config) = ctx.config.as_ref() else {
+        return CheckResult::skip(name, "skipped (config not available)");
+    };
+    let Some(ups) = config.ups() else {
+        return CheckResult::skip(name, "skipped (braid.ups not enabled)");
+    };
+    if !ups.shutdown.is_enabled() {
+        return CheckResult::skip(
+            name,
+            "skipped (shutdownAfter and shutdownBelowCharge are both null)",
+        );
+    }
+    let downgrade = "early shutdown is off; only the UPS's low-battery signal will shut down. \
+                     Check `journalctl -u braid-ups-guard` and run `systemctl start braid-ups-guard.service`.";
+    match ctx.online_ops.unit_active_state(UPS_GUARD_UNIT) {
+        Ok(UnitActiveState::Active) => CheckResult::ok(name, format!("{UPS_GUARD_UNIT} is active")),
+        Ok(UnitActiveState::Activating) => CheckResult::warn(
+            name,
+            format!("{UPS_GUARD_UNIT} is activating -- re-run braid doctor shortly"),
+        ),
+        Ok(UnitActiveState::Unknown(reason)) => CheckResult::fail(
+            name,
+            format!("{UPS_GUARD_UNIT} ActiveState unrecognised ({reason}) -- {downgrade}"),
+        ),
+        Ok(state) => CheckResult::fail(
+            name,
+            format!(
+                "{UPS_GUARD_UNIT} is {} -- {downgrade}",
+                state.systemd_word()
+            ),
+        ),
+        Err(e) => CheckResult::fail(
+            name,
+            format!("{UPS_GUARD_UNIT} ActiveState read failed: {e} -- {downgrade}"),
+        ),
+    }
+}
+
+/// UPS doctor check: a configured charge floor can actually fire.
+///
+/// `shutdownBelowCharge` needs the UPS to report `battery.charge`. Without
+/// it the floor silently never fires and the guard falls back to the timer
+/// and low battery, so this warns rather than fails. A failed query skips:
+/// `ups_daemon` already reports it.
+fn check_ups_charge_floor<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) -> CheckResult {
+    let name = "ups_charge_floor";
+    let Some(config) = ctx.config.as_ref() else {
+        return CheckResult::skip(name, "skipped (config not available)");
+    };
+    let Some(ups) = config.ups() else {
+        return CheckResult::skip(name, "skipped (braid.ups not enabled)");
+    };
+    let Some(floor) = ups.shutdown.below_charge_pct else {
+        return CheckResult::skip(name, "skipped (shutdownBelowCharge is null)");
+    };
+    match crate::ups::query_ups(ctx.runner, ups.name.as_str()) {
+        Err(_) => CheckResult::skip(name, "skipped (UPS query failed; see ups daemon)"),
+        Ok(q) => match q.parsed.battery.charge_pct {
+            Some(pct) => CheckResult::ok(
+                name,
+                format!(
+                    "battery.charge readable ({pct}%); floor is {}%",
+                    floor.get()
+                ),
+            ),
+            None => CheckResult::warn(
+                name,
+                format!(
+                    "upsc {} reports no readable battery.charge, so shutdownBelowCharge = {} \
+                     cannot fire -- only shutdownAfter and low battery will shut down. \
+                     Set braid.ups.shutdownBelowCharge = null and rely on shutdownAfter.",
+                    ups.name,
+                    floor.get()
+                ),
+            ),
+        },
+    }
+}
+
 /// Three-way reading of the mountpoint's immutable attribute. NOT a bare bool:
 /// `guard.is_immutable` can legitimately fail to yield a bool (absent root,
 /// unsupported fs, old kernel, I/O), and that indeterminacy must suppress a
@@ -1806,6 +1899,8 @@ pub fn run_doctor<R: CommandRunner>(
     checks.push(check_beep_path(&mut ctx, options));
     checks.push(check_ups_daemon_up(&mut ctx));
     checks.push(check_braid_online_active_when_mounted(&mut ctx));
+    checks.push(check_ups_guard_active(&mut ctx));
+    checks.push(check_ups_charge_floor(&mut ctx));
     checks.push(check_mountpoint_immutable(&mut ctx));
     checks.push(check_wake_on_lan(&mut ctx));
 
@@ -1851,6 +1946,8 @@ pub fn format_doctor_human_with(report: &DoctorReport, color_enabled: bool) -> S
             "beep_path" => "alert beep",
             "ups_daemon" => "ups daemon",
             "braid_online_active" => "braid-online",
+            "ups_guard_active" => "ups guard",
+            "ups_charge_floor" => "ups floor",
             "mountpoint_immutable" => "mountpoint seal",
             "wake_on_lan" => "wake-on-lan",
             other => other,
@@ -2148,7 +2245,9 @@ mod tests {
             "pool_missing_devices",
             "smart_self_test",
             "system_profile_mismatch",
+            "ups_charge_floor",
             "ups_daemon",
+            "ups_guard_active",
             "wake_on_lan",
         ];
         assert_eq!(actual_names, expected_names);
@@ -7382,6 +7481,123 @@ mod tests {
         let mut ctx = ups_ctx(&runner, &paths, config_with_ups_enabled());
         let r = check_braid_online_active_when_mounted(&mut ctx);
         assert_eq!(r.status, CheckStatus::Ok);
+    }
+
+    const UPS_POLICY_ON: &str = r#"{"mount_point":"/mnt/storage","systemd_lifecycle":true,
+        "ups":{"name":"ups","shutdown":{"after_secs":300,"below_charge_pct":50}}}"#;
+    const UPS_POLICY_OFF: &str = r#"{"mount_point":"/mnt/storage","systemd_lifecycle":true,
+        "ups":{"name":"ups","shutdown":{"after_secs":null,"below_charge_pct":null}}}"#;
+    const UPS_TIMER_ONLY: &str = r#"{"mount_point":"/mnt/storage","systemd_lifecycle":true,
+        "ups":{"name":"ups","shutdown":{"after_secs":300,"below_charge_pct":null}}}"#;
+
+    fn guard_state_runner(state: &str) -> MockRunner {
+        MockRunner::default().with_output(
+            CmdRequest::SystemctlShowActiveState {
+                unit: "braid-ups-guard.service".into(),
+            },
+            systemctl_show_active_state_output(state),
+        )
+    }
+
+    // Intent: ups_guard_active is Ok for an active guard, warns while it is
+    //   activating, and fails for every state where it is not running.
+    // Why it exists: plan/2026-10-22-1122/D7 and AR3 -- a dead guard
+    //   silently drops the host back to the firmware's late low-battery
+    //   shutdown, which the operator configured early shutdown to avoid.
+    // Scenario: the guard crash-looped, was stopped by hand, or is mid-restart.
+    #[test]
+    fn ups_guard_check_reports_unit_state() {
+        let (_dir, paths) = isolated_paths();
+        for (state, want) in [
+            ("active", CheckStatus::Ok),
+            ("activating", CheckStatus::Warn),
+            ("inactive", CheckStatus::Fail),
+            ("failed", CheckStatus::Fail),
+            ("deactivating", CheckStatus::Fail),
+        ] {
+            let runner = guard_state_runner(state);
+            let mut ctx = ups_ctx(&runner, &paths, UPS_POLICY_ON);
+            let r = check_ups_guard_active(&mut ctx);
+            assert_eq!(r.status, want, "state={state}: {r:?}");
+            if want == CheckStatus::Fail {
+                assert!(
+                    r.message.contains("only the UPS's low-battery signal"),
+                    "{}",
+                    r.message
+                );
+            }
+        }
+    }
+
+    // Intent: ups_guard_active skips when UPS is off or both triggers are
+    //   null, without asking systemd.
+    // Why it exists: with both null the module installs no guard; failing
+    //   on its absence would flag a deliberate configuration.
+    // Scenario: a host with no UPS, and one that opted out of early shutdown.
+    #[test]
+    fn ups_guard_check_skips_without_a_trigger() {
+        let (_dir, paths) = isolated_paths();
+        for config in [config_without_ups(), UPS_POLICY_OFF] {
+            let runner = MockRunner::default();
+            let mut ctx = ups_ctx(&runner, &paths, config);
+            let r = check_ups_guard_active(&mut ctx);
+            assert_eq!(r.status, CheckStatus::Skip, "{config}: {r:?}");
+            assert!(runner.requests().is_empty(), "{config}");
+        }
+    }
+
+    // Intent: ups_charge_floor warns when a floor is set but the UPS reports
+    //   no readable battery.charge, and is Ok when it does.
+    // Why it exists: plan/2026-10-22-1122/D7 and I4 -- without a charge the
+    //   floor never fires, and nothing else tells the operator.
+    // Scenario: a UPS whose driver publishes status and runtime but not
+    //   charge, and one that reports 90 %.
+    #[test]
+    fn ups_charge_floor_check_needs_a_readable_charge() {
+        let (_dir, paths) = isolated_paths();
+        let no_charge = MockRunner::default().with_output(
+            CmdRequest::UpscQuery { name: "ups".into() },
+            crate::test_fixtures::mock_ok("upsc ups", "ups.status: OL\nbattery.runtime: 1800\n"),
+        );
+        let mut ctx = ups_ctx(&no_charge, &paths, UPS_POLICY_ON);
+        let r = check_ups_charge_floor(&mut ctx);
+        assert_eq!(r.status, CheckStatus::Warn, "{r:?}");
+        assert!(
+            r.message.contains("shutdownBelowCharge = 50 cannot fire"),
+            "{}",
+            r.message
+        );
+
+        let charged = MockRunner::default().with_output(
+            CmdRequest::UpscQuery { name: "ups".into() },
+            crate::test_fixtures::mock_ok("upsc ups", "ups.status: OL\nbattery.charge: 90\n"),
+        );
+        let mut ctx = ups_ctx(&charged, &paths, UPS_POLICY_ON);
+        assert_eq!(check_ups_charge_floor(&mut ctx).status, CheckStatus::Ok);
+    }
+
+    // Intent: ups_charge_floor skips with no floor configured, with UPS
+    //   off, and when the query fails.
+    // Why it exists: a timer-only host has nothing to enforce, and a failed
+    //   query is ups_daemon's to report -- warning twice for one fault
+    //   teaches operators to ignore the check.
+    // Scenario: shutdownBelowCharge = null; no UPS; upsd stopped.
+    #[test]
+    fn ups_charge_floor_check_skips_when_not_applicable() {
+        let (_dir, paths) = isolated_paths();
+        for config in [config_without_ups(), UPS_TIMER_ONLY] {
+            let runner = MockRunner::default();
+            let mut ctx = ups_ctx(&runner, &paths, config);
+            assert_eq!(
+                check_ups_charge_floor(&mut ctx).status,
+                CheckStatus::Skip,
+                "{config}"
+            );
+        }
+        let (request, output) = crate::test_fixtures::ups_query_connection_refused_no_newline();
+        let refused = MockRunner::default().with_output(request, output);
+        let mut ctx = ups_ctx(&refused, &paths, UPS_POLICY_ON);
+        assert_eq!(check_ups_charge_floor(&mut ctx).status, CheckStatus::Skip);
     }
 
     /* Intent: check_braid_online_active_when_mounted treats systemd's

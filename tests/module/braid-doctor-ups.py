@@ -3,8 +3,8 @@
 # Sets up two scenarios:
 #
 # Scenario A (baseline happy path): unlock the pool via `braid unlock`
-# so braid-online.service activates. Both UPS-adjacent doctor checks
-# should be Ok.
+# so braid-online.service activates. Every UPS-adjacent doctor check
+# should be Ok, including the early-shutdown guard and charge floor.
 #
 # Scenario B (critical fault): unlock, then mount the pool manually
 # while braid-online.service stays inactive. This is the production
@@ -40,6 +40,8 @@ machine.wait_until_succeeds("upsc ups@localhost ups.status", timeout=60)
 machine.succeed("systemctl start braid-unlock.service")
 machine.wait_until_succeeds("mountpoint -q /mnt/storage", timeout=30)
 machine.wait_for_unit("braid-online.service")
+# The default shutdown policy installs the early-shutdown guard.
+machine.wait_for_unit("braid-ups-guard.service")
 
 raw = machine.succeed("braid doctor --json")
 report = json.loads(raw)
@@ -49,6 +51,10 @@ assert find_check(report, "ups_daemon")["status"] == "ok", find_check(
 assert (
     find_check(report, "braid_online_active")["status"] == "ok"
 ), find_check(report, "braid_online_active")
+# Proves the guard check reads the real unit and the floor check reads the
+# fixture's battery.charge (plan/2026-10-22-1122/D7).
+for name in ["ups_guard_active", "ups_charge_floor"]:
+    assert find_check(report, name)["status"] == "ok", find_check(report, name)
 
 # --- Scenario B: simulate mounted-but-braid-online-inactive ---
 #
