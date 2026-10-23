@@ -29,7 +29,7 @@ use crate::status::{BalanceReport, get_balance_report};
 use crate::status_tag::{StatusTag, color_enabled_for_stderr, emit_status, status_line};
 use crate::types::{
     ByIdPath, ConfigDiskState, Devid, DiskName, Fsid, KeyFilePath, LuksUuid, MapperName,
-    MountPoint, PoolState, format_uuid_list,
+    MountPoint, PoolState, PresentConfigDisk, PresentConfigDiskState, format_uuid_list,
 };
 use std::path::PathBuf;
 use std::time::Duration;
@@ -2247,6 +2247,50 @@ fn add_recovery_uuid_mismatch_message(
     )
 }
 
+/// The journaled operation a recover target belongs to, so the shared
+/// absent-target refusal names the operation the operator ran.
+#[derive(Debug, Clone, Copy)]
+enum RecoverTargetOp {
+    Add,
+    Replace,
+}
+
+impl RecoverTargetOp {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Add => "add",
+            Self::Replace => "replace",
+        }
+    }
+}
+
+/// Presence boundary for the replay sites that refuse a journaled target
+/// instead of skipping it: each one refuses an unplugged disk with this one
+/// message and never reports it as a non-LUKS disk. The discovery passes call
+/// `probe::probe_config_disk` directly because they skip absent targets on
+/// purpose.
+fn probe_present_recover_target<R: CommandRunner, F: Filesystem + ?Sized>(
+    runner: &R,
+    fs: &F,
+    op: RecoverTargetOp,
+    name: &DiskName,
+    by_id: &ByIdPath,
+    backing_path_resolver: &dyn BackingPathResolver,
+) -> Result<PresentConfigDiskState, RecoverError> {
+    let probed = probe::probe_config_disk(runner, fs, name, by_id, backing_path_resolver)?;
+    match PresentConfigDisk::try_from(probed) {
+        Ok(present) => Ok(present.state),
+        // No rerun step here: `cmd_recover` appends one from a fresh read of
+        // the journal.
+        Err(absent) => Err(RecoverError::Failed(format!(
+            "recover {} target '{}' ({}) is not present; reconnect it",
+            op.as_str(),
+            absent.name,
+            absent.by_id_path
+        ))),
+    }
+}
+
 /// Preflight for an interrupted existing-pool add: may open closed validated
 /// add-targets -- resolving the unlock credential once when it does -- and scan
 /// them before mount. The deliberate `!dry_run`-gated exception to Decision 022.
@@ -2694,21 +2738,23 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
                     verified_pool_fsid,
                     enroll_key_file,
                 } => {
-                    let probed = probe::probe_config_disk(
+                    let (uuid, mapper_open) = match probe_present_recover_target(
                         runner,
                         fs,
+                        RecoverTargetOp::Add,
                         &target.name,
                         &target.by_id,
                         params.backing_path_resolver,
-                    )?;
-                    let ConfigDiskState::PresentLuks {
-                        uuid, mapper_open, ..
-                    } = probed.state
-                    else {
-                        return Err(RecoverError::Failed(format!(
-                            "recover add target '{}' is not a LUKS device",
-                            target.name
-                        )));
+                    )? {
+                        PresentConfigDiskState::PresentLuks {
+                            uuid, mapper_open, ..
+                        } => (uuid, mapper_open),
+                        PresentConfigDiskState::PresentNotLuks => {
+                            return Err(RecoverError::Failed(format!(
+                                "recover add target '{}' is not a LUKS device",
+                                target.name
+                            )));
+                        }
                     };
                     if &uuid != target_uuid {
                         return Err(RecoverError::Failed(format!(
@@ -2761,16 +2807,17 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
                     extra_opts,
                     enroll_key_file,
                 } => {
-                    let probed = probe::probe_config_disk(
+                    let state = probe_present_recover_target(
                         runner,
                         fs,
+                        RecoverTargetOp::Add,
                         &target.name,
                         &target.by_id,
                         params.backing_path_resolver,
                     )?;
                     let expected_label = config::luks_label_for(&target.name);
-                    match probed.state {
-                        ConfigDiskState::PresentNotLuks => {
+                    match state {
+                        PresentConfigDiskState::PresentNotLuks => {
                             // Same readiness gate as the live add, so a stray
                             // mapper or a disk holder refuses with its advice
                             // instead of a raw luksFormat error.
@@ -2789,7 +2836,7 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
                                 extra_opts,
                             )?;
                         }
-                        ConfigDiskState::PresentLuks { uuid, label, .. } => {
+                        PresentConfigDiskState::PresentLuks { uuid, label, .. } => {
                             if label.as_deref() != Some(expected_label.as_str()) {
                                 return Err(RecoverError::Failed(format!(
                                     "recover add target '{}' has unexpected LUKS label",
@@ -2806,12 +2853,6 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
                                     ),
                                 ));
                             }
-                        }
-                        ConfigDiskState::Absent => {
-                            return Err(RecoverError::Failed(format!(
-                                "recover add target '{}' ({}) is not present",
-                                target.name, target.by_id
-                            )));
                         }
                     }
 
@@ -3181,11 +3222,12 @@ fn finish_uncommitted_replace_recovery<R: CommandRunner + Sync, F: Filesystem + 
         new_target,
         writes,
     } = ctx;
-    // Identity probe before any write. Wrong disk replugged or header
-    // zeroed -> preserve the journal.
-    let probed = probe::probe_config_disk(
+    // Identity probe before any write. Disk unplugged, wrong disk replugged,
+    // or header zeroed -> preserve the journal.
+    let state = probe_present_recover_target(
         runner,
         fs,
+        RecoverTargetOp::Replace,
         new_name,
         &new_target.by_id,
         params.backing_path_resolver,
@@ -3194,38 +3236,31 @@ fn finish_uncommitted_replace_recovery<R: CommandRunner + Sync, F: Filesystem + 
         journal::ReplaceJournalMode::ExistingLuks { .. } => {
             // We use LUKS UUID (not a braid label) because ExistingLuks
             // targets carry no braid label by definition.
-            match &probed.state {
-                ConfigDiskState::PresentLuks { uuid, .. } if uuid == new_uuid => true,
-                ConfigDiskState::PresentLuks { uuid, .. } => {
+            match &state {
+                PresentConfigDiskState::PresentLuks { uuid, .. } if uuid == new_uuid => true,
+                PresentConfigDiskState::PresentLuks { uuid, .. } => {
                     return Err(RecoverError::Failed(format!(
                         "recover replace target '{}' LUKS UUID mismatch: \
                          expected {}, found {} -- preserving pending-op.json",
                         new_name, new_uuid, uuid,
                     )));
                 }
-                ConfigDiskState::PresentNotLuks => {
+                PresentConfigDiskState::PresentNotLuks => {
                     return Err(RecoverError::Failed(format!(
                         "recover replace target '{}' is no longer LUKS-formatted; \
                          preserving pending-op.json",
                         new_name,
                     )));
                 }
-                ConfigDiskState::Absent => {
-                    return Err(RecoverError::Failed(format!(
-                        "recover replace target '{}' ({}) is not present; \
-                         preserving pending-op.json",
-                        new_name, new_target.by_id,
-                    )));
-                }
             }
         }
         journal::ReplaceJournalMode::FreshLuks { .. } => {
             let expected_label = config::luks_label_for(new_name);
-            match probed.state {
+            match state {
                 // Replace stopped before luksFormat: the disk holds nothing
                 // braid wrote, so there is no prep to finish.
-                ConfigDiskState::PresentNotLuks => false,
-                ConfigDiskState::PresentLuks { uuid, label, .. } => {
+                PresentConfigDiskState::PresentNotLuks => false,
+                PresentConfigDiskState::PresentLuks { uuid, label, .. } => {
                     if label.as_deref() != Some(expected_label.as_str()) {
                         return Err(RecoverError::Failed(format!(
                             "recover replace target '{}' has unexpected LUKS label",
@@ -3239,12 +3274,6 @@ fn finish_uncommitted_replace_recovery<R: CommandRunner + Sync, F: Filesystem + 
                         )));
                     }
                     true
-                }
-                ConfigDiskState::Absent => {
-                    return Err(RecoverError::Failed(format!(
-                        "recover replace target '{}' ({}) is not present",
-                        new_name, new_target.by_id
-                    )));
                 }
             }
         }
@@ -8622,65 +8651,101 @@ mod tests {
     }
 
     // Intent
-    // Verify a missing returned add target preserves the recovery journal and
-    // does not write pool.json.
+    // Verify a returned add target that is absent, or present but not LUKS,
+    // preserves the recovery journal, does not write pool.json, and names
+    // which of the two it is.
     //
     // Why it exists
     // Operators need to reattach the returned disk and rerun recover; clearing
-    // or rewriting state on the absent-target path would strand the operation.
+    // or rewriting state on either path would strand the operation. An absent
+    // disk was once reported as "not a LUKS device", which reads as a wiped
+    // disk instead of an unplugged one.
     //
     // Scenario
-    // The pool has disk1 mounted after an interrupted returned-disk add, but
-    // the journaled disk2 by-id path is physically absent.
+    // The pool has disk1 mounted after an interrupted returned-disk add, and
+    // the journaled disk2 by-id path is either physically absent or holds a
+    // disk whose LUKS header cryptsetup cannot read.
     #[test]
-    fn returned_target_absent_preserves_journal_and_pool_json() {
-        let f = PoolFixture::empty();
-        let fs = MockFs::new(&["/dev/mapper/braid-disk1"]);
-        let journal = recoverable_pool_mutation_add_journal();
-        journal::write_journal(&f.paths, &journal).unwrap();
-        let union = test_recovery_admission_membership(&journal);
-        let targets = match &journal.op {
-            OpKind::Add { targets, .. } => targets,
-            _ => unreachable!("test journal is Add"),
-        };
-        let runner = MockRunner::default().with_output_stdin(
-            CmdRequest::CryptsetupTestPassphrase {
-                device: "/dev/vda".into(),
-            },
-            TEST_PASSPHRASE_BYTES.to_vec(),
-            ok_raw_empty("cryptsetup open --test-passphrase"),
-        );
-        let params = f.recover_params().build();
+    fn returned_target_absent_or_not_luks_preserves_journal_and_pool_json() {
+        for absent in [true, false] {
+            let f = PoolFixture::empty();
+            let fs = if absent {
+                MockFs::new(&["/dev/mapper/braid-disk1"])
+            } else {
+                MockFs::new(&["/dev/mapper/braid-disk1", "/dev/disk/by-id/virtio-disk2"])
+            };
+            let journal = recoverable_pool_mutation_add_journal();
+            journal::write_journal(&f.paths, &journal).unwrap();
+            let union = test_recovery_admission_membership(&journal);
+            let targets = match &journal.op {
+                OpKind::Add { targets, .. } => targets,
+                _ => unreachable!("test journal is Add"),
+            };
+            let mut runner = MockRunner::default().with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/vda".into(),
+                },
+                TEST_PASSPHRASE_BYTES.to_vec(),
+                ok_raw_empty("cryptsetup open --test-passphrase"),
+            );
+            if !absent {
+                runner = runner.with_output(
+                    CmdRequest::CryptsetupLuksUuid {
+                        device: "/dev/disk/by-id/virtio-disk2".into(),
+                    },
+                    err_raw(
+                        "cryptsetup luksUUID",
+                        1,
+                        "Device is not a valid LUKS device.",
+                    ),
+                );
+            }
+            let params = f.recover_params().build();
 
-        let err = execute_add_pool_mutation_recovery(
-            &runner,
-            &fs,
-            &MockByIdResolver::default(),
-            &params,
-            AddPoolReplayCtx {
-                credential: None,
-                journal: &journal,
-                union: &union,
-                targets,
-                pool: pool_state_one_disk(),
-                owed_balance: OwedRaid1Balance::Grow,
-            },
-        )
-        .unwrap_err();
+            let err = execute_add_pool_mutation_recovery(
+                &runner,
+                &fs,
+                &MockByIdResolver::default(),
+                &params,
+                AddPoolReplayCtx {
+                    credential: None,
+                    journal: &journal,
+                    union: &union,
+                    targets,
+                    pool: pool_state_one_disk(),
+                    owed_balance: OwedRaid1Balance::Grow,
+                },
+            )
+            .unwrap_err();
 
-        let msg = err.to_string();
-        assert!(msg.contains("is not a LUKS device"), "{msg}");
-        assert!(
-            !runner.requests().iter().any(|r| matches!(
-                r,
-                CmdRequest::BtrfsDeviceScanForget { .. }
-                    | CmdRequest::WipefsBtrfs { .. }
-                    | CmdRequest::BtrfsDeviceAdd { .. }
-            )),
-            "absent returned target must not scan-forget, wipe, or add"
-        );
-        assert!(f.paths.pending_op_json().exists());
-        assert!(!f.paths.pool_json().exists());
+            let msg = err.to_string();
+            if absent {
+                assert!(
+                    msg.contains(
+                        "recover add target 'disk2' (/dev/disk/by-id/virtio-disk2) is not present; reconnect it"
+                    ),
+                    "{msg}"
+                );
+                assert!(!msg.contains("is not a LUKS device"), "{msg}");
+            } else {
+                assert!(
+                    msg.contains("recover add target 'disk2' is not a LUKS device"),
+                    "{msg}"
+                );
+                assert!(!msg.contains("is not present"), "{msg}");
+            }
+            assert!(
+                !runner.requests().iter().any(|r| matches!(
+                    r,
+                    CmdRequest::BtrfsDeviceScanForget { .. }
+                        | CmdRequest::WipefsBtrfs { .. }
+                        | CmdRequest::BtrfsDeviceAdd { .. }
+                )),
+                "absent or non-LUKS returned target must not scan-forget, wipe, or add"
+            );
+            assert!(f.paths.pending_op_json().exists());
+            assert!(!f.paths.pool_json().exists());
+        }
     }
 
     // Intent
@@ -10409,7 +10474,12 @@ mod tests {
             if wrong_label {
                 assert!(msg.contains("unexpected LUKS label"), "{msg}");
             } else {
-                assert!(msg.contains("is not present"), "{msg}");
+                assert!(
+                    msg.contains(
+                        "recover add target 'disk2' (/dev/disk/by-id/virtio-disk2) is not present; reconnect it"
+                    ),
+                    "{msg}"
+                );
             }
             assert!(f.paths.pending_op_json().exists());
             assert!(!f.paths.pool_json().exists());
@@ -12116,61 +12186,70 @@ mod tests {
         assert!(!f.paths.pool_json().exists());
     }
 
-    // Intent: Replace::PoolMutation FreshLuks recovery refuses a missing
-    // target device and preserves the journal.
+    // Intent: Replace::PoolMutation recovery refuses a missing target device,
+    // fresh or existing-LUKS, names it as absent, and preserves the journal.
     // Why it exists: if the replacement disk is absent, recovery cannot prove
     // whether pre-replace preparation completed and must not rewrite pool.json.
     // Scenario: live pool is still disk1+old, but the journaled new by-id path
     // is no longer present after reboot.
     #[test]
-    fn replace_pool_mutation_fresh_luks_absent_target_preserves_journal() {
-        let f = PoolFixture::empty();
-        let fs = MockFs::new(&[]);
-        let journal = replace_fresh_luks_journal("/run/keys/braid-new.key".into());
-        journal::write_journal(&f.paths, &journal).unwrap();
-        let union = test_recovery_admission_membership(&journal);
-        let runner = MockRunner::default();
-        let params = f
-            .recover_params()
-            .passphrase_file(None)
-            .sleep_inhibitor(&f.inhibitor)
-            .build();
-        let OpKind::Replace(journal::ReplaceOp {
-            identity,
-            new_target,
-            source,
-            ..
-        }) = &journal.op
-        else {
-            unreachable!("replace_fresh_luks_journal returns Replace");
-        };
+    fn replace_pool_mutation_absent_target_preserves_journal() {
+        for journal in [
+            replace_fresh_luks_journal("/run/keys/braid-new.key".into()),
+            replace_journal(),
+        ] {
+            let f = PoolFixture::empty();
+            let fs = MockFs::new(&[]);
+            journal::write_journal(&f.paths, &journal).unwrap();
+            let union = test_recovery_admission_membership(&journal);
+            let runner = MockRunner::default();
+            let params = f
+                .recover_params()
+                .passphrase_file(None)
+                .sleep_inhibitor(&f.inhibitor)
+                .build();
+            let OpKind::Replace(journal::ReplaceOp {
+                identity,
+                new_target,
+                source,
+                ..
+            }) = &journal.op
+            else {
+                unreachable!("replace journal fixtures return Replace");
+            };
 
-        let err = execute_replace_pool_mutation_recovery(
-            &runner,
-            &fs,
-            &MockByIdResolver::default(),
-            &params,
-            None,
-            &journal,
-            &union,
-            pool_state_disk1_and_old(),
-            identity,
-            &disk_name("new"),
-            new_target,
-            source,
-            UncommittedReplaceWrites::plan(&disk_name("new"), new_target).as_ref(),
-            None,
-        )
-        .unwrap_err();
+            let err = execute_replace_pool_mutation_recovery(
+                &runner,
+                &fs,
+                &MockByIdResolver::default(),
+                &params,
+                None,
+                &journal,
+                &union,
+                pool_state_disk1_and_old(),
+                identity,
+                &disk_name("new"),
+                new_target,
+                source,
+                UncommittedReplaceWrites::plan(&disk_name("new"), new_target).as_ref(),
+                None,
+            )
+            .unwrap_err();
 
-        assert!(err.to_string().contains("is not present"), "{err}");
-        assert_eq!(f.inhibitor.acquire_count(), 0);
-        assert!(
-            runner.requests().is_empty(),
-            "absent target should fail from the filesystem probe only"
-        );
-        assert!(f.paths.pending_op_json().exists());
-        assert!(!f.paths.pool_json().exists());
+            assert!(
+                err.to_string().contains(
+                    "recover replace target 'new' (/dev/disk/by-id/virtio-new) is not present; reconnect it"
+                ),
+                "{err}"
+            );
+            assert_eq!(f.inhibitor.acquire_count(), 0);
+            assert!(
+                runner.requests().is_empty(),
+                "absent target should fail from the filesystem probe only"
+            );
+            assert!(f.paths.pending_op_json().exists());
+            assert!(!f.paths.pool_json().exists());
+        }
     }
 
     // Intent: Replace::PoolMutation FreshLuks recovery rejects a bad

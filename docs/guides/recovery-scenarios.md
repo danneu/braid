@@ -138,6 +138,8 @@ sudo braid recover
 
 Recover replays the add from the journaled returned-disk target. Do not wipe the disk and retry it as a fresh add; the journal still records the checked LUKS identity and expected pool FSID.
 
+If the disk is absent, recover fails and leaves `pending-op.json` in place. Reconnect the original disk, then rerun `sudo braid recover`.
+
 ### Interrupted fresh-disk add
 
 For an interrupted fresh-disk add, recover finishes the steps `braid add` planned for the disk when the disk is present. [Interrupted adds](../commands/add.md#interrupted-adds) lists them.
