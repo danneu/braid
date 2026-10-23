@@ -142,11 +142,17 @@ If the disk is absent, recover fails and leaves `pending-op.json` in place. Reco
 
 ### Interrupted fresh-disk add
 
-For an interrupted fresh-disk add, recover finishes the steps `braid add` planned for the disk when the disk is present. [Interrupted adds](../commands/add.md#interrupted-adds) lists them.
+For an interrupted fresh-disk add, recover finishes the steps `braid add` planned for the disk when luksFormat already wrote it. [Interrupted adds](../commands/add.md#interrupted-adds) lists them.
+
+Recover never formats a disk. If the disk is still not LUKS, luksFormat never wrote it, so recover drops it from `pending-op.json` and you rerun `braid add` for it. That covers a `--luks-format-arg` option that made luksFormat fail after braid wrote the journal. If the dropped disk was the add's only target, recover restores the pre-add `pool.json` and clears the journal.
 
 If the disk is absent or has a different LUKS label than the journal records, recover fails and leaves `pending-op.json` in place. Reconnect the original disk or replace the target, then rerun `sudo braid recover`.
 
-Before it formats the disk, recover also checks that the disk is ready, as `braid add` does. If `/dev/mapper/braid-<name>` is already open, or a mount, an LVM volume group, an md array, or a device-mapper device holds the disk, recover fails and keeps `pending-op.json`. Close the mapper with `sudo cryptsetup close braid-<name>`, or free the disk (`lsblk <by-id path>` shows what holds it), then rerun `sudo braid recover`.
+### Interrupted first add (bootstrap)
+
+The first `braid add` creates the pool with mkfs.btrfs after it formats every disk. If it stopped before mkfs.btrfs, there is no pool, and `sudo braid recover` clears `pending-op.json` instead of mounting. If luksFormat wrote some disks, recover names them; wipe each one (`sudo wipefs -a <by-id path>`) before you rerun `braid add`, since add refuses a braid-labeled disk with no btrfs.
+
+When the pool is not mounted, recover checks every journaled disk before it decides whether mkfs.btrfs ran. It refuses and keeps `pending-op.json` if a disk is gone (`recover add target '<name>' (<by-id path>) is not present; reconnect it`), or if a disk carries a LUKS header without the `braid-<name>` label or the journaled LUKS UUID. A gone disk refuses this way even if mkfs.btrfs ran, with or without `--allow-degraded`, and recover exits 1. Reconnect the disk, then rerun `sudo braid recover`.
 
 ## Pending-op file corruption
 
@@ -194,7 +200,7 @@ btrfs reports a device it cannot reach as a MISSING devid with no LUKS UUID. Rec
 Recovery refuses and keeps `pending-op.json` when it cannot bind a MISSING devid safely:
 
 - Two journaled members record the same devid: `duplicate devid <devid> in journaled membership across UUIDs ...`.
-- A MISSING devid no member records sits beside a journaled member that records no devid, so either could be the other: `recovery cannot safely correlate journaled member(s) '<name>' with btrfs-MISSING devid(s) <devid>: ...`. A bootstrap `braid add` journal records no devids, so a bootstrap whose disk is gone hits this refusal even with `--allow-degraded`.
+- A MISSING devid no member records sits beside a journaled member that records no devid, so either could be the other: `recovery cannot safely correlate journaled member(s) '<name>' with btrfs-MISSING devid(s) <devid>: ...`. A bootstrap `braid add` journal records no devids, so a bootstrap whose disk is gone hits this refusal even with `--allow-degraded` when the pool is already mounted. When it is not mounted, recover refuses earlier, at the gone disk; see [Interrupted first add (bootstrap)](#interrupted-first-add-bootstrap).
 
 Do not edit `pool.json`; that resolution did not consult it. Re-run recovery only after manual reconciliation of `pending-op.json`. If the disk is reachable, reattach it and re-run `braid recover`; recovery then binds it by its LUKS UUID.
 
@@ -212,9 +218,9 @@ If a drive failed during the interrupted operation:
 sudo braid recover --allow-degraded
 ```
 
-Without `--allow-degraded`, recover exits with code 2 when devices are missing. The degraded flag allows mounting with missing devices so recovery can complete. The missing member stays in `pool.json`, so `braid replace` or `braid remove-missing` can name it later. Redundancy is reduced until the missing device is replaced.
+Without `--allow-degraded`, recover exits with code 2 when devices are missing. An interrupted bootstrap `braid add` with the pool not mounted is the exception: recover refuses at the gone disk before it mounts, and exits 1. The degraded flag allows mounting with missing devices so recovery can complete. The missing member stays in `pool.json`, so `braid replace` or `braid remove-missing` can name it later. Redundancy is reduced until the missing device is replaced.
 
-Recovery can finish a degraded pool only when it can tell which member each MISSING devid is. An interrupted bootstrap `braid add` (the pool's first disks) records no devids, so `--allow-degraded` cannot finish it while one of its disks is gone; see [Duplicate or missing devid in journal snapshot](#duplicate-or-missing-devid-in-journal-snapshot).
+Recovery can finish a degraded pool only when it can tell which member each MISSING devid is. An interrupted bootstrap `braid add` (the pool's first disks) records no devids, so `--allow-degraded` cannot finish it while one of its disks is gone. With the pool not mounted, recover refuses at the gone disk ([Interrupted first add (bootstrap)](#interrupted-first-add-bootstrap)); with it mounted, recover refuses at the MISSING devid ([Duplicate or missing devid in journal snapshot](#duplicate-or-missing-devid-in-journal-snapshot)).
 
 An interrupted existing-pool `braid add` in its `PoolMutation` phase cannot finish while a disk it was adding is gone, even if btrfs already added that disk. The journal records no devid for a new disk until the advance to `PostAddBalanceRaid1`, so recover cannot tell that a MISSING devid is that disk. It refuses at that disk and keeps `pending-op.json`, with or without `--allow-degraded`. Reattach the disk and re-run `braid recover`. After the advance, the journal records each new disk's devid, so a new disk that is gone then binds by it.
 

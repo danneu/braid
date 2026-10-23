@@ -46,9 +46,10 @@ values may not override `--uuid`, `--label`, or the target device, and may not
 end option parsing with `--`. cryptsetup formats the first word after
 `luksFormat` that is not an option, so `cli/src/cmd.rs#luks_format_argv` puts
 the by-id there and the user extras last. No extra can then become the device
-or swallow a braid token. `cli/src/luks.rs#luks_format` refuses `--` again
-before it runs, because recover replays journaled extras without
-`cli/src/types.rs#LuksFormatExtraOpts::parse`.
+or swallow a braid token. `cli/src/luks.rs#check_format_args`, which every
+format passes through, refuses `--` again before cryptsetup sees the argv, so
+extras that serde built without `cli/src/types.rs#LuksFormatExtraOpts::parse`
+cannot reach a format with `--` either.
 
 ## Identity Boundaries
 
@@ -101,10 +102,11 @@ one.
 
 - **Membership shape is simpler.** Membership has one identity axis: UUID keys
   map to name/by-id/devid metadata.
-- **Formatting is crash-replayable.** Fresh `add` and `replace` paths generate
+- **Formatting is crash-recoverable.** Fresh `add` and `replace` paths generate
   the UUID before mutation, journal it, and pass it to cryptsetup. Recovery can
   tell whether it is seeing the exact LUKS container that the interrupted plan
-  intended to create.
+  intended to create, so it finishes the plan for a disk the format wrote and
+  never formats one itself.
 - **Cleanup follows observed ownership.** `lock` classifies live mappers by
   the LUKS UUID their dm UUID records and closes the mapper it actually
   observed, including one whose disk is gone. A mapper opened as
@@ -343,8 +345,9 @@ devices to the kernel, so this check cannot join them.
   `--uuid`/`--label` and `--` extras and pin the structured
   `cryptsetup luksFormat <by-id> ... --uuid <uuid> --label <label> ... <extras>`
   argv order, including a stray extra that stays behind the by-id.
-  `cli/src/luks.rs` unit tests pin that `luks_format` refuses journaled
-  extras holding `--` before it runs cryptsetup.
+  `cli/src/luks.rs` unit tests pin that `check_format_args`, the gate every
+  format passes through, refuses serde-built extras holding `--` before it
+  runs cryptsetup.
 - `cli/src/status.rs` unit tests pin compact status names by resolving live
   pool UUIDs back to `DiskName`, including a drifted mapper case.
 - `cli/src/status.rs` and `cli/src/tui/probe.rs` unit tests pin that a present,

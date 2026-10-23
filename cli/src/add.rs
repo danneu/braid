@@ -9,12 +9,12 @@ use crate::filesystem::Filesystem;
 use crate::inhibit::AcquireSleepInhibitor;
 use crate::journal;
 use crate::luks::{
-    BackingPathResolver, FreshTargetChecked, FreshTargetReady, KeySlotState, LUKS_SLOT_KEYFILE,
-    OpenOutcome, PassphraseReader, backup_luks_header_post_mutation, check_fresh_target_ready,
-    check_key_slot, ensure_luks_open, format_keyfile_asymmetry_warning,
-    format_keyfile_enrollment_probe_failure, format_target_keyfile_probe_failure, luks_format,
-    luks_header_backup_path, probe_pool_keyfile_enrollment, push_enrollment_preview_steps,
-    read_passphrase_with,
+    BackingPathResolver, FormatArgsAccepted, FreshTargetChecked, FreshTargetReady, KeySlotState,
+    LUKS_SLOT_KEYFILE, OpenOutcome, PassphraseReader, backup_luks_header_post_mutation,
+    check_format_args, check_fresh_target_ready, check_key_slot, ensure_luks_open,
+    format_keyfile_asymmetry_warning, format_keyfile_enrollment_probe_failure,
+    format_target_keyfile_probe_failure, luks_format, luks_header_backup_path,
+    probe_pool_keyfile_enrollment, push_enrollment_preview_steps, read_passphrase_with,
 };
 use crate::mapper_close::{CloseContext, TrackedMapper, close_mapper_best_effort};
 use crate::membership::{
@@ -601,10 +601,11 @@ struct AddCredentialPrelude {
 
 /// Fresh-LUKS target adopted into `AddWorkPlan`. `luks_uuid` is generated
 /// at planning time via `LuksUuid::new_v4()` so the journal records the
-/// authoritative identity before `cryptsetup luksFormat` runs, and so a
-/// mid-format crash and replay reformat under the same identity. `_checked`
-/// is the receipt for the plan-time fresh-target check, so no fresh target
-/// exists without one; execute re-checks before the journal.
+/// authoritative identity before `cryptsetup luksFormat` runs. `_checked` is
+/// the receipt for the plan-time fresh-target check, so no fresh target
+/// exists without one; execute re-checks before the journal. `format_args`
+/// proves cryptsetup accepted this target's format argv at plan time, and
+/// Pass 2's `luks_format` runs that argv.
 #[derive(Debug, Clone)]
 struct FreshLuksTarget {
     name: DiskName,
@@ -612,18 +613,18 @@ struct FreshLuksTarget {
     mapper_name: MapperName,
     mapper_path: String,
     luks_uuid: LuksUuid,
-    luks_format_extra_opts: LuksFormatExtraOpts,
+    format_args: FormatArgsAccepted,
     enroll_key_file: Option<KeyFilePath>,
     _checked: FreshTargetChecked,
 }
 
 impl FreshLuksTarget {
-    /// Build a fresh target from its plan-time readiness proof, so the
-    /// target's name and by-id are the ones the check passed.
+    /// Build a fresh target from its plan-time proofs, so the target's name
+    /// and by-id are the ones the readiness check passed and its UUID is the
+    /// one cryptsetup checked.
     fn new(
         ready: FreshTargetReady,
-        luks_uuid: LuksUuid,
-        luks_format_extra_opts: LuksFormatExtraOpts,
+        format_args: FormatArgsAccepted,
         enroll_key_file: Option<KeyFilePath>,
     ) -> Self {
         let name = ready.name().clone();
@@ -634,8 +635,8 @@ impl FreshLuksTarget {
             mapper_name,
             name,
             by_id,
-            luks_uuid,
-            luks_format_extra_opts,
+            luks_uuid: format_args.uuid().clone(),
+            format_args,
             enroll_key_file,
             _checked: ready.into_checked(),
         }
@@ -983,7 +984,7 @@ impl AddWorkPlan {
                         commands: vec![CmdRequest::CryptsetupLuksFormatPreview {
                             device: target.by_id.as_str().to_owned(),
                             label,
-                            extra_opts: target.luks_format_extra_opts.clone(),
+                            extra_opts: target.format_args.extra_opts().clone(),
                         }],
                     });
                     push_enrollment_preview_steps(
@@ -1763,7 +1764,6 @@ impl AddPlan {
                 )));
             }
 
-            let label = luks_label_for(name);
             eprint!(
                 "{}",
                 status_line(
@@ -1772,14 +1772,7 @@ impl AddPlan {
                     &format!("disk {name}: formatting LUKS..."),
                 )
             );
-            luks_format(
-                runner,
-                ready,
-                &passphrase,
-                &target.luks_uuid,
-                &label,
-                &target.luks_format_extra_opts,
-            )?;
+            luks_format(runner, ready, &target.format_args, &passphrase)?;
             eprint!(
                 "{}",
                 status_line(
@@ -2507,7 +2500,7 @@ fn fresh_journal_target(target: &FreshLuksTarget) -> journal::AddJournalTarget {
         name: target.name.clone(),
         by_id: target.by_id.clone(),
         mode: journal::AddJournalMode::FreshLuks {
-            extra_opts: target.luks_format_extra_opts.clone(),
+            extra_opts: target.format_args.extra_opts().clone(),
             enroll_key_file: target.enroll_key_file.clone(),
         },
     }
@@ -2586,13 +2579,17 @@ fn build_add_work_plan<R: CommandRunner, F: Filesystem + ?Sized>(
                 let ready = check_fresh_target_ready(runner, fs, name, by_id)?;
                 // FreshLuks: pre-generate the LUKS UUID at planning so
                 // the journal records authoritative identity from t=0.
-                // A mid-format crash and replay reformats under the
-                // same identity.
                 let luks_uuid = LuksUuid::new_v4();
+                // Format-args check, plan tier only: cryptsetup checks the
+                // exact argv Pass 2 runs, so an option it rejects refuses in
+                // --dry-run and before the prompt, with nothing written. The
+                // argv holds no state that drifts, so execute does not re-run
+                // it.
+                let format_args =
+                    check_format_args(runner, &ready, &luks_uuid, input.luks_format_extra_opts)?;
                 let target = FreshLuksTarget::new(
                     ready,
-                    luks_uuid.clone(),
-                    input.luks_format_extra_opts.clone(),
+                    format_args,
                     input
                         .enroll_key_file
                         .map(|p| KeyFilePath::new(p.to_path_buf())),
@@ -3440,15 +3437,16 @@ mod tests {
     }
 
     fn fresh_target(name: &str, by_id: &str, uuid: &str) -> FreshLuksTarget {
-        FreshLuksTarget::new(
-            crate::test_fixtures::fresh_target_ready(
-                &DiskName::parse(name).unwrap(),
-                &ByIdPath::parse(by_id).unwrap(),
-            ),
-            LuksUuid::parse(uuid).unwrap(),
-            LuksFormatExtraOpts::default(),
-            None,
-        )
+        let ready = crate::test_fixtures::fresh_target_ready(
+            &DiskName::parse(name).unwrap(),
+            &ByIdPath::parse(by_id).unwrap(),
+        );
+        let format_args = crate::test_fixtures::format_args_accepted(
+            &ready,
+            &LuksUuid::parse(uuid).unwrap(),
+            &LuksFormatExtraOpts::default(),
+        );
+        FreshLuksTarget::new(ready, format_args, None)
     }
 
     fn journal_targets_with(
@@ -4314,7 +4312,9 @@ mod tests {
 
     #[test]
     fn dry_run_raw_disk_still_shows_destructive_format() {
-        let runner = MockRunner::default().with_mappers_closed(&["braid-disk1"]);
+        let runner = MockRunner::default()
+            .with_format_test_args_confirmed()
+            .with_mappers_closed(&["braid-disk1"]);
         let probed = vec![PresentConfigDisk {
             name: DiskName::parse("disk1").expect("valid disk name in test fixture"),
             by_id_path: ByIdPath::parse("/dev/disk/by-id/disk1").unwrap(),
@@ -5069,6 +5069,9 @@ mod tests {
                     &format!("cryptsetup open --test-passphrase {device}"),
                     "",
                 )),
+                CmdRequest::CryptsetupLuksFormatTestArgs { .. } => {
+                    Ok(crate::test_fixtures::format_test_args_ok())
+                }
                 CmdRequest::CryptsetupLuksFormat { .. } => Ok(mock_ok("cryptsetup luksFormat", "")),
                 CmdRequest::CryptsetupLuksHeaderBackup { backup_path, .. } => {
                     if let Some(parent) = std::path::Path::new(backup_path.as_str()).parent() {
@@ -6661,6 +6664,9 @@ mod tests {
                     &format!("cryptsetup open --test-passphrase {device}"),
                     "",
                 )),
+                CmdRequest::CryptsetupLuksFormatTestArgs { .. } => {
+                    Ok(crate::test_fixtures::format_test_args_ok())
+                }
                 CmdRequest::CryptsetupLuksFormat { device, .. } if self.fail_luks_format => {
                     Ok(RawCommandOutput {
                         cmd: format!("cryptsetup luksFormat {device}"),
@@ -8535,6 +8541,7 @@ mod tests {
         // CryptsetupLuksFormat carries a randomly generated LuksUuid, so the
         // runner matches it by `device` in a handler.
         let runner = MockRunner::default()
+            .with_format_test_args_confirmed()
             .with_output(
                 CmdRequest::CryptsetupLuksUuid {
                     device: by_id.into(),
@@ -8737,7 +8744,7 @@ mod tests {
         let disk1 = "/dev/disk/by-id/virtio-disk1";
         let disk2 = "/dev/disk/by-id/virtio-disk2";
         let disk2_uuid = "22222222-2222-2222-2222-222222222222";
-        let runner = MockRunner::default()
+        let runner = MockRunner::default().with_format_test_args_confirmed()
             .with_output(
                 CmdRequest::CryptsetupLuksUuid {
                     device: disk1.into(),
@@ -8826,7 +8833,9 @@ mod tests {
     // Scenario: first disk added to an empty pool (no pool mounted yet).
     #[test]
     fn dry_run_render_fresh_single_disk_bootstrap() {
-        let runner = MockRunner::default().with_mappers_closed(&["braid-disk1"]);
+        let runner = MockRunner::default()
+            .with_format_test_args_confirmed()
+            .with_mappers_closed(&["braid-disk1"]);
         let probed = vec![PresentConfigDisk {
             name: DiskName::parse("disk1").expect("valid disk name in test fixture"),
             by_id_path: ByIdPath::parse("/dev/disk/by-id/disk1").unwrap(),
@@ -8998,7 +9007,9 @@ mod tests {
     // Scenario: an operator runs `braid add --dry-run` twice against the same
     //   fresh disk and expects identical, honest preview output.
     fn dry_run_render_fresh_disk_uuid_is_reproducible_across_invocations() {
-        let runner = MockRunner::default().with_mappers_closed(&["braid-disk1"]);
+        let runner = MockRunner::default()
+            .with_format_test_args_confirmed()
+            .with_mappers_closed(&["braid-disk1"]);
         let probed = vec![PresentConfigDisk {
             name: DiskName::parse("disk1").expect("valid disk name in test fixture"),
             by_id_path: ByIdPath::parse("/dev/disk/by-id/disk1").unwrap(),
@@ -9068,7 +9079,9 @@ mod tests {
      * Scenario: bootstrap `braid add disk1=... --enroll-key-file=/mnt/kf`.
      */
     fn dry_run_render_fresh_disk_with_keyfile_orders_backup_after_addkey() {
-        let runner = MockRunner::default().with_mappers_closed(&["braid-disk1"]);
+        let runner = MockRunner::default()
+            .with_format_test_args_confirmed()
+            .with_mappers_closed(&["braid-disk1"]);
         let probed = vec![PresentConfigDisk {
             name: DiskName::parse("disk1").expect("valid disk name in test fixture"),
             by_id_path: ByIdPath::parse("/dev/disk/by-id/disk1").unwrap(),
@@ -9308,7 +9321,9 @@ mod tests {
     // no pool is mounted yet.
     #[test]
     fn dry_run_render_fresh_two_disk_bootstrap_uses_raid1_mkfs() {
-        let runner = MockRunner::default().with_mappers_closed(&["braid-disk1", "braid-disk2"]);
+        let runner = MockRunner::default()
+            .with_format_test_args_confirmed()
+            .with_mappers_closed(&["braid-disk1", "braid-disk2"]);
         let by_id_disk1 = ByIdPath::parse("/dev/disk/by-id/disk1").unwrap();
         let by_id_disk2 = ByIdPath::parse("/dev/disk/by-id/disk2").unwrap();
         let names = vec![
@@ -9371,7 +9386,9 @@ mod tests {
     // Why: verifies the pool-mounted path includes balance to RAID1.
     // Scenario: adding a fresh disk to a 1-disk pool (pool already mounted).
     fn dry_run_render_add_to_existing_pool_with_balance() {
-        let runner = MockRunner::default().with_mappers_closed(&["braid-disk2"]);
+        let runner = MockRunner::default()
+            .with_format_test_args_confirmed()
+            .with_mappers_closed(&["braid-disk2"]);
         let probed = vec![PresentConfigDisk {
             name: DiskName::parse("disk2").expect("valid disk name in test fixture"),
             by_id_path: ByIdPath::parse("/dev/disk/by-id/disk2").unwrap(),
@@ -9593,6 +9610,9 @@ mod tests {
                         stderr: "Device is not a valid LUKS device.\n".into(),
                         exit_status: 1,
                     })
+                }
+                CmdRequest::CryptsetupLuksFormatTestArgs { .. } => {
+                    Ok(crate::test_fixtures::format_test_args_ok())
                 }
                 CmdRequest::CryptsetupLuksFormat { device, .. } => Ok(RawCommandOutput {
                     cmd: format!("cryptsetup luksFormat {device}"),
@@ -11033,6 +11053,9 @@ mod tests {
                     "btrfs balance status",
                     "No balance found on '/mnt/storage'\n",
                 )),
+                CmdRequest::CryptsetupLuksFormatTestArgs { .. } => {
+                    Ok(crate::test_fixtures::format_test_args_ok())
+                }
                 CmdRequest::CryptsetupLuksDumpText { device } => {
                     let Some(index) = Self::disk_index_from_by_id(device) else {
                         return Err(CmdError::MissingMock);
@@ -13145,8 +13168,11 @@ mod tests {
         let mut pool =
             pool_with_live_devices(vec![live_pool_device("braid-drifted", &uuid, "/dev/vdb")]);
         pool.fsid = Some(Fsid::parse("cc86845b-aec3-408e-bef5-553affc1f2b1").unwrap());
-        let runner =
-            RequestRecordingRunner::new(MockRunner::default().with_mapper_closed("braid-fresh"));
+        let runner = RequestRecordingRunner::new(
+            MockRunner::default()
+                .with_format_test_args_confirmed()
+                .with_mapper_closed("braid-fresh"),
+        );
         let probed = vec![
             cloned_disk_probed_with_mapper_state(
                 "clone",
@@ -13207,14 +13233,24 @@ mod tests {
             work_plan.target_names(),
             vec![DiskName::parse("fresh").unwrap()]
         );
-        // The only probe is the fresh target's readiness check; the closed
-        // no-op clone needs none.
+        // The only probes are the fresh target's readiness check and its
+        // format-args check; the closed no-op clone needs none.
+        let requests = runner.requests();
         assert_eq!(
-            runner.requests(),
-            vec![CmdRequest::CryptsetupStatus {
+            requests.first(),
+            Some(&CmdRequest::CryptsetupStatus {
                 mapper: MapperName::from_basename("braid-fresh".into()),
-            }],
-            "closed no-op plus fresh planning should probe only the fresh mapper slot"
+            }),
+            "closed no-op plus fresh planning should probe the fresh mapper slot first: {requests:?}"
+        );
+        assert!(
+            requests.len() == 2
+                && matches!(
+                    &requests[1],
+                    CmdRequest::CryptsetupLuksFormatTestArgs { device, .. }
+                        if device == "/dev/disk/by-id/usb-FRESH"
+                ),
+            "closed no-op plus fresh planning should then check only the fresh format argv: {requests:?}"
         );
     }
 
@@ -13300,11 +13336,9 @@ mod tests {
      */
     #[test]
     fn add_preview_iteration_sorts_by_disk_name() {
-        let runner = MockRunner::default().with_mappers_closed(&[
-            "braid-a-disk",
-            "braid-m-disk",
-            "braid-z-disk",
-        ]);
+        let runner = MockRunner::default()
+            .with_format_test_args_confirmed()
+            .with_mappers_closed(&["braid-a-disk", "braid-m-disk", "braid-z-disk"]);
         let probed = vec![
             PresentConfigDisk {
                 name: DiskName::parse("a-disk").expect("valid disk name in test fixture"),
@@ -13562,6 +13596,111 @@ mod tests {
             panic!("expected FreshLuks mode");
         };
         assert_eq!(journaled_extras.as_slice(), &["--use-random".to_owned()]);
+    }
+
+    /// Answers every `cryptsetup luksFormat` argv that carries `bad_token`
+    /// the way cryptsetup's option parser does (exit 1, popt's message), and
+    /// passes every other request through.
+    struct RejectFormatOptionRunner<R> {
+        inner: R,
+        bad_token: &'static str,
+    }
+
+    impl<R> RejectFormatOptionRunner<R> {
+        fn rejection(&self, request: &CmdRequest) -> Option<RawCommandOutput> {
+            let argv = request.to_argv();
+            let rejects = argv.program == "cryptsetup"
+                && argv.args.first().map(String::as_str) == Some("luksFormat")
+                && argv.args.iter().any(|arg| arg == self.bad_token);
+            rejects.then(|| RawCommandOutput {
+                cmd: format!("cryptsetup {}", argv.args.join(" ")),
+                stdout: String::new(),
+                stderr: format!("{}: unknown option\n", self.bad_token),
+                exit_status: 1,
+            })
+        }
+    }
+
+    impl<R: CommandRunner> CommandRunner for RejectFormatOptionRunner<R> {
+        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
+            match self.rejection(request) {
+                Some(output) => Ok(output),
+                None => self.inner.run(request),
+            }
+        }
+
+        fn run_with_stdin(
+            &self,
+            request: &CmdRequest,
+            stdin: &[u8],
+        ) -> Result<RawCommandOutput, CmdError> {
+            match self.rejection(request) {
+                Some(output) => Ok(output),
+                None => self.inner.run_with_stdin(request, stdin),
+            }
+        }
+    }
+
+    // Intent: a --luks-format-arg that cryptsetup rejects refuses add before
+    //   the journal, with no real luksFormat run.
+    // Why it exists: braid used to check the extras only against its
+    //   managed-flag list, so cryptsetup first saw them in the real format,
+    //   after pending-op.json was written. The add failed with the disk
+    //   untouched but left the operator in recovery mode, and recover replayed
+    //   the same extras on every run (hunt finding 261022-1230-002).
+    // Scenario: the operator adds fresh disk2 to the live pool and types
+    //   --luks-format-arg=--use-randomm, an option cryptsetup does not know.
+    #[test]
+    fn add_refuses_format_arg_cryptsetup_rejects_before_journal() {
+        let (_state_tmp, paths, _tmp, config_path, pass_path) = add_test_setup();
+        let runner = AddFullPathRunner::live();
+        let fs = runner.fs(vec!["/dev/disk/by-id/virtio-disk2".into()]);
+        let recording = RequestRecordingRunner::new(RejectFormatOptionRunner {
+            inner: runner,
+            bad_token: "--use-randomm",
+        });
+        let extras = vec!["--use-randomm".to_owned()];
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let confirm = crate::confirm::RecordingConfirm::new();
+
+        let result = cmd_add(
+            &recording,
+            &fs,
+            &AddParams {
+                config: &read_test_config(&config_path),
+                disk_specs: &["disk2=/dev/disk/by-id/virtio-disk2".into()],
+                dry_run: false,
+                yes: true,
+                passphrase_stdin: false,
+                passphrase_file: Some(pass_path.as_path()),
+                enroll_key_file: None,
+                luks_format_extra_opts: &extras,
+                progress: ProgressOutput::Off,
+                paths: &paths,
+                sleep_inhibitor: &inhibitor,
+                confirm: &confirm,
+                passphrase_reader: &RealTty,
+                backing_path_resolver:
+                    crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
+            },
+        );
+
+        let err = result.expect_err("cryptsetup rejected the extras, so add must refuse");
+        assert!(
+            err.to_string().contains("--use-randomm: unknown option"),
+            "the refusal must carry cryptsetup's output: {err}"
+        );
+        assert!(
+            !paths.pending_op_json().exists(),
+            "a refused --luks-format-arg must leave no pending-op.json: {err}"
+        );
+        let requests = recording.requests();
+        assert!(
+            !requests
+                .iter()
+                .any(|r| matches!(r, CmdRequest::CryptsetupLuksFormat { .. })),
+            "no real luksFormat may run on rejected extras: {requests:?}"
+        );
     }
 
     /* Intent: pre-journal-write UUID uniqueness assert refuses a

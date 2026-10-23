@@ -120,10 +120,9 @@ pub enum AddPhase {
 /// One per-disk target within an `OpKind::Add` invocation. The map key in
 /// `OpKind::Add.targets` is the authoritative `LuksUuid` identity; this
 /// struct carries presentation (`name`) and hardware addressing (`by_id`)
-/// plus the per-target mode. `name` is required so replay derives the
-/// mapper via `config::mapper_name` and the label via
-/// `config::luks_label_for` at the call site that builds
-/// `CryptsetupLuksFormat`; the struct itself never stores `luks_uuid`,
+/// plus the per-target mode. `name` is required so recover derives the
+/// mapper via `config::mapper_name` and the expected label via
+/// `config::luks_label_for`; the struct itself never stores `luks_uuid`,
 /// `mapper_name`, `label`, or `extra_opts`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -154,7 +153,9 @@ pub enum AddJournalMode {
     },
     /// Fresh `cryptsetup luksFormat` of a non-LUKS or wipeable disk. The
     /// label is derived via `config::luks_label_for` at the format call
-    /// site; only the structured `extra_opts` argv slice is journaled.
+    /// site. `extra_opts` records the extras add formats with. Recover never
+    /// formats a disk, so it never reads them; the field stays so journals
+    /// written before that still load under `deny_unknown_fields`.
     FreshLuks {
         extra_opts: LuksFormatExtraOpts,
         enroll_key_file: Option<KeyFilePath>,
@@ -228,8 +229,10 @@ pub struct ReplaceJournalTarget {
 #[serde(deny_unknown_fields)]
 pub enum ReplaceJournalMode {
     /// Fresh `cryptsetup luksFormat` of the new disk. Label is derived
-    /// via `config::luks_label_for` at the format call site; only
-    /// `extra_opts` is journaled.
+    /// via `config::luks_label_for` at the format call site. `extra_opts`
+    /// records the extras replace formats with. Recover never formats a
+    /// disk, so it never reads them; the field stays so journals that carry
+    /// it still load under `deny_unknown_fields`.
     FreshLuks {
         extra_opts: LuksFormatExtraOpts,
         enroll_key_file: Option<KeyFilePath>,

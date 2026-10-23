@@ -222,6 +222,16 @@ machine.succeed(
 )
 machine.succeed(f"mount /dev/mapper/braid-vdb {MOUNT}")
 
+# 8d. cryptsetup luksFormat --test-args on a blank disk
+# braid runs this check before it journals a fresh format
+# (cli/src/luks.rs#check_format_args) and passes only on the confirmation
+# line; golden_cryptsetup_luks_format_test_args_confirms pins it. The check
+# writes nothing, so vdd is still blank for the format below.
+machine.succeed(
+    "cryptsetup luksFormat --test-args --batch-mode /dev/vdd"
+    f" > {FIXTURE_DIR}/cryptsetup-luks-format-test-args.txt"
+)
+
 # Format the third disk as LUKS, open as braid-vdd.
 machine.succeed(
     f"echo -n '{PASSPHRASE}' | cryptsetup luksFormat --batch-mode /dev/vdd -"

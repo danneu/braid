@@ -1,5 +1,5 @@
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, RawCommandOutput, Step};
-use crate::config::mapper_name;
+use crate::config::{luks_label_for, mapper_name};
 use crate::dm_identity::{UnprovenMapper, mapper_luks_uuid};
 use crate::filesystem::Filesystem;
 use crate::parse::types::{BackingDevice, CryptsetupStatusOutput};
@@ -127,9 +127,29 @@ pub enum LuksError {
     MapperOwnership(#[from] MapperOwnershipFailure),
     #[error("{0}")]
     FreshTargetNotReady(#[from] FreshTargetNotReady),
-    /// A journaled luksFormat extra that `luks_format` refuses to run with.
+    /// A luksFormat extra that `check_format_args` refuses to hand to
+    /// cryptsetup.
     #[error("{0}")]
     FormatExtraOpts(#[from] LuksFormatExtraOptsError),
+    /// cryptsetup did not confirm the format argv under `--test-args`.
+    /// `output` is what it printed, so the operator sees its own reason.
+    #[error(
+        "cryptsetup did not accept the luksFormat options for {device} \
+         (exit {exit_code}): {output}. braid formats nothing until cryptsetup \
+         accepts them; fix the --luks-format-arg values and re-run."
+    )]
+    FormatArgsRejected {
+        device: String,
+        exit_code: i32,
+        output: String,
+    },
+    /// Residual guard: a format-args proof checked a different disk than the
+    /// readiness proof `luks_format` was handed.
+    #[error(
+        "internal error: luksFormat options were checked for '{checked}', \
+         not for '{target}'; refusing to format"
+    )]
+    FormatArgsMismatch { checked: String, target: String },
     #[error("parse error: {0}")]
     Parse(#[from] ParseError),
     #[error("command failed: {0}")]
@@ -593,36 +613,126 @@ pub fn check_fresh_target_ready<R: CommandRunner, F: Filesystem + ?Sized>(
     })
 }
 
-/// LUKS format the checked fresh target with the given passphrase, journaled
-/// `uuid`, and braid-derived `label`. Taking `target` by value means every
-/// format spends a `FreshTargetReady` minted after confirmation; the residual
-/// guards for the journal-to-format window are luksFormat's own exclusive
-/// claim and the ownership check in the open that follows. The caller produces
-/// `uuid` (typically via `LuksUuid::new_v4()` at the planning site for
-/// fresh-format paths, or the preserved journaled value on a recovery replay)
-/// so a mid-format crash and replay reformat under the same identity, and so
-/// the same UUID is recorded in `OpKind::Add`/`OpKind::Replace` from t=0.
-/// `extra_opts` carries user argv extras that
-/// `cli/src/types.rs#LuksFormatExtraOpts::parse` validated (it rejects every
-/// braid-managed flag, `--uuid` and `--label` among them, and `--`), or that
-/// recover read back from the journal without `parse`. So the `--` refusal
-/// runs again here, before cryptsetup does.
+/// The line cryptsetup prints when `--test-args` passed every check
+/// (reference/cryptsetup/src/cryptsetup.c#main). braid runs it under
+/// `LC_ALL=C` (`cli/src/cmd.rs#apply_child_env`), so it is untranslated; the
+/// golden fixture `cryptsetup-luks-format-test-args.txt` pins it.
+pub const FORMAT_TEST_ARGS_CONFIRMATION: &str = "No action taken. Invoked with --test-args option.";
+
+/// Whether a `--test-args` run confirmed its argv: exit 0 and the
+/// confirmation line on stdout. Exit 0 alone is not enough, since help and
+/// version options also exit 0 without checking anything. Public for the
+/// golden fixture test.
+pub fn format_test_args_confirmed(output: &RawCommandOutput) -> bool {
+    output.exit_status == 0
+        && output
+            .stdout
+            .lines()
+            .any(|line| line.trim_end() == FORMAT_TEST_ARGS_CONFIRMATION)
+}
+
+/// Proof that cryptsetup accepted one exact luksFormat argv: this disk, this
+/// UUID and label, braid's managed options, and these extras. Private fields,
+/// so only `check_format_args` mints one, and `luks_format` builds its request
+/// from the proof's own fields, so a format runs only an argv cryptsetup
+/// checked. `Clone` because it vouches for a fixed argv, not for a moment in
+/// time, as `FreshTargetReady` does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FormatArgsAccepted {
+    name: DiskName,
+    by_id: ByIdPath,
+    uuid: LuksUuid,
+    extra_opts: LuksFormatExtraOpts,
+}
+
+impl FormatArgsAccepted {
+    /// The LUKS UUID the checked argv writes, which the journal records.
+    pub fn uuid(&self) -> &LuksUuid {
+        &self.uuid
+    }
+
+    /// The user extras the checked argv carries, for the dry-run row and the
+    /// journal.
+    pub fn extra_opts(&self) -> &LuksFormatExtraOpts {
+        &self.extra_opts
+    }
+
+    fn label(&self) -> LuksLabel {
+        luks_label_for(&self.name)
+    }
+}
+
+/// Ask cryptsetup to check the fresh-format argv for `target` before anything
+/// is written. It runs the exact argv `luks_format` will run, with
+/// `--test-args` added, through `CommandRunner::run`, whose stdin is null, so
+/// it never sees the passphrase. cryptsetup stops after option parsing, so a
+/// bad cipher, hash, or key size can still fail the real format; recover
+/// handles that by dropping the unformatted target. Any result but a
+/// confirmation refuses with cryptsetup's output.
+pub fn check_format_args<R: CommandRunner>(
+    runner: &R,
+    target: &FreshTargetReady,
+    uuid: &LuksUuid,
+    extra_opts: &LuksFormatExtraOpts,
+) -> Result<FormatArgsAccepted, LuksError> {
+    extra_opts.check_no_end_of_options()?;
+    let accepted = FormatArgsAccepted {
+        name: target.name.clone(),
+        by_id: target.by_id.clone(),
+        uuid: uuid.clone(),
+        extra_opts: extra_opts.clone(),
+    };
+    let output = runner.run(&CmdRequest::CryptsetupLuksFormatTestArgs {
+        device: accepted.by_id.as_str().to_owned(),
+        uuid: accepted.uuid.clone(),
+        label: accepted.label(),
+        extra_opts: accepted.extra_opts.clone(),
+    })?;
+    if !format_test_args_confirmed(&output) {
+        let printed = [output.stderr.trim(), output.stdout.trim()]
+            .into_iter()
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        return Err(LuksError::FormatArgsRejected {
+            device: accepted.by_id.as_str().to_owned(),
+            exit_code: output.exit_status,
+            output: if printed.is_empty() {
+                "no output".to_owned()
+            } else {
+                printed
+            },
+        });
+    }
+    Ok(accepted)
+}
+
+/// LUKS format the checked fresh target with the given passphrase and the
+/// argv `args` proves cryptsetup accepted. Taking `target` by value means
+/// every format spends a `FreshTargetReady` minted after confirmation; the
+/// residual guards for the journal-to-format window are luksFormat's own
+/// exclusive claim and the ownership check in the open that follows. The
+/// UUID comes from `args`, which the planner minted before the journal, so
+/// the journal records the identity the format writes.
 pub fn luks_format<R: CommandRunner>(
     runner: &R,
     target: FreshTargetReady,
+    args: &FormatArgsAccepted,
     passphrase: &Passphrase,
-    uuid: &LuksUuid,
-    label: &LuksLabel,
-    extra_opts: &LuksFormatExtraOpts,
 ) -> Result<(), LuksError> {
-    extra_opts.check_no_end_of_options()?;
+    if target.name != args.name || target.by_id != args.by_id {
+        return Err(LuksError::FormatArgsMismatch {
+            checked: format!("{} ({})", args.name, args.by_id),
+            target: format!("{} ({})", target.name, target.by_id),
+        });
+    }
     let device = target.by_id.as_str();
     let result = runner.run_with_stdin(
         &CmdRequest::CryptsetupLuksFormat {
             device: device.to_owned(),
-            uuid: uuid.clone(),
-            label: label.clone(),
-            extra_opts: extra_opts.clone(),
+            uuid: args.uuid.clone(),
+            label: args.label(),
+            extra_opts: args.extra_opts.clone(),
         },
         passphrase.expose_secret().as_bytes(),
     )?;
@@ -3211,15 +3321,8 @@ $ cryptsetup luksHeaderBackup --header-backup-file /var/lib/braid/luks-headers/b
                 exit_status: 2,
             },
         );
-        let err = luks_format(
-            &runner,
-            target,
-            &zpass("pass"),
-            &uuid,
-            &luks_label("test"),
-            &extras,
-        )
-        .unwrap_err();
+        let args = crate::test_fixtures::format_args_accepted(&target, &uuid, &extras);
+        let err = luks_format(&runner, target, &args, &zpass("pass")).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("exit 2"),
@@ -3263,15 +3366,8 @@ $ cryptsetup luksHeaderBackup --header-backup-file /var/lib/braid/luks-headers/b
                 exit_status: 4,
             },
         );
-        let err = luks_format(
-            &runner,
-            target,
-            &zpass("pass"),
-            &uuid,
-            &luks_label("test"),
-            &extras,
-        )
-        .unwrap_err();
+        let args = crate::test_fixtures::format_args_accepted(&target, &uuid, &extras);
+        let err = luks_format(&runner, target, &args, &zpass("pass")).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("exit 4"),
@@ -3284,18 +3380,20 @@ $ cryptsetup luksHeaderBackup --header-backup-file /var/lib/braid/luks-headers/b
     }
 
     /*
-     * Intent: luks_format refuses extras that hold the token `--` and sends
-     *   no luksFormat request.
-     * Why it exists: `braid recover` replays the journaled extras, which serde
-     *   builds without `LuksFormatExtraOpts::parse`. The extras are the last
-     *   argv tokens, so a `--` among them would make cryptsetup ignore every
-     *   extra after it and format without the operator's options (finding
-     *   261022-1230-001).
-     * Scenario: a journal written before braid refused `--` holds
-     *   `["--", "--cipher=serpent-xts-plain64"]`, and recover replays it.
+     * Intent: check_format_args refuses extras that hold the token `--` and
+     *   sends no cryptsetup request.
+     * Why it exists: serde builds `LuksFormatExtraOpts` without
+     *   `LuksFormatExtraOpts::parse`, so the parse-time refusal is not the
+     *   only path in. The extras are the last argv tokens, so a `--` among
+     *   them would make cryptsetup ignore every extra after it and format
+     *   without the operator's options (finding 261022-1230-001). Every
+     *   format now spends a proof this check mints, so the check is the one
+     *   gate in front of luksFormat.
+     * Scenario: extras deserialized from a journal written before braid
+     *   refused `--` hold `["--", "--cipher=serpent-xts-plain64"]`.
      */
     #[test]
-    fn luks_format_refuses_journaled_end_of_options_before_cryptsetup() {
+    fn check_format_args_refuses_end_of_options_before_cryptsetup() {
         let uuid = LuksUuid::parse("00000000-0000-0000-0000-000000000200").unwrap();
         let extras: LuksFormatExtraOpts =
             serde_json::from_str(r#"["--", "--cipher=serpent-xts-plain64"]"#)
@@ -3304,43 +3402,125 @@ $ cryptsetup luksHeaderBackup --header-backup-file /var/lib/braid/luks-headers/b
             &disk("test"),
             &ByIdPath::parse("/dev/disk/by-id/virtio-test").unwrap(),
         );
-        let runner = MockRunner::default().with_output_stdin(
-            CmdRequest::CryptsetupLuksFormat {
-                device: "/dev/disk/by-id/virtio-test".into(),
-                uuid: uuid.clone(),
-                label: luks_label("test"),
-                extra_opts: extras.clone(),
-            },
-            b"pass".to_vec(),
-            RawCommandOutput {
-                cmd: "cryptsetup luksFormat".into(),
-                stdout: String::new(),
-                stderr: String::new(),
-                exit_status: 0,
-            },
-        );
-        let result = luks_format(
-            &runner,
-            target,
-            &zpass("pass"),
-            &uuid,
-            &luks_label("test"),
-            &extras,
-        );
+        let runner = MockRunner::default().with_format_test_args_confirmed();
+        let result = check_format_args(&runner, &target, &uuid, &extras);
         assert!(
-            !runner
-                .requests()
-                .iter()
-                .any(|r| matches!(r, CmdRequest::CryptsetupLuksFormat { .. })),
-            "luks_format must not run cryptsetup with `--` in the extras: {:?}",
+            runner.requests().is_empty(),
+            "check_format_args must not run cryptsetup with `--` in the extras: {:?}",
             runner.requests()
         );
         let msg = result
-            .expect_err("luks_format must refuse `--` in the extras")
+            .expect_err("check_format_args must refuse `--` in the extras")
             .to_string();
         assert!(
             msg.contains("'--'"),
             "error must name the `--` token: {msg}"
+        );
+    }
+
+    /*
+     * Intent: check_format_args runs the exact luksFormat argv with
+     *   `--test-args` and passes only when cryptsetup prints its confirmation
+     *   line; a nonzero exit, or exit 0 without the line, refuses with
+     *   cryptsetup's own output.
+     * Why it exists: the check is what keeps a bad --luks-format-arg from
+     *   failing after the journal is written (finding 261022-1230-002).
+     *   Exit 0 alone proves nothing: cryptsetup's help and version options
+     *   also exit 0 without checking the argv.
+     * Scenario: the operator types `--use-randomm`; cryptsetup exits 1 with
+     *   "unknown option". Separately, a cryptsetup build answers exit 0 with
+     *   usage text and no confirmation.
+     */
+    #[test]
+    fn check_format_args_requires_the_confirmation_line() {
+        let uuid = LuksUuid::parse("00000000-0000-0000-0000-000000000200").unwrap();
+        let extras = LuksFormatExtraOpts::parse(&["--use-randomm".to_owned()]).unwrap();
+        let target = crate::test_fixtures::fresh_target_ready(
+            &disk("test"),
+            &ByIdPath::parse("/dev/disk/by-id/virtio-test").unwrap(),
+        );
+        let request = CmdRequest::CryptsetupLuksFormatTestArgs {
+            device: "/dev/disk/by-id/virtio-test".into(),
+            uuid: uuid.clone(),
+            label: luks_label("test"),
+            extra_opts: extras.clone(),
+        };
+
+        let confirmed = MockRunner::default()
+            .with_output(request.clone(), crate::test_fixtures::format_test_args_ok());
+        let accepted = check_format_args(&confirmed, &target, &uuid, &extras)
+            .expect("the confirmation line passes the check");
+        assert_eq!(accepted.uuid(), &uuid);
+        assert_eq!(accepted.extra_opts(), &extras);
+
+        let rejected = MockRunner::default().with_output(
+            request.clone(),
+            RawCommandOutput {
+                cmd: "cryptsetup luksFormat --test-args".into(),
+                stdout: String::new(),
+                stderr: "--use-randomm: unknown option\n".into(),
+                exit_status: 1,
+            },
+        );
+        let msg = check_format_args(&rejected, &target, &uuid, &extras)
+            .expect_err("a nonzero exit refuses")
+            .to_string();
+        assert!(
+            msg.contains("exit 1") && msg.contains("--use-randomm: unknown option"),
+            "error must carry the exit code and cryptsetup's stderr: {msg}"
+        );
+
+        let silent = MockRunner::default().with_output(
+            request,
+            RawCommandOutput {
+                cmd: "cryptsetup luksFormat --test-args".into(),
+                stdout: "Usage: cryptsetup [OPTION...] <action> <action-specific>\n".into(),
+                stderr: String::new(),
+                exit_status: 0,
+            },
+        );
+        let msg = check_format_args(&silent, &target, &uuid, &extras)
+            .expect_err("exit 0 without the confirmation line refuses")
+            .to_string();
+        assert!(
+            msg.contains("exit 0") && msg.contains("Usage: cryptsetup"),
+            "error must carry cryptsetup's stdout: {msg}"
+        );
+    }
+
+    /*
+     * Intent: luks_format refuses a proof minted for another disk and sends
+     *   no luksFormat request.
+     * Why it exists: the proof vouches for one exact argv, disk included.
+     *   A caller that paired one target's proof with another target's
+     *   readiness would format a disk with an argv cryptsetup never checked
+     *   for it.
+     * Scenario: a two-target add swaps the proofs of its targets.
+     */
+    #[test]
+    fn luks_format_refuses_a_proof_for_another_disk() {
+        let uuid = LuksUuid::parse("00000000-0000-0000-0000-000000000200").unwrap();
+        let extras = LuksFormatExtraOpts::default();
+        let checked = crate::test_fixtures::fresh_target_ready(
+            &disk("test"),
+            &ByIdPath::parse("/dev/disk/by-id/virtio-test").unwrap(),
+        );
+        let args = crate::test_fixtures::format_args_accepted(&checked, &uuid, &extras);
+        let other = crate::test_fixtures::fresh_target_ready(
+            &disk("other"),
+            &ByIdPath::parse("/dev/disk/by-id/virtio-other").unwrap(),
+        );
+        let runner = MockRunner::default();
+        let err = luks_format(&runner, other, &args, &zpass("pass"))
+            .expect_err("a proof for another disk refuses");
+        assert!(
+            matches!(err, LuksError::FormatArgsMismatch { .. }),
+            "expected FormatArgsMismatch, got: {err:?}"
+        );
+        assert!(
+            runner.requests().is_empty(),
+            "no cryptsetup request may run: {:?}",
+            runner.requests()
         );
     }
 

@@ -161,11 +161,22 @@ pub enum CmdRequest {
     // init-disk commands
     /// LUKS2 format with journaled identity and braid label. `uuid` is the
     /// pre-generated `LuksUuid` recorded in `OpKind::Add`/`OpKind::Replace`
-    /// so a mid-format crash and replay reformat under the same identity;
-    /// `label` is `braid-<DiskName>` and `extra_opts` are user-supplied
-    /// argv extras, validated by `LuksFormatExtraOpts::parse` or read back
-    /// from the journal; `luks::luks_format` refuses a `--` in either.
+    /// before the format runs; `label` is `braid-<DiskName>` and
+    /// `extra_opts` are user-supplied argv extras. `luks::luks_format` builds
+    /// it only from a `luks::FormatArgsAccepted`, so it carries an argv that
+    /// `CryptsetupLuksFormatTestArgs` checked.
     CryptsetupLuksFormat {
+        device: String,
+        uuid: LuksUuid,
+        label: LuksLabel,
+        extra_opts: LuksFormatExtraOpts,
+    },
+    /// The `CryptsetupLuksFormat` argv with `--test-args` right after
+    /// `luksFormat`: cryptsetup checks every option, then exits without
+    /// touching the disk. Not a stdin request, so the runner gives it a null
+    /// stdin and it never sees the passphrase. Built only by
+    /// `luks::check_format_args`.
+    CryptsetupLuksFormatTestArgs {
         device: String,
         uuid: LuksUuid,
         label: LuksLabel,
@@ -980,6 +991,18 @@ impl CmdRequest {
                 label,
                 extra_opts,
             } => luks_format_argv(uuid.as_str(), label, extra_opts, device),
+            CmdRequest::CryptsetupLuksFormatTestArgs {
+                device,
+                uuid,
+                label,
+                extra_opts,
+            } => {
+                // First after the action word, ahead of the device and every
+                // value-taking option, so no extra can take it as its value.
+                let mut argv = luks_format_argv(uuid.as_str(), label, extra_opts, device);
+                argv.args.insert(1, "--test-args".into());
+                argv
+            }
             CmdRequest::CryptsetupLuksFormatPreview {
                 device,
                 label,
@@ -1871,6 +1894,16 @@ impl MockRunner {
                 exit_status: 0,
             },
         )
+    }
+
+    /// Test helper: confirm every `luksFormat --test-args` check, as
+    /// cryptsetup does when it accepts the argv.
+    #[cfg(test)]
+    pub fn with_format_test_args_confirmed(self) -> Self {
+        self.with_handler(|request| {
+            matches!(request, CmdRequest::CryptsetupLuksFormatTestArgs { .. })
+                .then(|| Ok(crate::test_fixtures::format_test_args_ok()))
+        })
     }
 
     /// Test helper: stub LUKS2 luksDump output for every device in the
@@ -4107,6 +4140,45 @@ mod tests {
                 assert_eq!(r, p, "token {i} must match between real and preview argv");
             }
         }
+    }
+
+    #[test]
+    // Intent: the `--test-args` check argv is the real luksFormat argv with
+    //   `--test-args` added right after `luksFormat`, and the check runs with
+    //   no stdin and is allowed to spawn.
+    // Why it exists: the check proves cryptsetup accepts the argv a format
+    //   will run (finding 261022-1230-002), so any drift between the two argvs
+    //   makes it vouch for a command braid never runs. `--test-args` goes
+    //   before the extras because an extra could still hold `--`, after which
+    //   cryptsetup reads every token as a positional. The check must not read
+    //   stdin: it never needs the passphrase.
+    // Scenario: a future PR adds a managed luksFormat flag to the format arm
+    //   only, or appends `--test-args` after the extras.
+    fn luks_format_test_args_argv_is_the_format_argv_plus_test_args() {
+        let uuid = test_uuid(308);
+        let real = CmdRequest::CryptsetupLuksFormat {
+            device: "/dev/disk/by-id/disk1".to_owned(),
+            uuid: uuid.clone(),
+            label: luks_label("disk1"),
+            extra_opts: extras_from(&["--use-random"]),
+        }
+        .to_argv();
+        let check = CmdRequest::CryptsetupLuksFormatTestArgs {
+            device: "/dev/disk/by-id/disk1".to_owned(),
+            uuid: uuid.clone(),
+            label: luks_label("disk1"),
+            extra_opts: extras_from(&["--use-random"]),
+        };
+        let mut expected = real.args.clone();
+        expected.insert(1, "--test-args".to_owned());
+        assert_eq!(real.args[0], "luksFormat");
+        assert_eq!(check.to_argv().program, real.program);
+        assert_eq!(check.to_argv().args, expected);
+        assert!(!check.requires_stdin(), "the check never reads stdin");
+        assert!(
+            !check.is_preview_only(),
+            "the check must be allowed to spawn"
+        );
     }
 
     #[test]

@@ -1,21 +1,19 @@
-# Test: bootstrap crash recovery (escape instructions)
+# Test: bootstrap crash recovery (clear an uncommitted bootstrap)
 #
-# Intent: Verify `braid recover` detects a bootstrap crash (LUKS format
-# succeeded, mkfs.btrfs never ran) and prints actionable escape instructions
-# instead of a cryptic mount error.
+# Intent: Verify `braid recover` clears a bootstrap crash (LUKS format
+# succeeded, mkfs.btrfs never ran) and names the disk to wipe, instead of
+# failing to mount a pool that does not exist.
 #
 # Why it exists: First-time users are the most likely to hit a crash during
-# bootstrap (unfamiliar setup, experimenting). The detection logic in
-# recover.rs probes each target device with `btrfs filesystem show` to
-# confirm no superblock exists before printing the escape message — this
-# probe path is untested end-to-end.
+# bootstrap (unfamiliar setup, experimenting). Recover opens each formatted
+# disk and probes its mapper with `btrfs filesystem show` before it clears
+# the journal; that probe path needs a real end-to-end run.
 #
 # Scenario: A single-disk bootstrap add was interrupted after LUKS format
 # but before mkfs.btrfs. The disk has a LUKS header but no btrfs inside.
 # A pending-op.json with empty pre_membership is injected to simulate the
-# crash. `braid recover` should open LUKS, fail to mount, probe the mapper,
-# confirm NoBtrfs, and print escape instructions naming the pending-op.json
-# path, the disk's by-id path, and wipefs.
+# crash. `braid recover` should open LUKS, find no btrfs, close the mapper,
+# clear the journal, and name the disk's by-id path and wipefs.
 { braid }:
 {
   name = "recover-bootstrap-crash";

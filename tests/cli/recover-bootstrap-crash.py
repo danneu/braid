@@ -1,23 +1,22 @@
-# Test: bootstrap crash recovery (escape instructions)
+# Test: bootstrap crash recovery (clear an uncommitted bootstrap)
 #
-# Intent: Verify `braid recover` detects a bootstrap crash and prints
-#   actionable escape instructions instead of a cryptic mount error.
+# Intent: Verify `braid recover` clears a bootstrap add that luksFormat
+#   wrote but mkfs.btrfs never reached, closes the mapper it opened to
+#   check, and names the disk to wipe.
 #
-# Why it exists: `execute_recover_initial_open` has special handling for
-#   bootstrap crashes (empty pre_membership + MountFailed + NoBtrfs probe
-#   on target disks).
-#   This path is covered by 4 Rust unit tests with mocked runners, but no VM
-#   test exercises it end-to-end against real LUKS + btrfs filesystem show.
-#   A regression here would leave first-time users stranded with an opaque
-#   mount error and no documented way out.
+# Why it exists: `cli/src/recover.rs#plan_bootstrap_recovery` decides this
+#   case before mount planning by opening each formatted disk and asking
+#   `btrfs filesystem show` whether its mapper holds btrfs. Rust unit tests
+#   cover it with mocked runners; this test runs it against real LUKS and
+#   btrfs-progs. Before finding 261022-1230-002, recover failed here and
+#   told first-time users to delete pending-op.json by hand.
 #
 # Scenario: A single-disk bootstrap add was interrupted after LUKS format
 #   but before mkfs.btrfs. The disk has a valid LUKS header but no btrfs
 #   filesystem inside. A pending-op.json with empty pre_membership is
-#   injected. `braid recover` opens LUKS, fails to mount (no superblock),
-#   probes the mapper with `btrfs filesystem show`, confirms NoBtrfs, and
-#   prints escape instructions naming the pending-op.json path, the disk's
-#   by_id path, and wipefs.
+#   injected. `braid recover` opens LUKS, finds no btrfs on the mapper,
+#   closes it, clears the journal, and names the disk's by-id path and
+#   wipefs.
 
 import json
 import shlex
@@ -85,20 +84,17 @@ with subtest("Inject bootstrap journal"):
     # Ensure no pool.json exists (fresh system)
     machine.succeed("test ! -f /var/lib/braid/pool.json")
 
-# --- Phase 3: braid recover must fail with escape instructions ---
+# --- Phase 3: braid recover clears the uncommitted bootstrap ---
 
-with subtest("braid recover prints bootstrap escape instructions"):
+with subtest("braid recover clears the journal and names the disk to wipe"):
     exit_code, output = machine.execute(
         f"printf '%s\\n' {pq} | braid recover --passphrase-stdin 2>&1"
     )
-    assert exit_code != 0, (
-        f"braid recover should fail for bootstrap crash, but got exit {exit_code}"
+    assert exit_code == 0, (
+        f"braid recover should clear an uncommitted bootstrap, got exit {exit_code}: {output}"
     )
-    assert "bootstrap add was interrupted" in output, (
-        f"Expected 'bootstrap add was interrupted' in output, got: {output}"
-    )
-    assert "pending-op.json" in output, (
-        f"Expected 'pending-op.json' in output, got: {output}"
+    assert "pending-op.json cleared" in output, (
+        f"Expected 'pending-op.json cleared' in output, got: {output}"
     )
     assert "wipefs" in output, (
         f"Expected 'wipefs' in output, got: {output}"
@@ -109,12 +105,11 @@ with subtest("braid recover prints bootstrap escape instructions"):
 
 # --- Phase 4: Verify state ---
 
-with subtest("LUKS mapper was closed after failed recover"):
+with subtest("LUKS mapper recover opened to check was closed"):
     machine.fail("test -e /dev/mapper/braid-disk1")
 
-with subtest("No state mutation after bootstrap crash"):
-    # Journal preserved — user needs it to follow escape instructions
-    machine.succeed("test -f /var/lib/braid/pending-op.json")
+with subtest("Journal cleared, no pool created"):
+    machine.fail("test -f /var/lib/braid/pending-op.json")
 
     # pool.json must NOT exist — no pool was ever created
     machine.fail("test -f /var/lib/braid/pool.json")

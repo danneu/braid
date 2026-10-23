@@ -8,7 +8,9 @@ use crate::filesystem::Filesystem;
 use crate::inhibit::AcquireSleepInhibitor;
 use crate::journal::{self, Journal};
 use crate::luks::{self, BackingPathResolver, VerifyOutcome};
-use crate::mapper_close::{CloseContext, close_mapper_best_effort, emit_close_progress};
+use crate::mapper_close::{
+    CloseContext, TrackedMapper, close_mapper_best_effort, emit_close_progress,
+};
 use crate::membership::{
     self, DiskMember, LiveBinding, LiveBindingError, LuksUuidMap, MemberBinding, PoolMembership,
 };
@@ -302,6 +304,13 @@ struct RecoverWorkPlan {
 
 #[derive(Debug)]
 enum RecoverWorkAction {
+    /// A bootstrap add that stopped before mkfs.btrfs: there is no pool, so
+    /// recover only clears the journal. `formatted` lists the disks
+    /// luksFormat wrote, sorted by name, which the operator wipes before
+    /// re-running add. Terminal; nothing is opened or mounted.
+    ClearUncommittedBootstrap {
+        formatted: Vec<(DiskName, ByIdPath)>,
+    },
     InitialOpenPool,
     WaitForKernelReplace,
     RemountCycle {
@@ -325,6 +334,10 @@ enum RecoverCompletion {
         /// Targets the dry-run probe found committed, read from the live
         /// binding; `None` when the pool was not mounted to probe.
         committed_targets: Option<std::collections::BTreeSet<LuksUuid>>,
+        /// Fresh targets whose disk read as not LUKS at plan time, which
+        /// recover drops instead of replaying; see
+        /// `drop_never_formatted_add_targets`.
+        never_formatted: std::collections::BTreeSet<LuksUuid>,
         owed_balance: OwedRaid1Balance,
     },
     AddPostBalance {
@@ -396,6 +409,28 @@ impl RecoverWorkPlan {
 impl RecoverWorkAction {
     fn render_into(&self, plan: &RecoverWorkPlan, steps: &mut Vec<Step>) {
         match self {
+            RecoverWorkAction::ClearUncommittedBootstrap { formatted } => {
+                let detail = if formatted.is_empty() {
+                    "no disk was formatted".to_owned()
+                } else {
+                    format!(
+                        "wipe the formatted disks before re-running braid add: {}",
+                        formatted
+                            .iter()
+                            .map(|(name, _)| name.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                };
+                steps.push(Step {
+                    risk: "safe",
+                    description: format!(
+                        "clear pending-op.json -> {} (bootstrap add stopped before mkfs.btrfs; {detail})",
+                        plan.pending_op_path.display()
+                    ),
+                    commands: vec![],
+                });
+            }
             RecoverWorkAction::InitialOpenPool => {
                 if let Some(open_plan) = &plan.open_plan {
                     steps.extend(mount::compile_open_steps(
@@ -521,6 +556,10 @@ impl RecoverWorkAction {
         params: &RecoverParams<'_>,
     ) -> Result<bool, RecoverError> {
         match self {
+            RecoverWorkAction::ClearUncommittedBootstrap { formatted } => {
+                clear_uncommitted_bootstrap(params.paths, formatted)?;
+                Ok(true)
+            }
             RecoverWorkAction::InitialOpenPool => {
                 execute_recover_initial_open(plan, state, runner, fs, params)?;
                 Ok(false)
@@ -576,6 +615,7 @@ impl RecoverCompletion {
                 targets,
                 all_targets_already_live,
                 committed_targets,
+                never_formatted,
                 owed_balance,
             } => {
                 render_add_pool_mutation_recovery_steps(
@@ -584,8 +624,19 @@ impl RecoverCompletion {
                     targets,
                     *all_targets_already_live,
                     committed_targets.as_ref(),
+                    never_formatted,
                 );
-                render_recovery_tail(plan, steps, None, Some(*owed_balance));
+                let all_dropped = targets.keys().all(|uuid| {
+                    never_formatted.contains(uuid)
+                        && !committed_targets
+                            .as_ref()
+                            .is_some_and(|committed| committed.contains(uuid))
+                });
+                if all_dropped {
+                    render_uncommitted_add_tail(plan, steps);
+                } else {
+                    render_recovery_tail(plan, steps, None, Some(*owed_balance));
+                }
             }
             RecoverCompletion::AddPostBalance { owed_balance } => {
                 render_recovery_tail(plan, steps, None, Some(*owed_balance));
@@ -685,6 +736,7 @@ impl RecoverCompletion {
         match self {
             RecoverCompletion::AddPoolMutation {
                 targets,
+                never_formatted,
                 owed_balance,
                 ..
             } => execute_add_pool_mutation_recovery(
@@ -700,6 +752,7 @@ impl RecoverCompletion {
                     pool,
                     owed_balance: *owed_balance,
                 },
+                never_formatted,
             ),
             RecoverCompletion::AddPostBalance { owed_balance } => {
                 execute_add_post_balance_recovery(
@@ -890,6 +943,7 @@ fn render_add_pool_mutation_recovery_steps(
     targets: &LuksUuidMap<journal::AddJournalTarget>,
     all_targets_already_live: bool,
     committed_targets: Option<&std::collections::BTreeSet<LuksUuid>>,
+    never_formatted: &std::collections::BTreeSet<LuksUuid>,
 ) {
     steps.push(Step {
         risk: "safe",
@@ -925,6 +979,18 @@ fn render_add_pool_mutation_recovery_steps(
                 risk: "safe",
                 description: format!(
                     "replay {kind} {label} (skipped: target already live in pool)"
+                ),
+                commands: vec![],
+            });
+            continue;
+        }
+        if never_formatted.contains(uuid) {
+            steps.push(Step {
+                risk: "safe",
+                description: format!(
+                    "drop fresh add target {} from pending-op.json (luksFormat never wrote it; \
+                     refused if btrfs reports a missing devid no pre-operation member records)",
+                    target.by_id
                 ),
                 commands: vec![],
             });
@@ -976,17 +1042,11 @@ fn render_add_pool_mutation_recovery_steps(
                     commands,
                 });
             }
+            // `extra_opts` is unread: recover never formats a disk.
             journal::AddJournalMode::FreshLuks {
-                extra_opts,
-                enroll_key_file,
+                enroll_key_file, ..
             } => {
-                let label = config::luks_label_for(&target.name);
-                let mut commands = vec![CmdRequest::CryptsetupLuksFormat {
-                    device: target.by_id.as_str().to_owned(),
-                    uuid: uuid.clone(),
-                    label,
-                    extra_opts: extra_opts.clone(),
-                }];
+                let mut commands = Vec::new();
                 if let Some(key_file) = enroll_key_file {
                     commands.push(CmdRequest::CryptsetupLuksAddKeyFile {
                         device: target.by_id.as_str().to_owned(),
@@ -1011,10 +1071,10 @@ fn render_add_pool_mutation_recovery_steps(
                 });
                 let expected_label = config::luks_label_for(&target.name);
                 let fresh_conditional_suffix = format!(
-                    "{conditional_suffix} (the LUKS format command is also skipped at runtime if the disk already shows a LUKS header with the journaled UUID and the '{expected_label}' label)"
+                    "{conditional_suffix} (refused at runtime unless the disk shows a LUKS header with the journaled UUID and the '{expected_label}' label)"
                 );
                 steps.push(Step {
-                    risk: "destructive",
+                    risk: "safe",
                     description: format!(
                         "replay fresh add target {}{fresh_conditional_suffix}",
                         target.by_id
@@ -1024,6 +1084,62 @@ fn render_add_pool_mutation_recovery_steps(
             }
         }
     }
+}
+
+/// Dry-run tail for a live add whose every target luksFormat never wrote: the
+/// rows `drop_never_formatted_add_targets` runs when it rolls the add back.
+fn render_uncommitted_add_tail(plan: &RecoverWorkPlan, steps: &mut Vec<Step>) {
+    steps.push(Step {
+        risk: "safe",
+        description: format!(
+            "write pre-operation pool.json -> {} (add did not commit)",
+            plan.pool_json_path.display()
+        ),
+        commands: vec![],
+    });
+    steps.push(Step {
+        risk: "safe",
+        description: format!(
+            "clear pending-op.json -> {}",
+            plan.pending_op_path.display()
+        ),
+        commands: vec![],
+    });
+}
+
+/// Finish a bootstrap add that stopped before mkfs.btrfs: clear the journal
+/// and name the disks luksFormat wrote. pool.json stays as it is, since
+/// bootstrap add writes it only after mkfs.
+fn clear_uncommitted_bootstrap(
+    paths: &StatePaths,
+    formatted: &[(DiskName, ByIdPath)],
+) -> Result<(), RecoverError> {
+    journal::clear_journal(paths).map_err(|e| RecoverError::Journal(e.to_string()))?;
+    eprintln!("{}", uncommitted_bootstrap_message(formatted));
+    Ok(())
+}
+
+/// What recover tells the operator after it clears an uncommitted bootstrap
+/// journal: either nothing changed, or which disks still carry the LUKS
+/// container braid wrote and how to wipe them.
+fn uncommitted_bootstrap_message(formatted: &[(DiskName, ByIdPath)]) -> String {
+    if formatted.is_empty() {
+        return "bootstrap add stopped before luksFormat wrote any disk, so nothing changed. \
+                pending-op.json cleared. Re-run braid add to retry."
+            .to_owned();
+    }
+    let disks: Vec<String> = formatted
+        .iter()
+        .map(|(name, by_id)| format!("  {name} ({by_id})"))
+        .collect();
+    format!(
+        "bootstrap add stopped before mkfs.btrfs created the pool, so there is no pool to \
+         recover. pending-op.json cleared.\n\
+         braid add refuses a braid-labeled disk with no btrfs, so wipe the LUKS container \
+         braid wrote on each of these disks before re-running braid add:\n{}\n  \
+         e.g.: sudo wipefs -a /dev/disk/by-id/<device>",
+        disks.join("\n")
+    )
 }
 
 fn render_recovery_tail(
@@ -1158,50 +1274,9 @@ fn execute_recover_initial_open<R: CommandRunner + Sync, F: Filesystem + ?Sized>
             return Err(e.into());
         }
         Err(InitialOpenFailure::Unlock(failure)) => {
-            // Bootstrap mount failure: probe the target devices to confirm
-            // no btrfs superblock exists -- only then is it safe to advise
-            // wiping.
-            if plan.journal.is_bootstrap_add()
-                && let mount::MountError::MountFailed(_) = &failure.error
-                && let journal::OpKind::Add { targets, .. } = &plan.journal.op
-            {
-                let all_no_btrfs = targets.iter().all(|(_, target)| {
-                    let mapper = config::mapper_name(&target.name).dev_path();
-                    match runner.run(&CmdRequest::BtrfsFilesystemShowTarget { target: mapper }) {
-                        Ok(raw) => matches!(classify_btrfs_probe(&raw), DeviceBtrfsProbe::NoBtrfs),
-                        Err(_) => false,
-                    }
-                });
-                let _ = mount::close_opened_mappers(
-                    runner,
-                    params.sleeper,
-                    fs,
-                    &failure.opened_mappers,
-                    color_enabled_for_stderr(),
-                );
-                if all_no_btrfs {
-                    let disk_list: Vec<_> = plan
-                        .admission_membership
-                        .iter()
-                        .map(|(_, m)| format!("  {} ({})", m.name, m.by_id))
-                        .collect();
-                    return Err(RecoverError::Failed(format!(
-                        "bootstrap add was interrupted before the filesystem was \
-                         created.\n\
-                         The pool does not exist yet, so there is nothing to \
-                         recover.\n\n\
-                         To return to a clean state:\n\
-                         1. rm {}\n\
-                         2. Wipe the LUKS container from each disk that was being \
-                            added:\n{}\n\
-                            e.g.: wipefs -a /dev/disk/by-id/<device>\n\
-                         3. Re-run braid add",
-                        params.paths.pending_op_json().display(),
-                        disk_list.join("\n"),
-                    )));
-                }
-                return Err(failure.error.into());
-            }
+            // A bootstrap that never reached mkfs.btrfs was cleared in
+            // `plan_bootstrap_recovery` before this mount, so a mount failure
+            // here is a real one.
             let _ = mount::close_opened_mappers(
                 runner,
                 params.sleeper,
@@ -1408,8 +1483,39 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             return Err(PlanFailure::with_notes(notes, RecoverError::Membership(e)));
         }
     };
-    let mount_membership = mount_membership_for_recover(&journal, &admission_membership);
     let mut pre_resolved_credential = None;
+
+    // A bootstrap add that never reached mkfs.btrfs has no pool to mount, so
+    // it is decided before mount planning, which would refuse it.
+    if let journal::OpKind::Add {
+        phase: journal::AddPhase::PoolMutation,
+        targets,
+    } = &journal.op
+        && journal.is_bootstrap_add()
+    {
+        match plan_bootstrap_recovery(runner, fs, params, targets) {
+            Ok(BootstrapRecovery::Uncommitted { formatted }) => {
+                let work_plan = RecoverWorkPlan {
+                    open_plan: None,
+                    pre_resolved_credential: None,
+                    journal,
+                    admission_membership,
+                    mount_point: params.config.mount_point().clone(),
+                    pool_json_path: params.paths.pool_json(),
+                    pending_op_path: params.paths.pending_op_json(),
+                    luks_headers_dir: params.paths.luks_headers_dir(),
+                    actions: vec![RecoverWorkAction::ClearUncommittedBootstrap { formatted }],
+                };
+                return Ok(RecoverPlan { notes, work_plan });
+            }
+            Ok(BootstrapRecovery::Mount { credential, note }) => {
+                pre_resolved_credential = credential;
+                notes.extend(note);
+            }
+            Err(e) => return Err(PlanFailure::with_notes(notes, e)),
+        }
+    }
+    let mount_membership = mount_membership_for_recover(&journal, &admission_membership);
 
     if let journal::OpKind::Add {
         phase: journal::AddPhase::PoolMutation,
@@ -1418,9 +1524,12 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         && !journal.is_bootstrap_add()
         && !params.dry_run
     {
-        // Preflight add-target reconciliation -- the one deliberate mutation in the
-        // planner. Gated by `!dry_run` so preview stays side-effect-free; see
-        // `discover_add_targets_before_mount` for why it must precede the mount.
+        // Preflight add-target reconciliation -- one of the planner's two
+        // deliberate mutations (ADR 022). `plan_bootstrap_recovery` above is
+        // the other; it runs only for a bootstrap journal, so at most one of
+        // them runs per recover. Gated by `!dry_run` so preview stays
+        // side-effect-free; see `discover_add_targets_before_mount` for why it
+        // must precede the mount.
         match discover_add_targets_before_mount(runner, fs, params, &journal, targets) {
             Ok(credential) => pre_resolved_credential = credential,
             Err(e) => {
@@ -1604,6 +1713,15 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             phase: journal::AddPhase::PoolMutation,
             targets,
         } if !journal.is_bootstrap_add() => {
+            let never_formatted = match never_formatted_add_targets(
+                runner,
+                fs,
+                params.backing_path_resolver,
+                targets,
+            ) {
+                Ok(never_formatted) => never_formatted,
+                Err(e) => return Err(PlanFailure::with_notes(notes, e)),
+            };
             let committed_targets = match probed_live_pool.as_ref() {
                 Some(pool) => match committed_add_targets(pool, &admission_membership, targets) {
                     Ok(committed) => Some(committed),
@@ -1618,6 +1736,7 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
                 targets: targets.clone(),
                 all_targets_already_live,
                 committed_targets,
+                never_formatted,
                 owed_balance: OwedRaid1Balance::Grow,
             }
         }
@@ -2291,9 +2410,219 @@ fn probe_present_recover_target<R: CommandRunner, F: Filesystem + ?Sized>(
     }
 }
 
+/// How recover finishes an interrupted bootstrap add, decided before mount
+/// planning by `plan_bootstrap_recovery`.
+enum BootstrapRecovery {
+    /// mkfs.btrfs never ran, so there is no pool: clear the journal.
+    /// `formatted` names the disks luksFormat wrote, sorted by name.
+    Uncommitted {
+        formatted: Vec<(DiskName, ByIdPath)>,
+    },
+    /// mkfs.btrfs may have run: open and mount the pool. `credential` is the
+    /// one the btrfs check resolved, so the mount does not prompt again.
+    Mount {
+        credential: Option<OpenCredential>,
+        note: Option<PreviewNote>,
+    },
+}
+
+/// The bootstrap rule. mkfs.btrfs is the bootstrap commit point, and add runs
+/// it only after it formats every target, so a target with no LUKS header, or
+/// formatted targets with no btrfs among them, prove mkfs never ran. A pool
+/// mounted at the mount point proves it did. Every target is probed: an
+/// absent one, or a LUKS one without the braid label and journaled UUID,
+/// refuses with the journal kept. Telling formatted targets from a pool needs
+/// them open, so outside --dry-run this opens each closed formatted target,
+/// checks its mapper for btrfs, and closes what it opened. Like
+/// `discover_add_targets_before_mount`, that is a deliberate planner-time
+/// mutation (ADR 022).
+fn plan_bootstrap_recovery<R: CommandRunner, F: Filesystem + ?Sized>(
+    runner: &R,
+    fs: &F,
+    params: &RecoverParams<'_>,
+    targets: &LuksUuidMap<journal::AddJournalTarget>,
+) -> Result<BootstrapRecovery, RecoverError> {
+    let mount_path = BootstrapRecovery::Mount {
+        credential: None,
+        note: None,
+    };
+    if pool_mount::confirmed_mount(runner, params.config.mount_point())?.is_some() {
+        return Ok(mount_path);
+    }
+    // Bootstrap add formats every target; a journal that says otherwise is
+    // not one this rule can read, so it takes the mount path unchanged.
+    if targets
+        .iter()
+        .any(|(_, target)| !matches!(target.mode, journal::AddJournalMode::FreshLuks { .. }))
+    {
+        return Ok(mount_path);
+    }
+
+    let mut sorted: Vec<(&LuksUuid, &journal::AddJournalTarget)> = targets.iter().collect();
+    sorted.sort_by(|a, b| a.1.name.cmp(&b.1.name));
+    let mut formatted: Vec<(&journal::AddJournalTarget, bool)> = Vec::new();
+    for (target_uuid, target) in sorted {
+        let state = probe_present_recover_target(
+            runner,
+            fs,
+            RecoverTargetOp::Add,
+            &target.name,
+            &target.by_id,
+            params.backing_path_resolver,
+        )?;
+        let PresentConfigDiskState::PresentLuks {
+            uuid,
+            label,
+            mapper_open,
+        } = state
+        else {
+            continue;
+        };
+        let expected_label = config::luks_label_for(&target.name);
+        if label.as_deref() != Some(expected_label.as_str()) {
+            return Err(RecoverError::Failed(format!(
+                "recover add target '{}' has unexpected LUKS label",
+                target.name
+            )));
+        }
+        if &uuid != target_uuid {
+            return Err(RecoverError::Failed(add_recovery_uuid_mismatch_message(
+                &target.by_id,
+                target_uuid,
+                &uuid,
+                "fresh-luks",
+            )));
+        }
+        formatted.push((target, mapper_open));
+    }
+    let formatted_names = |formatted: &[(&journal::AddJournalTarget, bool)]| {
+        formatted
+            .iter()
+            .map(|(target, _)| (target.name.clone(), target.by_id.clone()))
+            .collect()
+    };
+    if formatted.is_empty() {
+        return Ok(BootstrapRecovery::Uncommitted {
+            formatted: Vec::new(),
+        });
+    }
+    if params.dry_run {
+        return Ok(BootstrapRecovery::Mount {
+            credential: None,
+            note: Some(PreviewNote::Info(
+                "dry-run does not open the formatted bootstrap disks; if none of them \
+                 carries btrfs, recover clears pending-op.json instead of mounting"
+                    .to_owned(),
+            )),
+        });
+    }
+
+    let mut credential: Option<OpenCredential> = None;
+    let mut opened: Vec<TrackedMapper> = Vec::new();
+    let check = (|| -> Result<bool, RecoverError> {
+        let mut any_btrfs = false;
+        for (target, mapper_open) in &formatted {
+            let mapper = config::mapper_name(&target.name);
+            if !mapper_open {
+                if credential.is_none() {
+                    credential = Some(
+                        credential::resolve_credential(
+                            params.passphrase_stdin,
+                            params.passphrase_file,
+                            None,
+                        )
+                        .map_err(|e| RecoverError::Failed(format!("recover: {e}")))?,
+                    );
+                }
+                let passphrase = open_credential_passphrase(
+                    credential.as_ref().expect("credential was resolved above"),
+                    "bootstrap add recovery",
+                )?;
+                if luks::ensure_luks_open(
+                    runner,
+                    fs,
+                    &target.name,
+                    &target.by_id,
+                    params.backing_path_resolver,
+                    passphrase,
+                )? == luks::OpenOutcome::Opened
+                {
+                    opened.push(TrackedMapper {
+                        name: target.name.clone(),
+                        mapper: mapper.clone(),
+                    });
+                }
+            }
+            // Only a clear "no btrfs" counts as unwritten; a btrfs signature,
+            // an unclear probe, or a probe failure takes the mount path.
+            let no_btrfs = runner
+                .run(&CmdRequest::BtrfsFilesystemShowTarget {
+                    target: mapper.dev_path(),
+                })
+                .is_ok_and(|raw| matches!(classify_btrfs_probe(&raw), DeviceBtrfsProbe::NoBtrfs));
+            if !no_btrfs {
+                any_btrfs = true;
+            }
+        }
+        Ok(any_btrfs)
+    })();
+    let closed = mount::close_opened_mappers(
+        runner,
+        params.sleeper,
+        fs,
+        &opened,
+        color_enabled_for_stderr(),
+    );
+    if check? {
+        return Ok(BootstrapRecovery::Mount {
+            credential,
+            note: None,
+        });
+    }
+    // The journal is cleared next, so a mapper left open here would sit on a
+    // disk the operator is told to wipe.
+    closed.map_err(|e| {
+        RecoverError::Failed(format!(
+            "bootstrap add recovery could not close a mapper it opened to check for btrfs: {e}"
+        ))
+    })?;
+    Ok(BootstrapRecovery::Uncommitted {
+        formatted: formatted_names(&formatted),
+    })
+}
+
+/// The fresh add targets whose disk reads as not LUKS now: luksFormat never
+/// wrote them. `plan_recover` records them so the dry-run shows each drop,
+/// and `drop_never_formatted_add_targets` probes each again before dropping.
+fn never_formatted_add_targets<R: CommandRunner, F: Filesystem + ?Sized>(
+    runner: &R,
+    fs: &F,
+    backing_path_resolver: &dyn BackingPathResolver,
+    targets: &LuksUuidMap<journal::AddJournalTarget>,
+) -> Result<std::collections::BTreeSet<LuksUuid>, RecoverError> {
+    let mut never_formatted = std::collections::BTreeSet::new();
+    for (uuid, target) in targets {
+        if !matches!(target.mode, journal::AddJournalMode::FreshLuks { .. }) {
+            continue;
+        }
+        let probed = probe::probe_config_disk(
+            runner,
+            fs,
+            &target.name,
+            &target.by_id,
+            backing_path_resolver,
+        )?;
+        if matches!(probed.state, ConfigDiskState::PresentNotLuks) {
+            never_formatted.insert(uuid.clone());
+        }
+    }
+    Ok(never_formatted)
+}
+
 /// Preflight for an interrupted existing-pool add: may open closed validated
 /// add-targets -- resolving the unlock credential once when it does -- and scan
-/// them before mount. The deliberate `!dry_run`-gated exception to Decision 022.
+/// them before mount. One of the two `!dry_run`-gated exceptions to Decision
+/// 022; `plan_bootstrap_recovery` is the other.
 fn discover_add_targets_before_mount<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
@@ -2608,7 +2937,196 @@ struct AddPoolReplayCtx<'a> {
     owed_balance: OwedRaid1Balance,
 }
 
+/// Finish an interrupted live add. Its first step drops each fresh target
+/// luksFormat never wrote, before any passphrase, inhibitor, or replay; the
+/// replay then reads the journal that step leaves.
 fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
+    runner: &R,
+    fs: &F,
+    by_id_resolver: &dyn ByIdResolver,
+    params: &RecoverParams<'_>,
+    ctx: AddPoolReplayCtx<'_>,
+    never_formatted: &std::collections::BTreeSet<LuksUuid>,
+) -> Result<(), RecoverError> {
+    let rewritten =
+        match drop_never_formatted_add_targets(runner, fs, params, &ctx, never_formatted)? {
+            AddTargetDrop::Kept => None,
+            AddTargetDrop::RolledBack => return Ok(()),
+            AddTargetDrop::Rewritten(journal) => Some(*journal),
+        };
+    let Some(journal) = &rewritten else {
+        return replay_add_pool_mutation(runner, fs, by_id_resolver, params, ctx);
+    };
+    // Every later gate binds the live pool to the admission membership, so it
+    // must come from the rewritten journal: a dropped target left in it would
+    // never bind, and recover would refuse on every run.
+    let union = recovery_admission_membership(journal)?;
+    let journal::OpKind::Add { targets, .. } = &journal.op else {
+        return Err(RecoverError::Journal(
+            "rewritten add journal is not an add".into(),
+        ));
+    };
+    replay_add_pool_mutation(
+        runner,
+        fs,
+        by_id_resolver,
+        params,
+        AddPoolReplayCtx {
+            credential: ctx.credential,
+            journal,
+            union: &union,
+            targets,
+            pool: ctx.pool,
+            owed_balance: ctx.owed_balance,
+        },
+    )
+}
+
+/// What `drop_never_formatted_add_targets` did to an interrupted live add.
+enum AddTargetDrop {
+    /// No target to drop; the journal stands.
+    Kept,
+    /// Some targets dropped; recovery goes on with this journal. Boxed
+    /// because a journal dwarfs the other variants.
+    Rewritten(Box<Journal>),
+    /// Every target dropped: pool.json holds the pre-add membership and the
+    /// journal is cleared.
+    RolledBack,
+}
+
+/// Drop each fresh add target luksFormat never wrote. Recover never formats
+/// a disk, so a format that failed cannot fail again on every run; the
+/// operator re-runs `braid add` for a dropped disk. A drop needs proof that
+/// btrfs does not hold the disk: it is not committed, it still reads as not
+/// LUKS, and every btrfs-MISSING devid with no open mapper is one a
+/// pre-operation member records (`check_drop_orphans_no_device`). Otherwise
+/// the disk may be one btrfs already added whose header now reads badly, so
+/// recover refuses with the journal kept. The drop rewrites both the add
+/// targets and target_membership, so the later gates see the reduced set and
+/// a crash after the rewrite reruns cleanly. When no target remains nothing
+/// committed, so this saves pre_membership and clears the journal, as
+/// `finish_uncommitted_replace_recovery` does.
+fn drop_never_formatted_add_targets<R: CommandRunner, F: Filesystem + ?Sized>(
+    runner: &R,
+    fs: &F,
+    params: &RecoverParams<'_>,
+    ctx: &AddPoolReplayCtx<'_>,
+    never_formatted: &std::collections::BTreeSet<LuksUuid>,
+) -> Result<AddTargetDrop, RecoverError> {
+    let committed = committed_add_targets(&ctx.pool, ctx.union, ctx.targets)?;
+    let mut dropped: Vec<(&LuksUuid, &journal::AddJournalTarget)> = Vec::new();
+    for (uuid, target) in ctx.targets {
+        if !never_formatted.contains(uuid)
+            || committed.contains(uuid)
+            || !matches!(target.mode, journal::AddJournalMode::FreshLuks { .. })
+        {
+            continue;
+        }
+        let probed = probe::probe_config_disk(
+            runner,
+            fs,
+            &target.name,
+            &target.by_id,
+            params.backing_path_resolver,
+        )?;
+        if matches!(probed.state, ConfigDiskState::PresentNotLuks) {
+            dropped.push((uuid, target));
+        }
+    }
+    if dropped.is_empty() {
+        return Ok(AddTargetDrop::Kept);
+    }
+    dropped.sort_by(|a, b| a.1.name.cmp(&b.1.name));
+    check_drop_orphans_no_device(&ctx.pool, ctx.union, &ctx.journal.pre_membership, &dropped)?;
+
+    let mut targets = ctx.targets.clone();
+    let mut target_membership = ctx.journal.target_membership.clone();
+    for (uuid, target) in &dropped {
+        targets.remove(uuid);
+        target_membership.remove_by_uuid(uuid);
+        eprintln!(
+            "note: add target '{}' ({}) was never formatted; dropping it from the \
+             interrupted add. Re-run braid add to add it.",
+            target.name, target.by_id
+        );
+    }
+    if targets.is_empty() {
+        membership::save_membership(&ctx.journal.pre_membership, params.paths)?;
+        journal::clear_journal(params.paths).map_err(|e| RecoverError::Journal(e.to_string()))?;
+        eprintln!(
+            "add did not complete -- luksFormat wrote no target, so the pool keeps its \
+             pre-add membership. pending-op.json cleared. Re-run braid add to retry."
+        );
+        return Ok(AddTargetDrop::RolledBack);
+    }
+    let journal = journal::rewrite_journal(
+        params.paths,
+        ctx.journal,
+        journal::OpKind::Add {
+            phase: journal::AddPhase::PoolMutation,
+            targets,
+        },
+        Some(target_membership),
+    )
+    .map_err(|e| RecoverError::Journal(e.to_string()))?;
+    Ok(AddTargetDrop::Rewritten(Box::new(journal)))
+}
+
+/// Refuses a drop when btrfs may hold a dropped disk under a devid braid
+/// cannot name: a btrfs-MISSING devid with no open mapper that no
+/// pre-operation member records, or a device btrfs counts that the probe
+/// does not show. A degraded pool whose missing member has no recorded devid
+/// refuses here, which fails closed.
+fn check_drop_orphans_no_device(
+    pool: &PoolState,
+    union: &PoolMembership,
+    pre_membership: &PoolMembership,
+    dropped: &[(&LuksUuid, &journal::AddJournalTarget)],
+) -> Result<(), RecoverError> {
+    let binding = membership::bind_live_pool(pool, union)
+        .map_err(|e| live_binding_error(e, ADMISSION_SCOPE))?;
+    let unnamed: Vec<Devid> = pool
+        .devid_only_missing()
+        .filter(|devid| {
+            !pre_membership.iter().any(|(uuid, _)| {
+                binding.member(uuid) == Some(MemberBinding::MissingByDevid(*devid))
+            })
+        })
+        .collect();
+    let shown = pool.devices.len() + pool.null_underlying.len() + pool.devid_only_missing().count();
+    let detail = if !unnamed.is_empty() {
+        format!(
+            "missing devid(s) {} that no pre-operation member records",
+            unnamed
+                .iter()
+                .map(|devid| devid.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    } else if (shown as u64) < pool.total_devices {
+        format!(
+            "{} devices, but braid sees only {shown} of them",
+            pool.total_devices
+        )
+    } else {
+        return Ok(());
+    };
+    let names = dropped
+        .iter()
+        .map(|(_, target)| format!("'{}'", target.name))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(RecoverError::Failed(format!(
+        "recover cannot drop never-formatted add target(s) {names}: btrfs reports {detail}, \
+         so one of them could be a disk btrfs already holds. Reconnect the missing disk and \
+         re-run braid recover."
+    )))
+}
+
+/// Replay an interrupted live add from its journal: open and scan the
+/// formatted targets, add what btrfs does not hold yet, then hand off to the
+/// committed tail. Never formats a disk.
+fn replay_add_pool_mutation<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
     by_id_resolver: &dyn ByIdResolver,
@@ -2803,9 +3321,9 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
                     crate::pool::pool_add_device(runner, &mapper_path, mount_point, true)
                         .map_err(|e| RecoverError::Failed(format!("recover add replay: {e}")))?;
                 }
+                // `extra_opts` is unread: recover never formats a disk.
                 journal::AddJournalMode::FreshLuks {
-                    extra_opts,
-                    enroll_key_file,
+                    enroll_key_file, ..
                 } => {
                     let state = probe_present_recover_target(
                         runner,
@@ -2817,24 +3335,14 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
                     )?;
                     let expected_label = config::luks_label_for(&target.name);
                     match state {
+                        // Read as LUKS when recover planned, so it was not
+                        // dropped. A rerun probes again and drops it.
                         PresentConfigDiskState::PresentNotLuks => {
-                            // Same readiness gate as the live add, so a stray
-                            // mapper or a disk holder refuses with its advice
-                            // instead of a raw luksFormat error.
-                            let ready = luks::check_fresh_target_ready(
-                                runner,
-                                fs,
-                                &target.name,
-                                &target.by_id,
-                            )?;
-                            luks::luks_format(
-                                runner,
-                                ready,
-                                passphrase,
-                                target_uuid,
-                                &expected_label,
-                                extra_opts,
-                            )?;
+                            return Err(RecoverError::Failed(format!(
+                                "recover add target '{}' is no longer a LUKS device; recover \
+                                 never formats a disk, so it stops here",
+                                target.name
+                            )));
                         }
                         PresentConfigDiskState::PresentLuks { uuid, label, .. } => {
                             if label.as_deref() != Some(expected_label.as_str()) {
@@ -6582,6 +7090,7 @@ mod tests {
                 pool: pool_state_one_disk(),
                 owed_balance: OwedRaid1Balance::Grow,
             },
+            &std::collections::BTreeSet::new(),
         )
         .expect("live-add replay should finish with one prompt");
 
@@ -6645,6 +7154,7 @@ mod tests {
                 pool: pool_state_one_disk(),
                 owed_balance: OwedRaid1Balance::Grow,
             },
+            &std::collections::BTreeSet::new(),
         )
         .expect("live-add replay should finish");
 
@@ -6709,6 +7219,7 @@ mod tests {
                 pool: pool_state_one_disk(),
                 owed_balance: OwedRaid1Balance::Grow,
             },
+            &std::collections::BTreeSet::new(),
         )
         .expect("live-add replay should tolerate mapper drift");
 
@@ -6773,6 +7284,7 @@ mod tests {
                 pool: pool_state_disk1_and_disk2_devid4(),
                 owed_balance: OwedRaid1Balance::Grow,
             },
+            &std::collections::BTreeSet::new(),
         )
         .expect("all-live add recovery should finish");
 
@@ -6836,6 +7348,7 @@ mod tests {
                 pool: pool_state_disk1_and_drifted_disk2_devid4(),
                 owed_balance: OwedRaid1Balance::Grow,
             },
+            &std::collections::BTreeSet::new(),
         )
         .expect("all-live add recovery should tolerate mapper drift");
 
@@ -6972,6 +7485,7 @@ mod tests {
                 pool: pool_state_disk1_and_disk2_devid4(),
                 owed_balance: OwedRaid1Balance::Grow,
             },
+            &std::collections::BTreeSet::new(),
         )
         .expect("mixed add recovery should finish");
 
@@ -7177,6 +7691,7 @@ mod tests {
                 pool: pool_state_one_disk(),
                 owed_balance: OwedRaid1Balance::Grow,
             },
+            &std::collections::BTreeSet::new(),
         )
         .unwrap_err();
 
@@ -7541,6 +8056,7 @@ mod tests {
                 pool: pool_state_one_disk(),
                 owed_balance: OwedRaid1Balance::Grow,
             },
+            &std::collections::BTreeSet::new(),
         )
         .unwrap_err();
 
@@ -7599,6 +8115,7 @@ mod tests {
                 pool: pool_state_one_disk(),
                 owed_balance: OwedRaid1Balance::Grow,
             },
+            &std::collections::BTreeSet::new(),
         )
         .unwrap_err();
 
@@ -8551,6 +9068,7 @@ mod tests {
                 pool: pool_state_one_disk(),
                 owed_balance: OwedRaid1Balance::Grow,
             },
+            &std::collections::BTreeSet::new(),
         )
         .unwrap_err();
 
@@ -8624,6 +9142,7 @@ mod tests {
                 pool,
                 owed_balance: OwedRaid1Balance::Grow,
             },
+            &std::collections::BTreeSet::new(),
         )
         .unwrap_err();
 
@@ -8715,6 +9234,7 @@ mod tests {
                     pool: pool_state_one_disk(),
                     owed_balance: OwedRaid1Balance::Grow,
                 },
+                &std::collections::BTreeSet::new(),
             )
             .unwrap_err();
 
@@ -8957,6 +9477,7 @@ mod tests {
                 pool: pool_state_one_disk(),
                 owed_balance: OwedRaid1Balance::Grow,
             },
+            &std::collections::BTreeSet::new(),
         )
         .expect("committed fresh target should be adopted without replay");
 
@@ -9124,6 +9645,7 @@ mod tests {
                 pool: pool_state_one_disk(),
                 owed_balance: OwedRaid1Balance::Grow,
             },
+            &std::collections::BTreeSet::new(),
         )
         .expect("returned-disk replay should complete recovery");
 
@@ -9308,6 +9830,7 @@ mod tests {
                 pool: pool_state_one_disk(),
                 owed_balance: OwedRaid1Balance::Grow,
             },
+            &std::collections::BTreeSet::new(),
         )
         .expect("replay with enroll_key_file should complete");
 
@@ -9386,7 +9909,14 @@ mod tests {
         };
 
         let mut steps = Vec::new();
-        render_add_pool_mutation_recovery_steps(&plan, &mut steps, &targets, false, None);
+        render_add_pool_mutation_recovery_steps(
+            &plan,
+            &mut steps,
+            &targets,
+            false,
+            None,
+            &std::collections::BTreeSet::new(),
+        );
         let output = Step::render_dry_run(&steps);
 
         let lines: Vec<&str> = output.lines().collect();
@@ -9423,17 +9953,19 @@ mod tests {
     }
 
     // Intent: the FreshLuks recovery replay arm with `enroll_key_file:
-    //   Some(kf)` renders luksFormat -> luksAddKey -> luksHeaderBackup ->
-    //   open -> add, and the addKey carries the keyfile while the backup
-    //   carries the header path -- never the reverse.
+    //   Some(kf)` renders luksAddKey -> luksHeaderBackup -> open -> add with
+    //   no luksFormat row, and the addKey carries the keyfile while the
+    //   backup carries the header path -- never the reverse.
     // Why it exists: the FreshLuks render is the second of the two recover
     //   replay arms that emit an addKey/headerBackup pair into stringly
     //   `CmdRequest` fields by hand. The newtypes guard the function
     //   boundary, but a transposition at the terminal `.display()` still
     //   compiles; this pins both exact fields with distinct paths so such a
     //   swap fails a test.
-    // Scenario: a crash mid-`add --enroll DIR` against a fresh (non-LUKS)
-    //   disk; recovery replays the format + enrollment.
+    //   Recover never formats a disk (finding 261022-1230-002), so the
+    //   replay of a formatted fresh target starts at the enrollment.
+    // Scenario: a crash mid-`add --enroll DIR` after luksFormat wrote a
+    //   fresh disk; recovery replays the enrollment.
     #[test]
     fn render_add_recovery_fresh_luks_with_enroll_pins_keyfile_and_header_fields() {
         let targets = add_targets(vec![(
@@ -9461,7 +9993,14 @@ mod tests {
         };
 
         let mut steps = Vec::new();
-        render_add_pool_mutation_recovery_steps(&plan, &mut steps, &targets, false, None);
+        render_add_pool_mutation_recovery_steps(
+            &plan,
+            &mut steps,
+            &targets,
+            false,
+            None,
+            &std::collections::BTreeSet::new(),
+        );
         let output = Step::render_dry_run(&steps);
         let lines: Vec<&str> = output.lines().collect();
         let find = |needle: &str| -> usize {
@@ -9470,13 +10009,16 @@ mod tests {
                 .position(|line| line.contains(needle))
                 .unwrap_or_else(|| panic!("missing {needle:?} in:\n{output}"))
         };
-        let format = find("$ cryptsetup luksFormat");
+        assert!(
+            !output.contains("luksFormat"),
+            "recover must never render a luksFormat row; got:\n{output}"
+        );
         let addkey = find("$ cryptsetup luksAddKey");
         let backup = find("$ cryptsetup luksHeaderBackup");
         let open = find("$ cryptsetup open --type luks");
         assert!(
-            format < addkey && addkey < backup && backup < open,
-            "expected luksFormat({format}) < luksAddKey({addkey}) < luksHeaderBackup({backup}) < open({open}); got:\n{output}"
+            addkey < backup && backup < open,
+            "expected luksAddKey({addkey}) < luksHeaderBackup({backup}) < open({open}); got:\n{output}"
         );
         // Pin BOTH stringly fields with distinct keyfile and header paths.
         assert!(
@@ -9529,7 +10071,14 @@ mod tests {
         };
 
         let mut steps = Vec::new();
-        render_add_pool_mutation_recovery_steps(&plan, &mut steps, &targets, false, None);
+        render_add_pool_mutation_recovery_steps(
+            &plan,
+            &mut steps,
+            &targets,
+            false,
+            None,
+            &std::collections::BTreeSet::new(),
+        );
         let output = Step::render_dry_run(&steps);
         assert!(
             !output.contains("$ cryptsetup luksAddKey"),
@@ -9604,6 +10153,7 @@ mod tests {
                 pool: pool_state_one_disk(),
                 owed_balance: OwedRaid1Balance::Grow,
             },
+            &std::collections::BTreeSet::new(),
         )
         .expect("already-committed target should advance to balance recovery");
 
@@ -9680,6 +10230,7 @@ mod tests {
                 pool: pool_state_three_disks(),
                 owed_balance: OwedRaid1Balance::Grow,
             },
+            &std::collections::BTreeSet::new(),
         )
         .unwrap_err();
 
@@ -9822,6 +10373,7 @@ mod tests {
                     pool: pool_state_one_disk(),
                     owed_balance: OwedRaid1Balance::Grow,
                 },
+                &std::collections::BTreeSet::new(),
             )
             .unwrap_err();
             let msg = err.to_string();
@@ -9972,94 +10524,88 @@ mod tests {
         assert!(!f.paths.pool_json().exists());
     }
 
+    /// Journaled add of fresh disk2 plus fresh disk3, for the drop tests.
+    fn fresh_two_target_add_journal() -> journal::Journal {
+        let mut journal = fresh_pool_mutation_add_journal(Vec::new(), None);
+        let OpKind::Add { targets, .. } = &mut journal.op else {
+            unreachable!("test journal is Add");
+        };
+        targets
+            .insert(
+                uuid_for_name("disk3"),
+                add_target(
+                    "disk3",
+                    "/dev/disk/by-id/virtio-disk3",
+                    fresh_mode(Vec::new(), None),
+                ),
+            )
+            .expect("insert disk3 target");
+        journal.target_membership = membership_from(vec![
+            membership_entry("disk1", "/dev/disk/by-id/virtio-disk1", None, None),
+            membership_entry("disk2", "/dev/disk/by-id/virtio-disk2", None, None),
+            membership_entry("disk3", "/dev/disk/by-id/virtio-disk3", None, None),
+        ]);
+        journal
+    }
+
+    fn disk2_not_luks(runner: MockRunner) -> MockRunner {
+        runner.with_output(
+            CmdRequest::CryptsetupLuksUuid {
+                device: "/dev/disk/by-id/virtio-disk2".into(),
+            },
+            err_raw(
+                "cryptsetup luksUUID",
+                1,
+                "Device is not a valid LUKS device",
+            ),
+        )
+    }
+
+    fn assert_no_format_or_add(requests: &[CmdRequest]) {
+        assert!(
+            !requests.iter().any(|r| matches!(
+                r,
+                CmdRequest::CryptsetupLuksFormat { .. }
+                    | CmdRequest::CryptsetupLuksFormatTestArgs { .. }
+                    | CmdRequest::BtrfsDeviceAdd { .. }
+            )),
+            "recover must never format a disk or add a dropped one: {requests:?}"
+        );
+    }
+
+    // Intent: live-add recovery drops a fresh target luksFormat never wrote,
+    //   and when no target remains it saves the pre-add membership and
+    //   clears the journal, with no passphrase, open, format, or device add.
+    // Why it exists: finding 261022-1230-002. Recover used to replay the
+    //   journaled luksFormat argv, so an option cryptsetup rejected failed the
+    //   same way on every run and the pool stayed in recovery mode. Recover
+    //   now never formats a disk, and a target that still reads as not LUKS
+    //   never reached btrfs, so dropping it is safe.
+    // Scenario: a journal written before braid checked format options holds
+    //   disk2 with the typo `--use-randomm`; luksFormat refused it after the
+    //   journal was written, and the operator runs `braid recover`.
     #[test]
-    fn fresh_replay_formats_with_stored_opts_and_ignores_current_env() {
+    fn add_recovery_drops_never_formatted_target_and_rolls_back() {
         let f = PoolFixture::empty();
-        let stored_opts = vec![
-            "--pbkdf".into(),
-            "pbkdf2".into(),
-            "--label".into(),
-            "braid-disk2".into(),
-        ];
-        let journal = fresh_pool_mutation_add_journal(stored_opts.clone(), None);
+        let journal = fresh_pool_mutation_add_journal(vec!["--use-randomm".into()], None);
         journal::write_journal(&f.paths, &journal).unwrap();
         let union = test_recovery_admission_membership(&journal);
-        let targets = match &journal.op {
-            OpKind::Add { targets, .. } => targets,
-            _ => unreachable!("test journal is Add"),
+        let OpKind::Add { targets, .. } = &journal.op else {
+            unreachable!("test journal is Add");
         };
-
-        let inner = with_grow_balance_replay(with_two_disk_pool_probe(
-            MockRunner::default()
-                .with_output(
-                    CmdRequest::CryptsetupLuksUuid {
-                        device: "/dev/disk/by-id/virtio-disk2".into(),
-                    },
-                    err_raw(
-                        "cryptsetup luksUUID",
-                        1,
-                        "Device is not a valid LUKS device",
-                    ),
-                )
-                .with_output_stdin(
-                    CmdRequest::CryptsetupTestPassphrase {
-                        device: "/dev/vda".into(),
-                    },
-                    TEST_PASSPHRASE_BYTES.to_vec(),
-                    ok_raw_empty("cryptsetup open --test-passphrase"),
-                )
-                .with_output_stdin(
-                    CmdRequest::CryptsetupLuksFormat {
-                        device: "/dev/disk/by-id/virtio-disk2".into(),
-                        uuid: uuid_for_name("disk2"),
-                        label: config::luks_label_for(&disk_name("disk2")),
-                        extra_opts: LuksFormatExtraOpts::parse(&strip_legacy_managed_format_opts(
-                            stored_opts.clone(),
-                        ))
-                        .unwrap(),
-                    },
-                    TEST_PASSPHRASE_BYTES.to_vec(),
-                    ok_raw_empty("cryptsetup luksFormat"),
-                )
-                .with_output(
-                    CmdRequest::CryptsetupLuksHeaderBackup {
-                        device: "/dev/disk/by-id/virtio-disk2".into(),
-                        backup_path: f
-                            .paths
-                            .luks_headers_dir()
-                            .join("braid-disk2.luksheader.tmp")
-                            .display()
-                            .to_string(),
-                    },
-                    ok_raw_empty("cryptsetup luksHeaderBackup"),
-                )
-                .with_output_stdin(
-                    CmdRequest::CryptsetupLuksOpen {
-                        device: "/dev/disk/by-id/virtio-disk2".into(),
-                        mapper: MapperName::from_basename("braid-disk2".into()),
-                    },
-                    TEST_PASSPHRASE_BYTES.to_vec(),
-                    ok_raw_empty("cryptsetup open"),
-                )
-                .with_output(
-                    CmdRequest::BtrfsDeviceAdd {
-                        device: "/dev/mapper/braid-disk2".into(),
-                        mount_point: MountPoint::new("/mnt/storage".into()),
-                        force: false,
-                    },
-                    ok_raw_empty("btrfs device add"),
-                ),
-        ));
-        let harness =
-            RemountHarness::new(&["/dev/disk/by-id/virtio-disk2"], inner, &["braid-disk2"])
-                .with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111")
-                .with_luks_dm("braid-disk2", "22222222-2222-2222-2222-222222222222");
+        let runner = disk2_not_luks(MockRunner::default());
+        let fs = MockFs::new(&["/dev/disk/by-id/virtio-disk2"]);
         let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
-        let params = f.recover_params().build();
+        let params = f
+            .recover_params()
+            .passphrase_file(None)
+            .sleep_inhibitor(&f.inhibitor)
+            .build();
+        let never_formatted = std::collections::BTreeSet::from([uuid_for_name("disk2")]);
 
         execute_add_pool_mutation_recovery(
-            &harness.runner,
-            &harness.fs,
+            &runner,
+            &fs,
             &resolver,
             &params,
             AddPoolReplayCtx {
@@ -10070,56 +10616,195 @@ mod tests {
                 pool: pool_state_one_disk(),
                 owed_balance: OwedRaid1Balance::Grow,
             },
+            &never_formatted,
         )
-        .expect("fresh replay should use stored format options");
+        .expect("a never-formatted target drops and the add rolls back");
+
+        assert!(
+            !f.paths.pending_op_json().exists(),
+            "the rollback clears the journal"
+        );
+        assert_eq!(
+            membership::load_membership(&f.paths).unwrap(),
+            journal.pre_membership,
+            "pool.json must hold the pre-add membership"
+        );
+        let requests = runner.requests();
+        assert_no_format_or_add(&requests);
+        assert!(
+            !requests.iter().any(|r| matches!(
+                r,
+                CmdRequest::CryptsetupTestPassphrase { .. } | CmdRequest::CryptsetupLuksOpen { .. }
+            )),
+            "a rollback needs no passphrase: {requests:?}"
+        );
+        assert_eq!(
+            f.inhibitor.acquire_count(),
+            0,
+            "a rollback writes no disk, so it holds no sleep inhibitor"
+        );
     }
 
-    // Intent: recover's fresh-add replay re-checks the target's readiness
-    //   before luksFormat, so a stray mapper refuses with its close advice
-    //   and the journal stays for a retry.
-    // Why it exists: finding 261022-0632-011. luks_format demands a
-    //   FreshTargetReady, so the replay mints one; before the gate a stray
-    //   `braid-<name>` surfaced only after the format, as an ownership
-    //   failure from the open.
-    // Scenario: an add of fresh disk2 crashed before luksFormat; when the
-    //   operator runs `braid recover`, a stray braid-disk2 is open on /dev/vdz.
+    // Intent: when some targets remain after the drop, recover rewrites the
+    //   journal without the dropped target, in both the add targets and
+    //   target_membership, before the replay; an absent target still refuses.
+    // Why it exists: the replay binds the live pool to the admission
+    //   membership, so a dropped target left in target_membership would never
+    //   bind and recover would refuse on every run. Writing the reduced
+    //   journal first means a failure later in the replay reruns cleanly.
+    // Scenario: an add of fresh disk2 and disk3 stopped after luksFormat
+    //   refused disk2; disk3 is unplugged when the operator runs recover.
     #[test]
-    fn fresh_replay_refuses_active_mapper_before_luks_format() {
+    fn add_recovery_rewrites_journal_without_dropped_target_before_replay() {
+        let f = PoolFixture::empty();
+        let journal = fresh_two_target_add_journal();
+        journal::write_journal(&f.paths, &journal).unwrap();
+        let union = test_recovery_admission_membership(&journal);
+        let OpKind::Add { targets, .. } = &journal.op else {
+            unreachable!("test journal is Add");
+        };
+        let runner = disk2_not_luks(with_two_disk_pool_probe(MockRunner::default()))
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/vda".into(),
+                },
+                TEST_PASSPHRASE_BYTES.to_vec(),
+                ok_raw_empty("cryptsetup open --test-passphrase"),
+            );
+        let fs = MockFs::new(&["/dev/disk/by-id/virtio-disk2"]);
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
+        let params = f.recover_params().build();
+        let never_formatted = std::collections::BTreeSet::from([uuid_for_name("disk2")]);
+
+        let err = execute_add_pool_mutation_recovery(
+            &runner,
+            &fs,
+            &resolver,
+            &params,
+            AddPoolReplayCtx {
+                credential: None,
+                journal: &journal,
+                union: &union,
+                targets,
+                pool: pool_state_one_disk(),
+                owed_balance: OwedRaid1Balance::Grow,
+            },
+            &never_formatted,
+        )
+        .expect_err("an absent disk3 must refuse the replay");
+        assert!(
+            err.to_string().contains("'disk3'") && err.to_string().contains("not present"),
+            "the refusal must name the absent disk3: {err}"
+        );
+
+        let rewritten = journal::load_journal(&f.paths)
+            .unwrap()
+            .expect("the rewritten journal stays for a rerun");
+        let OpKind::Add { targets, .. } = &rewritten.op else {
+            panic!("rewritten journal must stay an add: {rewritten:?}");
+        };
+        assert!(
+            targets.get(&uuid_for_name("disk2")).is_none()
+                && targets.get(&uuid_for_name("disk3")).is_some(),
+            "only disk3 stays an add target: {targets:?}"
+        );
+        assert_eq!(
+            membership_name_list(&rewritten.target_membership),
+            vec!["disk1".to_owned(), "disk3".to_owned()],
+            "target_membership must drop disk2 too"
+        );
+        assert_eq!(rewritten.pre_membership, journal.pre_membership);
+        assert!(
+            !f.paths.pool_json().exists(),
+            "a partial drop writes no pool.json"
+        );
+        assert_no_format_or_add(&runner.requests());
+    }
+
+    // Intent: recover refuses to drop a never-formatted target, and keeps
+    //   the journal, when btrfs reports a MISSING devid that no pre-operation
+    //   member records.
+    // Why it exists: a disk btrfs already added whose LUKS header now reads
+    //   badly also probes as not LUKS. If btrfs counts a member braid cannot
+    //   name, the not-LUKS disk could be it, and dropping it would let pool.json
+    //   forget a member btrfs holds.
+    // Scenario: btrfs added disk2 as devid 2, then disk2's header was damaged
+    //   and its mapper closed; btrfs shows devid 2 as MISSING.
+    #[test]
+    fn add_recovery_refuses_drop_with_unrecorded_missing_devid() {
         let f = PoolFixture::empty();
         let journal = fresh_pool_mutation_add_journal(Vec::new(), None);
         journal::write_journal(&f.paths, &journal).unwrap();
         let union = test_recovery_admission_membership(&journal);
-        let targets = match &journal.op {
-            OpKind::Add { targets, .. } => targets,
-            _ => unreachable!("test journal is Add"),
+        let OpKind::Add { targets, .. } = &journal.op else {
+            unreachable!("test journal is Add");
         };
+        let runner = disk2_not_luks(MockRunner::default());
+        let fs = MockFs::new(&["/dev/disk/by-id/virtio-disk2"]);
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
+        let params = f.recover_params().passphrase_file(None).build();
+        let never_formatted = std::collections::BTreeSet::from([uuid_for_name("disk2")]);
+        let mut pool = pool_state_one_disk();
+        pool.missing_count = 1;
+        pool.total_devices = 2;
+        pool.missing_devids = vec![Devid::new(2)];
 
-        let inner = with_two_disk_pool_probe(
-            MockRunner::default()
-                .with_output(
-                    CmdRequest::CryptsetupLuksUuid {
-                        device: "/dev/disk/by-id/virtio-disk2".into(),
-                    },
-                    err_raw(
-                        "cryptsetup luksUUID",
-                        1,
-                        "Device is not a valid LUKS device",
-                    ),
-                )
-                .with_output_stdin(
-                    CmdRequest::CryptsetupTestPassphrase {
-                        device: "/dev/vda".into(),
-                    },
-                    TEST_PASSPHRASE_BYTES.to_vec(),
-                    ok_raw_empty("cryptsetup open --test-passphrase"),
-                )
-                .with_output(
-                    CmdRequest::CryptsetupStatus {
-                        mapper: MapperName::from_basename("braid-disk2".into()),
-                    },
-                    cryptsetup_status_active("braid-disk2", "/dev/vdz"),
-                ),
+        let err = execute_add_pool_mutation_recovery(
+            &runner,
+            &fs,
+            &resolver,
+            &params,
+            AddPoolReplayCtx {
+                credential: None,
+                journal: &journal,
+                union: &union,
+                targets,
+                pool,
+                owed_balance: OwedRaid1Balance::Grow,
+            },
+            &never_formatted,
+        )
+        .expect_err("an unrecorded MISSING devid must block the drop");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("cannot drop never-formatted add target(s) 'disk2'")
+                && msg.contains("missing devid(s) 2"),
+            "the refusal must name the target and the devid: {msg}"
         );
+        assert_eq!(
+            journal::load_journal(&f.paths).unwrap().as_ref(),
+            Some(&journal),
+            "the journal must stay as it was"
+        );
+        assert!(!f.paths.pool_json().exists());
+        assert_no_format_or_add(&runner.requests());
+    }
+
+    // Intent: the replay refuses a fresh target that reads as not LUKS when
+    //   the plan did not mark it for a drop, and never formats it.
+    // Why it exists: recover never formats a disk (finding 261022-1230-002).
+    //   The drop set comes from the plan's probe, so a disk that read
+    //   otherwise then and as not LUKS now must stop the replay, not reach a
+    //   format; a rerun probes again and drops it.
+    // Scenario: disk2 was unplugged while recover planned and is back, still
+    //   blank, by the time the replay probes it.
+    #[test]
+    fn add_replay_refuses_not_luks_target_outside_drop_set() {
+        let f = PoolFixture::empty();
+        let journal = fresh_pool_mutation_add_journal(vec!["--use-randomm".into()], None);
+        journal::write_journal(&f.paths, &journal).unwrap();
+        let union = test_recovery_admission_membership(&journal);
+        let OpKind::Add { targets, .. } = &journal.op else {
+            unreachable!("test journal is Add");
+        };
+        let inner = disk2_not_luks(with_two_disk_pool_probe(MockRunner::default()))
+            .with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: "/dev/vda".into(),
+                },
+                TEST_PASSPHRASE_BYTES.to_vec(),
+                ok_raw_empty("cryptsetup open --test-passphrase"),
+            );
         let harness = RemountHarness::new(&["/dev/disk/by-id/virtio-disk2"], inner, &[])
             .with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111");
         let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
@@ -10138,31 +10823,54 @@ mod tests {
                 pool: pool_state_one_disk(),
                 owed_balance: OwedRaid1Balance::Grow,
             },
+            &std::collections::BTreeSet::new(),
         )
-        .expect_err("a stray braid-disk2 mapper must refuse the fresh replay");
+        .expect_err("a not-LUKS target outside the drop set must refuse");
+        assert!(
+            err.to_string().contains("recover never formats a disk"),
+            "the refusal must say recover never formats: {err}"
+        );
+        assert_no_format_or_add(&harness.requests());
+        assert!(f.paths.pending_op_json().exists());
+    }
+
+    // Intent: the dry-run of a live add whose only target luksFormat never
+    //   wrote shows the drop and the rollback rows, and no format or device
+    //   add.
+    // Why it exists: the preview must show what execute does (ADR 022).
+    //   Recover never formats a disk, so the old replay rows would preview a
+    //   command recover no longer runs.
+    // Scenario: the operator previews `braid recover --dry-run` after
+    //   luksFormat refused disk2's options.
+    #[test]
+    fn plan_recover_dry_run_renders_never_formatted_drop_and_rollback() {
+        let rendered = render_recover_dry_run(
+            fresh_pool_mutation_add_journal(vec!["--use-randomm".into()], None),
+            MockFs::new(&[
+                "/dev/disk/by-id/virtio-disk1",
+                "/dev/disk/by-id/virtio-disk2",
+            ]),
+            disk2_not_luks(closed_disk1_dry_run_runner()),
+            false,
+        );
 
         assert!(
-            matches!(
-                err,
-                RecoverError::Luks(luks::LuksError::FreshTargetNotReady(
-                    luks::FreshTargetNotReady::MapperActive { .. }
-                ))
+            rendered.contains(
+                "drop fresh add target /dev/disk/by-id/virtio-disk2 from pending-op.json (luksFormat never wrote it"
             ),
-            "expected MapperActive before luksFormat, got: {err:?}"
+            "missing drop row: {rendered}"
         );
         assert!(
-            err.to_string()
-                .contains("sudo cryptsetup close braid-disk2"),
-            "the refusal must tell the operator to close the mapper, got: {err}"
+            rendered.contains("write pre-operation pool.json")
+                && rendered.contains("clear pending-op.json"),
+            "missing rollback rows: {rendered}"
         );
         assert!(
-            !harness
-                .requests()
-                .iter()
-                .any(|r| matches!(r, CmdRequest::CryptsetupLuksFormat { .. })),
-            "a stray mapper must refuse before luksFormat"
+            !rendered.contains("luksFormat /dev")
+                && !rendered.contains("btrfs device add")
+                && !rendered.contains("replay fresh add target"),
+            "a dropped target must render no replay: {rendered}"
         );
-        assert!(f.paths.pending_op_json().exists());
     }
 
     #[test]
@@ -10267,6 +10975,7 @@ mod tests {
                 pool: pool_state_one_disk(),
                 owed_balance: OwedRaid1Balance::Grow,
             },
+            &std::collections::BTreeSet::new(),
         )
         .expect("fresh replay should continue after preexisting LUKS format");
 
@@ -10468,6 +11177,7 @@ mod tests {
                     pool: pool_state_one_disk(),
                     owed_balance: OwedRaid1Balance::Grow,
                 },
+                &std::collections::BTreeSet::new(),
             )
             .unwrap_err();
             let msg = err.to_string();
@@ -10566,6 +11276,7 @@ mod tests {
                 pool: pool_state_one_disk(),
                 owed_balance: OwedRaid1Balance::Grow,
             },
+            &std::collections::BTreeSet::new(),
         )
         .unwrap_err();
         assert!(
@@ -10706,6 +11417,7 @@ mod tests {
                 pool: pool_state_one_disk(),
                 owed_balance: OwedRaid1Balance::Grow,
             },
+            &std::collections::BTreeSet::new(),
         )
         .unwrap_err();
         assert!(
@@ -11042,6 +11754,7 @@ mod tests {
                     pool: pool_state_disk1_disk3_without_disk2(false),
                     owed_balance: OwedRaid1Balance::Grow,
                 },
+                &std::collections::BTreeSet::new(),
             )
         });
     }
@@ -11110,6 +11823,7 @@ mod tests {
                     pool: pool_state_disk1_disk3_without_disk2(true),
                     owed_balance: OwedRaid1Balance::Grow,
                 },
+                &std::collections::BTreeSet::new(),
             )
         });
     }
@@ -11207,6 +11921,7 @@ mod tests {
                 pool: mounted_pool_state(&devids),
                 owed_balance: OwedRaid1Balance::Grow,
             },
+            &std::collections::BTreeSet::new(),
         )
         .expect("a MISSING devid no member records must not block add recovery");
 
@@ -11258,6 +11973,7 @@ mod tests {
                 pool: mounted_pool_state(&devids),
                 owed_balance: OwedRaid1Balance::Grow,
             },
+            &std::collections::BTreeSet::new(),
         )
         .expect("a null-backed new target is committed");
 
@@ -11380,6 +12096,7 @@ mod tests {
                 pool: mounted_pool_state(&devids),
                 owed_balance: OwedRaid1Balance::Grow,
             },
+            &std::collections::BTreeSet::new(),
         )
         .unwrap_err();
 
@@ -17207,31 +17924,23 @@ mod tests {
         }
     }
 
-    /// Intent: when bootstrap add crashes after LUKS format but before mkfs,
-    ///   recover detects the unmountable state and prints step-by-step escape
-    ///   instructions.
-    ///
-    /// Why it exists: without this, the user is stuck in recovery mode with no
-    ///   documented way out — recover fails, add is blocked by the journal, and
-    ///   the error message gives no guidance.
-    ///
-    /// Scenario: first-ever braid add of one disk. LUKS format succeeded, crash
-    ///   before mkfs.btrfs. User runs braid recover. Mount fails because no btrfs
-    ///   superblock exists. Error should name the pending-op.json path, the disk's
-    ///   by-id path, and wipefs; the busy cleanup close should use the injected
-    ///   sleeper seam.
-    #[test]
-    fn recover_bootstrap_crash_gives_actionable_instructions() {
-        let f = PoolFixture::empty();
-        let fs = MockFs::new(&["/dev/disk/by-id/virtio-disk1"]);
+    /// Bootstrap journal as `braid add` writes it before mkfs.btrfs: phase
+    /// PoolMutation, empty pre_membership, one fresh target.
+    fn bootstrap_pool_mutation_journal() -> journal::Journal {
+        let mut journal = bootstrap_journal();
+        if let OpKind::Add { phase, .. } = &mut journal.op {
+            *phase = journal::AddPhase::PoolMutation;
+        }
+        journal
+    }
 
-        let journal = bootstrap_journal();
-        journal::write_journal(&f.paths, &journal).unwrap();
-
+    /// Runner for a bootstrap whose disk1 luksFormat wrote: closed, with the
+    /// braid label and the journaled UUID, and no btrfs on its mapper.
+    /// `close` answers the close that ends the btrfs check.
+    fn bootstrap_formatted_disk1_runner(close: RawCommandOutput) -> MockRunner {
         let (mp_req, mp_out) = mountpoint_fail();
-        let runner = MockRunner::default()
+        MockRunner::default()
             .with_output(mp_req, mp_out)
-            // probe disk1 → PresentLuks
             .with_output(
                 CmdRequest::CryptsetupLuksUuid {
                     device: "/dev/disk/by-id/virtio-disk1".into(),
@@ -17241,15 +17950,12 @@ mod tests {
                     "11111111-1111-1111-1111-111111111111",
                 ),
             )
-            // passphrase ok
-            .with_output_stdin(
-                CmdRequest::CryptsetupTestPassphrase {
+            .with_output(
+                CmdRequest::CryptsetupLuksDumpText {
                     device: "/dev/disk/by-id/virtio-disk1".into(),
                 },
-                TEST_PASSPHRASE_BYTES.to_vec(),
-                ok_raw_empty("cryptsetup open --test-passphrase"),
+                luks_dump_label("braid-disk1"),
             )
-            // LUKS open ok
             .with_output_stdin(
                 CmdRequest::CryptsetupLuksOpen {
                     device: "/dev/disk/by-id/virtio-disk1".into(),
@@ -17258,24 +17964,6 @@ mod tests {
                 TEST_PASSPHRASE_BYTES.to_vec(),
                 ok_raw_empty("cryptsetup open"),
             )
-            // btrfs scan ok
-            .with_output(
-                CmdRequest::BtrfsDeviceScanAll,
-                ok_raw_empty("btrfs device scan"),
-            )
-            // mount fails — no btrfs superblock
-            .with_output(
-                CmdRequest::Mount {
-                    device: "/dev/mapper/braid-disk1".into(),
-                    mount_point: MountPoint::new("/mnt/storage".into()),
-                },
-                err_raw(
-                    "mount",
-                    32,
-                    "wrong fs type, bad option, bad superblock on /dev/mapper/braid-disk1",
-                ),
-            )
-            // btrfs probe confirms NoBtrfs
             .with_output(
                 CmdRequest::BtrfsFilesystemShowTarget {
                     target: "/dev/mapper/braid-disk1".into(),
@@ -17296,56 +17984,299 @@ mod tests {
                 CmdRequest::CryptsetupClose {
                     mapper: MapperName::from_basename("braid-disk1".into()),
                 },
-                err_raw("cryptsetup close", 5, "busy"),
+                close,
             )
-            .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk1")
-            .with_mapper_closed("braid-disk1");
+            .with_mapper_closed("braid-disk1")
+    }
+
+    /// Intent: a bootstrap add that luksFormat wrote but mkfs.btrfs never
+    ///   reached is cleared by recover: it opens the formatted disk, finds no
+    ///   btrfs, closes the disk, and clears pending-op.json without mounting.
+    ///
+    /// Why it exists: there is no pool to recover, so a mount can only fail.
+    ///   Recover used to refuse with steps for deleting pending-op.json by
+    ///   hand (finding 261022-1230-002).
+    ///
+    /// Scenario: first-ever braid add of one disk. luksFormat succeeded, then
+    ///   a crash before mkfs.btrfs. The operator runs braid recover.
+    #[test]
+    fn recover_bootstrap_formatted_without_btrfs_clears_journal() {
+        let f = PoolFixture::empty();
+        let fs = MockFs::new(&["/dev/disk/by-id/virtio-disk1"]);
+        journal::write_journal(&f.paths, &bootstrap_pool_mutation_journal()).unwrap();
+        let runner = bootstrap_formatted_disk1_runner(ok_raw_empty("cryptsetup close"));
+
+        cmd_recover(
+            &runner,
+            &fs,
+            &MockByIdResolver::default(),
+            &f.recover_params().sleep_inhibitor(&f.inhibitor).build(),
+        )
+        .expect("an uncommitted bootstrap clears the journal");
+        assert_eq!(
+            f.inhibitor.acquire_count(),
+            0,
+            "clearing an uncommitted bootstrap holds no sleep inhibitor"
+        );
+
+        assert!(
+            !f.paths.pending_op_json().exists(),
+            "the journal must be cleared"
+        );
+        assert!(!f.paths.pool_json().exists(), "pool.json should not exist");
+        let requests = runner.requests();
+        assert!(
+            !requests.iter().any(|r| matches!(
+                r,
+                CmdRequest::Mount { .. }
+                    | CmdRequest::MkfsBtrfs { .. }
+                    | CmdRequest::MkfsBtrfsRaid1 { .. }
+                    | CmdRequest::CryptsetupLuksFormat { .. }
+            )),
+            "an uncommitted bootstrap must not mount, mkfs, or format: {requests:?}"
+        );
+        let probe_pos = requests
+            .iter()
+            .position(|r| matches!(r, CmdRequest::BtrfsFilesystemShowTarget { .. }))
+            .expect("the btrfs check should run");
+        let close_pos = requests
+            .iter()
+            .position(|r| matches!(r, CmdRequest::CryptsetupClose { .. }))
+            .expect("the opened mapper should close");
+        assert!(
+            probe_pos < close_pos,
+            "the btrfs check must precede the close"
+        );
+    }
+
+    /// Intent: when the bootstrap btrfs check cannot close a mapper it
+    ///   opened, recover refuses and keeps pending-op.json; the close retries
+    ///   use the injected sleeper.
+    ///
+    /// Why it exists: once recover clears the journal it tells the operator
+    ///   to wipe the formatted disks, so a mapper left open would sit on a disk
+    ///   being wiped.
+    ///
+    /// Scenario: the same crash before mkfs.btrfs, but something holds
+    ///   braid-disk1 open while recover checks it.
+    #[test]
+    fn recover_bootstrap_check_close_failure_keeps_journal() {
+        let f = PoolFixture::empty();
+        let fs = MockFs::new(&["/dev/disk/by-id/virtio-disk1"]);
+        journal::write_journal(&f.paths, &bootstrap_pool_mutation_journal()).unwrap();
+        let runner = bootstrap_formatted_disk1_runner(err_raw("cryptsetup close", 5, "busy"));
         let sleeper = RecordingSleeper::default();
 
-        let result = cmd_recover(
+        let err = cmd_recover(
             &runner,
             &fs,
             &MockByIdResolver::default(),
             &f.recover_params().sleeper(&sleeper).build(),
-        );
+        )
+        .expect_err("a mapper the check cannot close must refuse");
 
-        let err = result.expect_err("should fail with bootstrap instructions");
-        let msg = err.to_string();
         assert!(
-            msg.contains("bootstrap add was interrupted"),
-            "expected bootstrap message, got: {msg}"
+            err.to_string()
+                .contains("could not close a mapper it opened"),
+            "the refusal must name the close failure: {err}"
         );
-        assert!(
-            msg.contains("pending-op.json"),
-            "should mention pending-op.json, got: {msg}"
-        );
-        assert!(msg.contains("wipefs"), "should mention wipefs, got: {msg}");
-        assert!(
-            msg.contains("virtio-disk1"),
-            "should list disk by-id path, got: {msg}"
-        );
-
-        // Journal must NOT have been cleared
         assert!(
             f.paths.pending_op_json().exists(),
             "journal should still exist"
         );
-        // pool.json must NOT have been written
-        assert!(!f.paths.pool_json().exists(), "pool.json should not exist");
-        let requests = runner.requests();
-        let probe_pos = requests
-            .iter()
-            .position(|r| matches!(r, CmdRequest::BtrfsFilesystemShowTarget { .. }))
-            .expect("bootstrap probe should run");
-        let close_pos = requests
-            .iter()
-            .position(|r| matches!(r, CmdRequest::CryptsetupClose { .. }))
-            .expect("cleanup close should run");
-        assert!(
-            probe_pos < close_pos,
-            "bootstrap probe must precede cleanup"
-        );
         assert_close_retry_sleeps(sleeper.calls());
+    }
+
+    /// Intent: a bootstrap add that stopped before luksFormat wrote any disk
+    ///   is cleared with no passphrase, open, or mount.
+    ///
+    /// Why it exists: nothing changed on disk, so recover has nothing to
+    ///   unlock. Before finding 261022-1230-002 recover replayed toward a
+    ///   mount of a pool that never existed and refused on every run.
+    ///
+    /// Scenario: the first braid add's luksFormat refused an option after the
+    ///   journal was written; the operator runs braid recover with no
+    ///   passphrase source.
+    #[test]
+    fn recover_bootstrap_with_no_formatted_target_clears_journal_without_passphrase() {
+        let f = PoolFixture::empty();
+        let fs = MockFs::new(&["/dev/disk/by-id/virtio-disk1"]);
+        journal::write_journal(&f.paths, &bootstrap_pool_mutation_journal()).unwrap();
+        let (mp_req, mp_out) = mountpoint_fail();
+        let runner = MockRunner::default()
+            .with_output(mp_req, mp_out)
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                },
+                err_raw(
+                    "cryptsetup luksUUID",
+                    1,
+                    "Device is not a valid LUKS device",
+                ),
+            );
+
+        cmd_recover(
+            &runner,
+            &fs,
+            &MockByIdResolver::default(),
+            &f.recover_params().passphrase_file(None).build(),
+        )
+        .expect("a bootstrap that formatted nothing clears the journal");
+
+        assert!(!f.paths.pending_op_json().exists());
+        assert!(!f.paths.pool_json().exists());
+        let requests = runner.requests();
+        assert!(
+            !requests.iter().any(|r| matches!(
+                r,
+                CmdRequest::CryptsetupLuksOpen { .. }
+                    | CmdRequest::CryptsetupTestPassphrase { .. }
+                    | CmdRequest::Mount { .. }
+                    | CmdRequest::CryptsetupLuksFormat { .. }
+            )),
+            "nothing to unlock, mount, or format: {requests:?}"
+        );
+    }
+
+    /// Intent: the dry-run of a bootstrap that formatted nothing shows the
+    ///   journal clear as its only step.
+    ///
+    /// Why it exists: the preview must show what execute does (ADR 022).
+    ///
+    /// Scenario: the operator previews braid recover --dry-run after the first
+    ///   braid add's luksFormat refused an option.
+    #[test]
+    fn plan_recover_dry_run_bootstrap_with_no_formatted_target_renders_clear() {
+        let (mp_req, mp_out) = mountpoint_fail();
+        let rendered = render_recover_dry_run(
+            bootstrap_pool_mutation_journal(),
+            MockFs::new(&["/dev/disk/by-id/virtio-disk1"]),
+            MockRunner::default()
+                .with_output(mp_req, mp_out)
+                .with_output(
+                    CmdRequest::CryptsetupLuksUuid {
+                        device: "/dev/disk/by-id/virtio-disk1".into(),
+                    },
+                    err_raw(
+                        "cryptsetup luksUUID",
+                        1,
+                        "Device is not a valid LUKS device",
+                    ),
+                ),
+            false,
+        );
+        assert!(
+            rendered.contains("clear pending-op.json")
+                && rendered
+                    .contains("(bootstrap add stopped before mkfs.btrfs; no disk was formatted)"),
+            "missing clear row: {rendered}"
+        );
+        assert!(
+            !rendered.contains("$ "),
+            "an uncommitted bootstrap runs no command: {rendered}"
+        );
+    }
+
+    /// Intent: an unmounted bootstrap add whose journaled disk is gone refuses
+    ///   at that disk before it opens or mounts anything, with or without
+    ///   --allow-degraded, and the refusal is not a degraded refusal, so braid
+    ///   exits 1, not 2.
+    ///
+    /// Why it exists: the bootstrap rule probes every target before mount
+    ///   planning, since a gone disk may be one luksFormat wrote. A bootstrap
+    ///   journal records no devids, so --allow-degraded cannot finish it; the
+    ///   refusal names the disk to reconnect instead of the degraded flag.
+    ///
+    /// Scenario: first-ever braid add of disk1 and disk2. luksFormat wrote
+    ///   disk1, then a crash. disk2 is unplugged when the operator runs braid
+    ///   recover.
+    #[test]
+    fn recover_bootstrap_absent_target_refuses_before_mount() {
+        for allow_degraded in [false, true] {
+            let f = PoolFixture::empty();
+            let fs = MockFs::new(&["/dev/disk/by-id/virtio-disk1"]);
+            journal::write_journal(&f.paths, &bootstrap_pool_mutation_add_journal()).unwrap();
+            let (mp_req, mp_out) = mountpoint_fail();
+            let runner = MockRunner::default()
+                .with_output(mp_req, mp_out)
+                .with_output(
+                    CmdRequest::CryptsetupLuksUuid {
+                        device: "/dev/disk/by-id/virtio-disk1".into(),
+                    },
+                    cryptsetup_uuid_ok(
+                        "/dev/disk/by-id/virtio-disk1",
+                        "11111111-1111-1111-1111-111111111111",
+                    ),
+                )
+                .with_output(
+                    CmdRequest::CryptsetupLuksDumpText {
+                        device: "/dev/disk/by-id/virtio-disk1".into(),
+                    },
+                    luks_dump_label("braid-disk1"),
+                )
+                .with_mapper_closed("braid-disk1");
+
+            let err = cmd_recover(
+                &runner,
+                &fs,
+                &MockByIdResolver::default(),
+                &f.recover_params().allow_degraded(allow_degraded).build(),
+            )
+            .expect_err("an absent bootstrap disk must refuse");
+
+            let msg = err.to_string();
+            assert!(
+                msg.contains(
+                    "recover add target 'disk2' (/dev/disk/by-id/virtio-disk2) is not present; reconnect it"
+                ),
+                "allow_degraded={allow_degraded}: {msg}"
+            );
+            assert!(
+                !err.is_degraded_refusal(),
+                "allow_degraded={allow_degraded}: the refusal must exit 1, not 2: {msg}"
+            );
+            assert!(
+                f.paths.pending_op_json().exists(),
+                "allow_degraded={allow_degraded}: the journal must be kept"
+            );
+            let requests = runner.requests();
+            assert!(
+                !requests.iter().any(|r| matches!(
+                    r,
+                    CmdRequest::CryptsetupLuksOpen { .. }
+                        | CmdRequest::CryptsetupTestPassphrase { .. }
+                        | CmdRequest::Mount { .. }
+                )),
+                "allow_degraded={allow_degraded}: nothing opens or mounts: {requests:?}"
+            );
+        }
+    }
+
+    // Intent: the uncommitted-bootstrap message names each formatted disk
+    //   and the wipe command, or says nothing changed when no disk was
+    //   formatted.
+    // Why it exists: braid add refuses a braid-labeled disk with no btrfs,
+    //   so the operator must wipe braid's LUKS container before a retry.
+    // Scenario: recover clears a bootstrap journal after luksFormat wrote
+    //   disk1.
+    #[test]
+    fn uncommitted_bootstrap_message_names_disks_to_wipe() {
+        let msg = uncommitted_bootstrap_message(&[(
+            disk_name("disk1"),
+            by_id_path("/dev/disk/by-id/virtio-disk1"),
+        )]);
+        assert!(
+            msg.contains("disk1 (/dev/disk/by-id/virtio-disk1)")
+                && msg.contains("sudo wipefs -a")
+                && msg.contains("pending-op.json cleared"),
+            "{msg}"
+        );
+        let none = uncommitted_bootstrap_message(&[]);
+        assert!(
+            none.contains("nothing changed") && !none.contains("wipefs"),
+            "{none}"
+        );
     }
 
     /// Intent: when bootstrap recover fails due to wrong passphrase, the error
@@ -17495,23 +18426,24 @@ mod tests {
         );
     }
 
-    /// Intent: when bootstrap recover's mount fails but the disk actually has a
-    ///   btrfs superblock, the original mount error must propagate — the guidance
-    ///   to wipe disks would be wrong.
+    /// Intent: when a formatted bootstrap target carries btrfs, recover takes
+    ///   the mount path, and a mount failure propagates as the original mount
+    ///   error with the journal kept.
     ///
-    /// Why it exists: mkfs may have succeeded but mount failed for another reason
-    ///   (missing kernel module, bad options). Telling the user to wipefs would
-    ///   destroy a valid filesystem.
+    /// Why it exists: mkfs may have succeeded but mount failed for another
+    ///   reason (missing kernel module, bad options). Clearing the journal and
+    ///   telling the operator to wipe the disk would destroy a valid
+    ///   filesystem.
     ///
     /// Scenario: first-ever add of one disk. mkfs.btrfs succeeded, mount failed
-    ///   for an unrelated reason. btrfs filesystem show confirms HasBtrfs. Error
-    ///   should be the original mount error, not bootstrap guidance.
+    ///   for an unrelated reason. The bootstrap check finds btrfs on disk1, so
+    ///   recover mounts, and the mount error is what the operator sees.
     #[test]
     fn recover_bootstrap_mount_fails_but_btrfs_exists_propagates_mount_error() {
         let f = PoolFixture::empty();
         let fs = MockFs::new(&["/dev/disk/by-id/virtio-disk1"]);
 
-        let journal = bootstrap_journal();
+        let journal = bootstrap_pool_mutation_journal();
         journal::write_journal(&f.paths, &journal).unwrap();
 
         let (mp_req, mp_out) = mountpoint_fail();
@@ -17585,7 +18517,12 @@ mod tests {
                 },
                 ok_raw_empty("cryptsetup close"),
             )
-            .with_luks_dump_text_luks2("/dev/disk/by-id/virtio-disk1")
+            .with_output(
+                CmdRequest::CryptsetupLuksDumpText {
+                    device: "/dev/disk/by-id/virtio-disk1".into(),
+                },
+                luks_dump_label("braid-disk1"),
+            )
             .with_mapper_closed("braid-disk1");
 
         let result = cmd_recover(
@@ -17602,8 +18539,11 @@ mod tests {
             "expected original mount error, got: {msg}"
         );
         assert!(
-            !msg.contains("bootstrap add was interrupted"),
-            "must not show bootstrap message when btrfs exists, got: {msg}"
+            runner
+                .requests()
+                .iter()
+                .any(|r| matches!(r, CmdRequest::Mount { .. })),
+            "a target with btrfs must take the mount path"
         );
 
         // Journal must NOT have been cleared
@@ -21790,17 +22730,21 @@ mod tests {
 
     // Intent
     // Verify a not-mounted PoolMutation dry-run renders fresh-target setup as
-    // conditional replay, including the format row.
+    // conditional replay, with no format row.
     //
     // Why it exists
     // The planner has no mounted live-set snapshot in this shape, but the
-    // executor can still open/scan a committed target before replay.
+    // executor can still open/scan a committed target before replay. Recover
+    // never formats a disk (finding 261022-1230-002), so the row names the
+    // LUKS header the replay demands instead of a luksFormat command.
     //
     // Scenario
-    // Fresh disk2 add journal with the pool offline; recover will mount disk1
-    // first, then conditionally replay disk2 setup/add.
+    // Fresh disk2 add journal with the pool offline and disk2 not visible to
+    // the planner; recover will mount disk1 first, then conditionally replay
+    // disk2 setup/add.
     #[test]
-    fn plan_recover_dry_run_pool_mutation_not_mounted_fresh_conditional_replay_with_format_row() {
+    fn plan_recover_dry_run_pool_mutation_not_mounted_fresh_conditional_replay_without_format_row()
+    {
         let rendered = render_recover_dry_run(
             fresh_pool_mutation_add_journal(vec!["--label".into(), "braid-disk2".into()], None),
             MockFs::new(&["/dev/disk/by-id/virtio-disk1"]),
@@ -21828,16 +22772,17 @@ mod tests {
             "fresh replay row should advertise runtime skip: {disk2_block:?}",
         );
         assert!(
-            disk2_block.contains("LUKS format command is also skipped")
-                && disk2_block.contains("journaled UUID")
-                && disk2_block.contains("label")
-                && disk2_block.contains("braid-disk2"),
-            "fresh replay row should advertise per-command format skip: {disk2_block:?}",
+            disk2_block.contains(
+                "(refused at runtime unless the disk shows a LUKS header with the journaled UUID and the 'braid-disk2' label)"
+            ),
+            "fresh replay row should name the header the replay demands: {disk2_block:?}",
         );
         assert!(
-            disk2_block.contains(
-                "$ cryptsetup luksFormat /dev/disk/by-id/virtio-disk2 --type luks2 --batch-mode '--key-file=-' --uuid 22222222-2222-2222-2222-222222222222 --label braid-disk2 --offset 32768"
-            ) && disk2_block.contains("$ cryptsetup luksHeaderBackup --header-backup-file")
+            !disk2_block.contains("luksFormat"),
+            "recover must never render a luksFormat row: {disk2_block:?}",
+        );
+        assert!(
+            disk2_block.contains("$ cryptsetup luksHeaderBackup --header-backup-file")
                 && disk2_block.contains("braid-disk2.luksheader /dev/disk/by-id/virtio-disk2")
                 && disk2_block.contains(
                     "$ cryptsetup open --type luks '--key-file=-' --perf-no_read_workqueue --perf-no_write_workqueue /dev/disk/by-id/virtio-disk2 braid-disk2"

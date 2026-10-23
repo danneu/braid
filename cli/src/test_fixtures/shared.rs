@@ -7,11 +7,14 @@ use crate::config::mapper_name;
 use crate::confirm::RecordingConfirm;
 use crate::filesystem::Filesystem;
 use crate::inhibit::RecordingInhibitor;
-use crate::luks::{BackingPathResolver, FreshTargetReady, check_fresh_target_ready};
+use crate::luks::{
+    BackingPathResolver, FormatArgsAccepted, FreshTargetReady, check_format_args,
+    check_fresh_target_ready,
+};
 use crate::membership::{self, DiskMember, PoolMembership};
 use crate::progress::Sleeper;
 use crate::state_paths::StatePaths;
-use crate::types::{ByIdPath, Devid, DiskName, LuksUuid, MountPoint};
+use crate::types::{ByIdPath, Devid, DiskName, LuksFormatExtraOpts, LuksUuid, MountPoint};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -126,6 +129,29 @@ pub(crate) fn fresh_target_ready(name: &DiskName, by_id: &ByIdPath) -> FreshTarg
     let runner = MockRunner::default().with_mapper_closed(mapper_name(name).as_str());
     check_fresh_target_ready(&runner, &MockFs::storage(vec![]), name, by_id)
         .expect("inactive mapper and claimable disk pass the fresh-target check")
+}
+
+/// A confirmed `cryptsetup luksFormat --test-args` run. Its stdout is the
+/// captured stable fixture, so every mock answers with what cryptsetup prints.
+pub(crate) fn format_test_args_ok() -> RawCommandOutput {
+    RawCommandOutput {
+        cmd: "cryptsetup luksFormat --test-args".to_owned(),
+        stdout: read_stable_fixture("cryptsetup-luks-format-test-args.txt"),
+        stderr: String::new(),
+        exit_status: 0,
+    }
+}
+
+/// Mint a `FormatArgsAccepted` through the real check, against a cryptsetup
+/// that confirms the argv, for tests that build fresh-target plans directly.
+pub(crate) fn format_args_accepted(
+    ready: &FreshTargetReady,
+    uuid: &LuksUuid,
+    extra_opts: &LuksFormatExtraOpts,
+) -> FormatArgsAccepted {
+    let runner = MockRunner::default().with_format_test_args_confirmed();
+    check_format_args(&runner, ready, uuid, extra_opts)
+        .expect("a confirming cryptsetup passes the format-args check")
 }
 
 /// Compact constructor for a successful `RawCommandOutput`. Mirrors the

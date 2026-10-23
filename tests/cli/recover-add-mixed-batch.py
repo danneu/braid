@@ -11,10 +11,12 @@
 # pool.json rebuild, and post-add balance handoff needs an end-to-end VM
 # guard.
 #
-# Scenario: a 1-disk pool has disk1. `braid add disk2 disk3` commits disk2
-# to btrfs, then crashes before disk3's pool_add_device, leaving pool.json
-# with only disk1 and a pending Add journal for disk2 and disk3. Recovery must
-# finish disk3 without reformatting or re-adding disk2.
+# Scenario: a 1-disk pool has disk1. `braid add disk2 disk3` formats both
+# disks (add formats every fresh disk before any btrfs device add), commits
+# disk2 to btrfs, then crashes before disk3's pool_add_device, leaving
+# pool.json with only disk1 and a pending Add journal for disk2 and disk3.
+# Recovery must finish disk3 without re-adding disk2. Recover never formats
+# a disk, so it finishes disk3 from the LUKS header add wrote.
 
 import json
 import re
@@ -125,6 +127,14 @@ with subtest("Prepare disk2 as committed but not bookkept"):
     live_devids = all_devids()
     disk3_expected_devid = max(live_devids) + 1
     disk3_uuid = str(uuid.uuid4())
+
+    # Pass 2 of `braid add` formats disk3 with the journaled UUID and label
+    # before any btrfs device add, so the crash leaves disk3 formatted.
+    machine.succeed(
+        f"printf '%s' {pq} | "
+        f"cryptsetup luksFormat --batch-mode --key-file=- {luks_opts} "
+        f"--uuid {disk3_uuid} --label braid-disk3 /dev/disk/by-id/virtio-disk3"
+    )
 
 
 # --- Phase 3: Seed acked-stats and inject the Add journal ---

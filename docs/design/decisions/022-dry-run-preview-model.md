@@ -119,16 +119,18 @@ is the one place the rendered command intentionally diverges from the real argv.
 The preview variant is never executed: `cli/src/cmd.rs#RealRunner` hard-errors on
 it via `cli/src/cmd.rs#CmdRequest::is_preview_only` before any spawn.
 
-`recover` is excluded: `cli/src/recover.rs#render_add_pool_mutation_recovery_steps`
-also emits `CryptsetupLuksFormat`, but its UUID comes from the committed journal
--- reproducible and meaningful -- so recover keeps rendering the real identity.
+`recover` renders no luksFormat row: it never formats a disk.
+`cli/src/recover.rs#render_add_pool_mutation_recovery_steps` renders a drop row
+for a fresh target luksFormat never wrote, the step
+`cli/src/recover.rs#drop_never_formatted_add_targets` runs.
 
 ## Scope
 
 The typed work-plan preview model is the precedent for `add`, `replace`,
 `remove`, `remove-missing`, and `recover`.
 
-Recover is the one deliberate exception to the read-side planner rule. When
+Recover is the one deliberate exception to the read-side planner rule, in two
+places. The first: when
 recovering an interrupted existing-pool add and the pool is not already mounted,
 `plan_recover` reconciles the validated add-targets -- those present,
 LUKS-openable, and not yet pool members -- before mount: it opens any whose
@@ -140,8 +142,22 @@ two reasons: resolving the credential in the preflight window where an
 interactive prompt belongs, then caching it so execute reuses it without a
 second prompt (single passphrase, Principle 4); and making an
 already-committed-but-closed target visible to the kernel before the initial
-mount so the mount assembles it instead of recover re-adding or re-formatting
-it. It is not a general license to mutate inside `plan_*()`.
+mount so the mount assembles it instead of recover re-adding it. It is not a
+general license to mutate inside `plan_*()`.
+
+The second: for an interrupted bootstrap add `PoolMutation` with nothing
+mounted at the mount point, `cli/src/recover.rs#plan_bootstrap_recovery` opens
+each closed target that luksFormat wrote, asks btrfs whether its mapper holds a
+filesystem, and closes what it opened, all gated by `!dry_run`. The plan must
+know whether mkfs.btrfs ran before it can choose between clearing the journal
+and mounting, and only an open mapper answers that. When no target carries a
+LUKS header, the plan needs no open at all, so `--dry-run` previews that clear
+exactly.
+
+The add and replace planners also run `cryptsetup luksFormat --test-args`
+(`cli/src/luks.rs#check_format_args`), `--dry-run` included. That is a
+read-side probe, not an exception: cryptsetup checks the options and exits
+before it opens the device.
 
 The LUKS-UUID-identity migration also gave `lock` a typed close set
 (`LockCloseSet` carrying ordered `LockMapperClose` entries in

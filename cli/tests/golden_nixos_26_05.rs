@@ -65,3 +65,27 @@ fn golden_dm_uuid_luks2_matches_luks_uuid() {
         .expect("captured luksUUID parses");
     assert_eq!(from_dm, from_header.uuid);
 }
+
+// Intent: a real `cryptsetup luksFormat --test-args` run on a blank disk
+//   prints the line braid treats as cryptsetup's acceptance of the argv.
+// Why it exists: braid runs this check before it journals a fresh format
+//   (cli/src/luks.rs#check_format_args) and refuses unless the line is
+//   there, so a reworded line would refuse every add and replace of a fresh
+//   disk (finding 261022-1230-002).
+// Scenario: capture-tool-fixtures.py runs the check against blank /dev/vdd
+//   before it formats that disk. Stable-only: the unstable lane has no
+//   matching capture.
+#[test]
+fn golden_cryptsetup_luks_format_test_args_confirms() {
+    let raw = RawCommandOutput {
+        cmd: "cryptsetup luksFormat --test-args".into(),
+        stdout: fixture("cryptsetup-luks-format-test-args.txt"),
+        stderr: String::new(),
+        exit_status: 0,
+    };
+    assert!(
+        braid_cli::luks::format_test_args_confirmed(&raw),
+        "captured --test-args output must carry the confirmation line: {:?}",
+        raw.stdout
+    );
+}

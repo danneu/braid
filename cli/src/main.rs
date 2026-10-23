@@ -324,7 +324,9 @@ struct LuksFormatArgs {
     ///
     /// Repeat for multiple arguments. Always use the equals form
     /// (`--luks-format-arg=<ARG>`); the space form is rejected. Required even for
-    /// hyphen-leading values, e.g. `--luks-format-arg=--pbkdf`.
+    /// hyphen-leading values, e.g. `--luks-format-arg=--pbkdf
+    /// --luks-format-arg=argon2id`. braid asks cryptsetup to check the
+    /// arguments before it changes anything.
     #[arg(
         long = "luks-format-arg",
         value_name = "ARG",

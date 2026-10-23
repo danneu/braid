@@ -331,13 +331,17 @@ impl<'de> Deserialize<'de> for ByIdPath {
 pub struct LuksFormatExtraOpts(Vec<String>);
 
 /// Error returned when braid refuses a luksFormat extra, at parse time or
-/// before a journaled format runs.
+/// before cryptsetup checks the format argv.
 #[derive(Debug, Error)]
 pub enum LuksFormatExtraOptsError {
     #[error(
         "--luks-format-arg '{token}' targets a braid-managed identity or storage-model-breaking cryptsetup option"
     )]
     ManagedFormatFlag { token: String },
+    #[error(
+        "--luks-format-arg '{token}' makes cryptsetup exit without formatting the disk (a help, version, or --test-args option)"
+    )]
+    NoActionFlag { token: String },
     #[error(
         "--luks-format-arg '--' would end cryptsetup's option parsing, so cryptsetup would ignore every --luks-format-arg after it"
     )]
@@ -350,12 +354,17 @@ const END_OF_OPTIONS: &str = "--";
 impl LuksFormatExtraOpts {
     /// Validate the supplied argv extras. Empty input is valid. Each token
     /// is checked against the braid-managed identity and storage-model
-    /// reject list, and against `check_no_end_of_options`, so unsafe extras
-    /// fail before any `CryptsetupLuksFormat` request reaches the executor.
+    /// reject list, the no-action list, and `check_no_end_of_options`, so
+    /// unsafe extras fail before any cryptsetup request reaches the executor.
     pub fn parse(extras: &[String]) -> Result<Self, LuksFormatExtraOptsError> {
         for token in extras {
             if is_managed_format_flag(token) {
                 return Err(LuksFormatExtraOptsError::ManagedFormatFlag {
+                    token: token.clone(),
+                });
+            }
+            if is_no_action_format_flag(token) {
+                return Err(LuksFormatExtraOptsError::NoActionFlag {
                     token: token.clone(),
                 });
             }
@@ -367,9 +376,10 @@ impl LuksFormatExtraOpts {
 
     /// Refuses a `--` among the extras. `cli/src/cmd.rs#luks_format_argv`
     /// puts the extras last, so after `--` popt would read each later extra
-    /// as a leftover word that luksFormat ignores. Public because recover
-    /// replays a journaled value that serde built without `parse`;
-    /// `cli/src/luks.rs#luks_format` runs this before every format.
+    /// as a leftover word that luksFormat ignores, and `--test-args` would
+    /// still pass. Public because serde builds a journaled value without
+    /// `parse`; `cli/src/luks.rs#check_format_args` runs this before it asks
+    /// cryptsetup to check an argv.
     pub fn check_no_end_of_options(&self) -> Result<(), LuksFormatExtraOptsError> {
         if self.0.iter().any(|token| token == END_OF_OPTIONS) {
             return Err(LuksFormatExtraOptsError::EndOfOptions);
@@ -413,19 +423,46 @@ const MANAGED_LUKS_FORMAT_LONG_FLAGS: &[&str] = &[
 
 const MANAGED_LUKS_FORMAT_SHORT_FLAGS: &[char] = &['d', 'S', 'M', 'I', 'l', 'o'];
 
+// Options that make cryptsetup exit 0 without formatting. The help, usage,
+// and version options exit from popt's help callback while options are
+// parsed (reference/cryptsetup/src/cryptsetup.c#help), and `--test-args`
+// exits once they are checked. A format that exits 0 and writes nothing
+// would pass as done, so no extra may carry one.
+const NO_ACTION_LUKS_FORMAT_LONG_FLAGS: &[&str] =
+    &["--help", "--usage", "--version", "--test-args"];
+
+const NO_ACTION_LUKS_FORMAT_SHORT_FLAGS: &[char] = &['?', 'V'];
+
 fn is_managed_format_flag(token: &str) -> bool {
     // These flags either overlap fields braid writes itself (`--uuid`,
     // `--label`, `--offset`) or change the on-disk/passphrase model braid
     // assumes after format. The OPAL flags belong here because OPAL picks
     // its own layout around braid's offset. Names and short aliases come
     // from reference/cryptsetup/src/cryptsetup_arg_list.h.
-    //
+    token_names_flag(
+        token,
+        MANAGED_LUKS_FORMAT_LONG_FLAGS,
+        MANAGED_LUKS_FORMAT_SHORT_FLAGS,
+    )
+}
+
+fn is_no_action_format_flag(token: &str) -> bool {
+    token_names_flag(
+        token,
+        NO_ACTION_LUKS_FORMAT_LONG_FLAGS,
+        NO_ACTION_LUKS_FORMAT_SHORT_FLAGS,
+    )
+}
+
+/// Whether popt would read `token` as one of `long` or `short`. Shared by the
+/// reject lists so each one matches every spelling popt accepts.
+fn token_names_flag(token: &str, long: &[&str], short: &[char]) -> bool {
     // popt matches long options by full name only -- no getopt_long-style
     // abbreviation (`longOptionStrcmp` requires equal length) -- so exact and
-    // `--flag=value` are the only spellings that reach a managed flag. A
+    // `--flag=value` are the only spellings that reach a listed flag. A
     // prefix like `--uui` is rejected by cryptsetup as unknown, never read
     // as `--uuid`.
-    if MANAGED_LUKS_FORMAT_LONG_FLAGS.iter().any(|flag| {
+    if long.iter().any(|flag| {
         token == *flag
             || token
                 .strip_prefix(flag)
@@ -441,9 +478,7 @@ fn is_managed_format_flag(token: &str) -> bool {
         let cluster = shorts
             .split_once('=')
             .map_or(shorts, |(cluster, _)| cluster);
-        return cluster
-            .chars()
-            .any(|short| MANAGED_LUKS_FORMAT_SHORT_FLAGS.contains(&short));
+        return cluster.chars().any(|c| short.contains(&c));
     }
 
     false
@@ -1939,6 +1974,42 @@ mod tests {
             msg.contains("--luks-format-arg '--'"),
             "error must name the `--` token: {msg}"
         );
+    }
+
+    // Intent: every help, usage, version, and --test-args spelling refuses at
+    //   parse time with its own no-action message.
+    // Why it exists: cryptsetup exits 0 on these without formatting, so a
+    //   real luksFormat carrying one reports success on a blank disk and add
+    //   fails later, after the journal (hunt finding 261022-1230-002). The
+    //   --test-args check cannot catch them either: help and version exit
+    //   while options are parsed, before its confirmation line prints.
+    // Scenario: an operator passes --luks-format-arg=--version to see which
+    //   cryptsetup braid runs.
+    #[test]
+    fn luks_format_extra_opts_rejects_no_action_flags() {
+        for token in [
+            "--help",
+            "--usage",
+            "--version",
+            "--test-args",
+            "--test-args=1",
+            "-?",
+            "-V",
+            "-qV",
+        ] {
+            let err = LuksFormatExtraOpts::parse(&[token.to_owned()]).unwrap_err();
+            let msg = err.to_string();
+            match err {
+                LuksFormatExtraOptsError::NoActionFlag { token: offending } => {
+                    assert_eq!(offending, token, "error must name {token:?} verbatim");
+                }
+                other => panic!("expected NoActionFlag for {token:?}, got: {other:?}"),
+            }
+            assert!(
+                msg.contains("exit without formatting"),
+                "error must say why {token:?} is refused: {msg}"
+            );
+        }
     }
 
     #[test]

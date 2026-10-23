@@ -10,10 +10,10 @@ use crate::filesystem::Filesystem;
 use crate::inhibit::AcquireSleepInhibitor;
 use crate::journal;
 use crate::luks::{
-    BackingPathResolver, FreshTargetChecked, FreshTargetReady, KeySlotState, LUKS_SLOT_KEYFILE,
-    MapperOwnershipFailure, OwnershipError, backup_luks_header_post_mutation,
-    check_fresh_target_ready, check_key_slot, classify_mapper_ownership, ensure_luks_open,
-    format_keyfile_asymmetry_warning, format_keyfile_enrollment_probe_failure,
+    BackingPathResolver, FormatArgsAccepted, FreshTargetChecked, FreshTargetReady, KeySlotState,
+    LUKS_SLOT_KEYFILE, MapperOwnershipFailure, OwnershipError, backup_luks_header_post_mutation,
+    check_format_args, check_fresh_target_ready, check_key_slot, classify_mapper_ownership,
+    ensure_luks_open, format_keyfile_asymmetry_warning, format_keyfile_enrollment_probe_failure,
     format_target_keyfile_probe_failure, luks_format, luks_header_backup_path,
     probe_pool_keyfile_enrollment, push_enrollment_preview_steps, read_passphrase,
 };
@@ -260,12 +260,11 @@ pub struct ReplacePlan {
 enum ReplaceTargetPrep<C = FreshTargetChecked> {
     FreshLuks {
         check: C,
-        /// Validated `--luks-format-arg` extras. Braid-managed flags are
-        /// rejected by `cli/src/types.rs#LuksFormatExtraOpts::parse` at the
-        /// CLI boundary inside `plan_replace`; the structured `uuid` and
-        /// `label` fields on `CmdRequest::CryptsetupLuksFormat` carry the
-        /// managed identity. No raw `--label braid-<name>` injection.
-        extra_opts: LuksFormatExtraOpts,
+        /// Plan-time proof that cryptsetup accepted the format argv: the
+        /// journaled UUID, the braid label, and the `--luks-format-arg`
+        /// extras, which `cli/src/types.rs#LuksFormatExtraOpts::parse`
+        /// validated first. Step 1's `luks_format` runs that argv.
+        format_args: FormatArgsAccepted,
         enroll_key_file: Option<KeyFilePath>,
     },
     ExistingLuks {
@@ -319,7 +318,7 @@ impl ReplaceWorkPlan {
 
         match &self.target_prep {
             ReplaceTargetPrep::FreshLuks {
-                extra_opts,
+                format_args,
                 enroll_key_file,
                 ..
             } => {
@@ -333,7 +332,7 @@ impl ReplaceWorkPlan {
                     commands: vec![CmdRequest::CryptsetupLuksFormatPreview {
                         device: self.new_by_id.as_str().to_owned(),
                         label,
-                        extra_opts: extra_opts.clone(),
+                        extra_opts: format_args.extra_opts().clone(),
                     }],
                 });
                 push_enrollment_preview_steps(
@@ -666,7 +665,7 @@ impl ReplacePlan {
         match target_prep {
             ReplaceTargetPrep::FreshLuks {
                 check: ready,
-                extra_opts,
+                format_args,
                 enroll_key_file,
             } => {
                 // Passphrase already verified above.
@@ -678,8 +677,7 @@ impl ReplacePlan {
                         &format!("disk {new_name}: formatting LUKS..."),
                     )
                 );
-                let label = luks_label_for(&new_name);
-                luks_format(runner, ready, &passphrase, new_uuid, &label, &extra_opts)?;
+                luks_format(runner, ready, &format_args, &passphrase)?;
                 eprint!(
                     "{}",
                     status_line(
@@ -1189,11 +1187,11 @@ fn verify_new_target_preflight<R: CommandRunner, F: Filesystem + ?Sized>(
         }
         ReplaceTargetPrep::FreshLuks {
             check: _,
-            extra_opts,
+            format_args,
             enroll_key_file,
         } => Ok(ReplaceTargetPrep::FreshLuks {
             check: check_fresh_target_ready(runner, fs, new_name, new_by_id)?,
-            extra_opts,
+            format_args,
             enroll_key_file,
         }),
     }
@@ -1652,11 +1650,14 @@ where
     // Fresh-target readiness, plan tier: a blank --new disk must have
     // `braid-<new>` inactive and be claimable now, so a stray mapper or a
     // disk holder refuses in --dry-run and before the prompt, with nothing
-    // written. Execute re-checks before the journal.
+    // written. Execute re-checks before the journal. The same step has
+    // cryptsetup check the format argv, so an option it rejects refuses here
+    // too.
     let target_prep = match plan_replace_target_prep(
         runner,
         fs,
         &new_probed,
+        identity.new_uuid(),
         resolved_enroll_key_file.clone(),
         luks_format_extra_opts.clone(),
     ) {
@@ -1691,22 +1692,28 @@ where
 }
 
 /// Decide how replace prepares the new disk. A fresh (not-LUKS) target is
-/// built only from a passing `check_fresh_target_ready`, whose proof the
-/// FreshLuks arm consumes, so no fresh target is planned without a check.
+/// built only from a passing `check_fresh_target_ready` and a passing
+/// `check_format_args` for `new_uuid`, whose proofs the FreshLuks arm holds,
+/// so no fresh target is planned without both checks.
 fn plan_replace_target_prep<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
     new_probed: &PresentConfigDisk,
+    new_uuid: &LuksUuid,
     enroll_key_file: Option<KeyFilePath>,
     extra_opts: LuksFormatExtraOpts,
 ) -> Result<ReplaceTargetPrep, crate::luks::LuksError> {
     Ok(match &new_probed.state {
-        PresentConfigDiskState::PresentNotLuks => ReplaceTargetPrep::FreshLuks {
-            check: check_fresh_target_ready(runner, fs, &new_probed.name, &new_probed.by_id_path)?
-                .into_checked(),
-            extra_opts,
-            enroll_key_file,
-        },
+        PresentConfigDiskState::PresentNotLuks => {
+            let ready =
+                check_fresh_target_ready(runner, fs, &new_probed.name, &new_probed.by_id_path)?;
+            let format_args = check_format_args(runner, &ready, new_uuid, &extra_opts)?;
+            ReplaceTargetPrep::FreshLuks {
+                check: ready.into_checked(),
+                format_args,
+                enroll_key_file,
+            }
+        }
         PresentConfigDiskState::PresentLuks { mapper_open, .. } => {
             ReplaceTargetPrep::ExistingLuks {
                 mapper_open: *mapper_open,
@@ -2197,6 +2204,7 @@ fn replace_work_plan_for_test(input: &ReplaceWorkPlanTestInput<'_>) -> ReplaceWo
         .map(|p| KeyFilePath::new(p.to_path_buf()));
     let target_prep = replace_target_prep_for_test(
         input.new_probed,
+        &new_uuid,
         enroll_key_file.clone(),
         extra_opts.clone(),
     );
@@ -2223,19 +2231,22 @@ fn replace_work_plan_for_test(input: &ReplaceWorkPlanTestInput<'_>) -> ReplaceWo
 #[cfg(test)]
 fn replace_target_prep_for_test(
     new_probed: &PresentConfigDisk,
+    new_uuid: &LuksUuid,
     enroll_key_file: Option<KeyFilePath>,
     extra_opts: LuksFormatExtraOpts,
 ) -> ReplaceTargetPrep {
     let runner = crate::cmd::MockRunner::default()
-        .with_mapper_closed(mapper_name(&new_probed.name).as_str());
+        .with_mapper_closed(mapper_name(&new_probed.name).as_str())
+        .with_format_test_args_confirmed();
     plan_replace_target_prep(
         &runner,
         &crate::test_fixtures::MockFs::storage(vec![]),
         new_probed,
+        new_uuid,
         enroll_key_file,
         extra_opts,
     )
-    .expect("inactive mapper and claimable disk pass the fresh-target check")
+    .expect("inactive mapper, claimable disk, and accepted argv pass the fresh-target checks")
 }
 
 #[cfg(test)]
@@ -3920,6 +3931,12 @@ mod tests {
             &old_uuid,
         );
 
+        let target_prep = replace_target_prep_for_test(
+            &new_probed,
+            &new_uuid,
+            None,
+            LuksFormatExtraOpts::default(),
+        );
         ReplacePlan {
             notes: vec![],
             work_plan: build_replace_work_plan(ReplaceWorkPlanInput {
@@ -3929,11 +3946,7 @@ mod tests {
                 old_name: disk_name("disk2"),
                 new_name: new_name.clone(),
                 new_by_id: new_by_id.clone(),
-                target_prep: replace_target_prep_for_test(
-                    &new_probed,
-                    None,
-                    LuksFormatExtraOpts::default(),
-                ),
+                target_prep,
                 new_probed,
                 replace_source,
                 pool,
@@ -4398,6 +4411,9 @@ mod tests {
                     stderr: "Device is not a valid LUKS device.\n".into(),
                     exit_status: 1,
                 }))
+            }
+            CmdRequest::CryptsetupLuksFormatTestArgs { .. } => {
+                Some(Ok(crate::test_fixtures::format_test_args_ok()))
             }
             CmdRequest::CryptsetupLuksFormat { device, .. } => {
                 Some(Ok(mock_ok(&format!("cryptsetup luksFormat {device}"), "")))
@@ -5607,6 +5623,7 @@ mod tests {
             new_by_id: ByIdPath::parse("/dev/disk/by-id/virtio-disk3").unwrap(),
             target_prep: replace_target_prep_for_test(
                 &new_probed,
+                &luks_uuid,
                 Some(KeyFilePath::new(kf.to_path_buf())),
                 LuksFormatExtraOpts::default(),
             ),
@@ -5847,18 +5864,21 @@ mod tests {
             by_id_path: new_by_id.clone(),
             state: PresentConfigDiskState::PresentNotLuks,
         };
+        let new_uuid = LuksUuid::new_v4();
+        let target_prep = replace_target_prep_for_test(
+            &new_probed,
+            &new_uuid,
+            None,
+            LuksFormatExtraOpts::default(),
+        );
         let work_plan = build_replace_work_plan(ReplaceWorkPlanInput {
             config: f.config.clone(),
-            identity: journal::ReplaceIdentity::new(old_uuid, LuksUuid::new_v4())
+            identity: journal::ReplaceIdentity::new(old_uuid, new_uuid)
                 .expect("distinct replace UUIDs"),
             old_name: disk_name("disk2"),
             new_name: new_name.clone(),
             new_by_id: new_by_id.clone(),
-            target_prep: replace_target_prep_for_test(
-                &new_probed,
-                None,
-                LuksFormatExtraOpts::default(),
-            ),
+            target_prep,
             new_probed,
             replace_source,
             pool,
@@ -7048,6 +7068,9 @@ mod tests {
                     exit_status: 1,
                 }))
             }
+            CmdRequest::CryptsetupLuksFormatTestArgs { .. } => {
+                Some(Ok(crate::test_fixtures::format_test_args_ok()))
+            }
             CmdRequest::CryptsetupLuksFormat { device, .. } => {
                 Some(Ok(mock_ok(&format!("cryptsetup luksFormat {device}"), "")))
             }
@@ -7207,6 +7230,9 @@ mod tests {
                         stderr: "Device is not a valid LUKS device.\n".into(),
                         exit_status: 1,
                     }))
+                }
+                CmdRequest::CryptsetupLuksFormatTestArgs { .. } => {
+                    Some(Ok(crate::test_fixtures::format_test_args_ok()))
                 }
                 CmdRequest::CryptsetupLuksFormat { device, .. } => {
                     Some(Ok(mock_ok(&format!("cryptsetup luksFormat {device}"), "")))
@@ -7697,7 +7723,10 @@ mod tests {
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner = ReplacementPool::one_live_one_missing()
             .with_mapper_closed("braid-replacement")
-            .install(MockRunner::default(), replace_done)
+            .install(
+                MockRunner::default().with_format_test_args_confirmed(),
+                replace_done,
+            )
             .with_handler(|req| match req {
                 CmdRequest::CryptsetupLuksUuid { device } if device == "/dev/disk/by-id/new" => {
                     Some(Ok(RawCommandOutput {
@@ -8322,7 +8351,10 @@ mod tests {
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner = ReplacementPool::two_disk_healthy()
             .with_mapper_closed("braid-disk3")
-            .install(MockRunner::default(), replace_done)
+            .install(
+                MockRunner::default().with_format_test_args_confirmed(),
+                replace_done,
+            )
             .with_handler(keyfile_probe_all_failures_handler());
         let report = plan_replace(
             &runner,
@@ -8373,7 +8405,10 @@ mod tests {
         let replace_done = Arc::new(AtomicBool::new(false));
         let runner = ReplacementPool::two_disk_healthy()
             .with_mapper_closed("braid-disk3")
-            .install(MockRunner::default(), replace_done)
+            .install(
+                MockRunner::default().with_format_test_args_confirmed(),
+                replace_done,
+            )
             .with_handler(|req| match req {
                 CmdRequest::CryptsetupLuksUuid { device }
                     if device == "/dev/disk/by-id/virtio-disk3" =>
@@ -9752,6 +9787,9 @@ mod tests {
                         exit_status: 1,
                     }))
                 }
+                CmdRequest::CryptsetupLuksFormatTestArgs { .. } => {
+                    Some(Ok(crate::test_fixtures::format_test_args_ok()))
+                }
                 CmdRequest::CryptsetupLuksFormat { device, .. } => {
                     Some(Ok(mock_ok(&format!("cryptsetup luksFormat {device}"), "")))
                 }
@@ -9791,6 +9829,71 @@ mod tests {
         assert!(
             uuid::Uuid::parse_str(uuid.as_str()).is_ok(),
             "structured uuid carries the journaled identity"
+        );
+    }
+
+    // Intent: a `--luks-format-arg` cryptsetup rejects refuses the replace
+    //   at plan time, before the journal or any luksFormat.
+    // Why it exists: finding 261022-1230-002. braid used to learn of a bad
+    //   extra only when luksFormat failed after pending-op.json was written,
+    //   which left the pool in recovery mode over a typo.
+    // Scenario: live replace of disk2 -> disk3 with the typo `--use-randomm`.
+    #[test]
+    fn cmd_replace_refuses_format_arg_cryptsetup_rejects_before_journal() {
+        let f = PoolFixture::two_disk_healthy();
+        let fs = MockFs::storage(vec![
+            "/dev/disk/by-id/virtio-disk3".into(),
+            "/dev/mapper/braid-disk3".into(),
+        ])
+        .with_sysfs_disks(&["vdd"])
+        .with_dm(canonical_dm_table());
+        let replace_done = Arc::new(AtomicBool::new(false));
+        let runner = ReplacementPool::two_disk_healthy()
+            .with_mapper_closed("braid-disk3")
+            .install(MockRunner::default(), replace_done)
+            .with_handler(|req| match req {
+                CmdRequest::CryptsetupLuksUuid { device }
+                    if device == "/dev/disk/by-id/virtio-disk3" =>
+                {
+                    Some(Ok(RawCommandOutput {
+                        cmd: format!("cryptsetup luksUUID {device}"),
+                        stdout: String::new(),
+                        stderr: "Device is not a valid LUKS device.\n".into(),
+                        exit_status: 1,
+                    }))
+                }
+                CmdRequest::CryptsetupLuksFormatTestArgs { .. } => Some(Ok(RawCommandOutput {
+                    cmd: "cryptsetup luksFormat --test-args".into(),
+                    stdout: String::new(),
+                    stderr: "--use-randomm: unknown option\n".into(),
+                    exit_status: 1,
+                })),
+                _ => None,
+            });
+        let extras = vec!["--use-randomm".to_owned()];
+
+        let err = cmd_replace(
+            &runner,
+            &fs,
+            &f.replace_params().luks_format_extra_opts(&extras).build(),
+        )
+        .expect_err("a rejected extra must refuse the replace");
+
+        assert!(
+            err.to_string().contains("--use-randomm: unknown option"),
+            "the refusal must carry cryptsetup's reason: {err}"
+        );
+        assert!(
+            !f.paths.pending_op_json().exists(),
+            "a rejected extra must refuse before the journal"
+        );
+        assert!(
+            !runner
+                .requests()
+                .iter()
+                .any(|r| matches!(r, CmdRequest::CryptsetupLuksFormat { .. })),
+            "no luksFormat may run: {:?}",
+            runner.requests()
         );
     }
 }
