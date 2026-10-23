@@ -284,6 +284,18 @@ sudo braid unlock --allow-degraded
 
 This mounts the pool in degraded mode. All data is still accessible (btrfs RAID1 keeps a copy on the surviving disk(s)), but the pool is running with reduced redundancy until you replace the dead drive.
 
+### When the missing disk comes back
+
+If the disk was only unplugged or came loose, plug it back in. btrfs does not take a returning disk back into a mounted pool, and `braid add` refuses a disk `pool.json` already lists as a member that is not live. Close and reopen the pool so the disk rejoins, then check its health:
+
+```sh
+sudo braid lock
+sudo braid unlock
+sudo braid doctor
+```
+
+Add `--allow-degraded` to `braid unlock` if another member is still missing. If the pool wrote data as `single` while the disk was away, `braid doctor` reports it and gives the balance that restores RAID1.
+
 ### Hot-unplug while pool is mounted
 
 If a drive is physically disconnected while the pool is mounted, its LUKS

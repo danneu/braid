@@ -45,11 +45,14 @@ use std::path::{Path, PathBuf};
 /// refusal for the in-flight and membership arms, where both colliding
 /// parties are real, legitimately-resolved identities, so it names both
 /// `(name, by_id)` pairs explicitly rather than falling through to the
-/// generic `MembershipError::Conflict`. `DuplicateUuidLivePool` is the
-/// live-pool arm, where the colliding device is a foreign/cloned btrfs
-/// member absent from membership: per ADR 024 braid does not invent an
-/// identity for the clone, so it names only the real add target and reports
-/// the colliding side by scope -- mirroring `replace`'s
+/// generic `MembershipError::Conflict`. Its membership arm fires only for a
+/// member listed under another name and by-id than the target: exact members
+/// are decided by `resolve_existing_member`, never by the adoption paths.
+/// `DuplicateUuidLivePool` is the live-pool arm, where the colliding device
+/// is a foreign/cloned btrfs member absent from membership: per ADR 024
+/// braid does not invent an identity for the clone, so it names only the
+/// real add target and reports the colliding side by scope -- mirroring
+/// `replace`'s
 /// `DuplicateUuid { scope: LivePool }` name-nothing-foreign contract.
 /// `ManagedFormatFlag` surfaces a rejected `--luks-format-arg` through
 /// the `AddError` chain so the CLI matches a single error type at the
@@ -93,7 +96,8 @@ pub enum AddError {
     #[error("disk added to pool, but pool.json was not persisted: {detail}")]
     PostAddProbeFailed { detail: String },
     /// Pre-journal-write refusal: a target's LUKS UUID collides with
-    /// another in-flight add target or an existing pool member. Raised by
+    /// another in-flight add target or with a pool member listed under
+    /// another name and by-id. Raised by
     /// `assert_target_uuid_unique` before journal write, before any
     /// `CryptsetupLuksFormat`, and before any `PoolMembership::insert`,
     /// so the operator-facing message names both `(name, by_id)` pairs
@@ -127,6 +131,19 @@ pub enum AddError {
         name: DiskName,
         by_id: ByIdPath,
     },
+    /// A disk named under the name and by-id pool.json already lists for it,
+    /// while the mounted pool does not hold it live. `braid add` cannot
+    /// bring a member back: btrfs does not take a returning devid back into a
+    /// mounted pool, and a new devid would strand the MISSING one. `reason`
+    /// says what pool state and the member's disk show, so the refusal
+    /// gives the route that works for that state.
+    #[error("{}", format_member_not_live(.name, .by_id, .uuid, .reason))]
+    MemberNotLive {
+        name: DiskName,
+        by_id: ByIdPath,
+        uuid: LuksUuid,
+        reason: MemberNotLiveReason,
+    },
     /// Closed-PresentLuks target identity drift between planning-time
     /// probe and the live disk immediately before Pass 1
     /// `ensure_luks_open`. Mirrors
@@ -159,6 +176,82 @@ pub enum AddError {
     Parse(#[from] crate::parse::ParseError),
     #[error("membership error: {0}")]
     Membership(#[from] membership::MembershipError),
+}
+
+/// Why an exact pool.json member is not live, for `AddError::MemberNotLive`.
+/// Pool state decides the hot-unplug arm before any disk probe, because a
+/// mapper over a gone disk fails that probe. The member's disk decides the
+/// other arms, because the route depends on what the disk now holds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MemberNotLiveReason {
+    /// The member's mapper is open over a gone disk. The two lists are
+    /// `repair_hint::hot_unplug_reopen`'s inputs: every null-backed devid,
+    /// sorted, and the pool's btrfs-MISSING devids.
+    HotUnplugged {
+        hot_unplugged: Vec<Devid>,
+        missing: Vec<Devid>,
+    },
+    /// No open mapper holds the member, and its by-id path is gone.
+    /// `others_missing` is `reopen_needs_degraded` for the pool.
+    Absent { others_missing: bool },
+    /// No open mapper in the pool holds the member, but its disk is attached
+    /// and carries the member's LUKS UUID, such as a disk that came back after
+    /// a degraded mount.
+    Returned { others_missing: bool },
+    /// The member's disk is attached but holds no LUKS header braid can read.
+    NotLuks,
+    /// The member's disk is attached but carries another LUKS UUID.
+    OtherLuks { found: LuksUuid },
+}
+
+/// Hand-written wording for `AddError::MemberNotLive`. It shares the reopen
+/// route with remove and doctor through `repair_hint`, and says why add
+/// cannot help, because an operator whose disk came back reaches for add.
+fn format_member_not_live(
+    name: &DiskName,
+    by_id: &ByIdPath,
+    uuid: &LuksUuid,
+    reason: &MemberNotLiveReason,
+) -> String {
+    let lead = format!(
+        "disk '{name}' ({by_id}) is listed in pool.json but is not a live member of the pool, \
+         and `braid add` cannot bring a pool member back."
+    );
+    let replace = repair_hint::missing_replace_command(Some(name));
+    let unlock = repair_hint::ReopenWith::Unlock;
+    match reason {
+        MemberNotLiveReason::HotUnplugged {
+            hot_unplugged,
+            missing,
+        } => format!(
+            "{lead} {}",
+            repair_hint::hot_unplug_reopen(
+                hot_unplugged,
+                missing,
+                unlock,
+                "Then run `braid doctor`."
+            )
+        ),
+        MemberNotLiveReason::Absent { others_missing } => format!(
+            "{lead} Its disk is not present. If the disk is dead, replace the member: \
+             `{replace}`. Otherwise plug it in, then {}.",
+            repair_hint::not_live_reopen(unlock, *others_missing)
+        ),
+        MemberNotLiveReason::Returned { others_missing } => format!(
+            "{lead} Its disk is attached and carries the member's LUKS UUID {uuid}, but btrfs \
+             does not take a returning disk back into a mounted pool. To bring it back, {}.",
+            repair_hint::not_live_reopen(unlock, *others_missing)
+        ),
+        MemberNotLiveReason::NotLuks => format!(
+            "{lead} Its disk is attached but holds no LUKS header braid can read, so \
+             `braid unlock` cannot open member {name} from it. Replace the member: `{replace}`."
+        ),
+        MemberNotLiveReason::OtherLuks { found } => format!(
+            "{lead} Its disk is attached but carries LUKS UUID {found}, not the member's \
+             {uuid}, so `braid unlock` cannot open member {name} from it. Replace the member: \
+             `{replace}`."
+        ),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1150,6 +1243,143 @@ fn format_add_done(names: &[DiskName]) -> String {
     )
 }
 
+/// The refusal for a disk whose by-id path is gone, shared by the per-disk
+/// probe of new disks and by `resolve_existing_member`'s live arm so both
+/// word it the same.
+fn format_absent_disk_refusal(name: &DiskName, by_id: &ByIdPath) -> String {
+    format!("disk '{name}' ({by_id}) is not present. Is it plugged in?")
+}
+
+/// A disk spec that names a pool.json member under that member's own name
+/// and by-id. Carries the member's LUKS UUID so `resolve_existing_member`
+/// decides it by identity (principle 5), not by name.
+#[derive(Debug, Clone)]
+struct ExistingMemberSpec {
+    name: DiskName,
+    by_id: ByIdPath,
+    uuid: LuksUuid,
+}
+
+/// The disk specs after the conflict gate. Only `new` reaches the per-disk
+/// probe and `build_add_work_plan`, so no adoption path and no
+/// `assert_target_uuid_unique` call ever sees an exact member.
+#[derive(Debug, Clone, Default)]
+struct GatedSpecs {
+    new: Vec<(DiskName, ByIdPath)>,
+    existing: Vec<ExistingMemberSpec>,
+}
+
+/// Fail-fast name and by-id conflict gate, run before any probe, passphrase
+/// read, inhibitor acquisition, or journal write. A spec that matches a
+/// member on both axes is that member, not a conflict; one axis alone is a
+/// conflict. Only these two axes exist yet: the LUKS UUID is generated or
+/// probed later, and the real `PoolMembership::insert` at commit time is the
+/// four-axis backstop.
+fn gate_specs(
+    parsed: &[(DiskName, ByIdPath)],
+    membership: &PoolMembership,
+) -> Result<GatedSpecs, AddError> {
+    let mut gated = GatedSpecs::default();
+    for (name, by_id) in parsed {
+        if let Some((uuid, existing)) = membership.by_name(name) {
+            if &existing.by_id != by_id {
+                return Err(membership::MembershipError::Conflict(format!(
+                    "name '{name}' already in use under UUID {uuid}"
+                ))
+                .into());
+            }
+            gated.existing.push(ExistingMemberSpec {
+                name: name.clone(),
+                by_id: by_id.clone(),
+                uuid: uuid.clone(),
+            });
+            continue;
+        }
+        if let Some((uuid, _)) = membership.by_by_id(by_id) {
+            return Err(membership::MembershipError::Conflict(format!(
+                "by_id '{by_id}' already in use under UUID {uuid}"
+            ))
+            .into());
+        }
+        gated.new.push((name.clone(), by_id.clone()));
+    }
+    Ok(gated)
+}
+
+/// Whether a reopen must mount degraded because a member other than the one
+/// being brought back is missing. The member itself has no open mapper, so
+/// at most one devid-only MISSING devid is its own, and any null-backed row
+/// is another member.
+fn reopen_needs_degraded(pool: &PoolState) -> bool {
+    pool.devid_only_missing().count() > 1 || !pool.null_underlying.is_empty()
+}
+
+/// Decide one exact pool.json member: `Ok` is the already-in-pool no-op.
+/// Pool state decides first, by the member's LUKS UUID: live on the same
+/// disk is the no-op, live on another disk is a clone, and a hot-unplugged
+/// mapper gets the reopen route before a disk probe could trip over it. Only
+/// a member no open mapper in the pool holds gets the read-only disk probe,
+/// which picks the advice for its `AddError::MemberNotLive`.
+fn resolve_existing_member<R: CommandRunner, F: Filesystem + ?Sized>(
+    runner: &R,
+    fs: &F,
+    member: &ExistingMemberSpec,
+    pool: &PoolState,
+    resolver: &dyn BackingPathResolver,
+) -> Result<(), AddError> {
+    let not_live = |reason| AddError::MemberNotLive {
+        name: member.name.clone(),
+        by_id: member.by_id.clone(),
+        uuid: member.uuid.clone(),
+        reason,
+    };
+    match pool.member_by_uuid(&member.uuid) {
+        MemberPresence::Live(_) => {
+            if !fs.exists(member.by_id.as_str()) {
+                return Err(AddError::Validation(format_absent_disk_refusal(
+                    &member.name,
+                    &member.by_id,
+                )));
+            }
+            match classify_live_pool_match(&member.uuid, &member.by_id, pool, resolver)? {
+                LivePoolMatch::SameBacking => Ok(()),
+                LivePoolMatch::DifferentBacking => Err(duplicate_live_pool_uuid_error(
+                    &member.uuid,
+                    &member.name,
+                    &member.by_id,
+                )),
+                LivePoolMatch::NoMatch => Err(AddError::Validation(format!(
+                    "internal: member '{}' has a live pool row for LUKS UUID {} that the \
+                     backing-path match did not find",
+                    member.name, member.uuid
+                ))),
+            }
+        }
+        MemberPresence::HotUnplugged(_) | MemberPresence::HotUnpluggedMissing(_) => {
+            let hot_unplugged: std::collections::BTreeSet<Devid> =
+                pool.null_underlying.iter().map(|n| n.devid).collect();
+            Err(not_live(MemberNotLiveReason::HotUnplugged {
+                hot_unplugged: hot_unplugged.into_iter().collect(),
+                missing: pool.missing_devids.clone(),
+            }))
+        }
+        MemberPresence::NotOpen => {
+            let others_missing = reopen_needs_degraded(pool);
+            let disk = probe_config_disk(runner, fs, &member.name, &member.by_id, resolver)?;
+            Err(not_live(match disk.state {
+                ConfigDiskState::Absent => MemberNotLiveReason::Absent { others_missing },
+                ConfigDiskState::PresentLuks { uuid, .. } if uuid == member.uuid => {
+                    MemberNotLiveReason::Returned { others_missing }
+                }
+                ConfigDiskState::PresentLuks { uuid, .. } => {
+                    MemberNotLiveReason::OtherLuks { found: uuid }
+                }
+                ConfigDiskState::PresentNotLuks => MemberNotLiveReason::NotLuks,
+            }))
+        }
+    }
+}
+
 /// Dry-run preview source of truth for `braid add` plus the execute
 /// inputs pre-computed during planning. `preview()` renders accumulated
 /// notes plus steps from the semantic work plan; `execute()` renders
@@ -1164,6 +1394,8 @@ pub struct AddPlan {
     pub parsed: Vec<(DiskName, ByIdPath)>,
     pub names: Vec<DiskName>,
     pub by_ids: Vec<ByIdPath>,
+    /// Probes of the new disks only. Exact pool.json members never reach
+    /// the per-disk probe; `resolve_existing_member` decides them.
     pub probed: Vec<PresentConfigDisk>,
     pub pool: PoolState,
     pub pool_membership: PoolMembership,
@@ -1844,9 +2076,10 @@ impl AddPlan {
 /// operation and loaded config under the pool lock. Owns disk-spec parsing,
 /// duplicate-name validation, the distinct-whole-disk target check
 /// (`cli/src/target_disk.rs#check_whole_disk_targets`), keyfile path validation,
-/// membership load, conflict validation, pool probe, the bootstrap-or-live
-/// decision (`decide_add_pool_target`), mutation preflight,
-/// per-disk probe, UPS preflight, the missing-devices warning, the keyfile-asymmetry
+/// membership load, conflict validation (`gate_specs`), pool probe, the
+/// bootstrap-or-live decision (`decide_add_pool_target`), mutation preflight,
+/// exact-member resolution (`resolve_existing_member`), the per-disk probe of
+/// new disks, UPS preflight, the missing-devices warning, the keyfile-asymmetry
 /// warning, and the semantic add work planner. On success, every accumulated
 /// note lives on `plan.notes`; on failure after note accumulation, notes
 /// survive on `PlanFailure::notes` so `cmd_add` can render them to stderr
@@ -1933,42 +2166,16 @@ pub fn plan_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         Err(e) => return Err(PlanFailure::empty(e.into())),
     };
 
-    // Fail-fast name/by-id conflict gate. Runs before any probe, passphrase
-    // read, inhibitor acquisition, or journal write so a name/by-id collision
-    // with an existing member fails with zero side effects. In-invocation
-    // duplicate names and specs on one disk were already rejected above, so
-    // each spec is mutually distinct and only needs checking against existing
-    // members.
-    //
-    // Only the name and by-id axes are checked here: no LUKS UUID has been
-    // assigned yet (it is generated/probed per target later) and devid is
-    // enrichment-only. The full four-axis uniqueness invariant is enforced by
-    // the real `PoolMembership::insert` that builds `target_membership` at
-    // commit time -- this is the early fail-fast, that is the backstop.
-    for (name, by_id) in &parsed {
-        if let Some((existing_uuid, existing)) = pool_membership.by_name(name) {
-            // Exact existing member (same name AND by-id): re-specifying a
-            // disk already in the pool is the documented already-in-pool
-            // no-op, classified downstream -- not a conflict.
-            if &existing.by_id == by_id {
-                continue;
-            }
-            return Err(PlanFailure::empty(
-                membership::MembershipError::Conflict(format!(
-                    "name '{name}' already in use under UUID {existing_uuid}"
-                ))
-                .into(),
-            ));
-        }
-        if let Some((existing_uuid, _)) = pool_membership.by_by_id(by_id) {
-            return Err(PlanFailure::empty(
-                membership::MembershipError::Conflict(format!(
-                    "by_id '{by_id}' already in use under UUID {existing_uuid}"
-                ))
-                .into(),
-            ));
-        }
-    }
+    // Name/by-id conflict gate. In-invocation duplicate names and specs on
+    // one disk were already rejected above, so each spec only needs checking
+    // against existing members. An exact member (same name AND by-id) is
+    // split off here and decided by `resolve_existing_member` below: the
+    // already-in-pool no-op when it is live on the same disk, a refusal
+    // otherwise.
+    let gated = match gate_specs(&parsed, &pool_membership) {
+        Ok(gated) => gated,
+        Err(e) => return Err(PlanFailure::empty(e)),
+    };
 
     // Probe pool + preflight before per-disk LUKS probing so a short live
     // exclusive op is observed close to command entry. The btrfs operations
@@ -2003,11 +2210,29 @@ pub fn plan_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         }
     }
 
-    // Probe all disks, then refine to the present-only shape consumed by
-    // downstream builders.
-    let probed: Vec<ConfigDisk> = match names
+    // Exact members, after the pool gate: pool.json lists them, so a locked
+    // pool has already refused, and each one meets a mounted pool. Any member
+    // that is not live refuses the whole command before the prompt.
+    for member in &gated.existing {
+        if let Err(error) =
+            resolve_existing_member(runner, fs, member, &pool, params.backing_path_resolver)
+        {
+            return Err(if notes.is_empty() {
+                PlanFailure::empty(error)
+            } else {
+                PlanFailure::with_notes(notes, error)
+            });
+        }
+    }
+
+    // Probe the new disks, then refine to the present-only shape consumed by
+    // downstream builders. `new_names`, `new_by_ids` and `probed` stay
+    // index-aligned.
+    let new_names: Vec<DiskName> = gated.new.iter().map(|(n, _)| n.clone()).collect();
+    let new_by_ids: Vec<ByIdPath> = gated.new.iter().map(|(_, b)| b.clone()).collect();
+    let probed: Vec<ConfigDisk> = match gated
+        .new
         .iter()
-        .zip(by_ids.iter())
         .map(|(name, by_id)| {
             probe_config_disk(runner, fs, name, by_id, params.backing_path_resolver)
         })
@@ -2029,10 +2254,8 @@ pub fn plan_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         match PresentConfigDisk::try_from(probed_disk) {
             Ok(p) => present_probed.push(p),
             Err(orig) => {
-                let error = AddError::Validation(format!(
-                    "disk '{}' ({}) is not present. Is it plugged in?",
-                    orig.name, orig.by_id_path
-                ));
+                let error =
+                    AddError::Validation(format_absent_disk_refusal(&orig.name, &orig.by_id_path));
                 return Err(if notes.is_empty() {
                     PlanFailure::empty(error)
                 } else {
@@ -2049,14 +2272,14 @@ pub fn plan_add<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         return Err(PlanFailure::with_notes(notes, AddError::Validation(msg)));
     }
 
-    // Build the semantic work plan. This can fail on PresentLuks identity /
-    // foreign-pool guards.
-    let by_ids_refs: Vec<&ByIdPath> = by_ids.iter().collect();
+    // Build the semantic work plan from the new disks. This can fail on
+    // PresentLuks identity / foreign-pool guards.
+    let by_ids_refs: Vec<&ByIdPath> = new_by_ids.iter().collect();
     let work_plan_result = build_add_work_plan(
         runner,
         fs,
         &AddStepsInput {
-            names: &names,
+            names: &new_names,
             by_ids: &by_ids_refs,
             probed: &probed,
             pool: &pool,
@@ -2533,7 +2756,9 @@ fn build_add_work_plan<R: CommandRunner, F: Filesystem + ?Sized>(
 ///      `(name, by_id)` pairs (the cloned-disk-across-targets case).
 ///   2. Otherwise, if the UUID matches a membership key, raise
 ///      `AddError::DuplicateUuid` naming the in-flight target plus the
-///      colliding member's real `(name, by_id)`.
+///      colliding member's real `(name, by_id)`. `gate_specs` keeps exact
+///      members out of the work plan, so that member is always listed under
+///      another name and by-id, never the target itself.
 ///
 /// Live-pool collisions -- a UUID matching a device live in the btrfs pool
 /// but absent from membership (a foreign/cloned disk) -- are NOT this
@@ -8040,8 +8265,8 @@ mod tests {
     //
     // Why it exists: same gate, by-id arm. Neither conflict arm had add-layer
     //   coverage before; the by-id arm in particular must not be shadowed by
-    //   the exact-re-add skip (the `continue` fires only when name AND by-id
-    //   both match an existing member).
+    //   the exact-member split in `gate_specs`, which applies only when name
+    //   AND by-id both match an existing member.
     //
     // Scenario: operator gives a new logical name (disk9) to a
     //   /dev/disk/by-id path (virtio-disk1) that already belongs to disk1 --
@@ -10566,6 +10791,10 @@ mod tests {
         ClosedDumpFails,
         OpenRecoverableSlot1Empty,
         AlreadyInPoolSlot1Empty,
+        /// Mapper closed, LUKS UUID `pool_uuid(index)`: the disk of a
+        /// pool.json member that btrfs does not hold, such as one that
+        /// came back after a degraded mount.
+        ClosedPoolMember,
     }
 
     struct AddPlanTestRunner {
@@ -10685,7 +10914,8 @@ mod tests {
                         }
                         AddPlanTargetProbe::ClosedSlot1Empty
                         | AddPlanTargetProbe::ClosedSlot1Occupied
-                        | AddPlanTargetProbe::ClosedDumpFails => table,
+                        | AddPlanTargetProbe::ClosedDumpFails
+                        | AddPlanTargetProbe::ClosedPoolMember => table,
                     }
                 })
         }
@@ -10739,7 +10969,8 @@ mod tests {
                             match probe {
                                 AddPlanTargetProbe::ClosedSlot1Empty
                                 | AddPlanTargetProbe::ClosedSlot1Occupied
-                                | AddPlanTargetProbe::ClosedDumpFails => {
+                                | AddPlanTargetProbe::ClosedDumpFails
+                                | AddPlanTargetProbe::ClosedPoolMember => {
                                     return Ok(mock_status_inactive(mapper.as_str()));
                                 }
                                 AddPlanTargetProbe::OpenRecoverableSlot1Empty
@@ -10782,7 +11013,8 @@ mod tests {
                             | AddPlanTargetProbe::OpenRecoverableSlot1Empty => {
                                 "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa".to_owned()
                             }
-                            AddPlanTargetProbe::AlreadyInPoolSlot1Empty => Self::pool_uuid(index),
+                            AddPlanTargetProbe::AlreadyInPoolSlot1Empty
+                            | AddPlanTargetProbe::ClosedPoolMember => Self::pool_uuid(index),
                         };
                         Ok(mock_ok(
                             &format!("cryptsetup luksUUID {device}"),
@@ -10844,7 +11076,8 @@ mod tests {
                         return match probe {
                             AddPlanTargetProbe::ClosedSlot1Empty
                             | AddPlanTargetProbe::OpenRecoverableSlot1Empty
-                            | AddPlanTargetProbe::AlreadyInPoolSlot1Empty => Ok(mock_ok(
+                            | AddPlanTargetProbe::AlreadyInPoolSlot1Empty
+                            | AddPlanTargetProbe::ClosedPoolMember => Ok(mock_ok(
                                 "cryptsetup luksDump --dump-json-metadata",
                                 r#"{"keyslots":{"0":{"type":"luks2"}}}"#,
                             )),
@@ -11880,6 +12113,358 @@ mod tests {
         assert!(
             !rendered.contains("nothing to do."),
             "generic `nothing to do.` fallback must NOT appear alongside the Info note"
+        );
+    }
+
+    // Intent: naming a pool.json member that is not live, under its own name
+    // and by-id, refuses with the reattach route, not as a dd clone of itself.
+    // Why it exists: finding 261022-1230-005. The conflict gate let the exact
+    // member through, the closed-mapper branch found no live row, and
+    // `assert_target_uuid_unique` hit the member's own pool.json key. The
+    // refusal named braid-disk2 twice and told the operator to detach a real
+    // pool member.
+    // Scenario: the pool was unlocked degraded while disk2 was away. disk2 is
+    // plugged back in: its mapper is closed and btrfs lists its devid as
+    // MISSING. The operator runs `braid add disk2=<its by-id>`.
+    #[test]
+    fn plan_add_refuses_not_live_member_with_reattach_route() {
+        let fixture = plan_add_fixture();
+        add_canonical_member(&fixture.paths, 2);
+        let runner = AddPlanTestRunner::new().with_missing(1).with_target_probe(
+            "/dev/disk/by-id/virtio-disk2",
+            AddPlanTargetProbe::ClosedPoolMember,
+        );
+        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk2".into()])
+            .with_sysfs_disks(&["vdc"])
+            .with_dm(runner.dm_table());
+
+        let disk_specs = ["disk2=/dev/disk/by-id/virtio-disk2".to_string()];
+        let error = match plan_add(&runner, &fs, &fixture.params(&disk_specs, true)) {
+            Ok(_) => panic!("plan_add must refuse a member that is not live"),
+            Err(failure) => failure.error,
+        };
+
+        assert!(
+            !matches!(error, AddError::DuplicateUuid { .. }),
+            "a member is not a clone of itself: {error:?}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("disk2") && message.contains("is not a live member of the pool"),
+            "refusal must name the member as not live: {message}"
+        );
+        assert!(
+            message.contains("`braid lock` then `braid unlock`")
+                && !message.contains("--allow-degraded"),
+            "only disk2 is missing, so a plain lock and unlock brings it back: {message}"
+        );
+        assert!(
+            !message.contains("dd-cloned"),
+            "refusal must not send the operator to detach a clone: {message}"
+        );
+    }
+
+    // Intent: an exact pool.json member resolves from pool state first and
+    // from its disk second, to the no-op or to the refusal its state needs.
+    // Why it exists: finding 261022-1230-005. Exact members fell into the
+    // adoption paths, which call a member a clone of itself, show a LUKS
+    // format for a wiped member, or fail a zombie mapper's probe with advice
+    // that does not work on a mounted member.
+    // Scenario: pool.json lists disk2; one row per state disk2 can be in when
+    // the operator runs `braid add disk2=<its by-id>`.
+    #[test]
+    fn resolve_existing_member_decides_each_member_state() {
+        enum Expect {
+            NoOp,
+            Clone,
+            LinkGone,
+            NotLive(MemberNotLiveReason),
+        }
+        let uuid = crate::test_fixtures::canonical_luks_uuid(2);
+        let member = ExistingMemberSpec {
+            name: DiskName::parse("disk2").unwrap(),
+            by_id: ByIdPath::parse("/dev/disk/by-id/virtio-disk2").unwrap(),
+            uuid: uuid.clone(),
+        };
+        let row = |mapper: &str, uuid: &LuksUuid, devid: u64, underlying: &str| PoolDevice {
+            devid: Devid::new(devid),
+            ..live_pool_device(mapper, uuid, underlying)
+        };
+        let null_row = |mapper: &str, uuid: &LuksUuid, devid: u64| NullUnderlyingDevice {
+            mapper: MapperName::from_basename(mapper.into()),
+            luks_uuid: uuid.clone(),
+            devid: Devid::new(devid),
+        };
+        let disk1 = row(
+            "braid-disk1",
+            &crate::test_fixtures::canonical_luks_uuid(1),
+            1,
+            "/dev/vdb",
+        );
+        let pool = |devices: Vec<PoolDevice>, missing: &[u64], null: Vec<NullUnderlyingDevice>| {
+            let missing_devids: Vec<Devid> = missing.iter().copied().map(Devid::new).collect();
+            let missing_count = (missing_devids.len() + null.len()) as u64;
+            PoolState {
+                total_devices: devices.len() as u64 + missing_count,
+                devices,
+                missing_count,
+                missing_devids,
+                null_underlying: null,
+                ..pool_with_live_devices(vec![])
+            }
+        };
+        let live = pool(
+            vec![disk1.clone(), row("braid-disk2", &uuid, 2, "/dev/vdc")],
+            &[],
+            vec![],
+        );
+        let cloned = pool(
+            vec![disk1.clone(), row("braid-disk2", &uuid, 2, "/dev/vdz")],
+            &[],
+            vec![],
+        );
+        let unplugged = pool(
+            vec![disk1.clone()],
+            &[],
+            vec![null_row("braid-disk2", &uuid, 2)],
+        );
+        let unplugged_promoted = pool(
+            vec![disk1.clone()],
+            &[2],
+            vec![null_row("braid-disk2", &uuid, 2)],
+        );
+        let degraded = pool(vec![disk1.clone()], &[2], vec![]);
+        let two_missing = pool(vec![disk1.clone()], &[2, 3], vec![]);
+        let other_unplugged = pool(
+            vec![disk1.clone()],
+            &[2],
+            vec![null_row(
+                "braid-disk3",
+                &crate::test_fixtures::canonical_luks_uuid(3),
+                3,
+            )],
+        );
+        let returned =
+            |others_missing| Expect::NotLive(MemberNotLiveReason::Returned { others_missing });
+
+        // (case, pool, disk2's probe, disk2's by-id link exists, expected)
+        let cases = [
+            ("live on its disk", &live, None, true, Expect::NoOp),
+            ("live on another disk", &cloned, None, true, Expect::Clone),
+            (
+                "live, by-id link gone",
+                &live,
+                None,
+                false,
+                Expect::LinkGone,
+            ),
+            (
+                "hot-unplugged",
+                &unplugged,
+                None,
+                true,
+                Expect::NotLive(MemberNotLiveReason::HotUnplugged {
+                    hot_unplugged: vec![Devid::new(2)],
+                    missing: vec![],
+                }),
+            ),
+            (
+                "hot-unplugged, promoted to MISSING",
+                &unplugged_promoted,
+                None,
+                true,
+                Expect::NotLive(MemberNotLiveReason::HotUnplugged {
+                    hot_unplugged: vec![Devid::new(2)],
+                    missing: vec![Devid::new(2)],
+                }),
+            ),
+            (
+                "back, mapper closed",
+                &degraded,
+                Some(AddPlanTargetProbe::ClosedPoolMember),
+                true,
+                returned(false),
+            ),
+            (
+                "back, mapper open outside the pool",
+                &degraded,
+                Some(AddPlanTargetProbe::AlreadyInPoolSlot1Empty),
+                true,
+                returned(false),
+            ),
+            (
+                "back, a second member missing",
+                &two_missing,
+                Some(AddPlanTargetProbe::ClosedPoolMember),
+                true,
+                returned(true),
+            ),
+            (
+                "back, another member hot-unplugged",
+                &other_unplugged,
+                Some(AddPlanTargetProbe::ClosedPoolMember),
+                true,
+                returned(true),
+            ),
+            (
+                "disk absent",
+                &degraded,
+                None,
+                false,
+                Expect::NotLive(MemberNotLiveReason::Absent {
+                    others_missing: false,
+                }),
+            ),
+            (
+                "disk not LUKS",
+                &degraded,
+                None,
+                true,
+                Expect::NotLive(MemberNotLiveReason::NotLuks),
+            ),
+            (
+                "disk carries another LUKS UUID",
+                &degraded,
+                Some(AddPlanTargetProbe::ClosedSlot1Empty),
+                true,
+                Expect::NotLive(MemberNotLiveReason::OtherLuks {
+                    found: LuksUuid::parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa").unwrap(),
+                }),
+            ),
+        ];
+
+        for (case, pool, probe, link_exists, expected) in cases {
+            // Without a probe, disk2 reads as not LUKS, so a pool-state row
+            // that wrongly probes the disk lands on NotLuks and fails.
+            let mut runner = AddPlanTestRunner::new();
+            if let Some(probe) = probe {
+                runner = runner.with_target_probe(member.by_id.as_str(), probe);
+            }
+            let paths = if link_exists {
+                vec![member.by_id.as_str().to_owned()]
+            } else {
+                vec![]
+            };
+            let fs = MockFs::storage(paths).with_dm(runner.dm_table());
+            let result = resolve_existing_member(
+                &runner,
+                &fs,
+                &member,
+                pool,
+                crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
+            );
+            match (expected, result) {
+                (Expect::NoOp, Ok(())) => {}
+                (Expect::Clone, Err(AddError::DuplicateUuidLivePool { name, .. })) => {
+                    assert_eq!(name, member.name, "{case}");
+                }
+                (Expect::LinkGone, Err(AddError::Validation(message))) => {
+                    assert_eq!(
+                        message,
+                        format_absent_disk_refusal(&member.name, &member.by_id),
+                        "{case}"
+                    );
+                }
+                (
+                    Expect::NotLive(expected),
+                    Err(AddError::MemberNotLive {
+                        name,
+                        by_id,
+                        uuid: got_uuid,
+                        reason,
+                    }),
+                ) => {
+                    assert_eq!(
+                        (name, by_id, got_uuid),
+                        (member.name.clone(), member.by_id.clone(), uuid.clone()),
+                        "{case}"
+                    );
+                    assert_eq!(reason, expected, "{case}");
+                }
+                (_, other) => panic!("{case}: unexpected result {other:?}"),
+            }
+        }
+    }
+
+    // Intent: lock the operator-facing wording of each not-live refusal.
+    // Why it exists: finding 261022-1230-005. The refusal is the operator's
+    // only guide mid-recovery, so each state must name the route that works
+    // for it: reopen for a disk that is back or about to be, replace for a
+    // disk that cannot hold the member, and the shared hot-unplug route.
+    // Scenario: `braid add disk2=<its by-id>` while disk2 is not live, once
+    // per state.
+    #[test]
+    fn member_not_live_renders_each_route() {
+        let render = |reason| {
+            AddError::MemberNotLive {
+                name: DiskName::parse("disk2").unwrap(),
+                by_id: ByIdPath::parse("/dev/disk/by-id/virtio-disk2").unwrap(),
+                uuid: crate::test_fixtures::canonical_luks_uuid(2),
+                reason,
+            }
+            .to_string()
+        };
+        let lead = "disk 'disk2' (/dev/disk/by-id/virtio-disk2) is listed in pool.json but is \
+                    not a live member of the pool, and `braid add` cannot bring a pool member \
+                    back.";
+        let replace = "`braid replace --old disk2 --new <new-name>=/dev/disk/by-id/<...>`";
+        let uuid = crate::test_fixtures::canonical_luks_uuid(2);
+
+        assert_eq!(
+            render(MemberNotLiveReason::Returned {
+                others_missing: false
+            }),
+            format!(
+                "{lead} Its disk is attached and carries the member's LUKS UUID {uuid}, but \
+                 btrfs does not take a returning disk back into a mounted pool. To bring it \
+                 back, run `braid lock` then `braid unlock` to reopen the pool with it, and run \
+                 `braid doctor` to check for data written while it was away."
+            )
+        );
+        assert_eq!(
+            render(MemberNotLiveReason::Absent {
+                others_missing: true
+            }),
+            format!(
+                "{lead} Its disk is not present. If the disk is dead, replace the member: \
+                 {replace}. Otherwise plug it in, then run `braid lock` then `braid unlock \
+                 --allow-degraded` to reopen the pool with it, and run `braid doctor` to check \
+                 for data written while it was away."
+            )
+        );
+        assert_eq!(
+            render(MemberNotLiveReason::NotLuks),
+            format!(
+                "{lead} Its disk is attached but holds no LUKS header braid can read, so \
+                 `braid unlock` cannot open member disk2 from it. Replace the member: {replace}."
+            )
+        );
+        let found = LuksUuid::parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa").unwrap();
+        assert_eq!(
+            render(MemberNotLiveReason::OtherLuks {
+                found: found.clone()
+            }),
+            format!(
+                "{lead} Its disk is attached but carries LUKS UUID {found}, not the member's \
+                 {uuid}, so `braid unlock` cannot open member disk2 from it. Replace the \
+                 member: {replace}."
+            )
+        );
+        let (hot_unplugged, missing) = (vec![Devid::new(2)], vec![Devid::new(3)]);
+        assert_eq!(
+            render(MemberNotLiveReason::HotUnplugged {
+                hot_unplugged: hot_unplugged.clone(),
+                missing: missing.clone(),
+            }),
+            format!(
+                "{lead} {}",
+                repair_hint::hot_unplug_reopen(
+                    &hot_unplugged,
+                    &missing,
+                    repair_hint::ReopenWith::Unlock,
+                    "Then run `braid doctor`."
+                )
+            )
         );
     }
 

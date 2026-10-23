@@ -124,8 +124,23 @@ pub(crate) fn hot_unplug_reopen(
     )
 }
 
+/// Operator remediation for a pool member whose disk is attached, or about
+/// to be, while no open mapper in the mounted pool holds it. btrfs does not
+/// take a returning disk back into a mounted pool, so only a fresh mount
+/// brings it back, and doctor owns the advice for data written while it was
+/// away. Returns a lowercase clause for the caller's sentence.
+/// `others_missing` adds `--allow-degraded` when another member would still
+/// be missing after the reopen.
+pub(crate) fn not_live_reopen(reopen: ReopenWith, others_missing: bool) -> String {
+    format!(
+        "run {} to reopen the pool with it, and run `braid doctor` to check for data \
+         written while it was away",
+        lock_and_reopen(reopen, others_missing)
+    )
+}
+
 /// The one rendering of the close-and-reopen command pair, so every
-/// hot-unplug hint names the same commands in the same order.
+/// hot-unplug and not-live hint names the same commands in the same order.
 fn lock_and_reopen(reopen: ReopenWith, allow_degraded: bool) -> String {
     let reopen = match reopen {
         ReopenWith::Unlock => "braid unlock",
@@ -487,6 +502,28 @@ mod tests {
         assert!(
             hint.contains("back, run `braid lock` then `braid unlock` to close"),
             "{hint}"
+        );
+    }
+
+    // Intent: the not-live reopen clause names the shared lock-and-reopen
+    // pair and adds `--allow-degraded` only while another member is missing.
+    // Why it exists: finding 261022-1230-005. `braid add` told the operator
+    // to detach a member that came back after a degraded mount, as if it were
+    // a dd clone. A wrong flag here sends the operator to a plain unlock that
+    // refuses a degraded pool, or degrades a pool that is whole again.
+    // Scenario: disk2 comes back after a degraded mount, alone or while
+    // another member is still gone.
+    #[test]
+    fn not_live_reopen_renders_flag_per_other_missing() {
+        assert_eq!(
+            not_live_reopen(ReopenWith::Unlock, false),
+            "run `braid lock` then `braid unlock` to reopen the pool with it, and run \
+             `braid doctor` to check for data written while it was away"
+        );
+        assert_eq!(
+            not_live_reopen(ReopenWith::Unlock, true),
+            "run `braid lock` then `braid unlock --allow-degraded` to reopen the pool with \
+             it, and run `braid doctor` to check for data written while it was away"
         );
     }
 
