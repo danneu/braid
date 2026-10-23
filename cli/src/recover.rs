@@ -9,7 +9,9 @@ use crate::inhibit::AcquireSleepInhibitor;
 use crate::journal::{self, Journal};
 use crate::luks::{self, BackingPathResolver, VerifyOutcome};
 use crate::mapper_close::{CloseContext, close_mapper_best_effort, emit_close_progress};
-use crate::membership::{self, DiskMember, LuksUuidMap, PoolMembership};
+use crate::membership::{
+    self, DiskMember, LiveBinding, LiveBindingError, LuksUuidMap, MemberBinding, PoolMembership,
+};
 use crate::mount::{self, MountError, OpenPlan};
 use crate::mount_check;
 use crate::parse::btrfs_filesystem_show::{DeviceBtrfsProbe, classify_btrfs_probe};
@@ -27,7 +29,7 @@ use crate::status::{BalanceReport, get_balance_report};
 use crate::status_tag::{StatusTag, color_enabled_for_stderr, emit_status, status_line};
 use crate::types::{
     ByIdPath, ConfigDiskState, Devid, DiskName, Fsid, KeyFilePath, LuksUuid, MapperName,
-    MountPoint, PoolDevice, PoolState, format_uuid_list,
+    MountPoint, PoolState, format_uuid_list,
 };
 use std::path::PathBuf;
 use std::time::Duration;
@@ -76,13 +78,15 @@ pub enum RecoverError {
         devid: Devid,
         members: Vec<LuksUuid>,
     },
-    /// Journaled-snapshot corruption: a devid that the live pool reports
-    /// has no matching member in the relevant journal snapshot, so the
-    /// pre-crash identity binding is unrecoverable from the journal alone.
-    #[error(
-        "no member in journaled membership has devid {devid}; the journal entry was written against a never-enriched member -- see docs/internals/luks-unlock.md and docs/guides/recovery-scenarios.md before removing /var/lib/braid/pending-op.json"
-    )]
-    NoMemberForJournaledDevid { devid: Devid },
+    /// A btrfs-MISSING devid that no journaled member records sits beside
+    /// journaled members with no recorded devid, so any of them could be the
+    /// missing device (decision 024 rule 9). Recovery refuses rather than
+    /// guess which member btrfs still holds.
+    #[error("{}", ambiguous_missing_devid_message(.devids, .members))]
+    AmbiguousMissingDevid {
+        devids: Vec<Devid>,
+        members: Vec<DiskName>,
+    },
 }
 
 impl RecoverError {
@@ -97,35 +101,36 @@ impl RecoverError {
     }
 }
 
-/// Recover-local snapshot-walk errors raised by `live_pool_matches_membership`
-/// when `journal.pre_membership` / `journal.target_membership` corruption
-/// prevents the gate from evaluating its predicate. A dedicated type -- rather
-/// than returning `RecoverError` directly -- keeps these corruption signals
-/// type-distinct from the `Ok(false)` topology-mismatch case, which each call
-/// site reports with its own `RecoverError::Failed` wording. The
-/// `From<JournaledSnapshotError>` impl below bridges the two corruption variants
-/// into `RecoverError::{DuplicateDevidDuringReplay, NoMemberForJournaledDevid}`
-/// so `?` carries them across each call site.
-#[derive(Debug)]
-enum JournaledSnapshotError {
-    DuplicateDevid {
-        devid: Devid,
-        members: Vec<LuksUuid>,
-    },
-    NoMemberForDevid {
-        devid: Devid,
-    },
+/// Operator wording for `RecoverError::AmbiguousMissingDevid`. It names every
+/// suspect member and devid, since the operator must reconcile each by hand.
+fn ambiguous_missing_devid_message(devids: &[Devid], members: &[DiskName]) -> String {
+    let members = members
+        .iter()
+        .map(|name| format!("'{name}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let devids = devids
+        .iter()
+        .map(Devid::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "recovery cannot safely correlate journaled member(s) {members} with btrfs-MISSING \
+         devid(s) {devids}: the journal records no btrfs devid for those members and live \
+         btrfs reports the missing devid(s) without observable LUKS UUIDs, so any of those \
+         members could be a missing device. Preserve pending-op.json and rebuild membership \
+         with braid discover --write only after manual reconciliation -- see \
+         docs/guides/recovery-scenarios.md and docs/internals/luks-unlock.md."
+    )
 }
 
-impl From<JournaledSnapshotError> for RecoverError {
-    fn from(value: JournaledSnapshotError) -> Self {
+impl From<membership::BindingProjectionError> for RecoverError {
+    fn from(value: membership::BindingProjectionError) -> Self {
         match value {
-            JournaledSnapshotError::DuplicateDevid { devid, members } => {
-                RecoverError::DuplicateDevidDuringReplay { devid, members }
+            membership::BindingProjectionError::AmbiguousMissingDevid { devids, members } => {
+                RecoverError::AmbiguousMissingDevid { devids, members }
             }
-            JournaledSnapshotError::NoMemberForDevid { devid } => {
-                RecoverError::NoMemberForJournaledDevid { devid }
-            }
+            membership::BindingProjectionError::Membership(e) => RecoverError::Membership(e),
         }
     }
 }
@@ -306,7 +311,9 @@ enum RecoverCompletion {
     AddPoolMutation {
         targets: LuksUuidMap<journal::AddJournalTarget>,
         all_targets_already_live: bool,
-        live_uuids: Option<std::collections::BTreeSet<LuksUuid>>,
+        /// Targets the dry-run probe found committed, read from the live
+        /// binding; `None` when the pool was not mounted to probe.
+        committed_targets: Option<std::collections::BTreeSet<LuksUuid>>,
         owed_balance: OwedRaid1Balance,
     },
     AddPostBalance {
@@ -557,7 +564,7 @@ impl RecoverCompletion {
             RecoverCompletion::AddPoolMutation {
                 targets,
                 all_targets_already_live,
-                live_uuids,
+                committed_targets,
                 owed_balance,
             } => {
                 render_add_pool_mutation_recovery_steps(
@@ -565,7 +572,7 @@ impl RecoverCompletion {
                     steps,
                     targets,
                     *all_targets_already_live,
-                    live_uuids.as_ref(),
+                    committed_targets.as_ref(),
                 );
                 render_recovery_tail(plan, steps, None, Some(*owed_balance));
             }
@@ -690,7 +697,6 @@ impl RecoverCompletion {
                     by_id_resolver,
                     params,
                     &plan.journal,
-                    &plan.admission_membership,
                     pool,
                     *owed_balance,
                     false,
@@ -872,7 +878,7 @@ fn render_add_pool_mutation_recovery_steps(
     steps: &mut Vec<Step>,
     targets: &LuksUuidMap<journal::AddJournalTarget>,
     all_targets_already_live: bool,
-    live_uuids: Option<&std::collections::BTreeSet<LuksUuid>>,
+    committed_targets: Option<&std::collections::BTreeSet<LuksUuid>>,
 ) {
     steps.push(Step {
         risk: "safe",
@@ -895,7 +901,7 @@ fn render_add_pool_mutation_recovery_steps(
     for (uuid, target) in sorted {
         let mapper = config::mapper_name(&target.name);
         let mapper_path = mapper.dev_path();
-        if live_uuids.is_some_and(|live| live.contains(uuid)) {
+        if committed_targets.is_some_and(|committed| committed.contains(uuid)) {
             let (kind, label) = match &target.mode {
                 journal::AddJournalMode::RecoverableBraidLabeled { .. } => {
                     ("verified returned-disk add", mapper_path.clone())
@@ -1207,73 +1213,24 @@ fn execute_generic_live_pool_recovery<R: CommandRunner + Sync, F: Filesystem + ?
     pool: PoolState,
     owed_balance: Option<OwedRaid1Balance>,
 ) -> Result<(), RecoverError> {
+    // One binding for both journal kinds (decision 024 rule 9): a member
+    // btrfs still holds -- present, null-backed, or MISSING at the devid the
+    // journal records for it -- stays in pool.json. An absent member with a
+    // recorded devid that btrfs no longer reports is gone, as a committed
+    // remove leaves its target. An absent member with no recorded devid
+    // beside a MISSING devid nobody records refuses: either could be the
+    // other.
+    let null_backed_scope = if matches!(&plan.journal.op, journal::OpKind::Remove { .. }) {
+        "pre-operation membership"
+    } else {
+        ADMISSION_SCOPE
+    };
+    let binding = membership::bind_live_pool(&pool, &plan.admission_membership)
+        .map_err(|e| live_binding_error(e, null_backed_scope))?;
+    let projected = binding.bound_membership()?;
     let prior = membership::load_membership(params.paths).ok();
-    let mut recovered = build_membership_from_live_pool(
-        &pool,
-        &plan.admission_membership,
-        prior.as_ref(),
-        by_id_resolver,
-    )?;
-
-    // OpKind::Remove guard: restore any pre_membership disk that btrfs still
-    // owns. build_membership_from_live_pool walks pool.devices only, so any
-    // disk that has gone null-underlying or btrfs-MISSING between
-    // plan_remove and recovery would be pruned even though no eviction
-    // committed. This loop is the broadened form of the original
-    // target-only restore: the target is in pre_membership, so it gets the
-    // same treatment as any other disk; non-target disks now also survive
-    // (closes the gap where a post-journal validation failure preserved
-    // the journal but recover then lost a flapping non-target disk).
-    if matches!(&plan.journal.op, journal::OpKind::Remove { .. }) {
-        // A null-backed mapper records its LUKS UUID, so one that no
-        // pre-operation member owns is foreign, as a live device would be.
-        if let Some(foreign) = pool
-            .null_underlying
-            .iter()
-            .find(|n| plan.journal.pre_membership.by_uuid(&n.luks_uuid).is_none())
-        {
-            return Err(RecoverError::Failed(format!(
-                "device {} (LUKS UUID {}) is in the live pool with no backing disk but is not \
-                 part of the pre-operation membership.",
-                foreign.mapper, foreign.luks_uuid
-            )));
-        }
-        for (uuid, member) in plan.journal.pre_membership.iter() {
-            if recovered.by_uuid(uuid).is_some() {
-                continue;
-            }
-            // A null-backed mapper binds by the LUKS UUID it records, so the
-            // member records the devid btrfs holds that mapper at, as a
-            // present device does in build_membership_from_live_pool; the
-            // journaled devid may be stale or absent. Only a btrfs-MISSING
-            // device with no open mapper binds by persisted devid.
-            if let Some(null_backed) = pool.null_underlying.iter().find(|n| n.luks_uuid == *uuid) {
-                recovered.insert(
-                    uuid.clone(),
-                    DiskMember {
-                        devid: Some(null_backed.devid),
-                        ..member.clone()
-                    },
-                )?;
-                continue;
-            }
-            let in_missing = member
-                .devid
-                .is_some_and(|d| pool.devid_only_missing().any(|missing| missing == d));
-            if in_missing {
-                recovered.insert(uuid.clone(), member.clone())?;
-            } else if member.devid.is_none() && pool.devid_only_missing().next().is_some() {
-                return Err(RecoverError::Failed(format!(
-                    "remove recovery cannot safely correlate journaled member '{}' because \
-                     pre_membership has no persisted btrfs devid and live btrfs reports \
-                     devices without observable LUKS UUIDs. Current braid remove journals \
-                     pin live devids before mutation; preserve pending-op.json and rebuild \
-                     membership with braid discover --write only after manual reconciliation.",
-                    member.name
-                )));
-            }
-        }
-    }
+    let recovered =
+        materialize_recovered_membership(&binding, &projected, prior.as_ref(), by_id_resolver)?;
 
     let pre_names: std::collections::BTreeSet<_> = plan
         .journal
@@ -1635,14 +1592,20 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             phase: journal::AddPhase::PoolMutation,
             targets,
         } if !journal.is_bootstrap_add() => {
-            let all_targets_already_live = probed_live_pool
+            let committed_targets = match probed_live_pool.as_ref() {
+                Some(pool) => match committed_add_targets(pool, &admission_membership, targets) {
+                    Ok(committed) => Some(committed),
+                    Err(e) => return Err(PlanFailure::with_notes(notes, e)),
+                },
+                None => None,
+            };
+            let all_targets_already_live = committed_targets
                 .as_ref()
-                .is_some_and(|pool| add_targets_all_live(pool, targets));
-            let live_uuids = probed_live_pool.as_ref().map(live_member_uuids);
+                .is_some_and(|committed| committed.len() == targets.len());
             RecoverCompletion::AddPoolMutation {
                 targets: targets.clone(),
                 all_targets_already_live,
-                live_uuids,
+                committed_targets,
                 owed_balance: OwedRaid1Balance::Grow,
             }
         }
@@ -1807,154 +1770,119 @@ fn is_replace_pool_mutation(op: &journal::OpKind) -> bool {
     )
 }
 
+/// Bind `pool` for a phased topology check. A foreign live device means the
+/// pool shows some other topology, so it reads as `None` and each caller
+/// reports the mismatch in its own wording; contradictions still refuse.
+fn bind_for_topology<'a>(
+    pool: &'a PoolState,
+    reference: &'a PoolMembership,
+) -> Result<Option<LiveBinding<'a>>, RecoverError> {
+    match membership::bind_live_pool(pool, reference) {
+        Ok(binding) => Ok(Some(binding)),
+        Err(LiveBindingError::Foreign { .. }) => Ok(None),
+        Err(e) => Err(live_binding_error(e, ADMISSION_SCOPE)),
+    }
+}
+
+/// The phased reading of a binding: its projection when every reference
+/// member is bound, else `None`. The projection runs first, so an ambiguous
+/// MISSING devid refuses as such rather than as a topology mismatch.
+fn fully_bound_membership(
+    binding: &LiveBinding<'_>,
+) -> Result<Option<PoolMembership>, RecoverError> {
+    let projected = binding.bound_membership()?;
+    Ok(binding.all_bound().then_some(projected))
+}
+
+/// Yes/no topology check for phases that only need to know which topology
+/// the live pool shows (decision 024 rule 9 binding).
 fn live_pool_matches_membership(
     pool: &PoolState,
     membership: &PoolMembership,
-) -> Result<bool, JournaledSnapshotError> {
-    let live_uuids = live_member_uuids(pool);
-    // A null-backed mapper still records its LUKS UUID in the kernel's
-    // device-mapper table, so it binds by UUID like a present device.
-    let null_backed_uuids: std::collections::BTreeSet<LuksUuid> = pool
-        .null_underlying
-        .iter()
-        .map(|n| n.luks_uuid.clone())
-        .collect();
-    let live_devids: std::collections::BTreeSet<Devid> =
-        pool.devices.iter().map(|d| d.devid).collect();
-    let null_backed_devids: std::collections::BTreeSet<Devid> =
-        pool.null_underlying.iter().map(|n| n.devid).collect();
-    let mut fallback_uuids = std::collections::BTreeSet::new();
-    let mut fallback_devids = std::collections::BTreeSet::new();
-    for devid in pool.devid_only_missing() {
-        fallback_devids.insert(devid);
-        match membership.by_devid(devid) {
-            Ok(Some((uuid, _))) => {
-                fallback_uuids.insert(uuid.clone());
-            }
-            Ok(None) => {
-                return Err(JournaledSnapshotError::NoMemberForDevid { devid });
-            }
-            Err(membership::MembershipError::DuplicateDevid { devid, members }) => {
-                return Err(JournaledSnapshotError::DuplicateDevid { devid, members });
-            }
-            Err(
-                other @ (membership::MembershipError::Corrupt { .. }
-                | membership::MembershipError::Conflict(_)
-                | membership::MembershipError::Io { .. }
-                | membership::MembershipError::Save { .. }),
-            ) => {
-                unreachable!("by_devid cannot return this MembershipError variant: {other:?}");
-            }
-        }
-    }
-
-    let expected: std::collections::BTreeSet<LuksUuid> =
-        membership.iter().map(|(uuid, _)| uuid.clone()).collect();
-    let union: std::collections::BTreeSet<LuksUuid> = live_uuids
-        .iter()
-        .chain(&null_backed_uuids)
-        .chain(&fallback_uuids)
-        .cloned()
-        .collect();
-    let uuid_disjoint = live_uuids.is_disjoint(&null_backed_uuids)
-        && live_uuids.is_disjoint(&fallback_uuids)
-        && null_backed_uuids.is_disjoint(&fallback_uuids);
-    let devid_disjoint = live_devids.is_disjoint(&null_backed_devids)
-        && live_devids.is_disjoint(&fallback_devids)
-        && null_backed_devids.is_disjoint(&fallback_devids);
-    Ok(union == expected && uuid_disjoint && devid_disjoint)
+) -> Result<bool, RecoverError> {
+    let Some(binding) = bind_for_topology(pool, membership)? else {
+        return Ok(false);
+    };
+    Ok(fully_bound_membership(&binding)?.is_some())
 }
 
+/// The membership recovery writes for a phase whose live pool must show
+/// exactly `expected`, or `None` when it shows some other topology.
 fn recover_membership_matching_expected(
     pool: &PoolState,
     expected: &PoolMembership,
     prior: Option<&PoolMembership>,
     by_id_resolver: &dyn ByIdResolver,
+) -> Result<Option<PoolMembership>, RecoverError> {
+    let Some(binding) = bind_for_topology(pool, expected)? else {
+        return Ok(None);
+    };
+    let Some(projected) = fully_bound_membership(&binding)? else {
+        return Ok(None);
+    };
+    materialize_recovered_membership(&binding, &projected, prior, by_id_resolver).map(Some)
+}
+
+/// Turn a binding's projection into the `pool.json` recovery writes. A
+/// present member takes the by-id path its live backing disk resolves to; a
+/// null-backed or MISSING member has no live backing disk, so it keeps the
+/// journaled path. `added_at` follows `resolve_added_at`.
+fn materialize_recovered_membership(
+    binding: &LiveBinding<'_>,
+    projected: &PoolMembership,
+    prior: Option<&PoolMembership>,
+    by_id_resolver: &dyn ByIdResolver,
 ) -> Result<PoolMembership, RecoverError> {
     let mut recovered = PoolMembership::empty();
-    for dev in &pool.devices {
-        let Some(expected_member) = expected.by_uuid(&dev.luks_uuid) else {
-            return Err(not_in_expected_membership(&dev.mapper, &dev.luks_uuid));
+    for (uuid, member) in projected.iter() {
+        let by_id = match binding.member(uuid) {
+            Some(MemberBinding::Present(dev)) => {
+                resolve_by_id_for_underlying(by_id_resolver, &dev.underlying)?
+            }
+            _ => member.by_id.clone(),
         };
-        let by_id = resolve_by_id_for_underlying(by_id_resolver, &dev.underlying)?;
-        let added_at = resolve_added_at(prior, expected_member, &dev.luks_uuid);
         recovered.insert(
-            dev.luks_uuid.clone(),
+            uuid.clone(),
             DiskMember {
-                name: expected_member.name.clone(),
                 by_id,
-                devid: Some(dev.devid),
-                added_at,
+                added_at: resolve_added_at(prior, member, uuid),
+                ..member.clone()
             },
         )?;
-    }
-    // A null-backed mapper's backing disk is gone, so there is no live by-id
-    // to resolve; keep the expected member's by-id and record the live devid.
-    for null_backed in &pool.null_underlying {
-        let Some(expected_member) = expected.by_uuid(&null_backed.luks_uuid) else {
-            return Err(not_in_expected_membership(
-                &null_backed.mapper,
-                &null_backed.luks_uuid,
-            ));
-        };
-        let added_at = resolve_added_at(prior, expected_member, &null_backed.luks_uuid);
-        recovered.insert(
-            null_backed.luks_uuid.clone(),
-            DiskMember {
-                devid: Some(null_backed.devid),
-                added_at,
-                ..expected_member.clone()
-            },
-        )?;
-    }
-    // Re-insert any expected member whose live binding is devid-only: a
-    // btrfs-MISSING device with no open mapper (see
-    // `PoolState::devid_only_missing`). The live_pool_matches_membership gate
-    // has already proven every such devid resolves uniquely through expected;
-    // this loop materializes that resolution in the rebuilt membership.
-    for devid in pool.devid_only_missing() {
-        match expected.by_devid(devid) {
-            Ok(Some((uuid, expected_member))) => {
-                if recovered.by_uuid(uuid).is_some() {
-                    continue;
-                }
-                let added_at = resolve_added_at(prior, expected_member, uuid);
-                recovered.insert(
-                    uuid.clone(),
-                    DiskMember {
-                        added_at,
-                        ..expected_member.clone()
-                    },
-                )?;
-            }
-            Ok(None) => {
-                return Err(RecoverError::NoMemberForJournaledDevid { devid });
-            }
-            Err(membership::MembershipError::DuplicateDevid { devid, members }) => {
-                return Err(RecoverError::DuplicateDevidDuringReplay { devid, members });
-            }
-            Err(
-                other @ (membership::MembershipError::Corrupt { .. }
-                | membership::MembershipError::Conflict(_)
-                | membership::MembershipError::Io { .. }
-                | membership::MembershipError::Save { .. }),
-            ) => {
-                unreachable!("by_devid cannot return this MembershipError variant: {other:?}");
-            }
-        }
     }
     Ok(recovered)
 }
 
-/// Refusal for a live pool member -- present or null-backed -- whose LUKS UUID
-/// is not in the expected committed membership. Decision 017 uses committed
-/// target membership here, so this wording intentionally differs from the
-/// phase-aware admission paths.
-fn not_in_expected_membership(mapper: &MapperName, uuid: &LuksUuid) -> RecoverError {
-    RecoverError::Failed(format!(
-        "device {mapper} (LUKS UUID {uuid}) is in the live pool but is not part of the expected \
-         committed membership."
-    ))
+/// Scope named when a null-backed mapper records a UUID the recovery
+/// admission membership lacks.
+const ADMISSION_SCOPE: &str = "recovery admission membership for this phase";
+
+/// Map a binding refusal to recover's wording. `null_backed_scope` names the
+/// membership a foreign null-backed mapper is missing from; a foreign present
+/// device keeps the admission wording every recovery path shares.
+fn live_binding_error(err: LiveBindingError, null_backed_scope: &str) -> RecoverError {
+    match err {
+        LiveBindingError::Foreign {
+            mapper,
+            luks_uuid,
+            null_backed: false,
+        } => foreign_live_device_not_admitted(&mapper, &luks_uuid),
+        LiveBindingError::Foreign {
+            mapper,
+            luks_uuid,
+            null_backed: true,
+        } => RecoverError::Failed(format!(
+            "device {mapper} (LUKS UUID {luks_uuid}) is in the live pool with no backing disk \
+             but is not part of the {null_backed_scope}."
+        )),
+        LiveBindingError::DuplicateDevid { devid, members } => {
+            RecoverError::DuplicateDevidDuringReplay { devid, members }
+        }
+        e @ (LiveBindingError::DuplicateLiveUuid { .. }
+        | LiveBindingError::DuplicateLiveDevid { .. }) => RecoverError::Failed(format!(
+            "recovery refuses a contradictory live pool: {e}; preserving pending-op.json"
+        )),
+    }
 }
 
 fn write_remove_missing_phase(
@@ -2105,86 +2033,159 @@ fn live_member_uuids(pool: &PoolState) -> std::collections::BTreeSet<LuksUuid> {
         .collect()
 }
 
-/// Foreign-device rejection for recovery paths that rebuild from the
-/// phase-aware admission membership.
-///
-/// Kept distinct from the committed-target rejection because recover admits
-/// different journal snapshots in different phases.
-fn foreign_live_device_not_admitted(dev: &PoolDevice) -> RecoverError {
+/// Foreign-device rejection for a present device whose LUKS UUID the
+/// phase-aware admission membership lacks. Every recovery path that refuses a
+/// foreign present device uses this wording, since recover admits different
+/// journal snapshots in different phases.
+fn foreign_live_device_not_admitted(mapper: &MapperName, uuid: &LuksUuid) -> RecoverError {
     RecoverError::Failed(format!(
-        "device {} (LUKS UUID {}) is in the live pool but has no journaled by-id \
+        "device {mapper} (LUKS UUID {uuid}) is in the live pool but has no journaled by-id \
          binding in the recovery admission membership for this phase.\n\
          This must be resolved manually -- provide the correct \
-         /dev/disk/by-id/ path.",
-        dev.mapper, dev.luks_uuid
+         /dev/disk/by-id/ path."
     ))
 }
 
-/// Single foreign-admission gate for recovery rebuilds so standalone
-/// pre-mutation checks and membership builders cannot drift on the
-/// phase-aware admission predicate.
-fn admitted_live_member<'a>(
-    admission: &'a PoolMembership,
-    dev: &PoolDevice,
-) -> Result<&'a DiskMember, RecoverError> {
-    admission
-        .by_uuid(&dev.luks_uuid)
-        .ok_or_else(|| foreign_live_device_not_admitted(dev))
-}
-
+/// Present-device admission check, run before recovery mutates anything.
+/// It stays present-only: binding the replace union here could refuse a
+/// sound pool, because the old and new disk may both record the old devid.
 fn validate_live_members_allowed(
     pool: &PoolState,
     allowed: &PoolMembership,
 ) -> Result<(), RecoverError> {
-    for dev in &pool.devices {
-        admitted_live_member(allowed, dev)?;
+    match pool
+        .devices
+        .iter()
+        .find(|dev| allowed.by_uuid(&dev.luks_uuid).is_none())
+    {
+        Some(dev) => Err(foreign_live_device_not_admitted(
+            &dev.mapper,
+            &dev.luks_uuid,
+        )),
+        None => Ok(()),
     }
-    Ok(())
 }
 
-fn add_targets_all_live(
+/// The journaled add targets the live pool already holds, read from the one
+/// binding (decision 024 rule 9): a target whose LUKS UUID an open mapper
+/// records, present or null-backed, is committed and must not be replayed.
+/// Only `PoolMutation` calls this, and
+/// `cli/src/add.rs#AddPlan::execute_inner` journals every target there with
+/// no devid. So a committed target that btrfs reports only as a MISSING
+/// devid never binds here: its replay refuses at the absent disk until it
+/// returns. Each probe of an add recovery goes through here, so it is also
+/// the per-probe foreign-device gate.
+fn committed_add_targets(
     pool: &PoolState,
+    union: &PoolMembership,
     targets: &LuksUuidMap<journal::AddJournalTarget>,
-) -> bool {
-    let live = live_member_uuids(pool);
-    targets.keys().all(|uuid| live.contains(uuid))
+) -> Result<std::collections::BTreeSet<LuksUuid>, RecoverError> {
+    let binding = membership::bind_live_pool(pool, union)
+        .map_err(|e| live_binding_error(e, ADMISSION_SCOPE))?;
+    Ok(targets
+        .keys()
+        .filter(|uuid| binding.member(uuid).is_some_and(|b| b.is_bound()))
+        .cloned()
+        .collect())
 }
 
-fn build_membership_from_live_pool(
+/// The devid btrfs holds each journaled add target at, or `None` when some
+/// target is not bound.
+fn committed_add_target_devids(
+    binding: &LiveBinding<'_>,
+    targets: &LuksUuidMap<journal::AddJournalTarget>,
+) -> Option<Vec<Devid>> {
+    targets
+        .keys()
+        .map(|uuid| binding.member(uuid).and_then(|b| b.devid()))
+        .collect()
+}
+
+/// Refusal when the live pool does not show the committed add membership.
+/// `stage` keeps the post-add wording operators already know.
+fn add_membership_mismatch(
+    stage: &str,
+    expected: &PoolMembership,
     pool: &PoolState,
-    admission_membership: &PoolMembership,
+    binding: Option<&LiveBinding<'_>>,
+) -> RecoverError {
+    let expected: std::collections::BTreeSet<&LuksUuid> = expected.iter().map(|(u, _)| u).collect();
+    let found: std::collections::BTreeSet<&LuksUuid> = match binding {
+        Some(binding) => expected
+            .iter()
+            .copied()
+            .filter(|uuid| binding.member(uuid).is_some_and(|b| b.is_bound()))
+            .collect(),
+        None => pool.devices.iter().map(|dev| &dev.luks_uuid).collect(),
+    };
+    let live_devices = pool
+        .devices
+        .iter()
+        .map(|dev| format!("{} ({})", dev.mapper, dev.luks_uuid))
+        .chain(
+            pool.null_underlying
+                .iter()
+                .map(|dev| format!("{} ({}, no backing disk)", dev.mapper, dev.luks_uuid)),
+        )
+        .chain(
+            pool.devid_only_missing()
+                .map(|devid| format!("devid {devid} (MISSING)")),
+        )
+        .collect::<Vec<_>>()
+        .join(", ");
+    RecoverError::Failed(format!(
+        "{stage} expected live pool membership {expected:?}, found {found:?}; live devices: \
+         {live_devices}"
+    ))
+}
+
+/// The membership an add recovery writes once the add has committed: every
+/// member of `committed` bound to the live pool. Anything else refuses with
+/// the journal kept.
+fn committed_add_membership(
+    stage: &str,
+    binding: &LiveBinding<'_>,
+    pool: &PoolState,
+    committed: &PoolMembership,
     prior: Option<&PoolMembership>,
     by_id_resolver: &dyn ByIdResolver,
 ) -> Result<PoolMembership, RecoverError> {
-    let mut recovered = PoolMembership::empty();
-    for dev in &pool.devices {
-        let admission_member = admitted_live_member(admission_membership, dev)?;
-        let by_id = resolve_by_id_for_underlying(by_id_resolver, &dev.underlying)?;
-        let added_at = resolve_added_at(prior, admission_member, &dev.luks_uuid);
-        recovered.insert(
-            dev.luks_uuid.clone(),
-            DiskMember {
-                name: admission_member.name.clone(),
-                by_id,
-                devid: Some(dev.devid),
-                added_at,
-            },
-        )?;
-    }
-    Ok(recovered)
+    let Some(projected) = fully_bound_membership(binding)? else {
+        return Err(add_membership_mismatch(
+            stage,
+            committed,
+            pool,
+            Some(binding),
+        ));
+    };
+    materialize_recovered_membership(binding, &projected, prior, by_id_resolver)
 }
 
+/// Advance an add journal to `phase` with `target` as its target snapshot.
+/// At the PostAddBalanceRaid1 advance `target` is the membership just saved
+/// to `pool.json`, so a later rerun binds members at the devids btrfs gave
+/// them, not the devid-less snapshot the add started from.
 fn write_add_phase(
     paths: &StatePaths,
     journal: &Journal,
     phase: journal::AddPhase,
+    target: PoolMembership,
 ) -> Result<Journal, RecoverError> {
-    let mut next = journal.clone();
-    if let journal::OpKind::Add { phase: p, .. } = &mut next.op {
-        *p = phase;
-    }
-    journal::write_journal(paths, &next).map_err(|e| RecoverError::Journal(e.to_string()))?;
-    Ok(next)
+    let journal::OpKind::Add { targets, .. } = &journal.op else {
+        return Err(RecoverError::Journal(
+            "cannot advance non-add journal".into(),
+        ));
+    };
+    journal::rewrite_journal(
+        paths,
+        journal,
+        journal::OpKind::Add {
+            phase,
+            targets: targets.clone(),
+        },
+        Some(target),
+    )
+    .map_err(|e| RecoverError::Journal(e.to_string()))
 }
 
 /// The single place recover refuses a key-file credential; recover has not
@@ -2330,12 +2331,15 @@ fn discover_add_targets_before_mount<R: CommandRunner, F: Filesystem + ?Sized>(
     Ok(credential)
 }
 
+/// Verify the recovery passphrase against the live members and every add
+/// target the replay will touch, before any replay mutation. `pending` holds
+/// only the targets the live binding found uncommitted.
 fn verify_recover_passphrase_for_add_replay<R: CommandRunner, F: Filesystem + ?Sized>(
     runner: &R,
     fs: &F,
     pool: &PoolState,
     membership: &PoolMembership,
-    targets: &LuksUuidMap<journal::AddJournalTarget>,
+    pending: &[(&LuksUuid, &journal::AddJournalTarget)],
     backing_path_resolver: &dyn BackingPathResolver,
     passphrase: &Passphrase,
 ) -> Result<(), RecoverError> {
@@ -2350,11 +2354,7 @@ fn verify_recover_passphrase_for_add_replay<R: CommandRunner, F: Filesystem + ?S
         ));
     }
 
-    let live = live_member_uuids(pool);
-    for (target_uuid, target) in targets {
-        if live.contains(target_uuid) {
-            continue;
-        }
+    for &(target_uuid, target) in pending {
         let probed = probe::probe_config_disk(
             runner,
             fs,
@@ -2480,6 +2480,8 @@ fn ensure_keyfile_enrolled<R: CommandRunner>(
     }
 }
 
+/// Finish an add journal at PostAddBalanceRaid1. The journal target is the
+/// committed membership, so the live pool must bind every member of it.
 #[allow(clippy::too_many_arguments)]
 fn execute_add_post_balance_recovery<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     runner: &R,
@@ -2487,32 +2489,28 @@ fn execute_add_post_balance_recovery<R: CommandRunner + Sync, F: Filesystem + ?S
     by_id_resolver: &dyn ByIdResolver,
     params: &RecoverParams<'_>,
     journal: &Journal,
-    union: &PoolMembership,
     pool: PoolState,
     owed_balance: OwedRaid1Balance,
     inhibitor_already_held: bool,
 ) -> Result<(), RecoverError> {
-    let live = live_member_uuids(&pool);
-    let target: std::collections::BTreeSet<_> = journal
-        .target_membership
-        .iter()
-        .map(|(uuid, _)| uuid.clone())
-        .collect();
-    if live != target {
-        let live_devices = pool
-            .devices
-            .iter()
-            .map(|dev| format!("{} ({})", dev.mapper, dev.luks_uuid))
-            .collect::<Vec<_>>()
-            .join(", ");
-        return Err(RecoverError::Failed(format!(
-            "post-add recovery expected live pool membership {:?}, found {:?}; live devices: {}",
-            target, live, live_devices
-        )));
-    }
-
+    const STAGE: &str = "post-add recovery";
+    let committed = &journal.target_membership;
+    let binding = match membership::bind_live_pool(&pool, committed) {
+        Ok(binding) => binding,
+        Err(LiveBindingError::Foreign { .. }) => {
+            return Err(add_membership_mismatch(STAGE, committed, &pool, None));
+        }
+        Err(e) => return Err(live_binding_error(e, ADMISSION_SCOPE)),
+    };
     let prior = membership::load_membership(params.paths).ok();
-    let recovered = build_membership_from_live_pool(&pool, union, prior.as_ref(), by_id_resolver)?;
+    let recovered = committed_add_membership(
+        STAGE,
+        &binding,
+        &pool,
+        committed,
+        prior.as_ref(),
+        by_id_resolver,
+    )?;
     membership::save_membership(&recovered, params.paths)?;
     eprintln!("pool.json written from committed add membership.");
 
@@ -2569,14 +2567,14 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
         mut pool,
         owed_balance,
     } = ctx;
-    validate_live_members_allowed(&pool, union)?;
+    let mut committed = committed_add_targets(&pool, union, targets)?;
     let mount_point = params.config.mount_point();
     let mut passphrase: Option<RecoverPassphrase<'_>> = None;
 
-    if !add_targets_all_live(&pool, targets) {
+    if committed.len() < targets.len() {
         let mut opened_or_scanned = false;
         for (target_uuid, target) in targets {
-            if live_member_uuids(&pool).contains(target_uuid) {
+            if committed.contains(target_uuid) {
                 continue;
             }
             let probed = probe::probe_config_disk(
@@ -2644,11 +2642,11 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
 
         if opened_or_scanned {
             pool = probe::probe_pool(runner, fs, mount_point)?;
-            validate_live_members_allowed(&pool, union)?;
+            committed = committed_add_targets(&pool, union, targets)?;
         }
     }
 
-    if !add_targets_all_live(&pool, targets) {
+    if committed.len() < targets.len() {
         if passphrase.is_none() {
             passphrase = Some(recover_passphrase(credential, params, "add recovery")?);
         }
@@ -2661,7 +2659,10 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
             fs,
             &pool,
             union,
-            targets,
+            &targets
+                .iter()
+                .filter(|(uuid, _)| !committed.contains(*uuid))
+                .collect::<Vec<_>>(),
             params.backing_path_resolver,
             passphrase,
         )?;
@@ -2671,7 +2672,7 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
             .map_err(|e| RecoverError::Failed(format!("could not acquire sleep inhibitor: {e}")))?;
 
         for (target_uuid, target) in targets {
-            if live_member_uuids(&pool).contains(target_uuid) {
+            if committed.contains(target_uuid) {
                 continue;
             }
             let mapper = config::mapper_name(&target.name);
@@ -2838,49 +2839,88 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
             })?;
             // Per-target fail-closed gate: a foreign device surfacing mid-batch
             // stops further pool_add_device here rather than at the terminal
-            // builder, which remains the final admission gate.
-            validate_live_members_allowed(&pool, union)?;
+            // binding, which remains the final admission gate.
+            committed = committed_add_targets(&pool, union, targets)?;
         }
 
-        if !add_targets_all_live(&pool, targets) {
-            return Err(RecoverError::Failed(
-                "recover add replay finished but not every journaled target is live".into(),
-            ));
-        }
-
-        let prior = membership::load_membership(params.paths).ok();
-        let recovered =
-            build_membership_from_live_pool(&pool, union, prior.as_ref(), by_id_resolver)?;
-        sweep_recovered_add_acked_stats(params.paths, &pool, targets)?;
-        membership::save_membership(&recovered, params.paths)?;
-        eprintln!("pool.json written from completed add membership.");
-        let journal = write_add_phase(
-            params.paths,
-            journal,
-            journal::AddPhase::PostAddBalanceRaid1,
-        )?;
-        return execute_add_post_balance_recovery(
+        return finish_committed_add_recovery(
             runner,
             fs,
             by_id_resolver,
             params,
-            &journal,
-            union,
-            pool,
-            owed_balance,
+            AddPoolReplayCtx {
+                credential,
+                journal,
+                union,
+                targets,
+                pool,
+                owed_balance,
+            },
             true,
         );
     }
 
+    finish_committed_add_recovery(
+        runner,
+        fs,
+        by_id_resolver,
+        params,
+        AddPoolReplayCtx {
+            credential,
+            journal,
+            union,
+            targets,
+            pool,
+            owed_balance,
+        },
+        false,
+    )
+}
+
+/// The shared tail once every journaled add target should be committed:
+/// bind the live pool once, sweep the targets' acked-stats, save the
+/// committed membership, and advance the journal with that membership as its
+/// target before the post-balance tail runs.
+fn finish_committed_add_recovery<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
+    runner: &R,
+    fs: &F,
+    by_id_resolver: &dyn ByIdResolver,
+    params: &RecoverParams<'_>,
+    ctx: AddPoolReplayCtx<'_>,
+    inhibitor_already_held: bool,
+) -> Result<(), RecoverError> {
+    let AddPoolReplayCtx {
+        journal,
+        union,
+        targets,
+        pool,
+        owed_balance,
+        ..
+    } = ctx;
+    let binding = membership::bind_live_pool(&pool, union)
+        .map_err(|e| live_binding_error(e, ADMISSION_SCOPE))?;
+    let Some(target_devids) = committed_add_target_devids(&binding, targets) else {
+        return Err(RecoverError::Failed(
+            "recover add replay finished but not every journaled target is live".into(),
+        ));
+    };
     let prior = membership::load_membership(params.paths).ok();
-    let recovered = build_membership_from_live_pool(&pool, union, prior.as_ref(), by_id_resolver)?;
-    sweep_recovered_add_acked_stats(params.paths, &pool, targets)?;
+    let recovered = committed_add_membership(
+        "add recovery",
+        &binding,
+        &pool,
+        union,
+        prior.as_ref(),
+        by_id_resolver,
+    )?;
+    sweep_recovered_add_acked_stats(params.paths, &target_devids)?;
     membership::save_membership(&recovered, params.paths)?;
     eprintln!("pool.json written from completed add membership.");
     let journal = write_add_phase(
         params.paths,
         journal,
         journal::AddPhase::PostAddBalanceRaid1,
+        recovered,
     )?;
     execute_add_post_balance_recovery(
         runner,
@@ -2888,34 +2928,24 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
         by_id_resolver,
         params,
         &journal,
-        union,
         pool,
         owed_balance,
-        false,
+        inhibitor_already_held,
     )
 }
 
 /// Drop acked-stats ghosts for every journaled add target before phase handoff.
 ///
-/// Recovery can enter with targets already live, or skip individual live
-/// targets during replay; the sweep makes those committed-but-closed windows
-/// obey the same reused-devid boundary as the replayed add arm.
+/// Recovery can enter with targets already committed, or skip individual
+/// committed targets during replay; the sweep makes those committed-but-closed
+/// windows obey the same reused-devid boundary as the replayed add arm. The
+/// devids come from the live binding, so a target btrfs holds null-backed is
+/// swept at the devid its mapper holds.
 fn sweep_recovered_add_acked_stats(
     paths: &StatePaths,
-    pool: &PoolState,
-    targets: &LuksUuidMap<journal::AddJournalTarget>,
+    target_devids: &[Devid],
 ) -> Result<(), RecoverError> {
-    let mut sweep_devids: Vec<Devid> = Vec::with_capacity(targets.len());
-    for (uuid, target) in targets {
-        let dev = pool
-            .device_by_uuid(uuid)
-            .ok_or_else(|| RecoverError::AckCleanupFailed {
-                stage: "live-pool add recovery (target sweep)",
-                detail: format!("{}: not found in live pool", target.name),
-            })?;
-        sweep_devids.push(dev.devid);
-    }
-    alert::drop_ghost_alert_state_for_devids(paths, &sweep_devids).map_err(|e| {
+    alert::drop_ghost_alert_state_for_devids(paths, target_devids).map_err(|e| {
         RecoverError::AckCleanupFailed {
             stage: "live-pool add recovery (target sweep)",
             detail: e.to_string(),
@@ -2954,19 +2984,18 @@ fn execute_remove_missing_pool_mutation_recovery<
         return Ok(());
     }
 
-    if !live_pool_matches_membership(&pool, &journal.target_membership)? {
-        return Err(RecoverError::Failed(format!(
-            "remove-missing recovery found devid {devid} gone, but live pool topology \
-             does not match the target membership"
-        )));
-    }
-
-    let recovered = recover_membership_matching_expected(
+    let Some(recovered) = recover_membership_matching_expected(
         &pool,
         &journal.target_membership,
         membership::load_membership(params.paths).ok().as_ref(),
         by_id_resolver,
-    )?;
+    )?
+    else {
+        return Err(RecoverError::Failed(format!(
+            "remove-missing recovery found devid {devid} gone, but live pool topology \
+             does not match the target membership"
+        )));
+    };
     let journal = write_remove_missing_phase(
         params.paths,
         journal,
@@ -3022,19 +3051,18 @@ fn execute_remove_missing_post_maintenance_recovery<
              but btrfs still reports it missing"
         )));
     }
-    if !live_pool_matches_membership(&pool, &journal.target_membership)? {
-        return Err(RecoverError::Failed(
-            "post-remove-missing recovery live pool does not match target membership".into(),
-        ));
-    }
-
     let prior = membership::load_membership(params.paths).ok();
-    let recovered = recover_membership_matching_expected(
+    let Some(recovered) = recover_membership_matching_expected(
         &pool,
         &journal.target_membership,
         prior.as_ref(),
         by_id_resolver,
-    )?;
+    )?
+    else {
+        return Err(RecoverError::Failed(
+            "post-remove-missing recovery live pool does not match target membership".into(),
+        ));
+    };
     membership::save_membership(&recovered, params.paths)?;
     eprintln!("pool.json written from committed remove-missing membership.");
 
@@ -3259,19 +3287,19 @@ fn execute_replace_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem
         live_pool_matches_membership(&pool, &journal.pre_membership)? && !live.contains(new_uuid);
 
     if committed {
-        if !live_pool_matches_membership(&pool, &journal.target_membership)? {
+        let Some(recovered) = recover_membership_matching_expected(
+            &pool,
+            &journal.target_membership,
+            membership::load_membership(params.paths).ok().as_ref(),
+            by_id_resolver,
+        )?
+        else {
             return Err(RecoverError::Failed(
                 "replace recovery found the new disk live, but live pool topology \
                  does not match the target membership"
                     .into(),
             ));
-        }
-        let recovered = recover_membership_matching_expected(
-            &pool,
-            &journal.target_membership,
-            membership::load_membership(params.paths).ok().as_ref(),
-            by_id_resolver,
-        )?;
+        };
         let journal = write_replace_phase(
             params.paths,
             journal,
@@ -3376,18 +3404,18 @@ where
     F: Filesystem + ?Sized,
     S: Sleeper + ?Sized,
 {
-    if !live_pool_matches_membership(&pool, &journal.target_membership)? {
-        return Err(RecoverError::Failed(
-            "post-replace recovery live pool does not match target membership".into(),
-        ));
-    }
     let prior = membership::load_membership(params.paths).ok();
-    let recovered = recover_membership_matching_expected(
+    let Some(recovered) = recover_membership_matching_expected(
         &pool,
         &journal.target_membership,
         prior.as_ref(),
         by_id_resolver,
-    )?;
+    )?
+    else {
+        return Err(RecoverError::Failed(
+            "post-replace recovery live pool does not match target membership".into(),
+        ));
+    };
     let pre_names: std::collections::BTreeSet<_> = journal
         .pre_membership
         .names()
@@ -7541,29 +7569,36 @@ mod tests {
     }
 
     // Intent
-    // RemoveMissing::PoolMutation recovery bridges a missing journaled devid
-    // binding to RecoverError::NoMemberForJournaledDevid.
+    // RemoveMissing::PoolMutation recovery refuses with the typed
+    // RecoverError::AmbiguousMissingDevid when a btrfs-MISSING devid that no
+    // journaled member records sits beside a member with no recorded devid.
     //
     // Why it exists
-    // The corruption signal must stay typed after crossing the
-    // live_pool_matches_membership call site, not collapse to
+    // Either could be the other, so binding the devid to that member or
+    // dropping the member would be a guess (decision 024 rule 9). The signal
+    // must stay typed after crossing the binding, not collapse to
     // RecoverError::Failed.
     //
     // Scenario
-    // Recovery sees devid 99 still missing, but the journaled pre-membership
-    // snapshot only binds devids 1 and 2.
+    // remove-missing removed devid 2 and crashed. The journaled target
+    // records disk3 with no devid, and the live pool shows disk1 plus a
+    // MISSING devid 5.
     #[test]
-    fn bridges_no_member_for_devid_to_typed_recover_error() {
+    fn remove_missing_recovery_refuses_ambiguous_missing_devid() {
         let f = PoolFixture::empty();
         let mut journal = remove_missing_journal();
-        journal.op = OpKind::RemoveMissing {
-            phase: journal::RemoveMissingPhase::PoolMutation,
-            devid: Devid::new(99),
-            restore_raid1_after_commit: true,
-        };
+        journal.target_membership = membership_from(vec![
+            membership_entry(
+                "disk1",
+                "/dev/disk/by-id/virtio-disk1",
+                None,
+                Some(Devid::new(1)),
+            ),
+            membership_entry("disk3", "/dev/disk/by-id/virtio-disk3", None, None),
+        ]);
         journal::write_journal(&f.paths, &journal).unwrap();
         let mut pool = pool_state_disk1_with_missing_devid2();
-        pool.missing_devids = vec![Devid::new(99)];
+        pool.missing_devids = vec![Devid::new(5)];
         let params = f.recover_params().build();
 
         let err = execute_remove_missing_pool_mutation_recovery(
@@ -7573,21 +7608,25 @@ mod tests {
             &params,
             &journal,
             pool,
-            Devid::new(99),
+            Devid::new(2),
             Some(OwedRaid1Balance::RestoreSingle),
         )
         .unwrap_err();
 
-        match err {
-            RecoverError::NoMemberForJournaledDevid { devid } => {
-                assert_eq!(devid, Devid::new(99));
+        match &err {
+            RecoverError::AmbiguousMissingDevid { devids, members } => {
+                assert_eq!(devids, &vec![Devid::new(5)]);
+                assert_eq!(members, &vec![disk_name("disk3")]);
             }
-            RecoverError::Failed(message) => {
-                panic!("expected NoMemberForJournaledDevid, got Failed({message:?})");
-            }
-            other => panic!("expected NoMemberForJournaledDevid, got {other:?}"),
+            other => panic!("expected AmbiguousMissingDevid, got {other:?}"),
         }
+        let msg = err.to_string();
+        assert!(
+            msg.contains("'disk3'") && msg.contains("devid(s) 5"),
+            "the refusal must name the member and the devid, got: {msg}"
+        );
         assert!(f.paths.pending_op_json().exists());
+        assert!(!f.paths.pool_json().exists());
     }
 
     #[test]
@@ -8201,9 +8240,8 @@ mod tests {
                 ),
             )
             .unwrap();
-        // No journaled targets: the verify runs against the live (drifted)
+        // No pending targets: the verify runs against the live (drifted)
         // member only, which is exactly the membership join under test.
-        let targets: LuksUuidMap<journal::AddJournalTarget> = LuksUuidMap::new();
         let runner = MockRunner::default().with_output_stdin(
             CmdRequest::CryptsetupTestPassphrase {
                 device: "/dev/vda".into(),
@@ -8218,7 +8256,7 @@ mod tests {
             &fs,
             &pool,
             &membership,
-            &targets,
+            &[],
             &crate::test_fixtures::MockBackingPathResolver::default(),
             &passphrase("wrongpass"),
         )
@@ -9538,6 +9576,22 @@ mod tests {
             ),
             "preserved journal should be advanced to PostAddBalanceRaid1"
         );
+        // The advance carries the committed membership as the target, so a
+        // rerun binds each member at the devid btrfs gave it.
+        assert_eq!(
+            preserved.target_membership, recovered,
+            "the advanced journal target must be the membership saved to pool.json"
+        );
+        for (name, devid) in [("disk1", 1), ("disk2", 2), ("disk3", 3)] {
+            assert_eq!(
+                preserved
+                    .target_membership
+                    .by_uuid(&uuid_for_name(name))
+                    .and_then(|m| m.devid),
+                Some(Devid::new(devid)),
+                "{name}"
+            );
+        }
     }
 
     #[test]
@@ -10388,7 +10442,6 @@ mod tests {
         let f = PoolFixture::empty();
         let journal = committed_two_disk_add_journal();
         journal::write_journal(&f.paths, &journal).unwrap();
-        let union = test_recovery_admission_membership(&journal);
         let runner = with_two_disk_pool_probe(with_grow_balance_replay(MockRunner::default()));
         let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
         let params = f
@@ -10403,7 +10456,6 @@ mod tests {
             &resolver,
             &params,
             &journal,
-            &union,
             pool_state_two_disks(),
             OwedRaid1Balance::Grow,
             false,
@@ -10433,7 +10485,6 @@ mod tests {
         let f = PoolFixture::empty();
         let journal = committed_two_disk_add_journal();
         journal::write_journal(&f.paths, &journal).unwrap();
-        let union = test_recovery_admission_membership(&journal);
         let runner = MockRunner::default().with_output_stdin(
             CmdRequest::CryptsetupTestPassphrase {
                 device: "/dev/vda".into(),
@@ -10448,7 +10499,6 @@ mod tests {
             &MockByIdResolver::default(),
             &params,
             &journal,
-            &union,
             pool_state_one_disk(),
             OwedRaid1Balance::Grow,
             false,
@@ -10517,7 +10567,6 @@ mod tests {
         let f = PoolFixture::empty();
         let journal = committed_two_disk_add_journal();
         journal::write_journal(&f.paths, &journal).unwrap();
-        let union = test_recovery_admission_membership(&journal);
         let runner = MockRunner::default();
         let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
         let inhibitor = FailingInhibitor;
@@ -10533,7 +10582,6 @@ mod tests {
             &resolver,
             &params,
             &journal,
-            &union,
             pool_state_two_disks(),
             OwedRaid1Balance::Grow,
             false,
@@ -10619,6 +10667,691 @@ mod tests {
             "a soft convert skips every raid1 chunk and leaves disk3 empty: {requests:?}"
         );
         assert!(!f.paths.pending_op_json().exists());
+    }
+
+    /// Existing-pool add of disk3 into a disk1+disk2 pool whose pool.json
+    /// recorded disk1 at devid 1 and disk2 at devid 2. The target snapshot
+    /// gives disk3 no devid, as `AddPlan::execute` writes it.
+    fn add_disk3_to_disk1_disk2_journal(phase: journal::AddPhase) -> journal::Journal {
+        let entry = |name: &str, devid: Option<u64>| {
+            membership_entry(
+                name,
+                &format!("/dev/disk/by-id/virtio-{name}"),
+                None,
+                devid.map(Devid::new),
+            )
+        };
+        journal::Journal {
+            started_at: "2026-01-01T00:00:00Z".into(),
+            op: OpKind::Add {
+                phase,
+                targets: add_targets(vec![(
+                    uuid_for_name("disk3"),
+                    add_target(
+                        "disk3",
+                        "/dev/disk/by-id/virtio-disk3",
+                        fresh_mode(Vec::new(), None),
+                    ),
+                )]),
+            },
+            pre_membership: membership_from(vec![entry("disk1", Some(1)), entry("disk2", Some(2))]),
+            target_membership: membership_from(vec![
+                entry("disk1", Some(1)),
+                entry("disk2", Some(2)),
+                entry("disk3", None),
+            ]),
+        }
+    }
+
+    /// Live pool after disk3's `btrfs device add` committed at devid 3:
+    /// disk1 and disk3 present, disk2 absent. `null_backed_disk2` picks how
+    /// disk2 is absent: btrfs-MISSING with no open mapper, or hot-unplugged
+    /// with its mapper still open.
+    fn pool_state_disk1_disk3_without_disk2(null_backed_disk2: bool) -> PoolState {
+        let present = |name: &str, devid: u64, underlying: &str| PoolDevice {
+            mapper: MapperName::from_basename(format!("braid-{name}")),
+            luks_uuid: uuid_for_name(name),
+            devid: Devid::new(devid),
+            underlying: underlying.into(),
+        };
+        PoolState {
+            mounted: true,
+            devices: vec![
+                present("disk1", 1, "/dev/vda"),
+                present("disk3", 3, "/dev/vdc"),
+            ],
+            missing_count: 1,
+            total_devices: 3,
+            fsid: Some(Fsid::parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").unwrap()),
+            missing_devids: if null_backed_disk2 {
+                vec![]
+            } else {
+                vec![Devid::new(2)]
+            },
+            null_underlying: if null_backed_disk2 {
+                vec![NullUnderlyingDevice {
+                    mapper: MapperName::from_basename("braid-disk2".into()),
+                    luks_uuid: uuid_for_name("disk2"),
+                    devid: Devid::new(2),
+                }]
+            } else {
+                vec![]
+            },
+        }
+    }
+
+    /// Runner and device-mapper table for a mounted pool with an idle
+    /// balance, so an owed replay's fresh probe sees the pool a test hands
+    /// recovery. `devids` lists each btrfs devid row: `Some((name, backing))`
+    /// for an open `braid-<name>` mapper (`backing` `(null)` when its disk is
+    /// gone), `None` for a `path MISSING` row.
+    fn mounted_pool_probe(devids: &[(u64, Option<(&str, &str)>)]) -> (MockRunner, MockFs) {
+        let mut rows = String::new();
+        for (devid, row) in devids {
+            rows.push_str(&match row {
+                Some((name, _)) => format!(
+                    "\tdevid    {devid} size 10.00GiB used 2.00GiB path /dev/mapper/braid-{name}\n"
+                ),
+                None => format!("\tdevid    {devid} size 0 used 0 path MISSING\n"),
+            });
+        }
+        let show = ok_raw(
+            "btrfs filesystem show /mnt/storage",
+            &format!(
+                "Label: none  uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
+                 \tTotal devices {} FS bytes used 1.00GiB\n{rows}",
+                devids.len()
+            ),
+        );
+        let mut runner = with_idle_balance_status(MockRunner::default()).with_output(
+            CmdRequest::BtrfsFilesystemShow {
+                mount_point: MountPoint::new("/mnt/storage".into()),
+            },
+            show,
+        );
+        let mut fs = MockFs::new(&[]);
+        for (name, backing) in devids.iter().filter_map(|(_, row)| *row) {
+            let mapper = format!("braid-{name}");
+            runner = runner.with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName::from_basename(mapper.clone()),
+                },
+                cryptsetup_status_active(&mapper, backing),
+            );
+            fs = fs.with_luks_dm(&mapper, uuid_for_name(name).as_str());
+        }
+        (runner, fs)
+    }
+
+    /// Runner and device-mapper table for the pool
+    /// `pool_state_disk1_disk3_without_disk2` describes.
+    fn disk1_disk3_without_disk2_probe(null_backed_disk2: bool) -> (MockRunner, MockFs) {
+        let disk2 = null_backed_disk2.then_some(("disk2", "(null)"));
+        mounted_pool_probe(&[
+            (1, Some(("disk1", "/dev/vda"))),
+            (2, disk2),
+            (3, Some(("disk3", "/dev/vdc"))),
+        ])
+    }
+
+    /// Run one add-recovery tail with status lines captured, then assert it
+    /// finished, kept disk2 in pool.json at its recorded devid, skipped the
+    /// owed balance on the degraded pool, and cleared the journal.
+    fn assert_add_recovery_kept_disk2(
+        f: &PoolFixture,
+        runner: &MockRunner,
+        context: &str,
+        run: impl FnOnce() -> Result<(), RecoverError>,
+    ) {
+        let mut result = None;
+        let captured = crate::status_tag::testing::capture_with_color(false, || {
+            result = Some(run());
+        });
+        result
+            .expect("recovery ran")
+            .unwrap_or_else(|e| panic!("{context}: add recovery should finish: {e}"));
+
+        assert!(
+            !f.paths.pending_op_json().exists(),
+            "{context}: recovery must clear the journal"
+        );
+        let recovered = membership::load_membership(&f.paths).unwrap();
+        let disk2 = recovered
+            .by_uuid(&uuid_for_name("disk2"))
+            .unwrap_or_else(|| panic!("{context}: pool.json must keep disk2: {recovered:?}"));
+        assert_eq!(disk2.devid, Some(Devid::new(2)), "{context}");
+        assert_eq!(
+            disk2.by_id.as_str(),
+            "/dev/disk/by-id/virtio-disk2",
+            "{context}"
+        );
+        let disk3 = recovered
+            .by_uuid(&uuid_for_name("disk3"))
+            .unwrap_or_else(|| panic!("{context}: pool.json must hold disk3: {recovered:?}"));
+        assert_eq!(disk3.devid, Some(Devid::new(3)), "{context}");
+        assert_eq!(recovered.len(), 3, "{context}: {recovered:?}");
+        assert!(
+            !runner.requests().iter().any(|r| matches!(
+                r,
+                CmdRequest::BtrfsBalanceRaid1 { .. } | CmdRequest::BtrfsBalanceRaid1Soft { .. }
+            )),
+            "{context}: a degraded pool must not get the owed RAID1 balance"
+        );
+        let skip_line = format!("[skip] {}\n", OwedRaid1Balance::Grow.skip_line());
+        assert!(
+            captured.contains(&skip_line),
+            "{context}: recovery must print live add's degraded skip line, got: {captured:?}"
+        );
+    }
+
+    // Intent: existing-pool add recovery on a degraded pool keeps a member
+    // btrfs reports only as a MISSING devid in pool.json, bound by the devid
+    // pool.json recorded for it, and finishes.
+    // Why it exists: add recovery rebuilt pool.json from present devices
+    // alone, dropped disk2, advanced the journal, then refused on every rerun
+    // because the live devices never matched the target (hunt finding
+    // 261022-1230-007). remove-missing then could not name the devid.
+    // Scenario: a disk1+disk2 pool, `braid add disk3`, power loss after
+    // `btrfs device add`, and disk2 does not come back; the operator runs
+    // `braid recover --allow-degraded`.
+    #[test]
+    fn add_recovery_keeps_absent_member_missing_devid() {
+        let f = PoolFixture::empty();
+        let journal = add_disk3_to_disk1_disk2_journal(journal::AddPhase::PoolMutation);
+        journal::write_journal(&f.paths, &journal).unwrap();
+        let union = test_recovery_admission_membership(&journal);
+        let OpKind::Add { targets, .. } = &journal.op else {
+            unreachable!("test journal is Add")
+        };
+        let (runner, fs) = disk1_disk3_without_disk2_probe(false);
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdc", "virtio-disk3")]);
+        let params = f.recover_params().passphrase_file(None).build();
+
+        assert_add_recovery_kept_disk2(&f, &runner, "MISSING disk2", || {
+            execute_add_pool_mutation_recovery(
+                &runner,
+                &fs,
+                &resolver,
+                &params,
+                AddPoolReplayCtx {
+                    credential: None,
+                    journal: &journal,
+                    union: &union,
+                    targets,
+                    pool: pool_state_disk1_disk3_without_disk2(false),
+                    owed_balance: OwedRaid1Balance::Grow,
+                },
+            )
+        });
+    }
+
+    // Intent: add recovery already past the phase advance finishes on the
+    // same degraded pool and keeps disk2 at its recorded devid.
+    // Why it exists: installs this bug stranded hold a PostAddBalanceRaid1
+    // journal whose target still records disk2 at devid 2; a rerun must heal
+    // them instead of refusing forever (hunt finding 261022-1230-007).
+    // Scenario: the stranded install from the MISSING case reruns
+    // `braid recover --allow-degraded` with disk2 still gone.
+    #[test]
+    fn add_recovery_keeps_absent_member_after_phase_advance() {
+        let f = PoolFixture::empty();
+        let journal = add_disk3_to_disk1_disk2_journal(journal::AddPhase::PostAddBalanceRaid1);
+        journal::write_journal(&f.paths, &journal).unwrap();
+        let (runner, fs) = disk1_disk3_without_disk2_probe(false);
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdc", "virtio-disk3")]);
+        let params = f.recover_params().passphrase_file(None).build();
+
+        assert_add_recovery_kept_disk2(&f, &runner, "phase advanced", || {
+            execute_add_post_balance_recovery(
+                &runner,
+                &fs,
+                &resolver,
+                &params,
+                &journal,
+                pool_state_disk1_disk3_without_disk2(false),
+                OwedRaid1Balance::Grow,
+                false,
+            )
+        });
+    }
+
+    // Intent: add recovery keeps a pre-existing member whose disk is gone
+    // while its mapper stays open, bound by the LUKS UUID the mapper records.
+    // Why it exists: the null-backed member was dropped the same way as a
+    // MISSING one, since recovery read present devices only (hunt finding
+    // 261022-1230-007).
+    // Scenario: as in the MISSING case, but disk2's disk was hot-unplugged
+    // while the pool stayed mounted, so btrfs has not marked it MISSING.
+    #[test]
+    fn add_recovery_keeps_absent_member_null_backed() {
+        let f = PoolFixture::empty();
+        let journal = add_disk3_to_disk1_disk2_journal(journal::AddPhase::PoolMutation);
+        journal::write_journal(&f.paths, &journal).unwrap();
+        let union = test_recovery_admission_membership(&journal);
+        let OpKind::Add { targets, .. } = &journal.op else {
+            unreachable!("test journal is Add")
+        };
+        let (runner, fs) = disk1_disk3_without_disk2_probe(true);
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdc", "virtio-disk3")]);
+        let params = f.recover_params().passphrase_file(None).build();
+
+        assert_add_recovery_kept_disk2(&f, &runner, "null-backed disk2", || {
+            execute_add_pool_mutation_recovery(
+                &runner,
+                &fs,
+                &resolver,
+                &params,
+                AddPoolReplayCtx {
+                    credential: None,
+                    journal: &journal,
+                    union: &union,
+                    targets,
+                    pool: pool_state_disk1_disk3_without_disk2(true),
+                    owed_balance: OwedRaid1Balance::Grow,
+                },
+            )
+        });
+    }
+
+    /// The `PoolState` a probe of `mounted_pool_probe(devids)` returns.
+    fn mounted_pool_state(devids: &[(u64, Option<(&str, &str)>)]) -> PoolState {
+        let mut pool = PoolState {
+            mounted: true,
+            devices: vec![],
+            missing_count: 0,
+            total_devices: devids.len() as u64,
+            fsid: Some(Fsid::parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").unwrap()),
+            missing_devids: vec![],
+            null_underlying: vec![],
+        };
+        for (devid, row) in devids {
+            let devid = Devid::new(*devid);
+            match row {
+                Some((name, "(null)")) => pool.null_underlying.push(NullUnderlyingDevice {
+                    mapper: MapperName::from_basename(format!("braid-{name}")),
+                    luks_uuid: uuid_for_name(name),
+                    devid,
+                }),
+                Some((name, backing)) => pool.devices.push(PoolDevice {
+                    mapper: MapperName::from_basename(format!("braid-{name}")),
+                    luks_uuid: uuid_for_name(name),
+                    devid,
+                    underlying: (*backing).into(),
+                }),
+                None => pool.missing_devids.push(devid),
+            }
+        }
+        pool.missing_count = pool.total_devices - pool.devices.len() as u64;
+        pool
+    }
+
+    /// pool.json's members as (name, devid), sorted by name.
+    fn saved_member_devids(paths: &StatePaths) -> Vec<(String, Option<Devid>)> {
+        membership::load_membership(paths)
+            .unwrap()
+            .iter_by_name()
+            .into_iter()
+            .map(|(_, m)| (m.name.as_str().to_owned(), m.devid))
+            .collect()
+    }
+
+    fn named_devids(entries: &[(&str, u64)]) -> Vec<(String, Option<Devid>)> {
+        entries
+            .iter()
+            .map(|(name, devid)| ((*name).to_owned(), Some(Devid::new(*devid))))
+            .collect()
+    }
+
+    // Intent: add recovery finishes when btrfs reports a MISSING devid that no
+    // journaled member records, and leaves that devid out of pool.json.
+    // Why it exists: the binding carries such a devid instead of refusing, as
+    // live add does; only a member with no recorded devid beside it is
+    // ambiguous (hunt finding 261022-1230-007).
+    // Scenario: an install an earlier recovery stranded still has btrfs devid
+    // 7 MISSING with no pool.json member; `braid add disk3` then crashes after
+    // `btrfs device add`.
+    #[test]
+    fn add_recovery_finishes_beside_stray_missing_devid() {
+        let f = PoolFixture::empty();
+        let journal = add_disk3_to_disk1_disk2_journal(journal::AddPhase::PoolMutation);
+        journal::write_journal(&f.paths, &journal).unwrap();
+        let union = test_recovery_admission_membership(&journal);
+        let OpKind::Add { targets, .. } = &journal.op else {
+            unreachable!("test journal is Add")
+        };
+        let devids = [
+            (1, Some(("disk1", "/dev/vda"))),
+            (2, Some(("disk2", "/dev/vdb"))),
+            (3, Some(("disk3", "/dev/vdc"))),
+            (7, None),
+        ];
+        let (runner, fs) = mounted_pool_probe(&devids);
+        let resolver = resolver_for(&[
+            ("/dev/vda", "virtio-disk1"),
+            ("/dev/vdb", "virtio-disk2"),
+            ("/dev/vdc", "virtio-disk3"),
+        ]);
+        let params = f.recover_params().passphrase_file(None).build();
+
+        execute_add_pool_mutation_recovery(
+            &runner,
+            &fs,
+            &resolver,
+            &params,
+            AddPoolReplayCtx {
+                credential: None,
+                journal: &journal,
+                union: &union,
+                targets,
+                pool: mounted_pool_state(&devids),
+                owed_balance: OwedRaid1Balance::Grow,
+            },
+        )
+        .expect("a MISSING devid no member records must not block add recovery");
+
+        assert!(!f.paths.pending_op_json().exists());
+        assert_eq!(
+            saved_member_devids(&f.paths),
+            named_devids(&[("disk1", 1), ("disk2", 2), ("disk3", 3)])
+        );
+    }
+
+    // Intent: add recovery counts a new disk btrfs holds null-backed as
+    // committed, keeps it at the devid its mapper holds, and sweeps that
+    // devid's acked-stats ghost.
+    // Why it exists: recovery read present devices only, so a committed target
+    // that was hot-unplugged looked uncommitted and was dropped; the sweep then
+    // could not find its devid (hunt finding 261022-1230-007).
+    // Scenario: `braid add disk3` crashed after `btrfs device add` gave disk3
+    // devid 3, and disk3's cable then came loose with its mapper still open.
+    #[test]
+    fn add_recovery_keeps_null_backed_new_target_and_sweeps_its_devid() {
+        let f = PoolFixture::empty();
+        let journal = add_disk3_to_disk1_disk2_journal(journal::AddPhase::PoolMutation);
+        journal::write_journal(&f.paths, &journal).unwrap();
+        let control = acked_disk(false, 11);
+        seed_acked_stats(&f.paths, &[(1, control.clone()), (3, acked_disk(true, 33))]);
+        let union = test_recovery_admission_membership(&journal);
+        let OpKind::Add { targets, .. } = &journal.op else {
+            unreachable!("test journal is Add")
+        };
+        let devids = [
+            (1, Some(("disk1", "/dev/vda"))),
+            (2, Some(("disk2", "/dev/vdb"))),
+            (3, Some(("disk3", "(null)"))),
+        ];
+        let (runner, fs) = mounted_pool_probe(&devids);
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
+        let params = f.recover_params().passphrase_file(None).build();
+
+        execute_add_pool_mutation_recovery(
+            &runner,
+            &fs,
+            &resolver,
+            &params,
+            AddPoolReplayCtx {
+                credential: None,
+                journal: &journal,
+                union: &union,
+                targets,
+                pool: mounted_pool_state(&devids),
+                owed_balance: OwedRaid1Balance::Grow,
+            },
+        )
+        .expect("a null-backed new target is committed");
+
+        assert!(!f.paths.pending_op_json().exists());
+        assert_eq!(
+            saved_member_devids(&f.paths),
+            named_devids(&[("disk1", 1), ("disk2", 2), ("disk3", 3)])
+        );
+        let recovered = membership::load_membership(&f.paths).unwrap();
+        assert_eq!(
+            recovered
+                .by_uuid(&uuid_for_name("disk3"))
+                .unwrap()
+                .by_id
+                .as_str(),
+            "/dev/disk/by-id/virtio-disk3"
+        );
+        assert!(
+            !runner
+                .requests()
+                .iter()
+                .any(|r| matches!(r, CmdRequest::BtrfsDeviceAdd { .. })),
+            "a committed target must not be re-added"
+        );
+        let acked = alert::load_acked_stats(&f.paths);
+        assert_eq!(acked.0.get("1"), Some(&control));
+        assert!(!acked.0.contains_key("3"), "{acked:?}");
+    }
+
+    // Intent: add recovery past the phase advance binds a new disk that is now
+    // MISSING by the devid the advanced journal records for it.
+    // Why it exists: the advance used to keep the devid-less target snapshot,
+    // so a new disk lost before the balance finished could not be bound and
+    // was dropped (hunt finding 261022-1230-007).
+    // Scenario: `braid add disk3` committed and advanced the journal, the RAID1
+    // balance was interrupted, and disk3 did not come back.
+    #[test]
+    fn add_recovery_after_phase_advance_binds_missing_new_disk_by_devid() {
+        let f = PoolFixture::empty();
+        let mut journal = add_disk3_to_disk1_disk2_journal(journal::AddPhase::PostAddBalanceRaid1);
+        journal
+            .target_membership
+            .by_uuid_mut(&uuid_for_name("disk3"))
+            .unwrap()
+            .devid = Some(Devid::new(3));
+        journal::write_journal(&f.paths, &journal).unwrap();
+        let devids = [
+            (1, Some(("disk1", "/dev/vda"))),
+            (2, Some(("disk2", "/dev/vdb"))),
+            (3, None),
+        ];
+        let (runner, fs) = mounted_pool_probe(&devids);
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1"), ("/dev/vdb", "virtio-disk2")]);
+        let params = f.recover_params().passphrase_file(None).build();
+
+        execute_add_post_balance_recovery(
+            &runner,
+            &fs,
+            &resolver,
+            &params,
+            &journal,
+            mounted_pool_state(&devids),
+            OwedRaid1Balance::Grow,
+            false,
+        )
+        .expect("the journaled devid binds the MISSING new disk");
+
+        assert!(!f.paths.pending_op_json().exists());
+        assert_eq!(
+            saved_member_devids(&f.paths),
+            named_devids(&[("disk1", 1), ("disk2", 2), ("disk3", 3)])
+        );
+    }
+
+    // Intent: add recovery before the phase advance refuses at the new disk,
+    // with the journal kept and no pool.json written, when btrfs added that
+    // disk and now shows it only as a MISSING devid.
+    // Why it exists: the journal records no devid for a new disk until the
+    // advance to PostAddBalanceRaid1, so the binding cannot tell that devid is
+    // the target. Recovery must not count the target as committed, drop it,
+    // or re-add it; docs/commands/recover.md step 8 states this refusal.
+    // Scenario: `braid add disk3` crashed after `btrfs device add` gave disk3
+    // devid 3, and disk3 did not come back before `braid recover`.
+    #[test]
+    fn add_recovery_refuses_missing_new_disk_before_phase_advance() {
+        let f = PoolFixture::empty();
+        let journal = add_disk3_to_disk1_disk2_journal(journal::AddPhase::PoolMutation);
+        journal::write_journal(&f.paths, &journal).unwrap();
+        let union = test_recovery_admission_membership(&journal);
+        let OpKind::Add { targets, .. } = &journal.op else {
+            unreachable!("test journal is Add")
+        };
+        let devids = [
+            (1, Some(("disk1", "/dev/vda"))),
+            (2, Some(("disk2", "/dev/vdb"))),
+            (3, None),
+        ];
+        let mut runner = MockRunner::default();
+        for device in ["/dev/vda", "/dev/vdb"] {
+            runner = runner.with_output_stdin(
+                CmdRequest::CryptsetupTestPassphrase {
+                    device: device.into(),
+                },
+                TEST_PASSPHRASE_BYTES.to_vec(),
+                ok_raw_empty("cryptsetup open --test-passphrase"),
+            );
+        }
+        let params = f.recover_params().build();
+
+        let err = execute_add_pool_mutation_recovery(
+            &runner,
+            &MockFs::new(&[]),
+            &MockByIdResolver::default(),
+            &params,
+            AddPoolReplayCtx {
+                credential: None,
+                journal: &journal,
+                union: &union,
+                targets,
+                pool: mounted_pool_state(&devids),
+                owed_balance: OwedRaid1Balance::Grow,
+            },
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string().contains(
+                "recover add target 'disk3' (/dev/disk/by-id/virtio-disk3) is not present"
+            ),
+            "{err}"
+        );
+        assert!(f.paths.pending_op_json().exists());
+        assert!(!f.paths.pool_json().exists());
+        assert!(
+            !runner.requests().iter().any(|r| matches!(
+                r,
+                CmdRequest::BtrfsDeviceAdd { .. } | CmdRequest::CryptsetupLuksFormat { .. }
+            )),
+            "an absent target must stop before any disk write: {:?}",
+            runner.requests()
+        );
+    }
+
+    // Intent: bootstrap add recovery keeps a member btrfs holds null-backed,
+    // at the devid its mapper holds.
+    // Why it exists: the generic path rebuilt pool.json from present devices
+    // only, so a hot-unplugged bootstrap disk vanished from pool.json while
+    // btrfs still held it (hunt finding 261022-1230-007).
+    // Scenario: `braid add disk1 disk2` on an empty pool crashed after mkfs;
+    // disk2's cable came loose before `braid recover`.
+    #[test]
+    fn bootstrap_recovery_keeps_null_backed_member() {
+        let f = PoolFixture::empty();
+        let journal = bootstrap_pool_mutation_add_journal();
+        journal::write_journal(&f.paths, &journal).unwrap();
+        let plan = recover_work_plan_for_journal(journal);
+        let devids = [
+            (1, Some(("disk1", "/dev/vda"))),
+            (2, Some(("disk2", "(null)"))),
+        ];
+        let (runner, fs) = mounted_pool_probe(&devids);
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1")]);
+        let params = f.recover_params().passphrase_file(None).build();
+
+        execute_generic_live_pool_recovery(
+            &runner,
+            &fs,
+            &resolver,
+            &params,
+            &plan,
+            mounted_pool_state(&devids),
+            Some(OwedRaid1Balance::RestoreSingle),
+        )
+        .expect("bootstrap recovery should keep the null-backed member");
+
+        assert!(!f.paths.pending_op_json().exists());
+        assert_eq!(
+            saved_member_devids(&f.paths),
+            named_devids(&[("disk1", 1), ("disk2", 2)])
+        );
+    }
+
+    // Intent: bootstrap add recovery refuses, keeping the journal, when btrfs
+    // reports a member only as a MISSING devid.
+    // Why it exists: a bootstrap journal records no devids, so the MISSING
+    // devid could be any member not otherwise bound; the generic path used to
+    // drop that member from pool.json and clear the journal (hunt finding
+    // 261022-1230-007).
+    // Scenario: `braid add disk1 disk2` on an empty pool crashed after mkfs;
+    // disk2 is gone and the operator runs `braid recover --allow-degraded`.
+    #[test]
+    fn bootstrap_recovery_refuses_member_seen_only_as_missing_devid() {
+        let f = PoolFixture::empty();
+        let journal = bootstrap_pool_mutation_add_journal();
+        journal::write_journal(&f.paths, &journal).unwrap();
+        let plan = recover_work_plan_for_journal(journal);
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1")]);
+        let params = f.recover_params().passphrase_file(None).build();
+
+        let err = execute_generic_live_pool_recovery(
+            &MockRunner::default(),
+            &MockFs::new(&[]),
+            &resolver,
+            &params,
+            &plan,
+            mounted_pool_state(&[(1, Some(("disk1", "/dev/vda"))), (2, None)]),
+            Some(OwedRaid1Balance::RestoreSingle),
+        )
+        .unwrap_err();
+
+        match err {
+            RecoverError::AmbiguousMissingDevid { devids, members } => {
+                assert_eq!(devids, vec![Devid::new(2)]);
+                assert_eq!(members, vec![disk_name("disk2")]);
+            }
+            other => panic!("expected AmbiguousMissingDevid, got {other:?}"),
+        }
+        assert!(f.paths.pending_op_json().exists());
+        assert!(!f.paths.pool_json().exists());
+    }
+
+    // Intent: committed remove-missing recovery finishes when btrfs reports a
+    // second MISSING devid that no journaled member records.
+    // Why it exists: the old topology gate refused any MISSING devid the
+    // journal could not name, so an install an earlier recovery stranded
+    // could never finish (hunt finding 261022-1230-007).
+    // Scenario: btrfs still reports a stray devid 7 MISSING; remove-missing
+    // removed devid 2 and crashed before clearing the journal.
+    #[test]
+    fn remove_missing_recovery_finishes_beside_stray_missing_devid() {
+        let f = PoolFixture::empty();
+        let mut journal = remove_missing_journal();
+        journal.op = OpKind::RemoveMissing {
+            phase: journal::RemoveMissingPhase::PoolMutation,
+            devid: Devid::new(2),
+            restore_raid1_after_commit: false,
+        };
+        journal::write_journal(&f.paths, &journal).unwrap();
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1")]);
+        let params = f.recover_params().passphrase_file(None).build();
+
+        execute_remove_missing_pool_mutation_recovery(
+            &MockRunner::default(),
+            &MockFs::new(&[]),
+            &resolver,
+            &params,
+            &journal,
+            mounted_pool_state(&[(1, Some(("disk1", "/dev/vda"))), (7, None)]),
+            Devid::new(2),
+            None,
+        )
+        .expect("a stray MISSING devid must not block remove-missing recovery");
+
+        assert!(!f.paths.pending_op_json().exists());
+        assert_eq!(saved_member_devids(&f.paths), named_devids(&[("disk1", 1)]));
     }
 
     // Intent: RemoveMissing::PoolMutation recovery treats the primary
@@ -12868,11 +13601,12 @@ mod tests {
     // Intent: cmd_recover preserves a non-target MISSING-devid disk during
     // Replace::PostReplaceMaintenance while still replaying the resize for the
     // live replacement disk.
-    // Why it exists: the helper re-insert loop is already unit-pinned by
+    // Why it exists: the MISSING-devid binding is already unit-pinned by
     // recover_membership_matching_expected_reinserts_missing_devid_member; this
     // test pins the composed command-boundary path -- post-maintenance
-    // dispatcher, live_pool_matches_membership gate, helper call site, and
-    // pool.json write -- against a btrfs MISSING devid. It mirrors the
+    // dispatcher, the recover_membership_matching_expected call that both
+    // checks the topology and builds the membership, and the pool.json
+    // write -- against a btrfs MISSING devid. It mirrors the
     // null-underlying analog cmd_recover_replace_post_maintenance_preserves_non_target_null_underlying_disk.
     // Scenario: replace committed old -> disk-new, then unrelated disk3 went
     // MISSING (flapping disk) before recovery rebuilt pool.json.
@@ -13082,20 +13816,19 @@ mod tests {
         assert!(f.paths.pending_op_json().exists());
     }
 
-    // Intent: build_membership_from_live_pool rejects a live pool device whose
-    // LUKS UUID is absent from the admission membership, even if its mapper is
-    // not braid-prefixed.
+    // Intent: the add-recovery binding rejects a live pool device whose LUKS
+    // UUID is absent from the admission membership, even if its mapper is not
+    // braid-prefixed.
     // Why it exists: recovery must not treat mapper naming as an identity
     // gate; live-pool membership is correlated by UUID.
     // Scenario: a mounted pool contains disk1 plus an externally named LUKS
     // mapper with a foreign UUID. Recovery refuses to rebuild pool.json.
     #[test]
-    fn build_membership_from_live_pool_rejects_foreign_live_uuid() {
+    fn committed_add_targets_rejects_foreign_live_uuid() {
         let pool = pool_state_disk1_and_foreign();
         let union = one_disk_membership();
-        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1")]);
 
-        let err = build_membership_from_live_pool(&pool, &union, None, &resolver)
+        let err = committed_add_targets(&pool, &union, &LuksUuidMap::new())
             .expect_err("foreign live UUID must be rejected");
         let msg = err.to_string();
         assert!(
@@ -13108,40 +13841,34 @@ mod tests {
         );
     }
 
-    // Intent: recover_membership_matching_expected rejects a live pool device
-    // whose LUKS UUID is absent from the expected committed membership, even if
-    // its mapper is not braid-prefixed.
+    // Intent: recover_membership_matching_expected reads a live pool device
+    // whose LUKS UUID is absent from the expected committed membership as a
+    // topology mismatch, even if its mapper is not braid-prefixed.
     // Why it exists: phased recovery builders must preserve UUID identity when
-    // comparing live topology against expected membership.
+    // comparing live topology against expected membership, and each phase
+    // names the mismatch in its own wording.
     // Scenario: committed remove-missing or replace recovery compares a live
     // pool against expected membership while an external mapper is also live.
     #[test]
-    fn recover_membership_matching_expected_rejects_foreign_live_uuid() {
+    fn recover_membership_matching_expected_reads_foreign_live_uuid_as_mismatch() {
         let pool = pool_state_disk1_and_foreign();
         let expected = one_disk_membership();
         let resolver = resolver_for(&[("/dev/vda", "virtio-disk1")]);
 
-        let err = recover_membership_matching_expected(&pool, &expected, None, &resolver)
-            .expect_err("foreign live UUID must be rejected");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("device luks-foreign (LUKS UUID 99999999-9999-9999-9999-999999999999)"),
-            "error must name the foreign live UUID: {msg}"
-        );
-        assert!(
-            msg.contains(
-                "is in the live pool but is not part of the expected committed membership"
-            ),
-            "error must describe the expected-membership mismatch: {msg}"
-        );
+        let recovered = recover_membership_matching_expected(&pool, &expected, None, &resolver)
+            .expect("a foreign live UUID is a topology mismatch, not corruption");
+
+        assert_eq!(recovered, None);
     }
 
     // Intent: recover_membership_matching_expected re-inserts members whose
     // live binding is devid-only, with the same added_at precedence as the
     // live-device path.
     // Why it exists: principles 2/5 authorize btrfs devid as the fallback
-    // binding when LUKS UUID is unobservable, Decision 017 requires added_at
-    // preservation, and OpKind::Remove already restores this shape externally.
+    // binding when LUKS UUID is unobservable, and Decision 017 requires
+    // added_at preservation. Every recovery path binds this shape through
+    // the one `membership::bind_live_pool` pass, so a regression there would
+    // drop the MISSING member from pool.json.
     // Scenario: phased remove-missing or replace recovery sees an unrelated
     // disk flap to MISSING; recovery must keep it in pool.json with its
     // original added_at so the operator can still address it.
@@ -13198,7 +13925,8 @@ mod tests {
 
         let recovered =
             recover_membership_matching_expected(&pool, &expected, Some(&prior), &resolver)
-                .expect("missing-devid member should be restored from expected membership");
+                .expect("missing-devid member should be restored from expected membership")
+                .expect("the live pool binds every expected member");
 
         assert!(recovered.by_uuid(&uuid_for_name("disk1")).is_some());
         assert!(recovered.by_uuid(&uuid_for_name("disk2")).is_some());
@@ -13272,9 +14000,10 @@ mod tests {
     // Intent: recover_membership_matching_expected re-inserts a member whose
     // mapper is null-underlying, bound by its LUKS UUID, recording the live
     // devid and preserving added_at precedence.
-    // Why it exists: the rebuild half must stay in lockstep with the
-    // live_pool_matches_membership gate, or recovery can accept a topology but
-    // still drop the null-backed member from pool.json.
+    // Why it exists: the topology check and the membership recovery writes
+    // come from one binding pass. This pins that the written pool.json keeps
+    // the null-backed member the check accepted, rather than dropping a disk
+    // btrfs still owns.
     // Scenario: disk1 and disk2 are fully observable, disk3 is
     // null-underlying at devid 3 with no devid in the expected membership,
     // and prior pool.json has disk3's older added_at value.
@@ -13334,7 +14063,8 @@ mod tests {
 
         let recovered =
             recover_membership_matching_expected(&pool, &expected, Some(&prior), &resolver)
-                .expect("null-underlying member should be restored from expected membership");
+                .expect("null-underlying member should be restored from expected membership")
+                .expect("the live pool binds every expected member");
 
         let disk3 = recovered
             .by_uuid(&uuid_for_name("disk3"))
@@ -13380,16 +14110,19 @@ mod tests {
         let resolver = resolver_for(&[("/dev/vda", "virtio-disk1")]);
 
         let recovered = recover_membership_matching_expected(&pool, &expected, None, &resolver)
-            .expect("duplicate fallback sources for one devid should be idempotent");
+            .expect("duplicate fallback sources for one devid should be idempotent")
+            .expect("the live pool binds every expected member");
 
         assert!(recovered.by_uuid(&uuid_for_name("disk2")).is_some());
         assert_eq!(recovered.iter().count(), 2);
     }
 
-    // Intent: live_pool_matches_membership rejects a topology where a live
+    // Intent: live_pool_matches_membership refuses a topology where a live
     // device and a null-underlying mapper report the same devid.
     // Why it exists: the gate must fail closed on devid-level collisions even
-    // when UUID set equality and UUID disjointness would otherwise pass.
+    // when every UUID binds to a distinct expected member. The
+    // live pool contradicts itself, so it refuses rather than reading as a
+    // mismatch some other phase might accept.
     // Scenario: live disk2 reports devid 2, while a synthetic
     // null-underlying mapper whose dm UUID records disk4 also reports devid 2.
     #[test]
@@ -13422,16 +14155,21 @@ mod tests {
             ),
         ]);
 
-        let matches = live_pool_matches_membership(&pool, &expected)
-            .expect("devid collision should be a topology mismatch, not corruption");
+        let err = live_pool_matches_membership(&pool, &expected)
+            .expect_err("a devid reported twice must refuse");
 
-        assert!(!matches);
+        assert!(
+            err.to_string()
+                .contains("btrfs reports devid 2 for more than one live pool device"),
+            "{err}"
+        );
     }
 
-    // Intent: live_pool_matches_membership rejects a null-underlying mapper
+    // Intent: live_pool_matches_membership refuses a null-underlying mapper
     // whose LUKS UUID duplicates a present device's UUID.
     // Why it exists: binding null-backed mappers by UUID must not let one
-    // UUID count twice (a cloned header behind two mappers) and still match.
+    // UUID count twice (a cloned header behind two mappers), so the gate
+    // refuses rather than pick one.
     // Scenario: disk1 is live, and a null-backed braid-disk1-clone mapper's
     // dm UUID also records disk1's UUID.
     #[test]
@@ -13450,10 +14188,14 @@ mod tests {
             Some(Devid::new(1)),
         )]);
 
-        let matches = live_pool_matches_membership(&pool, &expected)
-            .expect("a duplicated UUID is a topology mismatch, not corruption");
+        let err = live_pool_matches_membership(&pool, &expected)
+            .expect_err("a UUID recorded twice must refuse");
 
-        assert!(!matches);
+        assert!(
+            err.to_string()
+                .contains("both record LUKS UUID 11111111-1111-1111-1111-111111111111"),
+            "{err}"
+        );
     }
 
     // Intent: cmd_recover with dry_run = true previews and returns through
@@ -13630,15 +14372,16 @@ mod tests {
     // Intent: verify that when the live pool contains a braid-prefixed
     // device that is in NEITHER the pre nor target membership snapshot,
     // cmd_recover for a PostAddBalanceRaid1 journal refuses to proceed
-    // via the set-equality check, surfaces the post-add-recovery
-    // mismatch message, and leaves the journal + pool.json untouched.
+    // because the binding pass finds a live UUID the committed membership
+    // lacks, surfaces the post-add-recovery mismatch message, and leaves
+    // the journal + pool.json untouched.
     // Why it exists: protects the simplification that drops the
     // structurally-redundant validate_live_members_allowed call in
     // execute_add_post_balance_recovery. Without this assertion, a
-    // future refactor could re-introduce that call or replace the
-    // set-equality check with a one-direction check and silently
-    // regress the error-message contract for the live-not-in-target
-    // direction. Pinned via the cmd_recover load path so the
+    // future refactor could re-introduce that call, or check only that
+    // every committed member is bound and let a foreign live device
+    // through, and silently regress the error-message contract for the
+    // live-not-in-target direction. Pinned via the cmd_recover load path so the
     // live-pool probe and PostAddBalanceRaid1 dispatch in
     // RecoverPlan::execute stay under the assertion.
     // Scenario: an interrupted add left a device in the btrfs pool that
@@ -13718,13 +14461,13 @@ mod tests {
         let params = f.recover_params().passphrase_file(None).build();
         let result = cmd_recover(&runner, &fs, &resolver, &params);
 
-        // Must fail with the set-equality mismatch message naming the
+        // Must fail with the post-add mismatch message naming the
         // unknown device, without the deleted by-id-path remediation hint.
         let err = result.unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("post-add recovery expected live pool membership"),
-            "expected set-mismatch message, got: {msg}"
+            "expected post-add mismatch message, got: {msg}"
         );
         assert!(
             msg.contains("mystery"),
@@ -13732,7 +14475,7 @@ mod tests {
         );
         assert!(
             !msg.contains("no by-id path"),
-            "post-balance recovery should use the set-mismatch message, not \
+            "post-balance recovery should use the post-add mismatch message, not \
              the deleted by-id-path message; got: {msg}"
         );
 
@@ -18901,9 +19644,8 @@ mod tests {
     /* Intent: cmd_recover for an interrupted OpKind::Remove preserves the
      * target in pool.json when the live pool reports the target's mapper
      * as null-underlying, even though it is absent from `pool.devices`.
-     * Why it exists: build_membership_from_live_pool walks pool.devices
-     * only, so without the OpKind::Remove guard, recover would persist a
-     * pool.json that excluded the target and clear the journal -- the
+     * Why it exists: a rebuild that walked pool.devices only would
+     * persist a pool.json that excluded the target and clear the journal -- the
      * recover-layer reproduction of the same phantom-success class that
      * RemovePlan::execute fail-closes at the helper boundary.
      * Scenario: a 2-disk pool started `braid remove disk2`. Disk2's
@@ -19188,7 +19930,7 @@ mod tests {
      * the target from pool.json when the live pool genuinely no longer
      * tracks it -- not in `pool.devices`, not in `null_underlying`, not
      * in `missing_devids`.
-     * Why it exists: the OpKind::Remove guard must not over-correct.
+     * Why it exists: the Remove recovery binding must not over-correct.
      * The eviction may have completed before the helper crashed, in
      * which case btrfs has fully removed the device and pool.json must
      * follow.
@@ -19199,7 +19941,7 @@ mod tests {
      */
     /// 3-disk Remove journal with disk2 as the eviction target and devids
     /// pinned on every pre_membership entry. Used by recover-side tests
-    /// for the broadened OpKind::Remove guard which must preserve any
+    /// for the Remove recovery binding, which must preserve any
     /// pre_membership disk that btrfs still owns -- not just the target.
     fn remove_3to2_journal_with_devids() -> journal::Journal {
         let pre = membership_from(vec![
@@ -19299,7 +20041,7 @@ mod tests {
     /* Intent: cmd_recover for an interrupted OpKind::Remove preserves a
      * NON-target disk in pool.json when btrfs reports its devid in
      * `missing_devids`.
-     * Why it exists: the broadened OpKind::Remove guard restores any
+     * Why it exists: the Remove recovery binding restores any
      * pre_membership disk that btrfs still owns, not just the target.
      * Without this, a post-journal validation failure that preserved the
      * journal would be undermined by recover silently dropping non-target
@@ -19380,16 +20122,16 @@ mod tests {
         );
         assert!(
             recovered.by_name(&disk_name("disk3")).is_some(),
-            "non-target MISSING disk3 must be preserved by the broadened guard"
+            "non-target MISSING disk3 must be preserved by the recovery binding"
         );
         assert!(!f.paths.pending_op_json().exists());
     }
 
     // Intent: cmd_recover preserves non-target MISSING members through the
     // RemoveMissing::PoolMutation committed path.
-    // Why it exists: the phased remove-missing dispatcher uses
-    // recover_membership_matching_expected instead of the OpKind::Remove
-    // external guard, so this pins the helper-internal devid fallback.
+    // Why it exists: the phased remove-missing dispatcher goes through
+    // recover_membership_matching_expected, so this pins that path's devid
+    // binding at the command boundary.
     // Scenario: remove-missing committed for devid 2, then unrelated disk3
     // flapped to MISSING before recovery rebuilt pool.json.
     #[test]
@@ -19452,10 +20194,9 @@ mod tests {
 
     // Intent: cmd_recover preserves non-target null-underlying members through
     // the RemoveMissing::PoolMutation committed path.
-    // Why it exists: the phased remove-missing dispatcher uses
-    // recover_membership_matching_expected instead of the OpKind::Remove
-    // external guard, so this pins the helper-internal null-underlying
-    // fallback at the command boundary.
+    // Why it exists: the phased remove-missing dispatcher goes through
+    // recover_membership_matching_expected, so this pins that path's
+    // null-underlying binding at the command boundary.
     // Scenario: remove-missing committed for devid 2, then unrelated disk3's
     // underlying block device hot-unplugged before recovery rebuilt pool.json.
     #[test]
@@ -19695,8 +20436,8 @@ mod tests {
     /* Intent: cmd_recover for an interrupted OpKind::Remove preserves a
      * NON-target disk in pool.json when its mapper is in
      * `pool.null_underlying` (cryptsetup reports `device: (null)`).
-     * Why it exists: the broadened guard checks both null_underlying and
-     * missing_devids; this test pins the null_underlying branch for the
+     * Why it exists: the recovery binding reads both null_underlying and
+     * missing_devids; this test pins the null_underlying arm for the
      * non-target case.
      * Scenario: a 3-disk pool started `braid remove disk2`; between
      * journal write and post-journal validation, disk3's underlying
@@ -19778,7 +20519,7 @@ mod tests {
         assert!(recovered.by_name(&disk_name("disk2")).is_some());
         assert!(
             recovered.by_name(&disk_name("disk3")).is_some(),
-            "non-target null-underlying disk3 must be preserved by the broadened guard"
+            "non-target null-underlying disk3 must be preserved by the recovery binding"
         );
         assert!(!f.paths.pending_op_json().exists());
     }
@@ -19786,7 +20527,7 @@ mod tests {
     /* Intent: cmd_recover for an interrupted OpKind::Remove must NOT
      * resurrect a NON-target disk that is genuinely gone from the live
      * pool (not in devices, not null-underlying, not MISSING).
-     * Why: the broadened guard must not over-correct. A non-target disk
+     * Why: the recovery binding must not over-correct. A non-target disk
      * may have been removed by an earlier, fully-completed operation
      * before the interrupted Remove; recover must drop it from pool.json
      * to match the live pool.

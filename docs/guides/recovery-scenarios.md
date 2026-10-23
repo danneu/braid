@@ -179,21 +179,26 @@ See also [Unlock refused by a foreign or mismatched disk](#unlock-refused-by-a-f
 
 ## Null-underlying mapper during recovery
 
-A member can stay in the live pool after its LUKS backing device is gone (`cryptsetup status` reports `device: (null)`). Recovery still binds that mapper to its UUID-keyed membership entry, because the kernel keeps the LUKS UUID the mapper was opened with; no persisted devid is needed.
+A member can stay in the live pool after its LUKS backing device is gone (`cryptsetup status` reports `device: (null)`). Recovery of every operation still binds that mapper to its UUID-keyed membership entry, because the kernel keeps the LUKS UUID the mapper was opened with; no persisted devid is needed. The member stays in `pool.json` at the devid btrfs holds it at. This holds for a disk the interrupted `braid add` was adding, too: if btrfs already added it, recover counts it as added and does not add it again.
 
-If that UUID belongs to no pre-operation member, recovery of an interrupted `braid remove` refuses with `device <mapper> (LUKS UUID <uuid>) is in the live pool with no backing disk but is not part of the pre-operation membership.` and keeps `pending-op.json`. Find out which disk that mapper belonged to before you re-run `braid recover`.
+If that UUID belongs to no journaled member, recovery refuses and keeps `pending-op.json`. For an interrupted `braid remove` the refusal reads `device <mapper> (LUKS UUID <uuid>) is in the live pool with no backing disk but is not part of the pre-operation membership.` Find out which disk that mapper belonged to before you re-run `braid recover`.
 
 Once btrfs promotes a gone device to MISSING, `braid remove-missing` or `braid replace` can act on it.
 
 ## Duplicate or missing devid in journal snapshot
 
-Recovery may refuse with internal errors equivalent to duplicate journaled devids or no member for a journaled devid. This means the journal snapshot cannot safely resolve a btrfs devid to a UUID-keyed member.
+btrfs reports a device it cannot reach as a MISSING devid with no LUKS UUID. Recovery binds that devid to the journaled member that records it. A MISSING devid that no journaled member records is left out of `pool.json`, as `braid add` leaves it.
 
-Do not edit `pool.json`; that resolution did not consult it. Re-run recovery only after manual reconciliation of `pending-op.json`.
+Recovery refuses and keeps `pending-op.json` when it cannot bind a MISSING devid safely:
+
+- Two journaled members record the same devid: `duplicate devid <devid> in journaled membership across UUIDs ...`.
+- A MISSING devid no member records sits beside a journaled member that records no devid, so either could be the other: `recovery cannot safely correlate journaled member(s) '<name>' with btrfs-MISSING devid(s) <devid>: ...`. A bootstrap `braid add` journal records no devids, so a bootstrap whose disk is gone hits this refusal even with `--allow-degraded`.
+
+Do not edit `pool.json`; that resolution did not consult it. Re-run recovery only after manual reconciliation of `pending-op.json`. If the disk is reachable, reattach it and re-run `braid recover`; recovery then binds it by its LUKS UUID.
 
 ### Committed-but-closed add target
 
-If the journaled add target is already a live pool member but its mapper is closed when recover starts, recover opens and scans it during the reconciliation pass. After the live-pool re-probe, the target is included in `pool.json` and is not re-added.
+If the journaled add target is already a live pool member but its mapper is closed when recover starts, recover opens and scans it during the reconciliation pass. After the live-pool re-probe, the target is included in `pool.json` and is not re-added. If the target's disk is gone instead, recover cannot open it and refuses; see [With missing devices](#with-missing-devices).
 
 This can still prompt for the pool passphrase even when the pool is already mounted, because the target mapper may need to be opened before recover can discover that it already committed.
 
@@ -205,7 +210,11 @@ If a drive failed during the interrupted operation:
 sudo braid recover --allow-degraded
 ```
 
-Without `--allow-degraded`, recover exits with code 2 when devices are missing. The degraded flag allows mounting with missing devices so recovery can complete. Redundancy is reduced until the missing device is replaced.
+Without `--allow-degraded`, recover exits with code 2 when devices are missing. The degraded flag allows mounting with missing devices so recovery can complete. The missing member stays in `pool.json`, so `braid replace` or `braid remove-missing` can name it later. Redundancy is reduced until the missing device is replaced.
+
+Recovery can finish a degraded pool only when it can tell which member each MISSING devid is. An interrupted bootstrap `braid add` (the pool's first disks) records no devids, so `--allow-degraded` cannot finish it while one of its disks is gone; see [Duplicate or missing devid in journal snapshot](#duplicate-or-missing-devid-in-journal-snapshot).
+
+An interrupted existing-pool `braid add` in its `PoolMutation` phase cannot finish while a disk it was adding is gone, even if btrfs already added that disk. The journal records no devid for a new disk until the advance to `PostAddBalanceRaid1`, so recover cannot tell that a MISSING devid is that disk. It refuses at that disk and keeps `pending-op.json`, with or without `--allow-degraded`. Reattach the disk and re-run `braid recover`. After the advance, the journal records each new disk's devid, so a new disk that is gone then binds by it.
 
 ### Scripted recovery
 

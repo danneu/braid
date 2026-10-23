@@ -190,13 +190,21 @@ one.
    mapper's LUKS UUID. A cloned LUKS header can give two physical devices the
    same UUID, so the runtime proof is backing path match first, then UUID
    match.
-9. Recovery binds a live btrfs device by the LUKS UUID its mapper's dm UUID
-   records, whether or not the mapper still has a backing disk, and fails
-   closed when that UUID cannot be read. `remove` recovery also refuses a
-   diskless pool device whose UUID is not in the journaled pre-operation
-   membership. A btrfs `missing_devids` entry has no mapper, so it binds by
-   persisted devid, and recovery fails closed without one. Recovery must not
-   infer identity from `braid-<DiskName>`.
+9. Recovery binds the live pool to a journaled membership in one pass,
+   `cli/src/membership.rs#bind_live_pool`, for every journal kind and phase.
+   A live btrfs device binds by the LUKS UUID its mapper's dm UUID records,
+   whether or not the mapper still has a backing disk. Recovery fails closed
+   when that UUID cannot be read or names no journaled member. A btrfs
+   `missing_devids` entry has no mapper, so it binds to the one member that
+   records that devid and is not bound by UUID. A member bound by UUID claims
+   no missing devid: its live devid replaces the recorded one. A missing devid
+   no such member records is carried: it stays out of `pool.json`, as live
+   `add` leaves it. Recovery fails closed when a carried devid sits beside a
+   member that is unbound and records no devid, since either could be the
+   other. It also fails closed when one UUID or devid shows up twice live, or
+   two unbound members record the same missing devid. Every member btrfs
+   still holds stays in `pool.json`, at the devid btrfs holds it at. Recovery
+   must not infer identity from `braid-<DiskName>`.
 10. `replace` must re-probe the mounted pool after confirmation and passphrase
     verification but before sleep inhibitor acquisition, journal write, or
     `btrfs replace start`. If the pool is no longer mounted, the FSID differs
@@ -431,6 +439,18 @@ devices to the kernel, so this check cannot join them.
   the devid btrfs holds it at, and refuses a null-underlying device whose dm
   UUID names a LUKS UUID outside the pre-operation membership, instead of
   falling back to mapper-name inference.
+- `cli/src/membership.rs` unit tests pin rule 9's one binding pass: present,
+  null-backed, and MISSING members bind; a member bound by UUID claims no
+  MISSING devid; a stray MISSING devid is carried; and a carried devid beside
+  a member with no recorded devid refuses. `cli/src/recover.rs` unit tests
+  named `add_recovery_keeps_absent_member_*` pin that add recovery keeps a
+  member btrfs reports MISSING or null-backed, before and after the phase
+  advance, and
+  `cli/src/recover.rs#bootstrap_recovery_refuses_member_seen_only_as_missing_devid`
+  pins the ambiguity refusal.
+  `cli/src/recover.rs#add_recovery_refuses_missing_new_disk_before_phase_advance`
+  pins that a MISSING devid never binds an add target the journal records no
+  devid for.
 - `cli/src/status.rs`, `cli/src/replace.rs`, and `cli/src/remove_missing.rs`
   unit tests pin that a hot-unplugged member whose mapper is still open binds
   its live devid by UUID when pool.json's devid is absent or stale: the

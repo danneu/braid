@@ -10,11 +10,12 @@
 use crate::state_io;
 use crate::state_paths::StatePaths;
 use crate::types::{
-    ByIdPath, Devid, DiskName, LuksUuid, MapperName, PoolDevice, PoolState, format_uuid_list,
+    ByIdPath, Devid, DiskName, LuksUuid, MapperName, NullUnderlyingDevice, PoolDevice, PoolState,
+    format_uuid_list,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 use std::collections::btree_map;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -705,6 +706,241 @@ pub fn enrich_from_pool_state(membership: &mut PoolMembership, pool: &PoolState)
                 member.added_at = Some(crate::util::now_iso());
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// bind_live_pool -- the one live-pool binding rule (decision 024 rule 9)
+// ---------------------------------------------------------------------------
+
+/// How one reference member is bound to the live pool. A bound arm borrows
+/// the live record that proves it, so callers read the devid and backing path
+/// from the probe rather than from the persisted snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemberBinding<'a> {
+    /// A device with a backing disk whose mapper records this member's UUID.
+    Present(&'a PoolDevice),
+    /// An open mapper with no backing disk that records this member's UUID.
+    NullBacked(&'a NullUnderlyingDevice),
+    /// A btrfs-MISSING devid with no open mapper that only this member
+    /// records.
+    MissingByDevid(Devid),
+    /// Nothing live names this member.
+    Unbound,
+}
+
+impl MemberBinding<'_> {
+    /// The devid btrfs holds this member at now, or `None` when unbound.
+    pub fn devid(&self) -> Option<Devid> {
+        match self {
+            MemberBinding::Present(dev) => Some(dev.devid),
+            MemberBinding::NullBacked(dev) => Some(dev.devid),
+            MemberBinding::MissingByDevid(devid) => Some(*devid),
+            MemberBinding::Unbound => None,
+        }
+    }
+
+    /// True when something live names this member.
+    pub fn is_bound(&self) -> bool {
+        !matches!(self, MemberBinding::Unbound)
+    }
+}
+
+/// A live pool bound to a reference membership by decision 024 rule 9. It is
+/// the only way recovery learns which members btrfs still holds, so no
+/// recovery path can treat `pool.devices` as the membership and drop a member
+/// that is null-backed or MISSING.
+#[derive(Debug)]
+pub struct LiveBinding<'a> {
+    reference: &'a PoolMembership,
+    members: BTreeMap<LuksUuid, MemberBinding<'a>>,
+    carried: Vec<Devid>,
+}
+
+/// Live state that contradicts itself or the reference membership. The pass
+/// refuses these whatever the caller does with a binding.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum LiveBindingError {
+    /// A live device -- present or null-backed -- records a LUKS UUID that no
+    /// reference member has. Callers name it in their own wording.
+    #[error(
+        "device {mapper} (LUKS UUID {luks_uuid}) is in the live pool but is not part of the reference membership"
+    )]
+    Foreign {
+        mapper: MapperName,
+        luks_uuid: LuksUuid,
+        null_backed: bool,
+    },
+    /// Two live devices record one LUKS UUID, as a cloned header would.
+    #[error(
+        "live pool devices {first} and {second} both record LUKS UUID {luks_uuid}; a cloned LUKS header cannot be told from its source"
+    )]
+    DuplicateLiveUuid {
+        luks_uuid: LuksUuid,
+        first: MapperName,
+        second: MapperName,
+    },
+    /// btrfs reports one devid for two live entries.
+    #[error("btrfs reports devid {devid} for more than one live pool device")]
+    DuplicateLiveDevid { devid: Devid },
+    /// Two unbound reference members record the same btrfs-MISSING devid.
+    #[error("duplicate devid {devid} in pool membership across UUIDs {}", format_uuid_list(.members))]
+    DuplicateDevid {
+        devid: Devid,
+        members: Vec<LuksUuid>,
+    },
+}
+
+/// Why a binding cannot become a membership for `pool.json` or a journal
+/// target.
+#[derive(Debug, Error)]
+pub enum BindingProjectionError {
+    /// A btrfs-MISSING devid that no member records sits beside members with
+    /// no recorded devid, so any of them could be that device. Both lists
+    /// are sorted, `members` by name.
+    #[error(
+        "btrfs-MISSING devid(s) {devids:?} could belong to members with no recorded devid {members:?}"
+    )]
+    AmbiguousMissingDevid {
+        devids: Vec<Devid>,
+        members: Vec<DiskName>,
+    },
+    /// The reference membership itself breaks the uniqueness invariant.
+    #[error("{0}")]
+    Membership(#[from] MembershipError),
+}
+
+/// Bind `pool` to `reference`. A present or null-backed device binds by the
+/// LUKS UUID its mapper records. A btrfs-MISSING devid with no open mapper
+/// binds to the one unbound member that records it; a UUID-bound member
+/// claims none, since its live devid outranks a persisted one (principle 2).
+/// A MISSING devid that no unbound member records is carried, not refused.
+pub fn bind_live_pool<'a>(
+    pool: &'a PoolState,
+    reference: &'a PoolMembership,
+) -> Result<LiveBinding<'a>, LiveBindingError> {
+    let mut members: BTreeMap<LuksUuid, MemberBinding<'a>> = reference
+        .iter()
+        .map(|(uuid, _)| (uuid.clone(), MemberBinding::Unbound))
+        .collect();
+    let mut seen_mapper: BTreeMap<LuksUuid, &MapperName> = BTreeMap::new();
+    let mut live_devids: BTreeSet<Devid> = BTreeSet::new();
+    let live = pool
+        .devices
+        .iter()
+        .map(|dev| (&dev.mapper, &dev.luks_uuid, MemberBinding::Present(dev)))
+        .chain(
+            pool.null_underlying
+                .iter()
+                .map(|dev| (&dev.mapper, &dev.luks_uuid, MemberBinding::NullBacked(dev))),
+        );
+    for (mapper, uuid, binding) in live {
+        let Some(slot) = members.get_mut(uuid) else {
+            return Err(LiveBindingError::Foreign {
+                mapper: mapper.clone(),
+                luks_uuid: uuid.clone(),
+                null_backed: matches!(binding, MemberBinding::NullBacked(_)),
+            });
+        };
+        if let Some(first) = seen_mapper.insert(uuid.clone(), mapper) {
+            return Err(LiveBindingError::DuplicateLiveUuid {
+                luks_uuid: uuid.clone(),
+                first: first.clone(),
+                second: mapper.clone(),
+            });
+        }
+        let devid = binding.devid().expect("a live device always has a devid");
+        if !live_devids.insert(devid) {
+            return Err(LiveBindingError::DuplicateLiveDevid { devid });
+        }
+        *slot = binding;
+    }
+
+    let mut carried = Vec::new();
+    for devid in pool.devid_only_missing() {
+        if !live_devids.insert(devid) {
+            return Err(LiveBindingError::DuplicateLiveDevid { devid });
+        }
+        let claimants: Vec<&LuksUuid> = reference
+            .iter()
+            .filter(|(uuid, member)| member.devid == Some(devid) && !members[*uuid].is_bound())
+            .map(|(uuid, _)| uuid)
+            .collect();
+        match claimants.as_slice() {
+            [] => carried.push(devid),
+            [uuid] => {
+                members.insert((*uuid).clone(), MemberBinding::MissingByDevid(devid));
+            }
+            _ => {
+                return Err(LiveBindingError::DuplicateDevid {
+                    devid,
+                    members: claimants.into_iter().cloned().collect(),
+                });
+            }
+        }
+    }
+    carried.sort();
+
+    Ok(LiveBinding {
+        reference,
+        members,
+        carried,
+    })
+}
+
+impl<'a> LiveBinding<'a> {
+    /// How the reference member keyed `uuid` binds, or `None` when `uuid` is
+    /// not a reference member.
+    pub fn member(&self, uuid: &LuksUuid) -> Option<MemberBinding<'a>> {
+        self.members.get(uuid).copied()
+    }
+
+    /// True when every reference member is bound: the live pool shows exactly
+    /// the reference membership, plus any carried MISSING devids.
+    pub fn all_bound(&self) -> bool {
+        self.members.values().all(MemberBinding::is_bound)
+    }
+
+    /// btrfs-MISSING devids that no unbound member records, sorted. They stay
+    /// out of any projected membership, as live add leaves them out.
+    pub fn carried_missing_devids(&self) -> &[Devid] {
+        &self.carried
+    }
+
+    /// The one projection from a binding to a membership for `pool.json` or a
+    /// journal target: each bound member at the devid btrfs holds it at, and
+    /// no unbound member. Refuses when a carried devid sits beside an unbound
+    /// member with no recorded devid, because that member could be the device
+    /// (decision 024 rule 9).
+    pub fn bound_membership(&self) -> Result<PoolMembership, BindingProjectionError> {
+        if !self.carried.is_empty() {
+            let suspects: Vec<DiskName> = self
+                .reference
+                .iter_by_name()
+                .into_iter()
+                .filter(|(uuid, member)| member.devid.is_none() && !self.members[*uuid].is_bound())
+                .map(|(_, member)| member.name.clone())
+                .collect();
+            if !suspects.is_empty() {
+                return Err(BindingProjectionError::AmbiguousMissingDevid {
+                    devids: self.carried.clone(),
+                    members: suspects,
+                });
+            }
+        }
+        let mut projected = PoolMembership::empty();
+        for (uuid, member) in self.reference.iter() {
+            if let Some(devid) = self.members[uuid].devid() {
+                projected.insert(
+                    uuid.clone(),
+                    DiskMember {
+                        devid: Some(devid),
+                        ..member.clone()
+                    },
+                )?;
+            }
+        }
+        Ok(projected)
     }
 }
 
@@ -1509,6 +1745,253 @@ mod tests {
             present_device_name(&m, &foreign),
             "braid-WRONG",
             "foreign UUID -> full mapper basename"
+        );
+    }
+
+    // ----- bind_live_pool (decision 024 rule 9) -----------------------------
+
+    /// Reference member `name` keyed by `test_uuid(seed)`, recording `devid`.
+    fn bound_member(seed: u64, name: &str, devid: Option<u64>) -> (LuksUuid, DiskMember) {
+        let mut m = member(name, &format!("/dev/disk/by-id/virtio-{name}"));
+        m.devid = devid.map(Devid::new);
+        (test_uuid(seed), m)
+    }
+
+    fn reference_of(entries: Vec<(LuksUuid, DiskMember)>) -> PoolMembership {
+        let mut m = PoolMembership::empty();
+        for (uuid, member) in entries {
+            m.insert(uuid, member).unwrap();
+        }
+        m
+    }
+
+    fn present(seed: u64, devid: u64) -> PoolDevice {
+        PoolDevice {
+            mapper: MapperName::from_basename(format!("braid-d{seed}")),
+            luks_uuid: test_uuid(seed),
+            devid: Devid::new(devid),
+            underlying: format!("/dev/vd{seed}"),
+        }
+    }
+
+    fn null_backed(seed: u64, devid: u64) -> NullUnderlyingDevice {
+        NullUnderlyingDevice {
+            mapper: MapperName::from_basename(format!("braid-d{seed}")),
+            luks_uuid: test_uuid(seed),
+            devid: Devid::new(devid),
+        }
+    }
+
+    fn live_pool(
+        devices: Vec<PoolDevice>,
+        null_underlying: Vec<NullUnderlyingDevice>,
+        missing: &[u64],
+    ) -> PoolState {
+        PoolState {
+            null_underlying,
+            missing_devids: missing.iter().copied().map(Devid::new).collect(),
+            ..pool_state_with(devices)
+        }
+    }
+
+    fn projected_devids(m: &PoolMembership) -> Vec<(String, Option<Devid>)> {
+        m.iter_by_name()
+            .into_iter()
+            .map(|(_, member)| (member.name.as_str().to_owned(), member.devid))
+            .collect()
+    }
+
+    // Intent: one pass binds a present member and a null-backed member by the
+    //   LUKS UUID their mappers record, and a MISSING devid with no open mapper
+    //   by the devid one member records.
+    // Why it exists: add recovery read present devices only and dropped the
+    //   other two kinds from pool.json (hunt finding 261022-1230-007).
+    // Scenario: a three-disk pool where d2's disk was hot-unplugged and d3 is
+    //   btrfs-MISSING.
+    #[test]
+    fn bind_live_pool_binds_present_null_backed_and_missing_members() {
+        let reference = reference_of(vec![
+            bound_member(180, "d1", Some(1)),
+            bound_member(181, "d2", None),
+            bound_member(182, "d3", Some(3)),
+        ]);
+        let pool = live_pool(vec![present(180, 1)], vec![null_backed(181, 2)], &[3]);
+
+        let binding = bind_live_pool(&pool, &reference).unwrap();
+
+        assert_eq!(
+            binding.member(&test_uuid(180)),
+            Some(MemberBinding::Present(&pool.devices[0]))
+        );
+        assert_eq!(
+            binding.member(&test_uuid(181)),
+            Some(MemberBinding::NullBacked(&pool.null_underlying[0]))
+        );
+        assert_eq!(
+            binding.member(&test_uuid(182)),
+            Some(MemberBinding::MissingByDevid(Devid::new(3)))
+        );
+        assert!(binding.all_bound());
+        assert!(binding.carried_missing_devids().is_empty());
+        assert_eq!(
+            projected_devids(&binding.bound_membership().unwrap()),
+            vec![
+                ("d1".into(), Some(Devid::new(1))),
+                ("d2".into(), Some(Devid::new(2))),
+                ("d3".into(), Some(Devid::new(3))),
+            ]
+        );
+    }
+
+    // Intent: a member bound by UUID claims no MISSING devid, and its live
+    //   devid replaces the one it recorded.
+    // Why it exists: a recorded devid can be stale; letting it claim a MISSING
+    //   devid would bind one member twice and lose the device that devid
+    //   names (principle 2: live state outranks persisted state).
+    // Scenario: btrfs renumbered d1 to devid 1 after a replace, while pool.json
+    //   still records devid 2 for it, and an unrelated devid 2 is MISSING.
+    #[test]
+    fn bind_live_pool_uuid_bound_member_keeps_live_devid_and_claims_no_missing_devid() {
+        let reference = reference_of(vec![bound_member(183, "d1", Some(2))]);
+        let pool = live_pool(vec![present(183, 1)], vec![], &[2]);
+
+        let binding = bind_live_pool(&pool, &reference).unwrap();
+
+        assert!(binding.all_bound());
+        assert_eq!(binding.carried_missing_devids(), &[Devid::new(2)]);
+        assert_eq!(
+            projected_devids(&binding.bound_membership().unwrap()),
+            vec![("d1".into(), Some(Devid::new(1)))]
+        );
+    }
+
+    // Intent: an unbound member is left out of the projection, and a MISSING
+    //   devid no member records is carried rather than refused.
+    // Why it exists: a member with a recorded devid btrfs no longer reports is
+    //   gone, as a committed remove leaves it; a stray MISSING devid is not
+    //   braid's to name, as live add leaves it.
+    // Scenario: d2 (devid 2) left the pool, and btrfs reports devid 7 MISSING.
+    #[test]
+    fn bound_membership_drops_unbound_member_and_carries_stray_missing_devid() {
+        let reference = reference_of(vec![
+            bound_member(184, "d1", Some(1)),
+            bound_member(185, "d2", Some(2)),
+        ]);
+        let pool = live_pool(vec![present(184, 1)], vec![], &[7]);
+
+        let binding = bind_live_pool(&pool, &reference).unwrap();
+
+        assert_eq!(
+            binding.member(&test_uuid(185)),
+            Some(MemberBinding::Unbound)
+        );
+        assert!(!binding.all_bound());
+        assert_eq!(binding.carried_missing_devids(), &[Devid::new(7)]);
+        assert_eq!(
+            projected_devids(&binding.bound_membership().unwrap()),
+            vec![("d1".into(), Some(Devid::new(1)))]
+        );
+    }
+
+    // Intent: the projection refuses when a carried MISSING devid sits beside
+    //   an unbound member with no recorded devid, and only then.
+    // Why it exists: that member could be the MISSING device, so dropping it
+    //   or binding it would be a guess.
+    // Scenario: d2 was never enriched with a devid; btrfs reports devid 5
+    //   MISSING in one pool and nothing MISSING in another.
+    #[test]
+    fn bound_membership_refuses_carried_devid_beside_member_without_devid() {
+        let reference = reference_of(vec![
+            bound_member(186, "d1", Some(1)),
+            bound_member(187, "d2", None),
+        ]);
+
+        let pool = live_pool(vec![present(186, 1)], vec![], &[5]);
+        let binding = bind_live_pool(&pool, &reference).unwrap();
+        match binding.bound_membership() {
+            Err(BindingProjectionError::AmbiguousMissingDevid { devids, members }) => {
+                assert_eq!(devids, vec![Devid::new(5)]);
+                assert_eq!(members, vec![disk_name("d2")]);
+            }
+            other => panic!("expected AmbiguousMissingDevid, got {other:?}"),
+        }
+
+        let pool = live_pool(vec![present(186, 1)], vec![], &[]);
+        let binding = bind_live_pool(&pool, &reference).unwrap();
+        assert_eq!(
+            projected_devids(&binding.bound_membership().unwrap()),
+            vec![("d1".into(), Some(Devid::new(1)))]
+        );
+    }
+
+    // Intent: the pass refuses a live UUID no reference member has, for a
+    //   present device and a null-backed one alike, and says which it was.
+    // Why it exists: both mappers record a LUKS UUID, so both bind by it;
+    //   callers name the refusal in their own wording.
+    // Scenario: an external LUKS device joined the pool, once present and
+    //   once with its disk gone.
+    #[test]
+    fn bind_live_pool_refuses_foreign_uuid() {
+        let reference = reference_of(vec![bound_member(188, "d1", Some(1))]);
+
+        let pool = live_pool(vec![present(188, 1), present(189, 2)], vec![], &[]);
+        assert_eq!(
+            bind_live_pool(&pool, &reference).unwrap_err(),
+            LiveBindingError::Foreign {
+                mapper: MapperName::from_basename("braid-d189".into()),
+                luks_uuid: test_uuid(189),
+                null_backed: false,
+            }
+        );
+
+        let pool = live_pool(vec![present(188, 1)], vec![null_backed(189, 2)], &[]);
+        assert!(matches!(
+            bind_live_pool(&pool, &reference).unwrap_err(),
+            LiveBindingError::Foreign {
+                null_backed: true,
+                ..
+            }
+        ));
+    }
+
+    // Intent: the pass refuses a live pool that contradicts itself or binds
+    //   one MISSING devid to two members.
+    // Why it exists: each shape has two readings, and the pass must not pick
+    //   one.
+    // Scenario: a cloned LUKS header behind two mappers; one devid reported
+    //   for two devices; corrupt membership recording one MISSING devid twice.
+    #[test]
+    fn bind_live_pool_refuses_contradictions() {
+        let one = reference_of(vec![bound_member(190, "d1", Some(1))]);
+        let pool = live_pool(vec![present(190, 1)], vec![null_backed(190, 2)], &[]);
+        assert!(matches!(
+            bind_live_pool(&pool, &one).unwrap_err(),
+            LiveBindingError::DuplicateLiveUuid { .. }
+        ));
+
+        let two = reference_of(vec![
+            bound_member(190, "d1", Some(1)),
+            bound_member(191, "d2", None),
+        ]);
+        let pool = live_pool(vec![present(190, 1)], vec![null_backed(191, 1)], &[]);
+        assert_eq!(
+            bind_live_pool(&pool, &two).unwrap_err(),
+            LiveBindingError::DuplicateLiveDevid {
+                devid: Devid::new(1)
+            }
+        );
+
+        let (u1, m1) = bound_member(192, "d1", Some(4));
+        let (u2, m2) = bound_member(193, "d2", Some(4));
+        let corrupt =
+            PoolMembership::for_corruption_tests(vec![(u1.clone(), m1), (u2.clone(), m2)]);
+        let pool = live_pool(vec![], vec![], &[4]);
+        assert_eq!(
+            bind_live_pool(&pool, &corrupt).unwrap_err(),
+            LiveBindingError::DuplicateDevid {
+                devid: Devid::new(4),
+                members: vec![u1, u2],
+            }
         );
     }
 

@@ -1598,10 +1598,16 @@ impl AddPlan {
             membership::enrich_from_pool_state(&mut final_membership, &pool_after);
             membership::save_membership(&final_membership, params.paths)?;
 
+            // The phase advance carries the committed membership as the
+            // journal target, as recover's advance does
+            // (`cli/src/recover.rs#write_add_phase`): a recovery from
+            // PostAddBalanceRaid1 then binds each new disk at the devid btrfs
+            // gave it, even if that disk is MISSING by then.
             let mut balance_journal = journal.clone();
             if let journal::OpKind::Add { phase, .. } = &mut balance_journal.op {
                 *phase = journal::AddPhase::PostAddBalanceRaid1;
             }
+            balance_journal.target_membership = final_membership;
             journal::write_journal_tracked(params.paths, &balance_journal, journal_state)
                 .map_err(|e| AddError::Validation(e.to_string()))?;
 
@@ -4973,6 +4979,140 @@ mod tests {
         );
     }
 
+    /// Fails the hard RAID1 convert, as a crash or power loss mid-balance
+    /// would, and passes every other request through.
+    struct FailingBalanceRunner<R> {
+        inner: R,
+    }
+
+    impl<R: CommandRunner> CommandRunner for FailingBalanceRunner<R> {
+        fn run(&self, request: &CmdRequest) -> Result<RawCommandOutput, CmdError> {
+            if matches!(request, CmdRequest::BtrfsBalanceRaid1 { .. }) {
+                return Err(CmdError::Failed("mock: balance interrupted".into()));
+            }
+            self.inner.run(request)
+        }
+
+        fn run_with_stdin(
+            &self,
+            request: &CmdRequest,
+            stdin: &[u8],
+        ) -> Result<RawCommandOutput, CmdError> {
+            if matches!(request, CmdRequest::BtrfsBalanceRaid1 { .. }) {
+                return Err(CmdError::Failed("mock: balance interrupted".into()));
+            }
+            self.inner.run_with_stdin(request, stdin)
+        }
+    }
+
+    // Intent: the live add's advance to PostAddBalanceRaid1 writes the
+    //   committed membership as the journal target, each member at the devid
+    //   btrfs holds it at.
+    // Why it exists: the target used to stay the devid-less snapshot the add
+    //   started from, so a recovery whose new disk had gone MISSING could not
+    //   bind it by devid and dropped it (hunt finding 261022-1230-007).
+    // Scenario: disk1 is mounted at devid 1 with no devid in pool.json; disk2
+    //   is added at devid 2; the RAID1 balance is interrupted, leaving the
+    //   journal at PostAddBalanceRaid1 for `braid recover`.
+    #[test]
+    fn execute_add_phase_advance_journals_committed_devids() {
+        let (_state_tmp, paths, _tmp, pass_path) = execute_fixture();
+        let fs = MockFs::storage(vec!["/dev/disk/by-id/virtio-disk2".into()])
+            .with_dm(canonical_dm_table());
+        let runner = FailingBalanceRunner {
+            inner: RecoverableAddRunner::new(),
+        };
+        let inhibitor = crate::inhibit::RecordingInhibitor::new();
+        let confirm = crate::confirm::RecordingConfirm::new();
+        let target = fresh_target(
+            "disk2",
+            "/dev/disk/by-id/virtio-disk2",
+            "22222222-2222-2222-2222-222222222222",
+        );
+        let target_uuid = target.luks_uuid.clone();
+        let disk1_uuid = LuksUuid::parse("11111111-1111-1111-1111-111111111111").unwrap();
+        let pool = PoolState {
+            mounted: true,
+            devices: vec![PoolDevice {
+                mapper: MapperName::from_basename("braid-disk1".into()),
+                luks_uuid: disk1_uuid.clone(),
+                devid: Devid::new(1),
+                underlying: "/dev/vdb".into(),
+            }],
+            missing_count: 0,
+            missing_devids: vec![],
+            total_devices: 1,
+            fsid: Some(Fsid::parse(POOL_FSID).unwrap()),
+            null_underlying: vec![],
+        };
+        let mut plan = plan_for_execute_target(
+            AddTargetWork::Fresh(target.clone()),
+            journal_targets_with(target_uuid.clone(), fresh_journal_target(&target)),
+            pool,
+        );
+        plan.pool_membership
+            .insert(
+                disk1_uuid.clone(),
+                DiskMember::new(
+                    DiskName::parse("disk1").unwrap(),
+                    ByIdPath::parse("/dev/disk/by-id/virtio-disk1").unwrap(),
+                ),
+            )
+            .unwrap();
+        let config = test_config();
+
+        let result = plan.execute(
+            &runner,
+            &fs,
+            &AddParams {
+                config: &config,
+                disk_specs: &[],
+                dry_run: false,
+                yes: true,
+                passphrase_stdin: false,
+                passphrase_file: Some(pass_path.as_path()),
+                enroll_key_file: None,
+                luks_format_extra_opts: &[],
+                progress: ProgressOutput::Off,
+                paths: &paths,
+                sleep_inhibitor: &inhibitor,
+                confirm: &confirm,
+                passphrase_reader: &RealTty,
+                backing_path_resolver:
+                    crate::test_fixtures::mock_virtio_offset_backing_path_resolver(),
+            },
+        );
+
+        assert!(result.is_err(), "the interrupted balance must fail the add");
+        let journal = journal::load_journal(&paths)
+            .unwrap()
+            .expect("the journal must survive the interrupted balance");
+        assert!(
+            matches!(
+                journal.op,
+                journal::OpKind::Add {
+                    phase: journal::AddPhase::PostAddBalanceRaid1,
+                    ..
+                }
+            ),
+            "{:?}",
+            journal.op
+        );
+        let devid_of = |uuid: &LuksUuid| {
+            journal
+                .target_membership
+                .by_uuid(uuid)
+                .and_then(|member| member.devid)
+        };
+        assert_eq!(devid_of(&disk1_uuid), Some(Devid::new(1)));
+        assert_eq!(devid_of(&target_uuid), Some(Devid::new(2)));
+        assert_eq!(
+            journal.target_membership,
+            membership::load_membership(&paths).unwrap(),
+            "the journal target must be the membership saved to pool.json"
+        );
+    }
+
     // Intent: executing an add into a *degraded* mounted pool (a member is
     //   missing) adds the disk but issues NO RAID1 convert balance.
     // Why it exists: the hard convert would rewrite every chunk while the
@@ -6590,9 +6730,10 @@ mod tests {
     //   every originally-requested target so `braid recover` can finish
     //   the work the loop interrupted.
     //
-    // Why it exists: ADR-017 makes target_membership a write-once,
-    //   before-the-irreversible-loop snapshot; the live-pool add loop in
-    //   `AddPlan::execute` never touches the journal mid-loop. A
+    // Why it exists: ADR-017 makes target_membership a
+    //   before-the-irreversible-loop snapshot that holds until the phase
+    //   advance; the live-pool add loop in `AddPlan::execute` never
+    //   touches the journal mid-loop. A
     //   future refactor that pruned journaled targets to "match recovery
     //   to live state" on partial failure would silently change what
     //   recover replays without breaking any existing test.

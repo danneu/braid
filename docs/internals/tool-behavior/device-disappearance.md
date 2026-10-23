@@ -37,8 +37,10 @@ LUKS header is gone, but the mapper's dm UUID (`/sys/block/dm-N/dm/uuid`) still
 records the LUKS UUID cryptsetup opened it with. braid binds the live mapper back
 to membership by that UUID (`cli/src/dm_identity.rs#mapper_luks_uuid`), as it
 does for a mapper whose disk is present. So status's compact `Drives:` row,
-`replace`, and remove recovery take a null-underlying member's devid from its
-mapper, not from pool.json, which may hold none or a stale one. Persisted
+`replace`, and every recovery path take a null-underlying member's devid from
+its mapper, not from pool.json, which may hold none or a stale one. Recovery
+does this through one binding pass (`cli/src/membership.rs#bind_live_pool`)
+and keeps the member in `pool.json`. Persisted
 `DiskMember.devid` binds only a device btrfs reports MISSING with no open
 mapper (`cli/src/types.rs#PoolState::devid_only_missing`); it is prior-binding
 state, not display authority, and status output still uses live btrfs stats
