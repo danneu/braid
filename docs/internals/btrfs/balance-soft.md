@@ -60,6 +60,33 @@ skip every chunk, leave device C empty and still clear the journal. On a nearly
 full pool writes would then keep failing with ENOSPC, because RAID1 needs free
 space on two devices.
 
+### Soft pass before the hard convert -- mixed profiles
+
+A hard convert that is cut off partway through a 1->2 add leaves a pool whose
+chunk types each hold two profiles at once: `single` and RAID1 data, DUP and
+RAID1 metadata, DUP and RAID1 system. A second hard convert on that pool marks
+its RAID1 system chunk read-only to rewrite it. btrfs still counts the DUP
+system chunk's free space, so it does not allocate a new RAID1 system chunk,
+and the next 16 KiB system tree block (`allocation failed flags 18`) fails.
+The balance stops with ENOSPC. In the VM repro it failed this way in 15 of 16
+trials. A soft convert skips the RAID1 chunks and converts the rest, and a
+hard convert run after it succeeds.
+
+So `Grow` probes the chunk profiles (`btrfs filesystem df`) before it runs.
+If any chunk type holds more than one profile, it runs the soft convert first
+and then the hard one (`cli/src/pool.rs#pool_balance_raid1`). If the probe
+fails, the balance fails closed. A pool with one profile per type, the usual
+live add, runs the hard convert alone, so its data is rewritten once. The
+check is in the one owner, so live add and recover's replay both get it.
+`tests/repro/btrfs-convert-replay-enospc.py` locks the btrfs behavior it
+rests on.
+
+Rejected: always running soft then hard, because on every 1->2 add both
+passes rewrite all the data. Also rejected: retrying the hard convert on
+ENOSPC. A retry passed 3 of 3 times, but it relies on kernel behavior braid
+does not explain, and it hides the error instead of avoiding the state that
+causes it.
+
 ### Soft convert -- converting leftover `single` chunks
 
 btrfs allocates a `single` chunk (one copy) only when it cannot place two copies
@@ -170,7 +197,9 @@ The journaled operation decides which balance is owed:
 - **Live add**, in either phase, owes the hard convert above, the one live add
   runs after `btrfs device add`. An interrupted 1->2 add leaves `single` chunks
   behind, and an interrupted 3rd+ add leaves the new disk partly or wholly
-  empty; the hard convert finishes both. The new disk is already in the pool, so
+  empty; the hard convert finishes both, after the soft pass in
+  [Soft pass before the hard convert](#soft-pass-before-the-hard-convert----mixed-profiles)
+  when the cut-off convert left mixed profiles. The new disk is already in the pool, so
   re-running `braid add` would refuse, and recover finishes the job. If the
   original balance had already finished before the crash, the replay rewrites
   every chunk again: hours of disk I/O, with no data at risk.

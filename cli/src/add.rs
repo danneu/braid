@@ -1119,12 +1119,17 @@ impl AddWorkPlan {
                     }
                 }
                 if balance == PreviewedBalance::Run {
+                    // OwedRaid1Balance::Grow, the hard convert: its doc says
+                    // why a soft one would leave a 3rd+ disk empty.
+                    let balance = OwedRaid1Balance::Grow;
+                    let description = match balance.soft_first_note() {
+                        Some(note) => format!("btrfs balance to RAID1 ({note})"),
+                        None => "btrfs balance to RAID1".into(),
+                    };
                     steps.push(Step {
                         risk: "long",
-                        description: "btrfs balance to RAID1".into(),
-                        // OwedRaid1Balance::Grow, the hard convert: its doc says
-                        // why a soft one would leave a 3rd+ disk empty.
-                        commands: vec![OwedRaid1Balance::Grow.command(&self.mount_point)],
+                        description,
+                        commands: vec![balance.command(&self.mount_point)],
                     });
                 }
             }
@@ -5094,6 +5099,9 @@ mod tests {
                         .store(true, std::sync::atomic::Ordering::SeqCst);
                     Ok(mock_ok("btrfs device add", ""))
                 }
+                CmdRequest::BtrfsFilesystemDfJson { .. } => {
+                    Ok(crate::test_fixtures::uniform_profiles_df_ok())
+                }
                 CmdRequest::BtrfsBalanceRaid1 { .. } => Ok(mock_ok("btrfs balance", "")),
                 CmdRequest::BtrfsBalanceStatus { .. } => Ok(mock_ok(
                     "btrfs balance status",
@@ -6732,6 +6740,9 @@ mod tests {
                     }
                     added.push(mapper);
                     Ok(mock_ok(&format!("btrfs device add {device}"), ""))
+                }
+                CmdRequest::BtrfsFilesystemDfJson { .. } => {
+                    Ok(crate::test_fixtures::uniform_profiles_df_ok())
                 }
                 CmdRequest::BtrfsBalanceRaid1 { .. } => Ok(mock_ok("btrfs balance start", "")),
                 CmdRequest::BtrfsBalanceStatus { .. } => Ok(mock_ok(

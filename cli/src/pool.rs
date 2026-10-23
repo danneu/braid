@@ -1,5 +1,6 @@
 use crate::cmd::{CmdError, CmdRequest, CommandRunner, ONE_DISK_PROFILES, RawCommandOutput, Step};
 use crate::filesystem::Filesystem;
+use crate::parse::parse_btrfs_df_json;
 use crate::probe::probe_pool;
 use crate::progress::{
     self, ProgressOutput, run_device_remove_with_progress, run_replace_with_progress,
@@ -444,13 +445,29 @@ impl OwedRaid1Balance {
         let extra = extra_condition
             .map(|condition| format!("{condition}, or "))
             .unwrap_or_default();
+        let soft_first = self
+            .soft_first_note()
+            .map(|note| format!("{note}; "))
+            .unwrap_or_default();
         Step {
             risk: "long",
             description: format!(
                 "btrfs balance {filters} {mount_point} \
-                 (skipped {extra}if the pool is degraded or has <2 devices)"
+                 ({soft_first}skipped {extra}if the pool is degraded or has <2 devices)"
             ),
             commands: vec![],
+        }
+    }
+
+    /// The preview clause for a step `run` adds on its own when the live pool
+    /// calls for it, shared by every preview of this balance. Its command is
+    /// not listed, since the probe decides at run time.
+    pub(crate) fn soft_first_note(self) -> Option<&'static str> {
+        match self {
+            OwedRaid1Balance::Grow => {
+                Some("a soft pass runs first if an interrupted convert left mixed profiles")
+            }
+            OwedRaid1Balance::RestoreSingle => None,
         }
     }
 }
@@ -458,24 +475,68 @@ impl OwedRaid1Balance {
 /// Hard-convert pool to RAID1 with progress display, for
 /// `OwedRaid1Balance::Grow`. Spends a `Raid1Host`, so no hard convert runs
 /// without the RAID1 gate.
+///
+/// A pool whose chunk types hold mixed profiles -- what an interrupted
+/// convert leaves -- gets the soft convert first. A hard convert over both
+/// DUP and RAID1 system chunks fails with ENOSPC, and the soft pass leaves
+/// one profile per type. `tests/repro/btrfs-convert-replay-enospc.py` locks
+/// both halves. A uniform pool, the usual live add, runs the hard convert
+/// alone, so it rewrites its data once.
 fn pool_balance_raid1<R: CommandRunner + Sync>(
     runner: &R,
     host: Raid1Host,
     progress: ProgressOutput,
 ) -> Result<(), PoolError> {
     let mount_point = &host.mount_point;
-    let result = run_with_progress(
-        runner,
-        &OwedRaid1Balance::Grow.command(mount_point),
-        mount_point,
-        progress,
-    )?;
-    if result.exit_status != 0 {
-        return Err(balance_error(
-            "btrfs balance to RAID1",
-            mount_point,
-            &result,
+    if chunk_profiles_mixed(runner, mount_point)? {
+        emit_status(&status_line(
+            StatusTag::Wait,
+            color_enabled_for_stderr(),
+            "pool: finishing an interrupted RAID1 convert before the full rewrite...",
         ));
+        run_raid1_convert(
+            runner,
+            OwedRaid1Balance::RestoreSingle,
+            mount_point,
+            progress,
+        )?;
+    }
+    run_raid1_convert(runner, OwedRaid1Balance::Grow, mount_point, progress)
+}
+
+/// Read the pool's chunk profiles for `pool_balance_raid1`. Fails closed:
+/// without the probe a hard convert could walk into the mixed-profile
+/// ENOSPC.
+fn chunk_profiles_mixed<R: CommandRunner>(
+    runner: &R,
+    mount_point: &MountPoint,
+) -> Result<bool, PoolError> {
+    let raw = runner.run(&CmdRequest::BtrfsFilesystemDfJson {
+        mount_point: mount_point.clone(),
+    })?;
+    let df = parse_btrfs_df_json(&raw).map_err(|e| {
+        PoolError::Failed(format!(
+            "btrfs filesystem df before the RAID1 balance at {mount_point}: {e}"
+        ))
+    })?;
+    Ok(df.has_mixed_chunk_profiles())
+}
+
+/// Run one RAID1 convert with progress, mapping a nonzero exit to the
+/// balance error for its kind.
+fn run_raid1_convert<R: CommandRunner + Sync>(
+    runner: &R,
+    balance: OwedRaid1Balance,
+    mount_point: &MountPoint,
+    progress: ProgressOutput,
+) -> Result<(), PoolError> {
+    let label = match balance {
+        OwedRaid1Balance::Grow => "btrfs balance to RAID1",
+        OwedRaid1Balance::RestoreSingle => "btrfs soft balance to RAID1",
+    };
+    let result = run_with_progress(runner, &balance.command(mount_point), mount_point, progress)?;
+    if result.exit_status != 0 {
+        return Err(balance_error(label, mount_point, &result));
     }
     Ok(())
 }
@@ -551,21 +612,12 @@ fn pool_balance_raid1_soft<R: CommandRunner + Sync>(
     host: Raid1Host,
     progress: ProgressOutput,
 ) -> Result<(), PoolError> {
-    let mount_point = &host.mount_point;
-    let result = run_with_progress(
+    run_raid1_convert(
         runner,
-        &OwedRaid1Balance::RestoreSingle.command(mount_point),
-        mount_point,
+        OwedRaid1Balance::RestoreSingle,
+        &host.mount_point,
         progress,
-    )?;
-    if result.exit_status != 0 {
-        return Err(balance_error(
-            "btrfs soft balance to RAID1",
-            mount_point,
-            &result,
-        ));
-    }
-    Ok(())
+    )
 }
 
 /// Plan-time predicate for whether a pool-mutation op (remove-missing, or
@@ -1569,6 +1621,120 @@ $ btrfs balance start --enqueue '-dconvert=raid1,soft' '-mconvert=raid1,soft' /m
             err.contains("post-operation pool probe failed"),
             "error should mention probe: {err}"
         );
+    }
+
+    fn df_raw(rows: &[(&str, &str)]) -> RawCommandOutput {
+        let entries: Vec<String> = rows
+            .iter()
+            .map(|(bg_type, profile)| {
+                format!(
+                    r#"{{ "bg-type": "{bg_type}", "bg-profile": "{profile}", "total": 33554432, "used": 16384 }}"#
+                )
+            })
+            .collect();
+        RawCommandOutput {
+            cmd: "btrfs filesystem df --format json".to_owned(),
+            stdout: format!(r#"{{ "filesystem-df": [{}] }}"#, entries.join(", ")),
+            stderr: String::new(),
+            exit_status: 0,
+        }
+    }
+
+    fn grow_runner(df: RawCommandOutput) -> MockRunner {
+        MockRunner::default()
+            .with_output(
+                CmdRequest::BtrfsFilesystemDfJson { mount_point: mp() },
+                df,
+            )
+            .with_output(OwedRaid1Balance::RestoreSingle.command(&mp()), ok_raw())
+            .with_output(OwedRaid1Balance::Grow.command(&mp()), ok_raw())
+    }
+
+    fn balances(runner: &MockRunner) -> Vec<CmdRequest> {
+        runner
+            .requests()
+            .into_iter()
+            .filter(|request| {
+                matches!(
+                    request,
+                    CmdRequest::BtrfsBalanceRaid1 { .. } | CmdRequest::BtrfsBalanceRaid1Soft { .. }
+                )
+            })
+            .collect()
+    }
+
+    // Intent: Grow runs the soft convert before the hard one when a chunk
+    // type holds mixed profiles.
+    // Why it exists: a hard convert over both DUP and RAID1 system chunks
+    // fails with ENOSPC, so recover's replay of an interrupted 1->2 add
+    // failed and the operator had to run recover twice.
+    // Scenario: a UPS low-battery shutdown cancels the post-add convert of a
+    // 1->2 add; recover replays it on a pool holding System DUP and RAID1.
+    #[test]
+    fn grow_runs_soft_convert_first_on_mixed_profiles() {
+        let runner = grow_runner(df_raw(&[
+            ("Data", "single"),
+            ("Data", "RAID1"),
+            ("Metadata", "RAID1"),
+            ("System", "DUP"),
+            ("System", "RAID1"),
+        ]));
+        OwedRaid1Balance::Grow
+            .run(&runner, Raid1Host { mount_point: mp() }, ProgressOutput::Off)
+            .expect("grow should succeed");
+        assert_eq!(
+            balances(&runner),
+            vec![
+                OwedRaid1Balance::RestoreSingle.command(&mp()),
+                OwedRaid1Balance::Grow.command(&mp()),
+            ]
+        );
+    }
+
+    // Intent: Grow runs the hard convert alone on a pool with one profile per
+    // chunk type.
+    // Why it exists: the soft pass is for interrupted converts only; running
+    // it on every 1->2 add would rewrite all data twice.
+    // Scenario: a fresh 1-disk pool (single data, DUP metadata and system)
+    // gains a second disk.
+    #[test]
+    fn grow_runs_hard_convert_alone_on_uniform_profiles() {
+        let runner = grow_runner(df_raw(&[
+            ("Data", "single"),
+            ("Metadata", "DUP"),
+            ("System", "DUP"),
+            ("GlobalReserve", "single"),
+        ]));
+        OwedRaid1Balance::Grow
+            .run(&runner, Raid1Host { mount_point: mp() }, ProgressOutput::Off)
+            .expect("grow should succeed");
+        assert_eq!(
+            balances(&runner),
+            vec![OwedRaid1Balance::Grow.command(&mp())]
+        );
+    }
+
+    // Intent: Grow fails closed, with no balance, when the profile probe
+    // fails.
+    // Why it exists: without the probe a hard convert could walk into the
+    // mixed-profile ENOSPC.
+    // Scenario: `btrfs filesystem df` exits nonzero during an add.
+    #[test]
+    fn grow_fails_closed_when_profile_probe_fails() {
+        let runner = grow_runner(RawCommandOutput {
+            cmd: "btrfs filesystem df --format json".to_owned(),
+            stdout: String::new(),
+            stderr: "ERROR: mock failure".to_owned(),
+            exit_status: 1,
+        });
+        let err = OwedRaid1Balance::Grow
+            .run(&runner, Raid1Host { mount_point: mp() }, ProgressOutput::Off)
+            .expect_err("grow should fail closed");
+        assert!(
+            err.to_string().contains("btrfs filesystem df"),
+            "error should name the probe: {err}"
+        );
+        assert!(balances(&runner).is_empty(), "no balance may run");
     }
 
     // Intent: pool_can_host_raid1 reports Degraded ahead of TooFewDevices.

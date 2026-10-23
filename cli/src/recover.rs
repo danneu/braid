@@ -6742,15 +6742,26 @@ mod tests {
         )
     }
 
-    /// Idle balance plus the hard convert, for live-add replays that owe
-    /// `OwedRaid1Balance::Grow`. A replay that ran the soft convert instead
-    /// fails on the missing mock.
+    /// Idle balance, uniform chunk profiles and the hard convert, for live-add
+    /// replays that owe `OwedRaid1Balance::Grow`. A replay that ran the soft
+    /// convert instead fails on the missing mock.
     fn with_grow_balance_replay(runner: MockRunner) -> MockRunner {
-        with_idle_balance_status(runner).with_output(
+        with_uniform_profiles(with_idle_balance_status(runner)).with_output(
             CmdRequest::BtrfsBalanceRaid1 {
                 mount_point: MountPoint::new("/mnt/storage".into()),
             },
             ok_raw_empty("btrfs balance start"),
+        )
+    }
+
+    /// The profile probe `OwedRaid1Balance::Grow` runs before its convert,
+    /// answering with one profile per chunk type.
+    fn with_uniform_profiles(runner: MockRunner) -> MockRunner {
+        runner.with_output(
+            CmdRequest::BtrfsFilesystemDfJson {
+                mount_point: MountPoint::new("/mnt/storage".into()),
+            },
+            crate::test_fixtures::uniform_profiles_df_ok(),
         )
     }
 
@@ -11528,6 +11539,12 @@ mod tests {
             MockRunner::default().with_output(mp_req, mp_out),
         ))
         .with_output(
+            CmdRequest::BtrfsFilesystemDfJson {
+                mount_point: MountPoint::new("/mnt/storage".into()),
+            },
+            crate::test_fixtures::uniform_profiles_df_ok(),
+        )
+        .with_output(
             CmdRequest::BtrfsBalanceRaid1 {
                 mount_point: MountPoint::new("/mnt/storage".into()),
             },
@@ -15628,6 +15645,12 @@ mod tests {
                 ),
             )
             .with_output(
+                CmdRequest::BtrfsFilesystemDfJson {
+                    mount_point: MountPoint::new("/mnt/storage".into()),
+                },
+                crate::test_fixtures::uniform_profiles_df_ok(),
+            )
+            .with_output(
                 CmdRequest::BtrfsBalanceRaid1 {
                     mount_point: MountPoint::new("/mnt/storage".into()),
                 },
@@ -15787,6 +15810,12 @@ mod tests {
                     "btrfs balance status",
                     "No balance found on '/mnt/storage'\n",
                 ),
+            )
+            .with_output(
+                CmdRequest::BtrfsFilesystemDfJson {
+                    mount_point: MountPoint::new("/mnt/storage".into()),
+                },
+                crate::test_fixtures::uniform_profiles_df_ok(),
             )
             .with_output(
                 CmdRequest::BtrfsBalanceRaid1 {
@@ -17647,6 +17676,12 @@ mod tests {
                 ),
             )
             .with_output(
+                CmdRequest::BtrfsFilesystemDfJson {
+                    mount_point: MountPoint::new("/mnt/storage".into()),
+                },
+                crate::test_fixtures::uniform_profiles_df_ok(),
+            )
+            .with_output(
                 CmdRequest::BtrfsBalanceRaid1 {
                     mount_point: MountPoint::new("/mnt/storage".into()),
                 },
@@ -17939,6 +17974,12 @@ mod tests {
                     "btrfs balance status",
                     "No balance found on '/mnt/storage'\n",
                 ),
+            )
+            .with_output(
+                CmdRequest::BtrfsFilesystemDfJson {
+                    mount_point: MountPoint::new("/mnt/storage".into()),
+                },
+                crate::test_fixtures::uniform_profiles_df_ok(),
             )
             .with_output(
                 CmdRequest::BtrfsBalanceRaid1 {
@@ -18702,6 +18743,12 @@ mod tests {
                     "btrfs balance status",
                     "No balance found on '/mnt/storage'\n",
                 ),
+            )
+            .with_output(
+                CmdRequest::BtrfsFilesystemDfJson {
+                    mount_point: MountPoint::new("/mnt/storage".into()),
+                },
+                crate::test_fixtures::uniform_profiles_df_ok(),
             )
             .with_output(
                 CmdRequest::BtrfsBalanceRaid1 {
@@ -23352,7 +23399,7 @@ mod tests {
             .find("check btrfs balance status /mnt/storage is idle before RAID1 replay")
             .unwrap_or_else(|| panic!("missing balance status placeholder: {rendered:?}"));
         let balance_pos = rendered
-            .find("btrfs balance -dconvert=raid1 -mconvert=raid1 /mnt/storage (skipped if the pool is degraded or has <2 devices)")
+            .find("btrfs balance -dconvert=raid1 -mconvert=raid1 /mnt/storage (a soft pass runs first if an interrupted convert left mixed profiles; skipped if the pool is degraded or has <2 devices)")
             .unwrap_or_else(|| panic!("missing hard balance placeholder: {rendered:?}"));
         let clear_pos = rendered
             .find("clear pending-op.json")
@@ -23388,7 +23435,7 @@ mod tests {
         assert!(
             rendered.contains("check btrfs balance status /mnt/storage is idle before RAID1 replay")
                 && rendered.contains(
-                    "btrfs balance -dconvert=raid1 -mconvert=raid1 /mnt/storage (skipped if the pool is degraded or has <2 devices)"
+                    "btrfs balance -dconvert=raid1 -mconvert=raid1 /mnt/storage (a soft pass runs first if an interrupted convert left mixed profiles; skipped if the pool is degraded or has <2 devices)"
                 ),
             "post-add preview should include only balance completion work: {rendered:?}",
         );

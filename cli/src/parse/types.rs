@@ -98,6 +98,15 @@ impl BtrfsDfOutput {
             .collect()
     }
 
+    /// Whether any chunk type holds more than one profile, the layout an
+    /// interrupted convert balance leaves behind. GlobalReserve is not a
+    /// chunk type, so it never counts.
+    pub fn has_mixed_chunk_profiles(&self) -> bool {
+        [BtrfsBgType::Data, BtrfsBgType::Metadata, BtrfsBgType::System]
+            .into_iter()
+            .any(|bg_type| self.profiles_for(bg_type).len() > 1)
+    }
+
     /// Logical filesystem-used bytes: Data.used + Metadata.used +
     /// System.used, excluding GlobalReserve. GlobalReserve is an
     /// internal emergency reservation carved out of Metadata, not

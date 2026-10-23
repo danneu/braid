@@ -205,7 +205,7 @@ pub(crate) use shared::{
     device_usage_raw_body, disk_member, disk_member_with, format_args_accepted,
     format_test_args_ok, fresh_target_ready, line_index, lsblk_device_json_output, mock_ok,
     mock_virtio_backing_path_resolver, mock_virtio_offset_backing_path_resolver, read_fixture,
-    read_stable_fixture, test_uuid, with_lsblk_hw_info,
+    read_stable_fixture, test_uuid, uniform_profiles_df_ok, with_lsblk_hw_info,
 };
 pub(crate) use status::{
     status_btrfs_device_usage_raw_1disk, status_btrfs_df_single, status_btrfs_scrub_aborted,

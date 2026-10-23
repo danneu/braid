@@ -166,6 +166,21 @@ pub(crate) fn mock_ok(cmd: &str, stdout: &str) -> RawCommandOutput {
     }
 }
 
+/// `btrfs filesystem df --format json` for a pool with one profile per chunk
+/// type, so `OwedRaid1Balance::Grow` runs its hard convert alone.
+pub(crate) fn uniform_profiles_df_ok() -> RawCommandOutput {
+    mock_ok(
+        "btrfs filesystem df --format json",
+        r#"{
+  "filesystem-df": [
+    { "bg-type": "Data", "bg-profile": "single", "total": 52428800, "used": 52428800 },
+    { "bg-type": "Metadata", "bg-profile": "DUP", "total": 10485760, "used": 10485760 },
+    { "bg-type": "System", "bg-profile": "DUP", "total": 32768, "used": 32768 }
+  ]
+}"#,
+    )
+}
+
 /// Render a `btrfs device remove` failure stderr line in btrfs-progs' by-id
 /// shape. A bare numeric devid takes the `string_is_numerical` ->
 /// `BTRFS_DEVICE_SPEC_BY_ID` arm in `reference/btrfs-progs/cmds/device.c`,
