@@ -30,7 +30,14 @@ with subtest("Unlock pool and activate braid-online"):
 
 with subtest("Start plain braid lock and wait for coordinator"):
     lock_pid = machine.succeed("rm -f /tmp/lock.log; nohup braid lock >/tmp/lock.log 2>&1 & echo $!").strip()
-    machine.wait_until_fails("flock -n /run/braid-stop-coordinator.lock true", timeout=10)
+    # Read the kernel lock table instead of probing with `flock -n`: a probe
+    # takes the coordinator for an instant, and a plain lock that starts in
+    # that instant sees it held and exits.
+    machine.wait_until_succeeds(
+        "lslocks --raw --noheadings --output PID,PATH"
+        f" | grep -qx '{lock_pid} /run/braid-stop-coordinator.lock'",
+        timeout=10,
+    )
 
 with subtest("External systemctl stop returns without deadline hang"):
     start = time.monotonic()
