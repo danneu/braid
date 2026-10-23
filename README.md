@@ -283,13 +283,13 @@ sudo braid add toshiba1=/dev/disk/by-id/ata-TOSHIBA_MN07ACA12T_XXXX \
                toshiba2=/dev/disk/by-id/ata-TOSHIBA_MN07ACA12T_YYYY --dry-run
 
 [destructive] LUKS format /dev/disk/by-id/ata-TOSHIBA_MN07ACA12T_XXXX
-$ cryptsetup luksFormat --type luks2 --batch-mode '--key-file=-' --uuid '<generated-at-format-time>' --label braid-toshiba1 --offset 32768 /dev/disk/by-id/ata-TOSHIBA_MN07ACA12T_XXXX
+$ cryptsetup luksFormat /dev/disk/by-id/ata-TOSHIBA_MN07ACA12T_XXXX --type luks2 --batch-mode '--key-file=-' --uuid '<generated-at-format-time>' --label braid-toshiba1 --offset 32768
 [safe] LUKS header backup -> /var/lib/braid/luks-headers/braid-toshiba1.luksheader
 $ cryptsetup luksHeaderBackup --header-backup-file /var/lib/braid/luks-headers/braid-toshiba1.luksheader /dev/disk/by-id/ata-TOSHIBA_MN07ACA12T_XXXX
 [safe] LUKS open -> braid-toshiba1
 $ cryptsetup open --type luks '--key-file=-' --perf-no_read_workqueue --perf-no_write_workqueue /dev/disk/by-id/ata-TOSHIBA_MN07ACA12T_XXXX braid-toshiba1
 [destructive] LUKS format /dev/disk/by-id/ata-TOSHIBA_MN07ACA12T_YYYY
-$ cryptsetup luksFormat --type luks2 --batch-mode '--key-file=-' --uuid '<generated-at-format-time>' --label braid-toshiba2 --offset 32768 /dev/disk/by-id/ata-TOSHIBA_MN07ACA12T_YYYY
+$ cryptsetup luksFormat /dev/disk/by-id/ata-TOSHIBA_MN07ACA12T_YYYY --type luks2 --batch-mode '--key-file=-' --uuid '<generated-at-format-time>' --label braid-toshiba2 --offset 32768
 [safe] LUKS header backup -> /var/lib/braid/luks-headers/braid-toshiba2.luksheader
 $ cryptsetup luksHeaderBackup --header-backup-file /var/lib/braid/luks-headers/braid-toshiba2.luksheader /dev/disk/by-id/ata-TOSHIBA_MN07ACA12T_YYYY
 [safe] LUKS open -> braid-toshiba2

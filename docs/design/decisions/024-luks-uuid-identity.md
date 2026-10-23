@@ -42,7 +42,13 @@ probes, format and recovery checks, and the backing-path check in rule 8 below.
 Fresh `add` and `replace` operations pre-generate the UUID that cryptsetup must
 write, store that UUID in the journal before mutation, and pass it through the
 structured `CryptsetupLuksFormat` request. User-supplied `--luks-format-arg`
-values may not override `--uuid` or `--label`.
+values may not override `--uuid`, `--label`, or the target device, and may not
+end option parsing with `--`. cryptsetup formats the first word after
+`luksFormat` that is not an option, so `cli/src/cmd.rs#luks_format_argv` puts
+the by-id there and the user extras last. No extra can then become the device
+or swallow a braid token. `cli/src/luks.rs#luks_format` refuses `--` again
+before it runs, because recover replays journaled extras without
+`cli/src/types.rs#LuksFormatExtraOpts::parse`.
 
 ## Identity Boundaries
 
@@ -334,8 +340,11 @@ devices to the kernel, so this check cannot join them.
   value-side `luks_uuid`, and enforce duplicate checks across UUID, name,
   by-id, and devid axes.
 - `cli/src/types.rs` and `cli/src/cmd.rs` unit tests reject user-supplied
-  `--uuid`/`--label` extras and pin the structured
-  `cryptsetup luksFormat --uuid <uuid> --label <label>` argv order.
+  `--uuid`/`--label` and `--` extras and pin the structured
+  `cryptsetup luksFormat <by-id> ... --uuid <uuid> --label <label> ... <extras>`
+  argv order, including a stray extra that stays behind the by-id.
+  `cli/src/luks.rs` unit tests pin that `luks_format` refuses journaled
+  extras holding `--` before it runs cryptsetup.
 - `cli/src/status.rs` unit tests pin compact status names by resolving live
   pool UUIDs back to `DiskName`, including a drifted mapper case.
 - `cli/src/status.rs` and `cli/src/tui/probe.rs` unit tests pin that a present,

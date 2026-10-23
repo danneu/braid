@@ -323,28 +323,35 @@ impl<'de> Deserialize<'de> for ByIdPath {
 // ---------------------------------------------------------------------------
 
 /// Validated wrapper around user-supplied `cryptsetup luksFormat` extras.
-/// The constructor rejects tokens that target braid-managed identity
-/// or storage-model-breaking cryptsetup options.
+/// The constructor rejects tokens that target braid-managed identity or
+/// storage-model-breaking cryptsetup options, and the `--` that would end
+/// option parsing.
 #[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct LuksFormatExtraOpts(Vec<String>);
 
-/// Error returned when `LuksFormatExtraOpts::parse` rejects a token that
-/// targets a braid-managed identity or storage-model-breaking cryptsetup
-/// option.
+/// Error returned when braid refuses a luksFormat extra, at parse time or
+/// before a journaled format runs.
 #[derive(Debug, Error)]
 pub enum LuksFormatExtraOptsError {
     #[error(
         "--luks-format-arg '{token}' targets a braid-managed identity or storage-model-breaking cryptsetup option"
     )]
     ManagedFormatFlag { token: String },
+    #[error(
+        "--luks-format-arg '--' would end cryptsetup's option parsing, so cryptsetup would ignore every --luks-format-arg after it"
+    )]
+    EndOfOptions,
 }
+
+/// The popt token that makes every later word a leftover, not an option.
+const END_OF_OPTIONS: &str = "--";
 
 impl LuksFormatExtraOpts {
     /// Validate the supplied argv extras. Empty input is valid. Each token
     /// is checked against the braid-managed identity and storage-model
-    /// reject list so unsafe extras fail before any
-    /// `CryptsetupLuksFormat` request reaches the executor.
+    /// reject list, and against `check_no_end_of_options`, so unsafe extras
+    /// fail before any `CryptsetupLuksFormat` request reaches the executor.
     pub fn parse(extras: &[String]) -> Result<Self, LuksFormatExtraOptsError> {
         for token in extras {
             if is_managed_format_flag(token) {
@@ -353,7 +360,21 @@ impl LuksFormatExtraOpts {
                 });
             }
         }
-        Ok(LuksFormatExtraOpts(extras.to_vec()))
+        let opts = LuksFormatExtraOpts(extras.to_vec());
+        opts.check_no_end_of_options()?;
+        Ok(opts)
+    }
+
+    /// Refuses a `--` among the extras. `cli/src/cmd.rs#luks_format_argv`
+    /// puts the extras last, so after `--` popt would read each later extra
+    /// as a leftover word that luksFormat ignores. Public because recover
+    /// replays a journaled value that serde built without `parse`;
+    /// `cli/src/luks.rs#luks_format` runs this before every format.
+    pub fn check_no_end_of_options(&self) -> Result<(), LuksFormatExtraOptsError> {
+        if self.0.iter().any(|token| token == END_OF_OPTIONS) {
+            return Err(LuksFormatExtraOptsError::EndOfOptions);
+        }
+        Ok(())
     }
 
     /// Borrow the validated extras as a slice for argv assembly. No
@@ -1721,11 +1742,20 @@ mod tests {
 
     fn assert_luks_format_extra_rejects(token: &str) {
         let err = LuksFormatExtraOpts::parse(&[token.to_owned()]).unwrap_err();
+        let msg = err.to_string();
         match err {
             LuksFormatExtraOptsError::ManagedFormatFlag { token: offending } => {
-                assert_eq!(offending, token);
+                assert_eq!(
+                    offending, token,
+                    "error must preserve the offending token verbatim"
+                );
             }
+            other => panic!("expected ManagedFormatFlag for {token:?}, got: {other:?}"),
         }
+        assert!(
+            msg.contains(&format!("--luks-format-arg '{token}'")),
+            "error must echo {token:?}"
+        );
     }
 
     #[test]
@@ -1861,22 +1891,8 @@ mod tests {
         // Scenario: operator passes a raw luksFormat flag that would alter
         //   braid's identity, header, key material, type, or integrity model.
         for flag in MANAGED_LUKS_FORMAT_LONG_FLAGS {
-            for token in [(*flag).to_owned(), format!("{flag}=value")] {
-                let err = LuksFormatExtraOpts::parse(std::slice::from_ref(&token)).unwrap_err();
-                let msg = err.to_string();
-                match err {
-                    LuksFormatExtraOptsError::ManagedFormatFlag { token: offending } => {
-                        assert_eq!(
-                            offending, token,
-                            "error must preserve the offending token verbatim"
-                        );
-                    }
-                }
-                assert!(
-                    msg.contains(&format!("--luks-format-arg '{token}'")),
-                    "error must echo {token:?}"
-                );
-            }
+            assert_luks_format_extra_rejects(flag);
+            assert_luks_format_extra_rejects(&format!("{flag}=value"));
         }
     }
 
@@ -1894,39 +1910,35 @@ mod tests {
                 format!("-{short}value"),
                 format!("-{short}=value"),
             ] {
-                let err = LuksFormatExtraOpts::parse(std::slice::from_ref(&token)).unwrap_err();
-                let msg = err.to_string();
-                match err {
-                    LuksFormatExtraOptsError::ManagedFormatFlag { token: offending } => {
-                        assert_eq!(
-                            offending, token,
-                            "error must preserve the offending token verbatim"
-                        );
-                    }
-                }
-                assert!(
-                    msg.contains(&format!("--luks-format-arg '{token}'")),
-                    "error must echo {token:?}"
-                );
+                assert_luks_format_extra_rejects(&token);
             }
         }
 
         for token in ["-qMluks1", "-vIhmac-sha256", "-ql16"] {
-            let err = LuksFormatExtraOpts::parse(&[token.to_owned()]).unwrap_err();
-            let msg = err.to_string();
-            match err {
-                LuksFormatExtraOptsError::ManagedFormatFlag { token: offending } => {
-                    assert_eq!(
-                        offending, token,
-                        "error must preserve the offending token verbatim"
-                    );
-                }
-            }
-            assert!(
-                msg.contains(&format!("--luks-format-arg '{token}'")),
-                "error must echo {token:?}"
-            );
+            assert_luks_format_extra_rejects(token);
         }
+    }
+
+    #[test]
+    fn luks_format_extra_opts_rejects_end_of_options() {
+        // Intent: the exact token `--` is refused, wherever it sits.
+        // Why it exists: braid puts the by-id device first and the user
+        //   extras last on the luksFormat argv. popt reads every word after
+        //   `--` as a leftover, and cryptsetup ignores leftovers past the
+        //   key-file slot, so the format would succeed without the
+        //   operator's cipher or pbkdf options (finding 261022-1230-001).
+        // Scenario: an operator passes `--luks-format-arg=--` ahead of
+        //   `--luks-format-arg=--cipher=serpent-xts-plain64`.
+        let err = LuksFormatExtraOpts::parse(&[
+            "--".to_owned(),
+            "--cipher=serpent-xts-plain64".to_owned(),
+        ])
+        .expect_err("parse must refuse `--` among the extras");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("--luks-format-arg '--'"),
+            "error must name the `--` token: {msg}"
+        );
     }
 
     #[test]

@@ -78,7 +78,7 @@ sudo braid replace --old toshiba1 --new toshiba4=/dev/disk/by-id/ata-TOSHIBA_MN0
 | `--yes` | Skip interactive confirmation |
 | `--passphrase-stdin` | Read passphrase from stdin |
 | `--passphrase-file <path>` | Read passphrase from a file (conflicts with `--passphrase-stdin`) |
-| `--luks-format-arg=<ARG>` | Advanced: pass one raw argument to `cryptsetup luksFormat`, repeated once per argument; always use the equals form (e.g. `--luks-format-arg=--pbkdf`). braid refuses flags it manages itself -- identity, key-material, integrity, hardware-encryption (OPAL), and on-disk-layout options such as `--uuid`, `--label`, `--type`, `--key-file`, and offset/sizing flags. |
+| `--luks-format-arg=<ARG>` | Advanced: pass one raw argument to `cryptsetup luksFormat`, repeated once per argument; always use the equals form (e.g. `--luks-format-arg=--pbkdf`). braid refuses flags it manages itself -- identity, key-material, integrity, hardware-encryption (OPAL), and on-disk-layout options such as `--uuid`, `--label`, `--type`, `--key-file`, and offset/sizing flags. It also refuses a bare `--`, which would make cryptsetup ignore every argument after it. braid passes the disk to cryptsetup ahead of every `--luks-format-arg`, so no argument can change which disk is formatted; cryptsetup ignores a stray value that no option takes. |
 | `--progress auto\|always\|never` | Control progress display (default: auto) |
 
 ## What happens under the hood

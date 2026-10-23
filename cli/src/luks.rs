@@ -7,8 +7,8 @@ use crate::parse::{ParseError, parse_cryptsetup_luks_uuid, parse_cryptsetup_stat
 use crate::secret::Passphrase;
 use crate::state_paths::StatePaths;
 use crate::types::{
-    ByIdPath, DiskName, KeyFilePath, LuksFormatExtraOpts, LuksLabel, LuksUuid, MapperName,
-    PoolDevice,
+    ByIdPath, DiskName, KeyFilePath, LuksFormatExtraOpts, LuksFormatExtraOptsError, LuksLabel,
+    LuksUuid, MapperName, PoolDevice,
 };
 use nix::sys::termios::{LocalFlags, SetArg, Termios};
 use std::io::{Read, Write};
@@ -127,6 +127,9 @@ pub enum LuksError {
     MapperOwnership(#[from] MapperOwnershipFailure),
     #[error("{0}")]
     FreshTargetNotReady(#[from] FreshTargetNotReady),
+    /// A journaled luksFormat extra that `luks_format` refuses to run with.
+    #[error("{0}")]
+    FormatExtraOpts(#[from] LuksFormatExtraOptsError),
     #[error("parse error: {0}")]
     Parse(#[from] ParseError),
     #[error("command failed: {0}")]
@@ -599,9 +602,11 @@ pub fn check_fresh_target_ready<R: CommandRunner, F: Filesystem + ?Sized>(
 /// fresh-format paths, or the preserved journaled value on a recovery replay)
 /// so a mid-format crash and replay reformat under the same identity, and so
 /// the same UUID is recorded in `OpKind::Add`/`OpKind::Replace` from t=0.
-/// `extra_opts` carries already-validated user argv extras
-/// (`cli/src/types.rs#LuksFormatExtraOpts::parse` rejects every braid-managed
-/// flag, `--uuid` and `--label` among them).
+/// `extra_opts` carries user argv extras that
+/// `cli/src/types.rs#LuksFormatExtraOpts::parse` validated (it rejects every
+/// braid-managed flag, `--uuid` and `--label` among them, and `--`), or that
+/// recover read back from the journal without `parse`. So the `--` refusal
+/// runs again here, before cryptsetup does.
 pub fn luks_format<R: CommandRunner>(
     runner: &R,
     target: FreshTargetReady,
@@ -610,6 +615,7 @@ pub fn luks_format<R: CommandRunner>(
     label: &LuksLabel,
     extra_opts: &LuksFormatExtraOpts,
 ) -> Result<(), LuksError> {
+    extra_opts.check_no_end_of_options()?;
     let device = target.by_id.as_str();
     let result = runner.run_with_stdin(
         &CmdRequest::CryptsetupLuksFormat {
@@ -3274,6 +3280,67 @@ $ cryptsetup luksHeaderBackup --header-backup-file /var/lib/braid/luks-headers/b
         assert!(
             msg.contains("device not found"),
             "should contain hint, got: {msg}"
+        );
+    }
+
+    /*
+     * Intent: luks_format refuses extras that hold the token `--` and sends
+     *   no luksFormat request.
+     * Why it exists: `braid recover` replays the journaled extras, which serde
+     *   builds without `LuksFormatExtraOpts::parse`. The extras are the last
+     *   argv tokens, so a `--` among them would make cryptsetup ignore every
+     *   extra after it and format without the operator's options (finding
+     *   261022-1230-001).
+     * Scenario: a journal written before braid refused `--` holds
+     *   `["--", "--cipher=serpent-xts-plain64"]`, and recover replays it.
+     */
+    #[test]
+    fn luks_format_refuses_journaled_end_of_options_before_cryptsetup() {
+        let uuid = LuksUuid::parse("00000000-0000-0000-0000-000000000200").unwrap();
+        let extras: LuksFormatExtraOpts =
+            serde_json::from_str(r#"["--", "--cipher=serpent-xts-plain64"]"#)
+                .expect("journaled extras deserialize");
+        let target = crate::test_fixtures::fresh_target_ready(
+            &disk("test"),
+            &ByIdPath::parse("/dev/disk/by-id/virtio-test").unwrap(),
+        );
+        let runner = MockRunner::default().with_output_stdin(
+            CmdRequest::CryptsetupLuksFormat {
+                device: "/dev/disk/by-id/virtio-test".into(),
+                uuid: uuid.clone(),
+                label: luks_label("test"),
+                extra_opts: extras.clone(),
+            },
+            b"pass".to_vec(),
+            RawCommandOutput {
+                cmd: "cryptsetup luksFormat".into(),
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_status: 0,
+            },
+        );
+        let result = luks_format(
+            &runner,
+            target,
+            &zpass("pass"),
+            &uuid,
+            &luks_label("test"),
+            &extras,
+        );
+        assert!(
+            !runner
+                .requests()
+                .iter()
+                .any(|r| matches!(r, CmdRequest::CryptsetupLuksFormat { .. })),
+            "luks_format must not run cryptsetup with `--` in the extras: {:?}",
+            runner.requests()
+        );
+        let msg = result
+            .expect_err("luks_format must refuse `--` in the extras")
+            .to_string();
+        assert!(
+            msg.contains("'--'"),
+            "error must name the `--` token: {msg}"
         );
     }
 

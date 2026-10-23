@@ -141,7 +141,8 @@ pub enum AddError {
         observed: String,
     },
     /// Operator passed `--luks-format-arg` containing a braid-managed
-    /// cryptsetup option (see `cli/src/types.rs#LuksFormatExtraOpts::parse`).
+    /// cryptsetup option or the `--` that would end cryptsetup's option
+    /// parsing (see `cli/src/types.rs#LuksFormatExtraOpts::parse`).
     /// Surfaced through `AddError` (rather than `LuksFormatExtraOptsError`
     /// directly) so the CLI matches one error type at the boundary.
     #[error("{0}")]

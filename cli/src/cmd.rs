@@ -160,8 +160,8 @@ pub enum CmdRequest {
     /// pre-generated `LuksUuid` recorded in `OpKind::Add`/`OpKind::Replace`
     /// so a mid-format crash and replay reformat under the same identity;
     /// `label` is `braid-<DiskName>` and `extra_opts` are user-supplied
-    /// argv extras already validated by `LuksFormatExtraOpts::parse`
-    /// (which rejects managed flags like `--uuid` and `--label`).
+    /// argv extras, validated by `LuksFormatExtraOpts::parse` or read back
+    /// from the journal; `luks::luks_format` refuses a `--` in either.
     CryptsetupLuksFormat {
         device: String,
         uuid: LuksUuid,
@@ -484,6 +484,13 @@ const PREVIEW_LUKS_UUID_PLACEHOLDER: &str = "<generated-at-format-time>";
 /// both renderings at once. The sole divergence is the `--uuid` token: the real
 /// arm passes the journaled identity, the preview arm passes
 /// `PREVIEW_LUKS_UUID_PLACEHOLDER`.
+///
+/// Order rule: the device comes right after `luksFormat`, every token braid
+/// adds follows it, and the user extras are always the last tokens.
+/// cryptsetup's option parser (popt) sets options aside and keeps the other
+/// words in order, and luksFormat formats the first of them. With the device
+/// first, no extra can become the device, take a braid token as its value, or
+/// turn one into a leftover word. A new braid token goes before the extras.
 fn luks_format_argv(
     uuid_token: &str,
     label: &LuksLabel,
@@ -492,15 +499,14 @@ fn luks_format_argv(
 ) -> CmdArgs {
     let mut args: Vec<String> = vec![
         "luksFormat".into(),
+        device.to_owned(),
         // luks2 is already the default but might as well
         "--type".into(),
         "luks2".into(),
         "--batch-mode".into(),
         "--key-file=-".into(),
-        // Managed identity. The plan pins `--uuid` before
-        // `--label` before user extras before device so a
-        // regression that reorders these tokens fails the
-        // argv pin in cmd.rs::tests.
+        // Managed identity: user extras cannot override it, because
+        // `LuksFormatExtraOpts::parse` refuses `--uuid` and `--label`.
         "--uuid".into(),
         uuid_token.to_owned(),
         "--label".into(),
@@ -512,10 +518,7 @@ fn luks_format_argv(
         "--offset".into(),
         (LUKS_DATA_OFFSET_BYTES / 512).to_string(),
     ];
-    for opt in extra_opts.as_slice() {
-        args.push(opt.clone());
-    }
-    args.push(device.to_owned());
+    args.extend(extra_opts.as_slice().iter().cloned());
     CmdArgs {
         program: "cryptsetup".to_owned(),
         args,
@@ -3439,12 +3442,11 @@ mod tests {
     #[test]
     // Intent: to_shell_string produces correct output for LUKS format with the
     //   structured uuid/label/extras shape pinned by the LUKS-UUID identity
-    //   migration. The argv ordering is `--uuid <uuid> --label <label>
-    //   --offset <sectors> <extras...> <device>`.
+    //   migration. The argv ordering is `<device> ... --uuid <uuid> --label
+    //   <label> --offset <sectors> <extras...>`.
     // Why: this is the user-facing dry-run string for the most complex real
-    //   command; a reorder regression that lets user extras precede `--label`
-    //   would also let user input shadow the journaled identity at the argv
-    //   layer if the boundary validator were ever bypassed.
+    //   command, and it must show the order braid runs: the device first and
+    //   the user extras last.
     // Scenario: dry-run of braid add with a fresh disk, passing through a
     //   single non-managed extra (`--use-random`).
     fn to_shell_string_luks_format_with_label() {
@@ -3458,7 +3460,7 @@ mod tests {
         .to_argv()
         .to_shell_string();
         let expected = format!(
-            "cryptsetup luksFormat --type luks2 --batch-mode '--key-file=-' --uuid {} --label braid-aaa --offset 32768 --use-random /dev/disk/by-id/disk1",
+            "cryptsetup luksFormat /dev/disk/by-id/disk1 --type luks2 --batch-mode '--key-file=-' --uuid {} --label braid-aaa --offset 32768 --use-random",
             uuid.as_str()
         );
         assert_eq!(s, expected);
@@ -3707,6 +3709,7 @@ mod tests {
             cmd.args,
             vec![
                 "luksFormat",
+                "/dev/disk/by-id/disk1",
                 "--type",
                 "luks2",
                 "--batch-mode",
@@ -3717,7 +3720,6 @@ mod tests {
                 "braid-disk1",
                 "--offset",
                 "32768",
-                "/dev/disk/by-id/disk1",
             ]
         );
         assert!(
@@ -3825,19 +3827,20 @@ mod tests {
     }
 
     #[test]
-    // Intent: CryptsetupLuksFormat's argv emits the structured `uuid` and
-    //   `label` fields as `--uuid <uuid> --label <label>` BEFORE any user-
-    //   supplied extras, and the device is the final positional argument.
-    //   Empty `LuksFormatExtraOpts` leaves zero tokens between the managed
-    //   `--offset <sectors>` and `<device>`.
-    // Why: this is the LUKS-UUID identity boundary in argv form. A
-    //   regression that swapped order (e.g. extras before `--uuid`) would
-    //   let user input either shadow the journaled identity or break
-    //   recovery's "reformat under the same UUID" contract. The pinned
-    //   slice asserts both the structured shape and the ordering.
+    // Intent: CryptsetupLuksFormat's argv follows the `luks_format_argv`
+    //   order rule: the device comes right after `luksFormat`, every token
+    //   braid adds (including `--uuid <uuid> --label <label>`) follows it,
+    //   and user extras are always the last tokens. Empty
+    //   `LuksFormatExtraOpts` leaves zero tokens after the managed
+    //   `--offset <sectors>`.
+    // Why: this is the LUKS-UUID identity boundary in argv form. cryptsetup
+    //   formats the first word after the action, so the device must lead.
+    //   Extras must come last so none can take a braid token as its value or
+    //   turn one into a leftover word. The pinned slice asserts both the
+    //   structured shape and the ordering.
     // Scenario: a planner emits `CryptsetupLuksFormat` with the structured
     //   uuid+label and no user extras; argv is exactly the pinned slice.
-    fn cryptsetup_luks_format_renders_uuid_label_before_extras_and_device() {
+    fn cryptsetup_luks_format_renders_device_first_and_extras_last() {
         let uuid = test_uuid(305);
         let cmd = CmdRequest::CryptsetupLuksFormat {
             device: "/dev/disk/by-id/disk1".to_owned(),
@@ -3851,6 +3854,7 @@ mod tests {
             cmd.args,
             vec![
                 "luksFormat",
+                "/dev/disk/by-id/disk1",
                 "--type",
                 "luks2",
                 "--batch-mode",
@@ -3861,25 +3865,24 @@ mod tests {
                 "braid-disk1",
                 "--offset",
                 "32768",
-                "/dev/disk/by-id/disk1",
             ],
-            "managed --uuid/--label precede extras and device"
+            "the device leads, then braid's tokens; user extras come last"
         );
     }
 
     #[test]
     // Intent: a positive non-managed extra (`--use-random`) passes through
     //   the structured `LuksFormatExtraOpts` and reaches argv in the
-    //   pinned position: AFTER the managed `--offset <sectors>` and BEFORE
-    //   `<device>`.
+    //   pinned position: AFTER the managed `--offset <sectors>`, as the
+    //   last token.
     // Why: this is the positive-extras forwarding regression pinned in
     //   the plan's Test Plan > LUKS format boundary section. A regression
     //   that silently dropped accepted extras passes the rejection suite
     //   and the empty-extras suite yet fails this test.
     // Scenario: operator passes `--luks-format-arg=--use-random`; the
     //   token survives validation (it is not a managed flag), is stored
-    //   inside `LuksFormatExtraOpts`, and renders in argv between
-    //   `--offset <sectors>` and `<device>` unchanged.
+    //   inside `LuksFormatExtraOpts`, and renders unchanged at the end of
+    //   argv.
     fn cryptsetup_luks_format_forwards_non_managed_extras_in_order() {
         let uuid = test_uuid(306);
         let cmd = CmdRequest::CryptsetupLuksFormat {
@@ -3894,6 +3897,7 @@ mod tests {
             cmd.args,
             vec![
                 "luksFormat",
+                "/dev/disk/by-id/disk2",
                 "--type",
                 "luks2",
                 "--batch-mode",
@@ -3905,25 +3909,60 @@ mod tests {
                 "--offset",
                 "32768",
                 "--use-random",
-                "/dev/disk/by-id/disk2",
             ]
         );
     }
 
     #[test]
+    // Intent: the by-id device is the first token after `luksFormat`, and a
+    //   user extra that no option takes stays behind it, as the last token.
+    // Why it exists: cryptsetup's option parser (popt) sets options aside and
+    //   keeps the other words in order, and luksFormat formats the first of
+    //   them. With the device last, a stray extra came first, so cryptsetup
+    //   formatted the extra's path and `--batch-mode` skipped the prompt. The
+    //   readiness check had proved only the by-id disk, and `braid recover`
+    //   replayed the journaled extra onto the same wrong disk (finding
+    //   261022-1230-001).
+    // Scenario: an operator passes `--luks-format-arg=/dev/disk/by-id/other`,
+    //   which `LuksFormatExtraOpts::parse` accepts because it is not a flag.
+    fn cryptsetup_luks_format_reads_by_id_as_device_whatever_the_extras() {
+        let device = "/dev/disk/by-id/disk1";
+        let stray = "/dev/disk/by-id/other";
+        let cmd = CmdRequest::CryptsetupLuksFormat {
+            device: device.to_owned(),
+            uuid: test_uuid(309),
+            label: luks_label("disk1"),
+            extra_opts: extras_from(&[stray]),
+        }
+        .to_argv();
+        assert_eq!(
+            cmd.args.get(1).map(String::as_str),
+            Some(device),
+            "the by-id must be the first word after luksFormat: {:?}",
+            cmd.args
+        );
+        assert_eq!(
+            cmd.args.last().map(String::as_str),
+            Some(stray),
+            "user extras must be the last tokens: {:?}",
+            cmd.args
+        );
+    }
+
+    #[test]
     // Intent: CryptsetupLuksFormatPreview renders the same argv shape as the
-    //   real CryptsetupLuksFormat (--uuid before --label before extras before
-    //   device), but with the fixed `<generated-at-format-time>` placeholder in
-    //   the --uuid slot. Empty extras leave zero tokens between the managed
-    //   `--offset <sectors>` and `<device>`; a positive non-managed extra
-    //   lands after `--offset <sectors>` and before `<device>`.
+    //   real CryptsetupLuksFormat (device first, then --uuid, --label, and
+    //   --offset, then extras), but with the fixed
+    //   `<generated-at-format-time>` placeholder in the --uuid slot. Empty
+    //   extras leave zero tokens after the managed `--offset <sectors>`; a
+    //   positive non-managed extra lands after it, as the last token.
     // Why: the preview variant is the dry-run-only twin. This pins that its
     //   argv is reproducible and honest (placeholder, not a random UUID that the
     //   real run discards). A regression that minted a real UUID into the
     //   preview, or reordered tokens, fails here.
     // Scenario: `braid add --dry-run` against a fresh (PresentNotLuks) disk
     //   renders the format step.
-    fn cryptsetup_luks_format_preview_renders_placeholder_uuid_before_label_extras_device() {
+    fn cryptsetup_luks_format_preview_renders_placeholder_uuid() {
         let cmd = CmdRequest::CryptsetupLuksFormatPreview {
             device: "/dev/disk/by-id/disk1".to_owned(),
             label: luks_label("disk1"),
@@ -3935,6 +3974,7 @@ mod tests {
             cmd.args,
             vec![
                 "luksFormat",
+                "/dev/disk/by-id/disk1",
                 "--type",
                 "luks2",
                 "--batch-mode",
@@ -3945,9 +3985,8 @@ mod tests {
                 "braid-disk1",
                 "--offset",
                 "32768",
-                "/dev/disk/by-id/disk1",
             ],
-            "preview placeholder --uuid/--label precede extras and device"
+            "preview: the device leads, then braid's tokens; user extras come last"
         );
 
         let with_extra = CmdRequest::CryptsetupLuksFormatPreview {
@@ -3960,6 +3999,7 @@ mod tests {
             with_extra.args,
             vec![
                 "luksFormat",
+                "/dev/disk/by-id/disk2",
                 "--type",
                 "luks2",
                 "--batch-mode",
@@ -3971,7 +4011,6 @@ mod tests {
                 "--offset",
                 "32768",
                 "--use-random",
-                "/dev/disk/by-id/disk2",
             ]
         );
     }
@@ -4089,7 +4128,7 @@ mod tests {
         .to_shell_string();
         assert_eq!(
             s,
-            "cryptsetup luksFormat --type luks2 --batch-mode '--key-file=-' --uuid '<generated-at-format-time>' --label braid-aaa --offset 32768 --use-random /dev/disk/by-id/disk1"
+            "cryptsetup luksFormat /dev/disk/by-id/disk1 --type luks2 --batch-mode '--key-file=-' --uuid '<generated-at-format-time>' --label braid-aaa --offset 32768 --use-random"
         );
     }
 
