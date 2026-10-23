@@ -174,7 +174,7 @@ impl RemoveMissingWorkPlan {
 /// variant for a state the planner refuses. Whether to restore RAID1 is an
 /// advisory plan-time gate; see `crate::pool::should_restore_raid1`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RemovalOutcome {
+pub(crate) enum RemovalOutcome {
     /// Clears the last missing entry and leaves `present` survivors, enough to
     /// re-mirror, so the soft RAID1 balance is queued.
     RestoresRedundancy { present: usize },
@@ -462,19 +462,19 @@ fn validate_missing_id_target(pool: &PoolState, missing_id: Devid) -> Result<(),
 
 /// Sole production constructor of `RemovalOutcome`, so the plan decides the
 /// post-state once and no consumer can meet a state the planner refuses. Its
-/// only refusal is the 2-disk RAID1 floor: the last missing entry with fewer
-/// than two survivors.
-fn classify_removal_outcome(
-    missing_id: Devid,
+/// only refusal, `None`, is the 2-disk RAID1 floor: the last missing entry
+/// with fewer than two survivors. It reads only the pool's shape, so
+/// `braid remove` asks it too before naming `braid remove-missing`.
+pub(crate) fn classify_removal_outcome(
     present: usize,
     missing_count: NonZeroU64,
-) -> Result<RemovalOutcome, String> {
+) -> Option<RemovalOutcome> {
     let remaining_missing = missing_count.get() - 1;
     if crate::pool::should_restore_raid1(remaining_missing == 0, present) {
-        return Ok(RemovalOutcome::RestoresRedundancy { present });
+        return Some(RemovalOutcome::RestoresRedundancy { present });
     }
     if remaining_missing > 0 {
-        return Ok(RemovalOutcome::StaysDegraded {
+        return Some(RemovalOutcome::StaysDegraded {
             present,
             remaining_missing,
         });
@@ -504,16 +504,23 @@ fn classify_removal_outcome(
     // device_remove_error (pool.rs), which decodes the kernel's real
     // min-devices rejection regardless of profile, so correctness never
     // rests on this label.
+    None
+}
+
+/// remove-missing's refusal at the 2-disk RAID1 floor that
+/// `classify_removal_outcome` detects, naming the devid the operator asked
+/// to remove.
+fn raid1_floor_refusal(missing_id: Devid, missing_count: NonZeroU64) -> String {
     let repair_command = repair_hint::missing_replace_command(None);
     let status_hint = repair_hint::see_missing_names_and_devids_in_status(missing_count.get());
-    Err(format!(
+    format!(
         "cannot remove missing devid {missing_id} -- this is a 2-disk \
          RAID1 pool with one disk missing, and the kernel refuses \
          to drop a RAID1 pool below two devices. Repair the dead \
          disk with `{repair_command}`, or run \
          `braid add <new-name>=/dev/disk/by-id/<...>` \
          first and then re-run `braid remove-missing`. {status_hint}",
-    ))
+    )
 }
 
 /// Plan a `braid remove-missing` run after dispatch has already checked for
@@ -611,16 +618,12 @@ pub fn plan_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
 
     // Before the membership load and the relocation-space check, so the
     // 2-disk refusal keeps its place in the refusal order.
-    let outcome =
-        match classify_removal_outcome(params.missing_id, pool.devices.len(), missing_count) {
-            Ok(outcome) => outcome,
-            Err(msg) => {
-                return Err(PlanFailure::with_notes(
-                    notes,
-                    RemoveMissingError::Validation(msg),
-                ));
-            }
-        };
+    let Some(outcome) = classify_removal_outcome(pool.devices.len(), missing_count) else {
+        return Err(PlanFailure::with_notes(
+            notes,
+            RemoveMissingError::Validation(raid1_floor_refusal(params.missing_id, missing_count)),
+        ));
+    };
 
     // Resolve pool.json membership while planning so dry-run refuses the
     // same missing-devid identity failures as real execution.
@@ -3594,11 +3597,15 @@ mod tests {
     //   each planned with `braid remove-missing`.
     #[test]
     fn classify_removal_outcome_sweeps_present_missing_pairs() {
-        let classify = |present, missing| {
-            classify_removal_outcome(Devid::new(2), present, NonZeroU64::new(missing).unwrap())
-        };
+        let classify =
+            |present, missing| classify_removal_outcome(present, NonZeroU64::new(missing).unwrap());
 
-        let msg = classify(1, 1).expect_err("1 present + 1 missing is the 2-disk RAID1 floor");
+        assert_eq!(
+            classify(1, 1),
+            None,
+            "1 present + 1 missing is the 2-disk RAID1 floor"
+        );
+        let msg = raid1_floor_refusal(Devid::new(2), NonZeroU64::new(1).unwrap());
         assert!(
             msg.contains("2-disk RAID1 pool with one disk missing"),
             "refusal must name the rejected topology; got: {msg}"
@@ -3626,7 +3633,7 @@ mod tests {
         ] {
             assert_eq!(
                 classify(present, missing),
-                Ok(expected),
+                Some(expected),
                 "({present} present, {missing} missing)"
             );
         }

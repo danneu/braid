@@ -68,14 +68,85 @@ pub(crate) fn see_devids_in_status() -> String {
 /// `actor` names the command that only acts on btrfs-authoritative MISSING
 /// devids so the promote-then-retry guidance points back at the right command.
 pub(crate) fn hot_unplug_not_yet_missing(devid: Devid, actor: &str) -> String {
+    let promote = lock_and_reopen(ReopenWith::Unlock, true);
     format!(
         "devid {devid} is hot-unplugged but btrfs has not yet promoted it to \
          MISSING (LUKS mapper open, backing device gone). `{actor}` only \
          operates on btrfs-authoritative MISSING devids. Confirm the disk is \
-         truly gone, then relock and re-unlock the pool degraded (`braid lock` \
-         then `braid unlock --allow-degraded`) so btrfs promotes devid {devid}, \
-         and retry."
+         truly gone, then relock and re-unlock the pool degraded ({promote}) \
+         so btrfs promotes devid {devid}, and retry."
     )
+}
+
+/// Operator remediation for members whose LUKS mapper is open while the
+/// disk under it is gone. It owns the whole reopen route, so remove and
+/// doctor cannot drift from
+/// `docs/internals/real-world/sata-hot-unplug.md#recovery-path`.
+///
+/// `hot_unplugged` lists the devids the hint speaks about. `missing` is the
+/// pool's btrfs-MISSING set. The disk-is-back command adds
+/// `--allow-degraded` only when some MISSING devid is not listed, because
+/// the gone branch already covers a listed one. `next_step` is the
+/// caller's closing sentence.
+pub(crate) fn hot_unplug_reopen(
+    hot_unplugged: &[Devid],
+    missing: &[Devid],
+    reopen: ReopenWith,
+    next_step: &str,
+) -> String {
+    let other_missing = missing.iter().any(|devid| !hot_unplugged.contains(devid));
+    let back = lock_and_reopen(reopen, other_missing);
+    let gone = lock_and_reopen(reopen, true);
+    let devids = devid_list(hot_unplugged);
+    let (lead, disk_back, gone_promotes) = if hot_unplugged.len() == 1 {
+        (
+            format!(
+                "{devids} is hot-unplugged (LUKS mapper open, backing device gone). \
+                 Re-plugging the disk alone never reopens its mapper."
+            ),
+            format!("If the disk is back, run {back} to close and reopen its mapper."),
+            format!("If it is truly gone, run {gone} so btrfs promotes {devids} to MISSING."),
+        )
+    } else {
+        (
+            format!(
+                "{devids} are hot-unplugged (LUKS mappers open, backing devices gone). \
+                 Re-plugging the disks alone never reopens their mappers."
+            ),
+            format!("If the disks are back, run {back} to close and reopen their mappers."),
+            format!(
+                "If any is truly gone, run {gone} so btrfs promotes each gone devid to MISSING."
+            ),
+        )
+    };
+    format!(
+        "{lead} {disk_back} {gone_promotes} A reboot can stand in for `braid lock`. {next_step}"
+    )
+}
+
+/// The one rendering of the close-and-reopen command pair, so every
+/// hot-unplug hint names the same commands in the same order.
+fn lock_and_reopen(reopen: ReopenWith, allow_degraded: bool) -> String {
+    let reopen = match reopen {
+        ReopenWith::Unlock => "braid unlock",
+        ReopenWith::Recover => "braid recover",
+    };
+    let flag = if allow_degraded {
+        " --allow-degraded"
+    } else {
+        ""
+    };
+    format!("`braid lock` then `{reopen}{flag}`")
+}
+
+/// `devid 3`, `devids 2 and 3`, or `devids 2, 3 and 5`, so a hint that
+/// lists hot-unplugged members reads the same everywhere.
+fn devid_list(devids: &[Devid]) -> String {
+    let names: Vec<String> = devids.iter().map(Devid::to_string).collect();
+    match names.split_last() {
+        Some((last, rest)) if !rest.is_empty() => format!("devids {} and {last}", rest.join(", ")),
+        _ => format!("devid {}", names.concat()),
+    }
 }
 
 /// Operator remediation when members other than the command's target are
@@ -84,36 +155,34 @@ pub(crate) fn hot_unplug_not_yet_missing(devid: Devid, actor: &str) -> String {
 /// would write, not about the target, while the promote-then-retry route
 /// is the same.
 pub(crate) fn hot_unplugged_bystander_not_yet_missing(devids: &[Devid], actor: &str) -> String {
-    let names: Vec<String> = devids.iter().map(Devid::to_string).collect();
-    let devids = match names.split_last() {
-        Some((last, rest)) if !rest.is_empty() => format!("devids {} and {last}", rest.join(", ")),
-        _ => format!("devid {}", names.concat()),
-    };
+    let devids = devid_list(devids);
+    let promote = lock_and_reopen(ReopenWith::Unlock, true);
     format!(
         "`{actor}` cannot run while btrfs still treats a hot-unplugged member as \
          present. Hot-unplugged but not yet promoted to MISSING: {devids} (LUKS \
          mapper open, backing device gone). btrfs places new chunk copies on such a \
          member, so they could land on a disk that is gone. Confirm each \
          hot-unplugged disk is truly gone, then relock and re-unlock the pool \
-         degraded (`braid lock` then `braid unlock --allow-degraded`) so btrfs \
-         promotes {devids}, and retry."
+         degraded ({promote}) so btrfs promotes {devids}, and retry."
     )
 }
 
-/// The braid command that opens the fresh mount in `read_only_pool`'s
-/// error branch. Each caller knows whether a pending-op journal can exist
-/// when it refuses, so the hint never names a command that would refuse.
+/// The braid command that reopens the pool in a hint's fresh-mount or
+/// reopen step. A command caller passes the one it knows can run: it knows
+/// whether a pending-op journal can exist when it refuses. doctor, which
+/// does not read the journal, passes `Unlock`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ReopenWith {
-    /// The pool mutators that run
-    /// `cli/src/preflight.rs#require_mutation_preflight`.
+    /// The pool mutators, refusing before they write a journal.
     /// `cli/src/main.rs#dispatch_policy` marks them `Gated`, so the recovery
     /// gate refuses them while a journal exists. None exists here, and
     /// `braid unlock` can run. The operator then retries the refused command.
     Unlock,
-    /// recover, which runs only while a journal exists. `braid unlock`
-    /// refuses then, and `braid recover` opens its own fresh mount, so it is
-    /// both the reopen and the retry.
+    /// A caller refusing while a pending-op journal exists: recover itself,
+    /// or a mutator after it wrote its journal. `braid unlock` refuses then,
+    /// and `braid recover` opens its own fresh mount. When recover refused,
+    /// that is also the retry. When a mutator refused, recover resolves the
+    /// journal, and the operator then re-runs the refused command.
     Recover,
 }
 
@@ -330,6 +399,94 @@ mod tests {
             three.contains("MISSING: devids 2, 3 and 5 (")
                 && three.contains("promotes devids 2, 3 and 5,"),
             "{three}"
+        );
+    }
+
+    // Intent: the hot-unplug reopen hint renders the full route for one
+    // hot-unplugged devid with nothing else missing.
+    // Why it exists: finding 261022-1230-017. remove offered re-plugging
+    // alone as a fix, and re-plugging never rebinds a dm-crypt mapper
+    // (docs/internals/real-world/sata-hot-unplug.md#recovery-path).
+    // Scenario: disk2's cable came loose before `braid remove disk2`.
+    #[test]
+    fn hot_unplug_reopen_renders_one_devid_route() {
+        assert_eq!(
+            hot_unplug_reopen(
+                &[Devid::new(2)],
+                &[],
+                ReopenWith::Unlock,
+                "Then re-run `braid remove`."
+            ),
+            "devid 2 is hot-unplugged (LUKS mapper open, backing device gone). \
+             Re-plugging the disk alone never reopens its mapper. If the disk is back, \
+             run `braid lock` then `braid unlock` to close and reopen its mapper. If it \
+             is truly gone, run `braid lock` then `braid unlock --allow-degraded` so \
+             btrfs promotes devid 2 to MISSING. A reboot can stand in for `braid lock`. \
+             Then re-run `braid remove`."
+        );
+    }
+
+    // Intent: the reopen hint names only the reopen command the caller can
+    // run, adds `--allow-degraded` to the disk-back step only while another
+    // member is btrfs-MISSING, and always ends with the caller's next step.
+    // Why it exists: one helper owns this route for remove's plan-time,
+    // pre-journal and post-journal refusals and for doctor. A wrong switch
+    // sends the operator to `braid unlock` with a journal (it refuses), or to
+    // a plain unlock that refuses a degraded pool.
+    // Scenario: one or two hot-unplugged members, with or without a dead
+    // disk elsewhere, before and after remove writes its journal.
+    #[test]
+    fn hot_unplug_reopen_matrix() {
+        for (reopen, command, wrong_command) in [
+            (ReopenWith::Unlock, "braid unlock", "braid recover"),
+            (ReopenWith::Recover, "braid recover", "braid unlock"),
+        ] {
+            for other_missing in [false, true] {
+                for (listed, lead) in [
+                    (&[2][..], "devid 2 is hot-unplugged"),
+                    (&[2, 3][..], "devids 2 and 3 are hot-unplugged"),
+                ] {
+                    let listed: Vec<Devid> = listed.iter().copied().map(Devid::new).collect();
+                    let missing = if other_missing {
+                        vec![Devid::new(5)]
+                    } else {
+                        vec![]
+                    };
+                    let hint = hot_unplug_reopen(&listed, &missing, reopen, "NEXT.");
+                    let back_flag = if other_missing {
+                        " --allow-degraded"
+                    } else {
+                        ""
+                    };
+                    let case = format!("{reopen:?} other_missing={other_missing} {listed:?}");
+                    assert!(hint.starts_with(lead), "{case}: {hint}");
+                    assert!(hint.contains("alone never reopens"), "{case}: {hint}");
+                    assert!(
+                        hint.contains(&format!(
+                            "back, run `braid lock` then `{command}{back_flag}` to close"
+                        )),
+                        "{case}: {hint}"
+                    );
+                    assert!(
+                        hint.contains(&format!(
+                            "gone, run `braid lock` then `{command} --allow-degraded` so btrfs \
+                             promotes"
+                        )),
+                        "{case}: {hint}"
+                    );
+                    assert!(!hint.contains(wrong_command), "{case}: {hint}");
+                    assert!(hint.contains("reboot"), "{case}: {hint}");
+                    assert!(hint.ends_with(" NEXT."), "{case}: {hint}");
+                }
+            }
+        }
+
+        // A listed devid that btrfs has already promoted is covered by the
+        // gone step, so it does not make the disk-back step degraded.
+        let hint = hot_unplug_reopen(&[Devid::new(2)], &[Devid::new(2)], ReopenWith::Unlock, "");
+        assert!(
+            hint.contains("back, run `braid lock` then `braid unlock` to close"),
+            "{hint}"
         );
     }
 

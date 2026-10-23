@@ -817,16 +817,7 @@ fn check_pool_missing_devices<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) 
             let lead =
                 format!("pool has {n} missing device{suffix} (devid{suffix}: {lead_devids})");
 
-            let missing_devid_set = pool.missing_devids.iter().copied().collect::<HashSet<_>>();
-            let mut null_underlying_devids = pool
-                .null_underlying
-                .iter()
-                .filter_map(|device| {
-                    (!missing_devid_set.contains(&device.devid)).then_some(device.devid)
-                })
-                .collect::<Vec<_>>();
-            null_underlying_devids.sort();
-            null_underlying_devids.dedup();
+            let null_underlying_devids = pool.hot_unplugged_not_missing();
 
             let mut parts = Vec::new();
             if !pool.missing_devids.is_empty() {
@@ -865,26 +856,14 @@ fn check_pool_missing_devices<R: CommandRunner>(ctx: &mut DoctorContext<'_, R>) 
             }
 
             if !null_underlying_devids.is_empty() {
-                let unlock_command = if pool.missing_devids.is_empty() {
-                    "braid unlock"
-                } else {
-                    "braid unlock --allow-degraded"
-                };
-                let recover_target = if null_underlying_devids.len() == 1 {
-                    "the hot-unplugged disk is healthy, re-plug it"
-                } else {
-                    "the hot-unplugged disks are healthy, re-plug them"
-                };
-                let mut hot_unplug_parts = vec![format!(
-                    "If {recover_target} then run `braid lock` and `{unlock_command}` \
-                     to close and reopen the mapper (it does not self-heal on re-plug alone)."
-                )];
-                hot_unplug_parts.extend(
-                    null_underlying_devids.iter().map(|devid| {
-                        repair_hint::hot_unplug_not_yet_missing(*devid, "braid replace")
-                    }),
-                );
-                parts.push(hot_unplug_parts.join(" "));
+                // doctor does not read the journal, so it names the
+                // no-journal reopen, `braid unlock`.
+                parts.push(repair_hint::hot_unplug_reopen(
+                    &null_underlying_devids,
+                    &pool.missing_devids,
+                    repair_hint::ReopenWith::Unlock,
+                    "Then replace a gone disk with `braid replace`.",
+                ));
             }
 
             CheckResult::warn(
@@ -6024,17 +6003,16 @@ mod tests {
             check.message
         );
         assert!(
-            check.message.contains(
-                "If the hot-unplugged disk is healthy, re-plug it then run `braid lock` and \
-                 `braid unlock` to close"
-            ),
+            check
+                .message
+                .contains("If the disk is back, run `braid lock` then `braid unlock` to close"),
             "expected plain unlock recover step: {}",
             check.message
         );
         assert!(
             !check.message.contains(
-                "If the hot-unplugged disk is healthy, re-plug it then run `braid lock` and \
-                 `braid unlock --allow-degraded` to close"
+                "If the disk is back, run `braid lock` then `braid unlock --allow-degraded` \
+                 to close"
             ),
             "pure hot-unplug recover step must not use degraded unlock: {}",
             check.message
@@ -6089,8 +6067,8 @@ mod tests {
         );
         assert!(
             check.message.contains(
-                "If the hot-unplugged disk is healthy, re-plug it then run `braid lock` and \
-                 `braid unlock --allow-degraded` to close"
+                "If the disk is back, run `braid lock` then `braid unlock --allow-degraded` \
+                 to close"
             ),
             "mixed recover step must use degraded unlock: {}",
             check.message
@@ -6140,8 +6118,8 @@ mod tests {
         );
         assert!(
             check.message.contains(
-                "If the hot-unplugged disk is healthy, re-plug it then run `braid lock` and \
-                 `braid unlock --allow-degraded` to close"
+                "If the disk is back, run `braid lock` then `braid unlock --allow-degraded` \
+                 to close"
             ),
             "mixed recover step must use degraded unlock: {}",
             check.message

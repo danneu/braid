@@ -2883,7 +2883,7 @@ fn execute_add_pool_mutation_recovery<R: CommandRunner + Sync, F: Filesystem + ?
             // requires btrfs to list the target as present. A miss is a btrfs
             // anomaly, so fail closed with the journal kept and let a rerun
             // probe again. Alert state is untouched at this point.
-            let dev = pool.device_by_uuid(target_uuid).ok_or_else(|| {
+            let dev = pool.member_by_uuid(target_uuid).live().ok_or_else(|| {
                 RecoverError::Failed(format!(
                     "recover add replay: target '{}' is not in the live pool after btrfs device add",
                     target.name
@@ -3513,7 +3513,7 @@ where
         );
     }
 
-    let Some(dev) = pool.device_by_uuid(new_uuid) else {
+    let Some(dev) = pool.member_by_uuid(new_uuid).live() else {
         return Err(RecoverError::Failed(format!(
             "post-replace recovery could not find new disk '{}' in the live pool",
             new_name

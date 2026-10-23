@@ -287,7 +287,9 @@ with subtest("Simulate disk3 death and mount degraded"):
 with subtest("braid remove disk3 fails for dead disk"):
     (status, output) = machine.execute(remove_cmd("disk3") + " 2>&1")
     assert status != 0, f"Expected failure, got exit 0: {output}"
-    assert "not found in pool" in output, f"Expected 'not found in pool' in error:\n{output}"
+    assert "is not a live member of the pool" in output, (
+        f"Expected 'is not a live member of the pool' in error:\n{output}"
+    )
     assert "missing" in output.lower(), f"Expected mention of missing devices:\n{output}"
     assert "braid replace" in output, f"Expected suggestion to use braid replace:\n{output}"
     assert (

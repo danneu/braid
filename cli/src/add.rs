@@ -1729,11 +1729,12 @@ impl AddPlan {
                             detail: format!("{}: {e}", target.name),
                         }
                     })?;
-                    let dev = probe.device_by_uuid(&target.luks_uuid).ok_or_else(|| {
-                        AddError::PostAddProbeFailed {
+                    let dev = probe
+                        .member_by_uuid(&target.luks_uuid)
+                        .live()
+                        .ok_or_else(|| AddError::PostAddProbeFailed {
                             detail: format!("{}: not found in pool after add", target.name),
-                        }
-                    })?;
+                        })?;
                     alert::drop_ghost_alert_state_for_devids(params.paths, &[dev.devid]).map_err(
                         |source| AddError::AckCleanupFailed {
                             stage: "live-pool add",
@@ -1763,7 +1764,7 @@ impl AddPlan {
                 // post-commit lifecycle point and same braid recover remediation,
                 // regardless of detection site.
                 for (uuid, target) in journal_targets.iter() {
-                    if pool_after.device_by_uuid(uuid).is_none() {
+                    if pool_after.member_by_uuid(uuid).live().is_none() {
                         return Err(AddError::PostAddProbeFailed {
                             detail: format!(
                                 "{}: no longer present in the live pool after all disks were added",
@@ -2256,7 +2257,7 @@ fn build_add_credential_prelude(
         let PresentConfigDiskState::PresentLuks { uuid, .. } = &probed.state else {
             return None;
         };
-        if input.pool.device_by_uuid(uuid).is_some() {
+        if input.pool.member_by_uuid(uuid).live().is_some() {
             return None;
         }
         Some(CredentialVerifyTarget::named_candidate(
@@ -2592,7 +2593,7 @@ fn assert_fresh_uuid_absent_from_live_pool(
     name: &DiskName,
     by_id: &ByIdPath,
 ) -> Result<(), AddError> {
-    if live_pool.device_by_uuid(uuid).is_some() {
+    if live_pool.member_by_uuid(uuid).live().is_some() {
         return Err(duplicate_live_pool_uuid_error(uuid, name, by_id));
     }
     Ok(())

@@ -295,19 +295,33 @@ appears in `missing_devids` -- but `braid remove-missing --missing-id N` and
 only act on btrfs-authoritative MISSING entries.
 `braid remove-missing` also refuses every other devid while this disk stays
 unpromoted, because btrfs still writes to it and could put relocated data on a
-disk that is gone.
+disk that is gone. `braid remove` refuses the disk too and prints the steps
+below; `braid doctor` prints them as well.
 
-To make progress:
+Re-plugging the disk alone never reopens its mapper: it stays at
+`device: (null)` until it is closed and reopened. To make progress:
 
-1. Confirm the disk is truly gone (not just a loose cable).
-2. Relock and re-unlock the pool degraded so btrfs re-evaluates membership and
-   promotes the devid:
+1. Check whether the disk is truly gone or only came loose.
+2. If the disk is back (re-seated or re-plugged), close and reopen the mapper.
+   `braid unlock` reopens it through the stable `/dev/disk/by-id/` path,
+   wherever the kernel re-attached the disk:
+   ```sh
+   sudo braid lock
+   sudo braid unlock
+   ```
+   Add `--allow-degraded` to `braid unlock` if another member is MISSING.
+3. If the disk is truly gone, relock and re-unlock the pool degraded so btrfs
+   re-evaluates membership and promotes the devid:
    ```sh
    sudo braid lock
    sudo braid unlock --allow-degraded
    ```
-3. Re-run `braid status` -- the devid should now appear as authoritatively
+   Re-run `braid status` -- the devid should now appear as authoritatively
    MISSING -- then retry `braid remove-missing` or `braid replace`.
+
+A reboot in place of `braid lock` also closes the mapper. If an interrupted
+operation left `pending-op.json`, `braid unlock` refuses: use `braid recover`
+in its place (with `--allow-degraded` if a disk is gone).
 
 ### Option A: Replace the disk
 

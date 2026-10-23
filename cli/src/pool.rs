@@ -34,8 +34,8 @@ pub struct DeviceIdentity {
 /// validation (pre-journal clean-failure vs. post-journal recovery
 /// handoff) and wraps the returned drift with the appropriate
 /// remediation. The struct exposes the derived `target_present` and
-/// `target_null_underlying` flags so callers can route the hot-unplug
-/// case without re-probing.
+/// `target_null_underlying` flags, and the devid sets a reopen hint needs,
+/// so callers can route the hot-unplug case without re-probing.
 #[derive(Debug)]
 pub struct TopologyDrift {
     /// `None` when the probe succeeded; `Some(message)` when probing
@@ -46,6 +46,13 @@ pub struct TopologyDrift {
     pub expected_present_identities: BTreeMap<MapperName, DeviceIdentity>,
     pub observed_present_identities: BTreeMap<MapperName, DeviceIdentity>,
     pub observed_missing_count: u64,
+    /// Devids whose open mapper reads `device: (null)`, promoted or not,
+    /// sorted. With `observed_missing_devids` they feed
+    /// `repair_hint::hot_unplug_reopen`, which covers every listed devid in
+    /// both its disk-back and disk-gone steps.
+    pub observed_null_underlying_devids: Vec<Devid>,
+    /// btrfs-MISSING devids from the same probe.
+    pub observed_missing_devids: Vec<Devid>,
 }
 
 impl TopologyDrift {
@@ -164,6 +171,8 @@ pub fn validate_pool_topology<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
                 expected_present_identities: expected_present_identities.clone(),
                 observed_present_identities: BTreeMap::new(),
                 observed_missing_count: 0,
+                observed_null_underlying_devids: Vec::new(),
+                observed_missing_devids: Vec::new(),
             });
         }
     };
@@ -200,6 +209,14 @@ pub fn validate_pool_topology<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         expected_present_identities: expected_present_identities.clone(),
         observed_present_identities,
         observed_missing_count: pool.missing_count,
+        observed_null_underlying_devids: pool
+            .null_underlying
+            .iter()
+            .map(|n| n.devid)
+            .collect::<std::collections::BTreeSet<Devid>>()
+            .into_iter()
+            .collect(),
+        observed_missing_devids: pool.missing_devids,
     })
 }
 
@@ -2226,6 +2243,8 @@ $ btrfs balance start --enqueue '-dconvert=raid1,soft' '-mconvert=raid1,soft' /m
         let drift = validate_pool_topology(&runner, &runner.fs(), &mp(), "braid-disk2", &expected)
             .expect_err("null-underlying must surface drift");
         assert!(drift.is_target_hot_unplug(), "must classify as hot-unplug");
+        assert_eq!(drift.observed_null_underlying_devids, vec![Devid::new(2)]);
+        assert!(drift.observed_missing_devids.is_empty());
         let detail = drift.detail();
         assert!(
             detail.contains("null-underlying") || detail.contains("device: (null)"),

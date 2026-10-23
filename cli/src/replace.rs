@@ -1029,7 +1029,7 @@ fn verify_replace_execute_live_pool_uuid<R: CommandRunner, F: Filesystem + ?Size
         )));
     }
 
-    if fresh_pool.device_by_uuid(new_uuid).is_some() {
+    if fresh_pool.member_by_uuid(new_uuid).live().is_some() {
         return Err(ReplaceError::DuplicateUuid {
             uuid: new_uuid.clone(),
             scope: DuplicateUuidScope::LivePool,
@@ -1739,7 +1739,7 @@ fn assert_new_uuid_unique(
             scope: DuplicateUuidScope::Membership,
         });
     }
-    if pool.device_by_uuid(new_uuid).is_some() {
+    if pool.member_by_uuid(new_uuid).live().is_some() {
         return Err(ReplaceError::DuplicateUuid {
             uuid: new_uuid.clone(),
             scope: DuplicateUuidScope::LivePool,
@@ -1982,65 +1982,92 @@ fn resolve_replace_source(
     pool: &PoolState,
 ) -> Result<ReplaceSource, ReplaceError> {
     // Pattern 4: find by UUID, not by reconstructed mapper.
-    if let Some(matched) = pool.device_by_uuid(old_uuid) {
-        // Live old disk in pool.
-        if missing_id.is_some() {
-            return Err(ReplaceError::Validation(
-                "--missing-id cannot be used when the old disk is still alive in the pool".into(),
-            ));
+    match pool.member_by_uuid(old_uuid) {
+        MemberPresence::Live(matched) => resolve_live_replace_source(matched, missing_id, pool),
+        // A hot-unplugged old disk whose mapper is still open keeps its LUKS
+        // UUID in that mapper's dm UUID, so the UUID binds it to the devid
+        // btrfs holds the mapper at; pool.json's devid plays no part
+        // (principles 2 and 5). It resolves only once btrfs promotes it.
+        MemberPresence::HotUnplugged(null_backed) => {
+            check_missing_id_matches_mapper(old_name, null_backed, missing_id)?;
+            Err(ReplaceError::Validation(
+                repair_hint::hot_unplug_not_yet_missing(null_backed.devid, "braid replace"),
+            ))
         }
-        if pool.missing_count > 0 {
-            let repair_command = repair_hint::missing_replace_command(None);
-            let status_hint = repair_hint::see_missing_names_in_status(pool.missing_count);
-            return Err(ReplaceError::Validation(format!(
-                "pool has {} missing device{}. \
-                 Repair the missing device{} first with `{repair_command}`, \
-                 then retry this live replace. {status_hint}",
-                pool.missing_count,
-                if pool.missing_count == 1 { "" } else { "s" },
-                if pool.missing_count == 1 { "" } else { "s" },
-            )));
+        MemberPresence::HotUnpluggedMissing(null_backed) => {
+            check_missing_id_matches_mapper(old_name, null_backed, missing_id)?;
+            Ok(ReplaceSource::Missing {
+                devid: null_backed.devid,
+            })
         }
-        // Observed mapper, NOT mapper_name(&old_name). Journaling the
-        // reconstructed name would leak the post-commit close past
-        // operator-applied mapper drift.
-        return Ok(ReplaceSource::Live {
-            mapper: matched.mapper.clone(),
-            devid: matched.devid,
-        });
+        MemberPresence::NotOpen => {
+            resolve_unopened_replace_source(old_name, old_member, missing_id, pool)
+        }
     }
+}
 
-    // Old disk not in pool -- dead/missing path.
-    //
-    // A hot-unplugged old disk whose mapper is still open keeps its LUKS UUID
-    // in that mapper's dm UUID, so the UUID binds it to the devid btrfs holds
-    // the mapper at; pool.json's devid plays no part (principles 2 and 5).
-    if let Some(null_backed) = pool
-        .null_underlying
-        .iter()
-        .find(|d| d.luks_uuid == *old_uuid)
-    {
-        let devid = null_backed.devid;
-        if let Some(supplied) = missing_id
-            && supplied != devid
-        {
-            return Err(ReplaceError::OldMapperDevidMismatch {
+/// Live arm of `resolve_replace_source`: a live replace needs no
+/// `--missing-id` and refuses while any member is missing.
+fn resolve_live_replace_source(
+    matched: &PoolDevice,
+    missing_id: Option<Devid>,
+    pool: &PoolState,
+) -> Result<ReplaceSource, ReplaceError> {
+    if missing_id.is_some() {
+        return Err(ReplaceError::Validation(
+            "--missing-id cannot be used when the old disk is still alive in the pool".into(),
+        ));
+    }
+    if pool.missing_count > 0 {
+        let repair_command = repair_hint::missing_replace_command(None);
+        let status_hint = repair_hint::see_missing_names_in_status(pool.missing_count);
+        return Err(ReplaceError::Validation(format!(
+            "pool has {} missing device{}. \
+             Repair the missing device{} first with `{repair_command}`, \
+             then retry this live replace. {status_hint}",
+            pool.missing_count,
+            if pool.missing_count == 1 { "" } else { "s" },
+            if pool.missing_count == 1 { "" } else { "s" },
+        )));
+    }
+    // Observed mapper, NOT mapper_name(&old_name). Journaling the
+    // reconstructed name would leak the post-commit close past
+    // operator-applied mapper drift.
+    Ok(ReplaceSource::Live {
+        mapper: matched.mapper.clone(),
+        devid: matched.devid,
+    })
+}
+
+/// `--missing-id` typo guard for a hot-unplugged `--old`, checked before
+/// promotion so a wrong devid names the mapper's real one either way.
+fn check_missing_id_matches_mapper(
+    old_name: &DiskName,
+    null_backed: &NullUnderlyingDevice,
+    missing_id: Option<Devid>,
+) -> Result<(), ReplaceError> {
+    match missing_id {
+        Some(supplied) if supplied != null_backed.devid => {
+            Err(ReplaceError::OldMapperDevidMismatch {
                 old_name: old_name.as_str().to_owned(),
                 mapper: null_backed.mapper.clone(),
-                mapper_devid: devid,
+                mapper_devid: null_backed.devid,
                 supplied_devid: supplied,
-            });
+            })
         }
-        if !pool.missing_devids.contains(&devid) {
-            return Err(ReplaceError::Validation(
-                repair_hint::hot_unplug_not_yet_missing(devid, "braid replace"),
-            ));
-        }
-        return Ok(ReplaceSource::Missing { devid });
+        _ => Ok(()),
     }
+}
 
-    // No open mapper: --old binds only through its persisted devid, and only
-    // to a btrfs-MISSING devid that no open mapper accounts for.
+/// No-open-mapper arm of `resolve_replace_source`: `--old` binds only
+/// through its persisted devid, and only to a btrfs-MISSING devid that no
+/// open mapper accounts for.
+fn resolve_unopened_replace_source(
+    old_name: &DiskName,
+    old_member: &membership::DiskMember,
+    missing_id: Option<Devid>,
+    pool: &PoolState,
+) -> Result<ReplaceSource, ReplaceError> {
     let persisted_devid = match old_member.devid {
         Some(d) => d,
         None => {

@@ -61,7 +61,8 @@ If a btrfs exclusive operation (a running balance, device add/remove/replace, re
 ## Safety checks / refusal cases
 
 - Refuses if the pool is not mounted
-- Refuses if the named disk is not a live member of the pool (suggests `braid replace --old <missing-name> --new <new-name>=/dev/disk/by-id/<...>` or `braid remove-missing` if missing devices are detected)
+- Refuses if the named disk is hot-unplugged: its LUKS mapper is open but `cryptsetup status` reports `device: (null)`, and btrfs has not promoted it to MISSING. Re-plugging alone never reopens the mapper, so braid gives the reopen route: `braid lock` then `braid unlock` if the disk is back, or `braid lock` then `braid unlock --allow-degraded` if it is gone, then re-run `braid remove`. If the disk is hot-unplugged after the journal is written, the route reopens with `braid recover` instead. See [Hot-unplug while pool is mounted](../guides/recovery-scenarios.md#hot-unplug-while-pool-is-mounted).
+- Refuses if the named disk is otherwise not a live member of the pool. If missing devices are detected, it suggests `braid replace --old <missing-name> --new <new-name>=/dev/disk/by-id/<...>`, and also `braid remove-missing` unless that command would refuse the pool's shape (the last missing disk of a 2-disk RAID1 pool)
 - Refuses to remove the last disk from the pool
 - Refuses if there are missing devices in the pool (resolve those first)
 - Refuses if remaining disks lack space to absorb the removed disk's data (ENOSPC pre-flight)

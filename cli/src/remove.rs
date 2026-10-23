@@ -9,7 +9,7 @@ use crate::mapper_close::{CloseContext, close_mapper_best_effort};
 use crate::membership;
 use crate::parse::{ParseError, parse_btrfs_device_usage, parse_btrfs_df_json};
 use crate::pool::{
-    DeviceIdentity, pool_balance_single, pool_remove_device, validate_pool_topology,
+    DeviceIdentity, TopologyDrift, pool_balance_single, pool_remove_device, validate_pool_topology,
 };
 use crate::preflight;
 use crate::preview::{self, PerDiskStyle, PlanFailure, Preview, PreviewNote};
@@ -70,6 +70,48 @@ fn absent_from_membership_error(name: &str) -> RemoveError {
         "'{name}' not found in pool.json membership -- \
          no disk entry has this name. Pool membership may need manual repair."
     ))
+}
+
+/// Refusal for a pool.json member with no live mapper: closed, or open on a
+/// devid btrfs has promoted to MISSING. It names `braid remove-missing` only
+/// when remove-missing would accept the pool's shape
+/// (`cli/src/remove_missing.rs#classify_removal_outcome`), since it refuses
+/// at the 2-disk RAID1 floor.
+fn not_live_member_error(name: &str, pool: &PoolState) -> String {
+    let mut msg = format!("disk '{name}' is not a live member of the pool.");
+    let Some(missing_count) = std::num::NonZeroU64::new(pool.missing_count) else {
+        return msg;
+    };
+    let repair_command = repair_hint::missing_replace_command(None);
+    let forget =
+        if crate::remove_missing::classify_removal_outcome(pool.devices.len(), missing_count)
+            .is_some()
+        {
+            " To forget the entry, use `braid remove-missing`."
+        } else {
+            ""
+        };
+    let status_hint = repair_hint::see_missing_names_and_devids_in_status(pool.missing_count);
+    msg.push_str(&format!(
+        " ({} missing device{} detected. \
+         To repair onto a new disk, use `{repair_command}`.{forget} \
+         {status_hint})",
+        pool.missing_count,
+        if pool.missing_count == 1 { "" } else { "s" }
+    ));
+    msg
+}
+
+/// Reopen route for a target whose mapper reads `device: (null)` at an
+/// execute-time topology check. The caller picks `reopen` by whether the
+/// journal exists yet.
+fn target_hot_unplug_route(drift: &TopologyDrift, reopen: repair_hint::ReopenWith) -> String {
+    repair_hint::hot_unplug_reopen(
+        &drift.observed_null_underlying_devids,
+        &drift.observed_missing_devids,
+        reopen,
+        "Then re-run `braid remove`.",
+    )
 }
 
 /// Resolve a user-typed `--name` argument to its `(LuksUuid, DiskName)`
@@ -337,10 +379,9 @@ impl RemovePlan {
         // (Pre-journal) topology drift validation -- clean failure if the
         // world changed between plan_remove and here. Above journal::write_journal
         // so failure does NOT strand pending-op.json (principle 3,
-        // docs/design/principles.md#3-safe-by-construction-operations). Hot-unplug variant surfaces a journal-free
-        // recovery sequence (re-plug, OR close + reopen the stale mapper via
-        // lock/unlock or reboot, then re-run); `braid recover` is intentionally
-        // NOT mentioned here because it would fail with no pending journal.
+        // docs/design/principles.md#3-safe-by-construction-operations). The
+        // hot-unplug variant reopens with `braid unlock`, because no journal
+        // exists yet and `braid recover` would refuse.
         validate_pool_topology(
             runner,
             fs,
@@ -351,13 +392,12 @@ impl RemovePlan {
         .map_err(|drift| {
             let detail = drift.detail();
             let suffix = if drift.is_target_hot_unplug() {
-                "cryptsetup reports `device: (null)` (hot-unplug). \
-                 The remove did not start. Resolve the hot-unplug by re-plugging \
-                 the disk, OR by closing + reopening the stale mapper \
-                 (`braid lock` then `braid unlock`, or reboot then `braid unlock`), \
-                 then re-run `braid remove`."
+                format!(
+                    "The remove did not start. {}",
+                    target_hot_unplug_route(&drift, repair_hint::ReopenWith::Unlock)
+                )
             } else {
-                "Resolve the drift and re-run `braid remove`."
+                "Resolve the drift and re-run `braid remove`.".to_owned()
             };
             RemoveError::Validation(format!("{detail}. {suffix}"))
         })?;
@@ -427,15 +467,12 @@ impl RemovePlan {
         )
         .map_err(|drift| {
             let detail = drift.detail();
+            // The journal exists now, so `braid unlock` would refuse; `braid
+            // recover` is both the reopen and the journal's resolution.
             let suffix = if drift.is_target_hot_unplug() {
-                "cryptsetup reports `device: (null)` (hot-unplug). \
-                 The broken mapper does not self-heal on replug; if \
-                 `cryptsetup status` still reports `device: (null)` after \
-                 recovery, close + reopen the mappers (`braid lock` then \
-                 `braid unlock`, or reboot then `braid unlock`) before \
-                 retrying the remove."
+                target_hot_unplug_route(&drift, repair_hint::ReopenWith::Recover)
             } else {
-                "Pool topology changed after the operation entered recovery mode."
+                "Pool topology changed after the operation entered recovery mode.".to_owned()
             };
             RemoveError::Validation(format!("{detail}. {suffix}"))
         })?;
@@ -584,25 +621,32 @@ pub fn plan_remove<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             Err(e) => return Err(PlanFailure::with_notes(notes, e)),
         };
 
-    // Is the disk present in the live pool under that UUID?
-    let target = match pool.device_by_uuid(&target_uuid) {
-        Some(d) => d,
-        None => {
-            let mut msg = format!("disk '{}' not found in pool.", params.name);
-            if pool.missing_count > 0 {
-                let repair_command = repair_hint::missing_replace_command(None);
-                let status_hint =
-                    repair_hint::see_missing_names_and_devids_in_status(pool.missing_count);
-                msg.push_str(&format!(
-                    " ({} missing device{} detected. \
-                     To repair onto a new disk, use `{repair_command}`. \
-                     To forget the entry, use `braid remove-missing`. \
-                     {status_hint})",
-                    pool.missing_count,
-                    if pool.missing_count == 1 { "" } else { "s" }
-                ));
-            }
+    // Is the disk live in the pool under that UUID?
+    let target = match pool.member_by_uuid(&target_uuid) {
+        MemberPresence::Live(d) => d,
+        // btrfs still counts the devid as writable, so replace and
+        // remove-missing refuse it too. Reopening the mapper is the only way
+        // forward, whether the disk is back or gone.
+        MemberPresence::HotUnplugged(null_backed) => {
+            let msg = format!(
+                "disk '{}' cannot be removed: cryptsetup reports `device: (null)` for its \
+                 mapper {}. {}",
+                params.name,
+                null_backed.mapper,
+                repair_hint::hot_unplug_reopen(
+                    &pool.hot_unplugged_not_missing(),
+                    &pool.missing_devids,
+                    repair_hint::ReopenWith::Unlock,
+                    "Then re-run `braid remove`.",
+                ),
+            );
             return Err(PlanFailure::with_notes(notes, RemoveError::Validation(msg)));
+        }
+        MemberPresence::HotUnpluggedMissing(_) | MemberPresence::NotOpen => {
+            return Err(PlanFailure::with_notes(
+                notes,
+                RemoveError::Validation(not_live_member_error(params.name, &pool)),
+            ));
         }
     };
 
@@ -2635,6 +2679,112 @@ mod tests {
         );
     }
 
+    /* Intent: plan_remove refuses a hot-unplugged target (mapper open,
+     * `device: (null)`, btrfs still lists its devid) with the reopen route,
+     * not the missing-disk advice.
+     * Why it exists: finding 261022-1230-017. The UUID lookup searched only
+     * live rows, so the refusal said "not found in pool" and pointed at
+     * `braid replace` and `braid remove-missing`, which both refuse a devid
+     * btrfs has not promoted to MISSING.
+     * Scenario: disk2's cable came loose. Its mapper still reads
+     * `device: (null)` when the operator runs `braid remove disk2` to shrink
+     * the pool.
+     */
+    #[test]
+    fn plan_remove_hot_unplugged_target_gives_reopen_route() {
+        let f = PoolFixture::three_disk_healthy();
+        let runner = RemovalPool::three_disk()
+            .install(MockRunner::default())
+            .with_handler(|req| match req {
+                CmdRequest::CryptsetupStatus { mapper } if mapper.as_str() == "braid-disk2" => {
+                    Some(Ok(mock_ok(
+                        "cryptsetup status braid-disk2",
+                        "braid-disk2 is active and is in use.\n  type:    LUKS2\n  device:  (null)\n  mode:    read/write\n",
+                    )))
+                }
+                _ => None,
+            });
+        let fs = MockFs::storage(vec![]).with_dm(canonical_dm_table());
+
+        let failure = match plan_remove(&runner, &fs, &f.remove_params().build()) {
+            Ok(_) => panic!("a hot-unplugged target must refuse"),
+            Err(failure) => failure,
+        };
+        let msg = failure.error.to_string();
+
+        assert!(msg.contains("hot-unplugged"), "expected hot-unplug: {msg}");
+        assert!(
+            msg.contains("`braid lock` then `braid unlock`"),
+            "expected the lock/unlock reopen route: {msg}"
+        );
+        assert!(
+            !msg.contains("not found in pool"),
+            "btrfs still lists the target, so it is not 'not found': {msg}"
+        );
+        assert!(
+            !msg.contains("braid remove-missing"),
+            "remove-missing refuses an unpromoted devid: {msg}"
+        );
+    }
+
+    /* Intent: plan_remove's refusal for a target with no live mapper names
+     * `braid remove-missing` only when remove-missing would accept the
+     * pool's shape.
+     * Why it exists: remove-missing refuses the last missing entry of a
+     * 2-disk RAID1 pool, so naming it there sent the operator to a refusal.
+     * Scenario: disk2 died and btrfs lists it MISSING with no mapper, once
+     * in a 2-disk pool and once in a 3-disk pool.
+     */
+    #[test]
+    fn plan_remove_not_live_target_names_remove_missing_above_raid1_floor() {
+        const TWO_DISK_DISK2_MISSING: &str = "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\
+             \tTotal devices 2 FS bytes used 16.17MiB\n\
+             \tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\
+             \tdevid    2 size 0 used 0 path MISSING\n";
+        const THREE_DISK_DISK2_MISSING: &str = "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\
+             \tTotal devices 3 FS bytes used 16.17MiB\n\
+             \tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\
+             \tdevid    2 size 0 used 0 path MISSING\n\
+             \tdevid    3 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk3\n";
+        let cases = [
+            (
+                PoolFixture::two_disk_healthy(),
+                RemovalPool::two_disk(),
+                TWO_DISK_DISK2_MISSING,
+                false,
+            ),
+            (
+                PoolFixture::three_disk_healthy(),
+                RemovalPool::three_disk(),
+                THREE_DISK_DISK2_MISSING,
+                true,
+            ),
+        ];
+        for (f, pool, show, names_remove_missing) in cases {
+            let runner = pool
+                .install(MockRunner::default())
+                .with_handler(show_sequence_handler(vec![show]));
+            let fs = MockFs::storage(vec![]).with_dm(canonical_dm_table());
+
+            let failure = match plan_remove(&runner, &fs, &f.remove_params().build()) {
+                Ok(_) => panic!("a target with no live mapper must refuse"),
+                Err(failure) => failure,
+            };
+            let msg = failure.error.to_string();
+
+            assert!(
+                msg.contains("disk 'disk2' is not a live member of the pool."),
+                "{msg}"
+            );
+            assert!(msg.contains("braid replace --old <missing-name>"), "{msg}");
+            assert_eq!(
+                msg.contains("braid remove-missing"),
+                names_remove_missing,
+                "{msg}"
+            );
+        }
+    }
+
     // ---------------------------------------------------------------------
     // Drift-detection regression tests for validate_pool_topology, wired
     // pre-journal and post-journal in RemovePlan::execute.
@@ -2930,7 +3080,10 @@ mod tests {
      * would fail with "no pending operation journal found".
      *
      * Why: this is the pre-journal clean-failure path, so it must not
-     * preserve or reference recovery state.
+     * preserve or reference recovery state. It also must not offer
+     * re-plugging alone as a fix (finding 261022-1230-017): re-plugging
+     * never rebinds the mapper, so a re-run would only hit plan_remove's
+     * hot-unplug refusal.
      *
      * Scenario: between plan_remove and the pre-journal probe, the target
      * disk was hot-unplugged -- cryptsetup reports `device: (null)`.
@@ -2980,6 +3133,21 @@ mod tests {
         assert!(msg.contains("braid lock"), "expected braid lock: {msg}");
         assert!(msg.contains("braid unlock"), "expected braid unlock: {msg}");
         assert!(msg.contains("reboot"), "expected reboot alt: {msg}");
+        // Re-plugging never rebinds a dm-crypt mapper, so the message may
+        // name re-plugging only to say it is not enough.
+        for sentence in msg
+            .split(". ")
+            .filter(|s| s.to_lowercase().contains("re-plug"))
+        {
+            assert!(
+                sentence.contains("never"),
+                "re-plugging alone must not be offered as a fix: {sentence:?} in {msg}"
+            );
+        }
+        assert!(
+            msg.contains("alone never reopens"),
+            "expected the re-plug-alone warning: {msg}"
+        );
         assert!(
             msg.contains("re-run `braid remove`"),
             "pre-journal hot-unplug must point at re-run remove: {msg}"
@@ -2995,12 +3163,13 @@ mod tests {
     }
 
     /* Intent: post-journal target hot-unplug surfaces the journal-bearing
-     * remediation -- mentions `braid recover` and preserves the journal
-     * for it. Mirrors the legacy in-helper wording in `device_remove_error`,
-     * which is what the existing operator muscle-memory expects.
+     * remediation -- `braid lock` then `braid recover`, then the re-run --
+     * and preserves the journal for recover.
      *
      * Why: complements the pre-journal hot-unplug regression so callers
-     * see the same rich UX but routed by call position.
+     * see the same reopen route, with the reopen command picked by call
+     * position. The old text sent the operator through recover, lock, and
+     * unlock before the re-run.
      *
      * Scenario: pre-journal validation passed; between then and the
      * post-journal validation, the target's underlying was hot-unplugged.
@@ -3051,15 +3220,23 @@ mod tests {
         );
         assert!(msg.contains("hot-unplug"), "expected hot-unplug: {msg}");
         assert!(
-            msg.contains("braid recover"),
-            "expected braid recover: {msg}"
+            msg.contains("`braid lock` then `braid recover`"),
+            "expected the lock/recover reopen route: {msg}"
         );
-        assert!(msg.contains("braid lock"), "expected braid lock: {msg}");
-        assert!(msg.contains("braid unlock"), "expected braid unlock: {msg}");
         assert!(msg.contains("reboot"), "expected reboot alt: {msg}");
+        // The journal blocks a re-run until recover resolves it, and
+        // `braid unlock` refuses while the journal exists.
+        let recover_at = msg.find("braid recover").expect("names braid recover");
+        let rerun_at = msg
+            .find("re-run `braid remove`")
+            .expect("names the re-run after recover");
         assert!(
-            !msg.contains("re-run `braid remove`"),
-            "post-journal hot-unplug must NOT direct at re-run remove (blocked by pending-op): {msg}",
+            recover_at < rerun_at,
+            "post-journal hot-unplug must put recover before the re-run: {msg}",
+        );
+        assert!(
+            !msg.contains("braid unlock"),
+            "post-journal hot-unplug must NOT name braid unlock (refuses with a journal): {msg}",
         );
         assert!(
             journal::load_journal(&f.paths).unwrap().is_some(),

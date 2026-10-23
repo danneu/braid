@@ -939,21 +939,41 @@ pub struct PoolState {
 }
 
 impl PoolState {
-    /// Shared first-match lookup for a live pool member by LUKS UUID so
-    /// plan-time, execute-time, and recovery surfaces cannot drift on the
-    /// same predicate. `probe_pool` records one row per live btrfs member
-    /// without UUID dedupe, so cloned disks can produce duplicate rows; this
-    /// returns only the first and duplicate-sensitive code like add clone
-    /// detection must scan all rows itself.
-    pub fn device_by_uuid(&self, uuid: &LuksUuid) -> Option<&PoolDevice> {
-        self.devices.iter().find(|d| d.luks_uuid == *uuid)
+    /// Shared lookup of a pool member by LUKS UUID, so plan-time,
+    /// execute-time, and recovery surfaces cannot drift on the same
+    /// predicate. A hot-unplugged member and its promotion each get their own
+    /// arm, so no caller can mistake one for an absent disk. Live rows win.
+    /// `probe_pool` records one row per live btrfs member without UUID
+    /// dedupe, so cloned disks can produce duplicate rows; this returns only
+    /// the first and duplicate-sensitive code like add clone detection must
+    /// scan all rows itself.
+    pub fn member_by_uuid(&self, uuid: &LuksUuid) -> MemberPresence<'_> {
+        if let Some(device) = self.devices.iter().find(|d| d.luks_uuid == *uuid) {
+            return MemberPresence::Live(device);
+        }
+        match self.null_underlying.iter().find(|n| n.luks_uuid == *uuid) {
+            Some(null_backed) if self.is_promoted(null_backed) => {
+                MemberPresence::HotUnpluggedMissing(null_backed)
+            }
+            Some(null_backed) => MemberPresence::HotUnplugged(null_backed),
+            None => MemberPresence::NotOpen,
+        }
     }
 
     /// Live backing path for a present pool device identified by LUKS UUID.
     /// Hardware queries must prefer this over persisted by-id paths because
     /// those setup/repair handles can drift while the member is still present.
     pub fn underlying_for_uuid(&self, uuid: &LuksUuid) -> Option<&str> {
-        self.device_by_uuid(uuid).map(|d| d.underlying.as_str())
+        self.member_by_uuid(uuid)
+            .live()
+            .map(|d| d.underlying.as_str())
+    }
+
+    /// The one promotion test for a null-backed member, shared by
+    /// `member_by_uuid` and `hot_unplugged_not_missing` so they cannot
+    /// disagree on a devid btrfs promoted while its mapper reads `(null)`.
+    fn is_promoted(&self, null_backed: &NullUnderlyingDevice) -> bool {
+        self.missing_devids.contains(&null_backed.devid)
     }
 
     /// Devids that must fire `MissingDevice` alert causes: the btrfs-
@@ -992,8 +1012,8 @@ impl PoolState {
     pub fn hot_unplugged_not_missing(&self) -> Vec<Devid> {
         self.null_underlying
             .iter()
+            .filter(|n| !self.is_promoted(n))
             .map(|n| n.devid)
-            .filter(|devid| !self.missing_devids.contains(devid))
             .collect::<BTreeSet<Devid>>()
             .into_iter()
             .collect()
@@ -1027,6 +1047,35 @@ pub struct NullUnderlyingDevice {
     pub luks_uuid: LuksUuid,
     /// Btrfs devid still associated with the open mapper.
     pub devid: Devid,
+}
+
+/// Where `PoolState::member_by_uuid` found a LUKS UUID in the live pool.
+/// Promotion is its own arm, not a flag, so every match must choose how to
+/// treat a devid btrfs has promoted to MISSING while its mapper still reads
+/// `(null)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemberPresence<'a> {
+    /// An open mapper with a live backing device.
+    Live(&'a PoolDevice),
+    /// The mapper is open but reads `device: (null)`, and btrfs still counts
+    /// the devid as writable.
+    HotUnplugged(&'a NullUnderlyingDevice),
+    /// The mapper is open but reads `device: (null)`, and btrfs has promoted
+    /// the devid to MISSING.
+    HotUnpluggedMissing(&'a NullUnderlyingDevice),
+    /// No open mapper in the pool carries the UUID.
+    NotOpen,
+}
+
+impl<'a> MemberPresence<'a> {
+    /// The live row, for callers that act only on a live member, so each one
+    /// visibly drops the hot-unplugged arms.
+    pub fn live(self) -> Option<&'a PoolDevice> {
+        match self {
+            Self::Live(device) => Some(device),
+            Self::HotUnplugged(_) | Self::HotUnpluggedMissing(_) | Self::NotOpen => None,
+        }
+    }
 }
 
 /// Pre-probed state of each config disk (produced by probe, consumed by commands).
@@ -1521,7 +1570,7 @@ mod tests {
 
     // -- PoolState ---------------------------------------------------------
 
-    // Intent: device_by_uuid resolves a live PoolDevice by first matching
+    // Intent: member_by_uuid resolves a live PoolDevice by first matching
     // LUKS UUID, tolerating mapper drift and duplicate live rows.
     //
     // Why it exists: plan-time, execute-time, and recovery callers must key
@@ -1530,9 +1579,9 @@ mod tests {
     //
     // Scenario: a live probe reports one member under a drifted mapper and
     // two rows for a cloned UUID; the accessor ignores mapper text, returns
-    // the first cloned row, and reports a missing UUID as absent.
+    // the first cloned row, and reports a UUID no mapper carries as not open.
     #[test]
-    fn pool_state_device_by_uuid_returns_first_uuid_match() {
+    fn member_by_uuid_live_returns_first_uuid_match() {
         let target_uuid = LuksUuid::parse("22222222-2222-2222-2222-222222222222").unwrap();
         let duplicate_uuid = LuksUuid::parse("33333333-3333-3333-3333-333333333333").unwrap();
         let missing_uuid = LuksUuid::parse("99999999-9999-9999-9999-999999999999").unwrap();
@@ -1566,7 +1615,8 @@ mod tests {
         };
 
         let drifted = pool
-            .device_by_uuid(&target_uuid)
+            .member_by_uuid(&target_uuid)
+            .live()
             .expect("uuid should match despite mapper drift");
         assert_eq!(drifted.devid, Devid::new(4));
         assert_eq!(
@@ -1575,12 +1625,60 @@ mod tests {
         );
 
         let duplicate_first = pool
-            .device_by_uuid(&duplicate_uuid)
+            .member_by_uuid(&duplicate_uuid)
+            .live()
             .expect("duplicate uuid should return first row");
         assert_eq!(duplicate_first.devid, Devid::new(5));
         assert_eq!(duplicate_first.underlying, "/dev/vdd");
 
-        assert!(pool.device_by_uuid(&missing_uuid).is_none());
+        assert_eq!(pool.member_by_uuid(&missing_uuid), MemberPresence::NotOpen);
+    }
+
+    // Intent: member_by_uuid sorts a null-backed member into HotUnplugged or
+    // HotUnpluggedMissing by btrfs promotion, and a live row with the same
+    // UUID wins over a null-backed one.
+    // Why it exists: finding 261022-1230-017. The old lookup returned None
+    // for a hot-unplugged member, the same as for an absent one, so remove
+    // told the operator the disk was "not found" and sent them to commands
+    // that refuse an unpromoted devid.
+    // Scenario: devid 2's mapper reads `(null)` and btrfs still counts it;
+    // devid 3's mapper reads `(null)` and btrfs lists it MISSING; disk 4 is
+    // live, and a stale null row carries its UUID too.
+    #[test]
+    fn member_by_uuid_splits_null_backed_members_on_promotion() {
+        let uuid = |n: u64| LuksUuid::parse(&format!("00000000-0000-0000-0000-{n:012x}")).unwrap();
+        let null_backed = |n: u64| NullUnderlyingDevice {
+            mapper: MapperName::from_basename(format!("braid-disk{n}")),
+            luks_uuid: uuid(n),
+            devid: Devid::new(n),
+        };
+        let pool = PoolState {
+            mounted: true,
+            devices: vec![PoolDevice {
+                mapper: MapperName::from_basename("braid-disk4".into()),
+                luks_uuid: uuid(4),
+                devid: Devid::new(4),
+                underlying: "/dev/vde".into(),
+            }],
+            missing_count: 2,
+            total_devices: 3,
+            fsid: None,
+            missing_devids: vec![Devid::new(3)],
+            null_underlying: vec![null_backed(2), null_backed(3), null_backed(4)],
+        };
+
+        assert_eq!(
+            pool.member_by_uuid(&uuid(2)),
+            MemberPresence::HotUnplugged(&pool.null_underlying[0])
+        );
+        assert_eq!(
+            pool.member_by_uuid(&uuid(3)),
+            MemberPresence::HotUnpluggedMissing(&pool.null_underlying[1])
+        );
+        assert_eq!(
+            pool.member_by_uuid(&uuid(4)),
+            MemberPresence::Live(&pool.devices[0])
+        );
     }
 
     // Intent: MapperName::from_basename debug-asserts on option-like and
