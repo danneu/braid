@@ -134,7 +134,11 @@ braid classifies each disk before acting:
 
 Existing-pool adds recover in two phases:
 
-- **PoolMutation**: disk preparation and btrfs membership are not fully committed yet. `braid recover` may finish formatting a fresh target, re-open a verified returned target, run the narrow btrfs-signature wipe for that returned target, and run `btrfs device add`. Before it formats a fresh target it runs the same readiness check as `braid add`; a refusal keeps the journal, so free the disk and run `braid recover` again.
+- **PoolMutation**: disk preparation and btrfs membership are not fully committed yet. For each journaled target that is not a live pool member yet, `braid recover` finishes the steps `braid add` planned for that kind of disk:
+  - **Fresh disk:** if the disk is not LUKS yet, recover runs the same readiness check as `braid add`, then formats the disk from the journaled options. A readiness refusal keeps the journal, so free the disk and run `braid recover` again. If the disk already carries the `braid-<name>` label and the journaled LUKS UUID, recover skips the format. Then recover enrolls the keyfile if the journal records one, backs up the LUKS header, opens the mapper, and runs `btrfs device add`.
+  - **Returned disk:** recover opens the mapper if it is closed. If the mapper still shows a btrfs signature, recover checks that it carries this pool's FSID. If the journal records a keyfile, recover enrolls it and backs up the LUKS header. Then it runs the narrow btrfs-signature wipe and `btrfs device add -f`.
+
+  See [Pending LUKS header backups](status.md#pending-luks-header-backups) -- copy each `.luksheader` off-system and delete the local copy. The [`braid recover` safety checks](recover.md#safety-checks) say when recover refuses a target and keeps the journal.
 - **PostAddBalanceRaid1**: membership and `pool.json` are committed. `braid recover` will not format, wipe, or add disks in this phase; it only mounts/probes the committed pool, repairs `pool.json` from the committed live topology if needed, runs the owed RAID1 balance when btrfs balance state is idle and the pool can host RAID1 (no member missing or hot-unplugged, two or more present), and clears `pending-op.json` after that succeeds or skips. A paused, running, or unknown balance state fails closed with the journal preserved.
 
 ## Related commands

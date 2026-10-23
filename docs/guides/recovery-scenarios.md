@@ -140,7 +140,7 @@ Recover replays the add from the journaled returned-disk target. Do not wipe the
 
 ### Interrupted fresh-disk add
 
-For an interrupted fresh-disk add, recover replays the format, optional keyfile enrollment, LUKS header backup, mapper open, and `btrfs device add` from the journaled options when the disk is present.
+For an interrupted fresh-disk add, recover finishes the steps `braid add` planned for the disk when the disk is present. [Interrupted adds](../commands/add.md#interrupted-adds) lists them.
 
 If the disk is absent or has a different LUKS label than the journal records, recover fails and leaves `pending-op.json` in place. Reconnect the original disk or replace the target, then rerun `sudo braid recover`.
 
