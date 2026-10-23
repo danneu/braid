@@ -41,6 +41,7 @@ use crate::state_paths::StatePaths;
 use crate::status::{BalanceReport, format_bytes, get_balance_report, paused_balance_advice};
 use crate::status_tag::{StatusTag, color_enabled_for_stdout, status_line};
 use crate::types::{LuksUuid, PoolState};
+use crate::ups_guard::UPS_GUARD_UNIT;
 use crate::wol::{WolReadiness, classify_wol};
 
 // ---------------------------------------------------------------------------
@@ -1541,9 +1542,6 @@ fn check_braid_online_active_when_mounted<R: CommandRunner>(
         ),
     }
 }
-
-/// The early-shutdown guard's unit, named once for the doctor check.
-const UPS_GUARD_UNIT: &str = "braid-ups-guard.service";
 
 /// UPS doctor check: the early-shutdown guard is running whenever a
 /// shutdown trigger is configured.

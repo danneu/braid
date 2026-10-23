@@ -8,6 +8,7 @@ mod model;
 pub(crate) mod probe;
 #[cfg(test)]
 pub(crate) mod test_support;
+mod ups_shutdown;
 mod view;
 
 use std::io;

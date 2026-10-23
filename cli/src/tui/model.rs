@@ -193,6 +193,34 @@ pub struct UpsSnapshot {
     /// view without widening the parsed `braid ups status --json` model.
     pub raw_text: String,
     pub daemon: DaemonStatus,
+    /// The early-shutdown guard's state, probed only when a shutdown trigger
+    /// is configured; `None` otherwise (plan/2026-10-23-0548/D2).
+    pub guard: Option<GuardSnapshot>,
+}
+
+/// What the TUI can see of `braid-ups-guard`: whether it is running and the
+/// on-battery clock it persists. Read-only; the guard owns both
+/// (plan/2026-10-23-0548/I3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuardSnapshot {
+    /// Active or activating. Any other unit state, or a failed read, means a
+    /// trigger cannot fire (plan/2026-10-23-0548/I2).
+    pub running: bool,
+    pub clock: GuardClock,
+}
+
+/// The guard's clock file as of one probe. Only the file decides whether an
+/// outage is being timed, never the TUI's own `ups.status` reading
+/// (plan/2026-10-23-0548/D3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuardClock {
+    /// No clock file: no outage is being timed.
+    Idle,
+    /// The guard is timing an outage; the time on battery so far, measured
+    /// when the probe ran.
+    Running { on_battery: Duration },
+    /// The file, or CLOCK_BOOTTIME, could not be read.
+    Error,
 }
 
 impl UpsSnapshot {
@@ -206,6 +234,7 @@ impl UpsSnapshot {
             watts_estimated: None,
             raw_text: String::new(),
             daemon: DaemonStatus::Unknown,
+            guard: None,
         }
     }
 }
@@ -434,6 +463,7 @@ impl Model {
         if let Some(u) = ups_config.as_ref() {
             effects.push(Effect::ProbeUps {
                 name: u.name.as_str().to_owned(),
+                shutdown: u.shutdown.clone(),
             });
             ups_probe_inflight = true;
         }

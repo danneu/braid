@@ -23,6 +23,10 @@ use std::time::{Duration, Instant};
 /// preserved across restarts and cleared at boot (plan/2026-10-22-1122/D10).
 pub const CLOCK_PATH: &str = "/run/braid-ups-guard/clock";
 
+/// The guard's systemd unit, named once for every reader of its state: the
+/// doctor check and the TUI (plan/2026-10-23-0548/D1).
+pub const UPS_GUARD_UNIT: &str = "braid-ups-guard.service";
+
 /// Time between polls. Together with `QUERY_WAIT` it bounds detection lag
 /// (plan/2026-10-22-1122/I8).
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
@@ -31,6 +35,12 @@ const POLL_INTERVAL: Duration = Duration::from_secs(5);
 /// Kept under `POLL_INTERVAL` so a hung query never delays a running timer by
 /// more than one poll.
 const QUERY_WAIT: Duration = Duration::from_secs(4);
+
+/// The longest a met trigger can wait for the guard to act: one poll interval
+/// plus one query wait (plan/2026-10-22-1122/I8). A timer past its deadline by
+/// more than this, with no FSD, means the guard failed to shut down.
+pub const TRIGGER_LAG_BOUND: Duration =
+    Duration::from_secs(POLL_INTERVAL.as_secs() + QUERY_WAIT.as_secs());
 
 /// Setup failures only. Once the loop runs, every fault is logged and retried
 /// rather than returned, so systemd's restart is the last resort, not the plan.

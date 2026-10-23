@@ -1,0 +1,13 @@
+---
+source: cli/src/tui/view/mod.rs
+expression: buffer_to_string(&terminal)
+---
+ on battery 1m 48s -- braid shuts down in 3m 12s, or below 50% charge (now 78%)
+Data  Scrub  Browse
+ Scrub ─────────────────────────────────────────────────────────────────────────
+ Last run     Tue Feb 24 02:00:07 2026 (11 min ago)
+ Errors       0
+ Total        32.4 MiB
+ Rate         32.3 MiB/s
+ Duration     0s
+Quit: q │ Help: ? │ Reset temp hi/lo: R │ Reload: r

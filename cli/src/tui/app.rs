@@ -73,6 +73,7 @@ fn ups_probe_effect(model: &Model) -> Option<Effect> {
     let u = model.ups_config.as_ref()?;
     Some(Effect::ProbeUps {
         name: u.name.as_str().to_owned(),
+        shutdown: u.shutdown.clone(),
     })
 }
 
@@ -429,6 +430,7 @@ mod tests {
             watts_estimated: None,
             raw_text: String::new(),
             daemon: DaemonStatus::Active,
+            guard: None,
         }
     }
 

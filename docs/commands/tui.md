@@ -112,8 +112,11 @@ See the [fan control guide](../guides/fan-control.md#tui-fans-panel).
 
 **UPS** (when UPS support is enabled) -- Data-tab row with the same
 `daemon:` header annotation for the NUT daemon. The columns are Status
-(color-coded flags), Battery, Runtime, and Load. See the
-[UPS guide](../guides/ups.md#tui-ups-panel) for Status severity.
+(color-coded flags), Battery, Runtime, Load, and Shutdown (the early-shutdown
+policy and, on battery, its countdown). During an outage a banner above every
+tab says when braid will shut down. See the
+[UPS guide](../guides/ups.md#tui-ups-panel) for Status severity and the
+Shutdown states.
 
 **Disk detail popup** (press Enter on a disk) -- disk name, LUKS lock status, cipher, key size, keyslot count, an allocations table (type/profile/size plus unallocated), the btrfs device-error breakdown (read/write/flush/corruption/generation), and a `SMART` section with the health verdict plus its supporting evidence rows (per-protocol: SATA reallocated/pending/uncorrectable, or NVMe critical-warning/media-errors/available-spare/percentage-used). A row for an out-of-spec attribute is colored red. Temperature is not repeated here -- it has its own column in the disk table.
 

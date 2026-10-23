@@ -16,8 +16,8 @@ use crate::status::resolve_alert_state;
 use crate::status::{DiskErrors, estimate_pool_capacity, get_balance_report};
 use crate::tui::model::{
     DaemonStatus, DiskIdentity, DiskLockState, DiskLuksInfo, DiskLuksState, DiskUsage,
-    DrivingDrive, FanReading, FanSnapshot, PoolState, TemperatureReading, UnpooledDiskRender,
-    UpsSnapshot, smart_query_device,
+    DrivingDrive, FanReading, FanSnapshot, GuardClock, GuardSnapshot, PoolState,
+    TemperatureReading, UnpooledDiskRender, UpsSnapshot, smart_query_device,
 };
 use crate::types::{ByIdPath, ConfigDiskState, Devid, DiskName, LuksUuid, MountPoint};
 use std::collections::{HashMap, HashSet};
@@ -828,10 +828,23 @@ const UPS_DAEMON_UNIT: &str = "upsd.service";
 /// This is the single bridge from `UpscOutput` -> `UpsSnapshot`, per
 /// the plan's risk 3 ("TUI snapshot drifts from UpscOutput"): all
 /// conversion happens here, tests snapshot the converter output.
-pub fn probe_ups_for_tui<R: CommandRunner>(runner: &R, name: &str) -> UpsSnapshot {
+///
+/// With a shutdown trigger configured it also reads the guard's state
+/// (`probe_ups_guard`), whether or not `upsc` succeeded: the countdown comes
+/// from the guard's clock, not from this reading.
+pub fn probe_ups_for_tui<R: CommandRunner>(
+    runner: &R,
+    name: &str,
+    shutdown: &crate::config::UpsShutdownPolicy,
+    clock: &crate::ups_guard::ClockFile,
+    now: impl FnOnce() -> Result<std::time::Duration, nix::Error>,
+) -> UpsSnapshot {
+    let guard = shutdown
+        .is_enabled()
+        .then(|| probe_ups_guard(runner, clock, now));
     let queried = match crate::ups::query_ups(runner, name) {
         Ok(queried) => queried,
-        Err(_) => return ups_snapshot_query_failed(runner),
+        Err(_) => return ups_snapshot_query_failed(runner, guard),
     };
     let parsed = queried.parsed;
     UpsSnapshot {
@@ -845,10 +858,14 @@ pub fn probe_ups_for_tui<R: CommandRunner>(runner: &R, name: &str) -> UpsSnapsho
         // the unit status just in case the upstream check captures a
         // transitional state worth rendering (active / failed).
         daemon: probe_daemon_status(runner, UPS_DAEMON_UNIT),
+        guard,
     }
 }
 
-fn ups_snapshot_query_failed<R: CommandRunner>(runner: &R) -> UpsSnapshot {
+fn ups_snapshot_query_failed<R: CommandRunner>(
+    runner: &R,
+    guard: Option<GuardSnapshot>,
+) -> UpsSnapshot {
     UpsSnapshot {
         flags: Vec::new(),
         battery_charge_pct: None,
@@ -859,7 +876,35 @@ fn ups_snapshot_query_failed<R: CommandRunner>(runner: &R) -> UpsSnapshot {
         // Fall back to the unit probe so we can still distinguish
         // "daemon has crashed" vs. "nothing running" vs. "transitional".
         daemon: probe_daemon_status(runner, UPS_DAEMON_UNIT),
+        guard,
     }
+}
+
+/// Read the guard's unit state and its persisted clock through the guard's
+/// own definitions (plan/2026-10-23-0548/D1). The time on battery is measured
+/// here, so it is as fresh as the probe.
+fn probe_ups_guard<R: CommandRunner>(
+    runner: &R,
+    clock: &crate::ups_guard::ClockFile,
+    now: impl FnOnce() -> Result<std::time::Duration, nix::Error>,
+) -> GuardSnapshot {
+    use crate::online_state::{OnlineStateOps, RealOnlineStateOps, UnitActiveState};
+    let state = RealOnlineStateOps::new(runner).unit_active_state(crate::ups_guard::UPS_GUARD_UNIT);
+    // `activating` is a restart in progress and the guard keeps its clock
+    // across it. Every other state counts as down, matching the doctor's
+    // guard check.
+    let running = matches!(
+        state,
+        Ok(UnitActiveState::Active | UnitActiveState::Activating)
+    );
+    let clock = match (clock.load(), now()) {
+        (Ok(None), _) => GuardClock::Idle,
+        (Ok(Some(since)), Ok(now)) => GuardClock::Running {
+            on_battery: now.saturating_sub(since),
+        },
+        (Err(_), _) | (Ok(Some(_)), Err(_)) => GuardClock::Error,
+    };
+    GuardSnapshot { running, clock }
 }
 
 /// Parse `systemctl show -P ActiveState <unit>`. It emits one ActiveState word
@@ -3575,6 +3620,65 @@ mod tests {
             )
     }
 
+    /// Probe with early shutdown off, so the guard is never consulted.
+    fn probe_ups_no_policy(mock: &MockRunner) -> UpsSnapshot {
+        let clock = crate::ups_guard::ClockFile::new("/nonexistent/braid-ups-guard/clock");
+        probe_ups_for_tui(
+            mock,
+            "ups",
+            &crate::config::UpsShutdownPolicy::default(),
+            &clock,
+            || panic!("the clock must not be read with early shutdown off"),
+        )
+    }
+
+    fn timer_policy() -> crate::config::UpsShutdownPolicy {
+        crate::config::UpsShutdownPolicy {
+            after_secs: std::num::NonZeroU64::new(300),
+            below_charge_pct: None,
+        }
+    }
+
+    fn with_guard_state(mock: MockRunner, state: &str) -> MockRunner {
+        mock.with_output(
+            CmdRequest::SystemctlShowActiveState {
+                unit: crate::ups_guard::UPS_GUARD_UNIT.into(),
+            },
+            RawCommandOutput {
+                cmd: "systemctl show -P ActiveState braid-ups-guard.service".into(),
+                stdout: format!("{state}\n"),
+                stderr: String::new(),
+                exit_status: 0,
+            },
+        )
+    }
+
+    /// Probe with a timer configured, the guard in `state`, and the clock file
+    /// holding `clock_text` (`None` for no file), at boottime 1000 s.
+    fn probe_with_guard(
+        upsc_stdout: &str,
+        upsc_exit: i32,
+        state: &str,
+        clock_text: Option<&str>,
+    ) -> UpsSnapshot {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("clock");
+        if let Some(text) = clock_text {
+            std::fs::write(&path, text).unwrap();
+        }
+        let mock = with_guard_state(
+            mock_with_upsc_and_unit(upsc_stdout, upsc_exit, "active\n"),
+            state,
+        );
+        probe_ups_for_tui(
+            &mock,
+            "ups",
+            &timer_policy(),
+            &crate::ups_guard::ClockFile::new(path),
+            || Ok(std::time::Duration::from_secs(1000)),
+        )
+    }
+
     // Intent: probe_ups_for_tui converts a healthy UpscOutput to an
     // UpsSnapshot with the expected typed fields populated and
     // daemon=Active.
@@ -3586,7 +3690,7 @@ mod tests {
         let stdout = "ups.status: OL\nbattery.charge: 100\nbattery.runtime: 1800\n\
                       ups.load: 20\nups.realpower.nominal: 500\n";
         let mock = mock_with_upsc_and_unit(stdout, 0, "active\n");
-        let snap = probe_ups_for_tui(&mock, "ups");
+        let snap = probe_ups_no_policy(&mock);
         assert!(snap.flags.contains(&crate::parse::types::UpsStatusFlag::Ol));
         assert_eq!(snap.battery_charge_pct, Some(100));
         assert_eq!(snap.runtime_secs, Some(1800));
@@ -3608,7 +3712,7 @@ mod tests {
     fn probe_ups_for_tui_preserves_status_flag_order() {
         use crate::parse::types::UpsStatusFlag;
         let mock = mock_with_upsc_and_unit("ups.status: CAL OL CHRG RB\n", 0, "active\n");
-        let snap = probe_ups_for_tui(&mock, "ups");
+        let snap = probe_ups_no_policy(&mock);
         assert_eq!(
             snap.flags,
             vec![
@@ -3629,7 +3733,7 @@ mod tests {
     #[test]
     fn probe_ups_watts_requires_both_ingredients() {
         let mock = mock_with_upsc_and_unit("ups.status: OL\nups.load: 40\n", 0, "active\n");
-        let snap = probe_ups_for_tui(&mock, "ups");
+        let snap = probe_ups_no_policy(&mock);
         assert_eq!(snap.load_pct, Some(40));
         assert_eq!(snap.watts_estimated, None);
     }
@@ -3655,7 +3759,7 @@ mod tests {
             },
         );
 
-        let snap = probe_ups_for_tui(&mock, "ups");
+        let snap = probe_ups_no_policy(&mock);
 
         assert!(snap.flags.is_empty());
         assert_eq!(snap.battery_charge_pct, None);
@@ -3672,11 +3776,114 @@ mod tests {
     #[test]
     fn probe_ups_falls_back_on_query_failure() {
         let mock = mock_with_upsc_and_unit("", 1, "inactive\n");
-        let snap = probe_ups_for_tui(&mock, "ups");
+        let snap = probe_ups_no_policy(&mock);
         assert!(snap.flags.is_empty());
         assert_eq!(snap.battery_charge_pct, None);
         assert_eq!(snap.load_pct, None);
         assert!(snap.raw_text.is_empty());
         assert_eq!(snap.daemon, DaemonStatus::Inactive);
+    }
+
+    // Intent: a running guard and its clock file become the snapshot's guard
+    //   fields, with the time on battery measured against the probe's clock.
+    // Why it exists: plan/2026-10-23-0548/D2 -- the countdown is the guard's
+    //   persisted clock, not anything the TUI infers.
+    // Scenario: the guard started timing at boottime 820 s; the probe runs at
+    //   1000 s.
+    #[test]
+    fn probe_ups_reads_guard_state_and_clock() {
+        let snap = probe_with_guard("ups.status: OB\n", 0, "active", Some("820\n"));
+        assert_eq!(
+            snap.guard,
+            Some(GuardSnapshot {
+                running: true,
+                clock: GuardClock::Running {
+                    on_battery: std::time::Duration::from_secs(180),
+                },
+            })
+        );
+    }
+
+    // Intent: no clock file means no countdown, even while upsc says OB.
+    // Why it exists: plan/2026-10-23-0548/I1 and D3 -- the TUI never invents
+    //   an outage start from its own reading.
+    // Scenario: power just failed and the guard has not polled yet.
+    #[test]
+    fn probe_ups_without_clock_file_has_no_countdown() {
+        let snap = probe_with_guard("ups.status: OB\n", 0, "active", None);
+        assert_eq!(snap.guard.unwrap().clock, GuardClock::Idle);
+    }
+
+    // Intent: a corrupt clock file is reported as a clock error, not as idle.
+    // Why it exists: plan/2026-10-23-0548/D4 -- an unreadable clock must not
+    //   look like "no outage".
+    // Scenario: the clock file holds garbage.
+    #[test]
+    fn probe_ups_corrupt_clock_file_is_clock_error() {
+        let snap = probe_with_guard("ups.status: OB\n", 0, "active", Some("soon\n"));
+        assert_eq!(snap.guard.unwrap().clock, GuardClock::Error);
+    }
+
+    // Intent: with early shutdown off, the probe asks systemd about upsd only,
+    //   never the guard, and reports no guard state.
+    // Why it exists: plan/2026-10-23-0548/D2 and I4 -- the guard is not
+    //   installed when both triggers are null.
+    // Scenario: a UPS host with shutdownAfter and shutdownBelowCharge null.
+    #[test]
+    fn probe_ups_without_trigger_skips_guard_probe() {
+        let mock = mock_with_upsc_and_unit("ups.status: OL\n", 0, "active\n");
+        let snap = probe_ups_no_policy(&mock);
+        assert_eq!(snap.guard, None);
+        let guard_requests = mock
+            .requests()
+            .into_iter()
+            .filter(|r| {
+                matches!(r, CmdRequest::SystemctlShowActiveState { unit }
+                    if unit == crate::ups_guard::UPS_GUARD_UNIT)
+            })
+            .count();
+        assert_eq!(guard_requests, 0);
+    }
+
+    // Intent: a failed upsc query still yields the guard state and countdown.
+    // Why it exists: the probe returns early on query failure; the countdown
+    //   matters most when the UPS link is flaky mid-outage, and the guard
+    //   keeps timing through failed reads (plan/2026-10-22-1122/I2).
+    // Scenario: upsc exits 1 while the guard has been timing for 180 s.
+    #[test]
+    fn probe_ups_query_failure_keeps_guard_countdown() {
+        let snap = probe_with_guard("", 1, "active", Some("820\n"));
+        assert!(snap.flags.is_empty());
+        assert_eq!(
+            snap.guard,
+            Some(GuardSnapshot {
+                running: true,
+                clock: GuardClock::Running {
+                    on_battery: std::time::Duration::from_secs(180),
+                },
+            })
+        );
+    }
+
+    // Intent: guard unit states classify as plan/2026-10-23-0548/D4 needs:
+    //   activating counts as running, deactivating and reloading do not.
+    // Why it exists: the upsd probe folds all three into Transitioning, which
+    //   cannot express this split; a stopping guard must read as down
+    //   (plan/2026-10-23-0548/I2).
+    // Scenario: the guard is in each systemd ActiveState in turn.
+    #[test]
+    fn probe_ups_classifies_guard_unit_states() {
+        for (state, running) in [
+            ("active", true),
+            ("activating", true),
+            ("deactivating", false),
+            ("reloading", false),
+            ("inactive", false),
+            ("failed", false),
+            ("bogus", false),
+        ] {
+            let snap = probe_with_guard("ups.status: OL\n", 0, state, None);
+            assert_eq!(snap.guard.unwrap().running, running, "state {state}");
+        }
     }
 }

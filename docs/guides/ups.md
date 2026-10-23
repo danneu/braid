@@ -117,6 +117,19 @@ Status text is color-coded by the shared UPS severity model:
   or comms-loss).
 - **DarkGray** -- UPS query failed, or no UPS state available yet.
 
+The **Shutdown** column shows the [shutdown policy](#shutdown-policy) as
+`braid-ups-guard` sees it. On utility power it shows the armed policy
+dimmed, such as `after 5m 0s or <50%`. During an outage it counts down
+(`in 3m 12s or <50%`), turning red in the last minute. It shows
+`guard down` in red when a trigger is set but the guard is not running,
+`overdue` when the timer passed its deadline and no forced shutdown
+followed, and `off` when both options are `null`. The countdown comes from
+the guard's own clock, so it matches what the guard will do.
+
+During an outage a banner above every tab says how long the UPS has been
+on battery and when braid shuts down, or why it will not shut down early.
+It clears once power returns.
+
 The panel polls on the same 5-second cadence as the
 [TUI fans panel](fan-control.md#tui-fans-panel). Press `r` to refresh both
 pool and UPS probes immediately.

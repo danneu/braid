@@ -39,9 +39,11 @@ pub enum Effect {
         delay: Duration,
     },
     /// Run `upsc <name>` through `query_ups` on a worker thread; raw stdout
-    /// and parsed state become `Event::UpsProbeFinished`.
+    /// and parsed state become `Event::UpsProbeFinished`. The policy decides
+    /// whether the probe also reads the early-shutdown guard's state.
     ProbeUps {
         name: String,
+        shutdown: crate::config::UpsShutdownPolicy,
     },
     ScheduleUpsProbe {
         delay: Duration,
@@ -143,12 +145,19 @@ pub fn execute_effect(effect: Effect, cmd_tx: &mpsc::Sender<Event>) {
                 |_| Event::PollPoolRefresh,
             );
         }
-        Effect::ProbeUps { name } => {
+        Effect::ProbeUps { name, shutdown } => {
             spawn_worker(
                 cmd_tx,
                 move || {
                     let runner = RealRunner;
-                    let snapshot = crate::tui::probe::probe_ups_for_tui(&runner, &name);
+                    let clock = crate::ups_guard::ClockFile::new(crate::ups_guard::CLOCK_PATH);
+                    let snapshot = crate::tui::probe::probe_ups_for_tui(
+                        &runner,
+                        &name,
+                        &shutdown,
+                        &clock,
+                        crate::ups_guard::boottime_now,
+                    );
                     Event::UpsProbeFinished(snapshot)
                 },
                 // Unknown snapshot on panic, like ProbeFan (no message).

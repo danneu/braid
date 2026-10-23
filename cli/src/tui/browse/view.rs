@@ -404,6 +404,7 @@ mod tests {
             watts_estimated: Some(100),
             daemon: DaemonStatus::Active,
             raw_text: "ups.status: OL\nbattery.charge: 100\n".into(),
+            guard: None,
         }
     }
 

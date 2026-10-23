@@ -21,6 +21,7 @@ use crate::tui::model::{
     DaemonStatus, DiskLockState, DiskLuksState, DrivingDrive, FanReading, Model, PoolState,
     PoolStatus, Tab, TemperatureReading, TemperatureWatermark, UnpooledDiskRender, UpsSnapshot,
 };
+use crate::tui::ups_shutdown::{self, ShutdownDisplay};
 use crate::types::LuksUuid;
 
 fn format_timestamp(dt: &PrimitiveDateTime) -> String {
@@ -327,12 +328,19 @@ fn format_ups_load(snapshot: &UpsSnapshot) -> String {
     }
 }
 
+/// The early-shutdown state for this frame, or `None` before the first UPS
+/// probe or without UPS support (plan/2026-10-23-0548/I4).
+fn ups_shutdown_display(model: &Model) -> Option<ShutdownDisplay> {
+    let config = model.ups_config.as_ref()?;
+    ups_shutdown::classify(&config.shutdown, model.ups.as_ref()?)
+}
+
 /// Render the single-row UPS table. Sensor cells render dim when the
 /// UPS daemon is Failed or Inactive (mirror of the Fans section).
 ///
 /// Precondition: `model.ups_config` is Some.
 fn ups_section(model: &Model) -> Table<'_> {
-    let header = Row::new(["Status", "Battery", "Runtime", "Load"])
+    let header = Row::new(["Status", "Battery", "Runtime", "Load", "Shutdown"])
         .style(Style::default().fg(Color::DarkGray));
 
     let snapshot = model.ups.as_ref();
@@ -350,6 +358,10 @@ fn ups_section(model: &Model) -> Table<'_> {
     let status_color = snapshot
         .map(|s| ups_severity_color(&s.flags))
         .unwrap_or(Color::DarkGray);
+    let (shutdown_text, shutdown_color) = ups_shutdown_display(model)
+        .map(|d| d.column())
+        .unwrap_or_else(|| ("--".into(), Color::DarkGray));
+    let shutdown_cell = Cell::from(shutdown_text).style(Style::default().fg(shutdown_color));
 
     let row = Row::new(vec![
         Cell::from(status_text).style(Style::default().fg(status_color)),
@@ -367,13 +379,15 @@ fn ups_section(model: &Model) -> Table<'_> {
         .style(sensor_style),
         Cell::from(snapshot.map(format_ups_load).unwrap_or_else(|| "--".into()))
             .style(sensor_style),
+        shutdown_cell,
     ]);
 
     let widths = [
         Constraint::Length(10),
         Constraint::Length(9),
         Constraint::Length(9),
-        Constraint::Min(18),
+        Constraint::Length(18),
+        Constraint::Min(20),
     ];
     Table::new(vec![row], widths).header(header)
 }
@@ -1474,10 +1488,16 @@ pub fn view(model: &Model, frame: &mut Frame, now: PrimitiveDateTime, now_utc: O
         .unwrap_or(0);
     let stale_msg = model.pool.stale_error();
     let stale_height: u16 = if stale_msg.is_some() { 1 } else { 0 };
+    // An outage outranks the static advisories but not a pool alert
+    // (plan/2026-10-23-0548/D5).
+    let ups_banner = ups_shutdown_display(model).and_then(|d| d.banner());
 
     let mut constraints = Vec::new();
     if alert_height > 0 {
         constraints.push(Constraint::Length(alert_height));
+    }
+    if ups_banner.is_some() {
+        constraints.push(Constraint::Length(1));
     }
     if advisory_height > 0 {
         constraints.push(Constraint::Length(advisory_height));
@@ -1498,6 +1518,18 @@ pub fn view(model: &Model, frame: &mut Frame, now: PrimitiveDateTime, now_utc: O
             Paragraph::new(alert_lines(pool, severity, now_utc)),
             outer[off],
         );
+        off += 1;
+    }
+
+    if let Some((text, color)) = ups_banner {
+        let line = Line::from(Span::styled(
+            format!(" {text} "),
+            Style::default()
+                .bg(color)
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD),
+        ));
+        frame.render_widget(Paragraph::new(line), outer[off]);
         off += 1;
     }
 
@@ -2874,12 +2906,109 @@ pub(crate) mod tests {
             watts_estimated: None,
             raw_text: String::new(),
             daemon: DaemonStatus::Active,
+            guard: None,
         });
 
         let terminal = render(&model, 60, 24);
         let buf = buffer_to_string(&terminal);
 
         assert!(buf.contains("30m 0s"), "got:\n{buf}");
+    }
+
+    /// A demo model with UPS support, a 5 min / 50% shutdown policy, and one
+    /// probe reading with the given flags and guard state.
+    fn model_with_ups_guard(
+        flags: &[UpsStatusFlag],
+        guard: crate::tui::model::GuardSnapshot,
+    ) -> Model {
+        let mut model = Model::new_demo(sample_disk_names(), PoolStatus::Mounted(sample_pool()));
+        model.ups_config = Some(crate::config::Ups {
+            name: crate::types::UpsName::parse("ups").unwrap(),
+            shutdown: crate::config::UpsShutdownPolicy {
+                after_secs: std::num::NonZeroU64::new(300),
+                below_charge_pct: Some(crate::config::ChargeFloorPct::try_from(50).unwrap()),
+            },
+        });
+        model.ups = Some(UpsSnapshot {
+            flags: flags.to_vec(),
+            battery_charge_pct: Some(78),
+            runtime_secs: Some(720),
+            load_pct: Some(17),
+            watts_estimated: Some(56),
+            raw_text: String::new(),
+            daemon: DaemonStatus::Active,
+            guard: Some(guard),
+        });
+        model
+    }
+
+    fn guard_counting(secs: u64) -> crate::tui::model::GuardSnapshot {
+        crate::tui::model::GuardSnapshot {
+            running: true,
+            clock: crate::tui::model::GuardClock::Running {
+                on_battery: Duration::from_secs(secs),
+            },
+        }
+    }
+
+    // Intent: on mains with the guard running, the Shutdown column shows the
+    //   armed policy and no banner appears.
+    // Why it exists: plan/2026-10-23-0548/D4 -- the quiet state must stay
+    //   quiet, or the banner stops meaning "outage".
+    // Scenario: a healthy UPS host with the default 5 min / 50% policy.
+    #[test]
+    fn snapshot_ups_shutdown_armed() {
+        let model = model_with_ups_guard(
+            &[UpsStatusFlag::Ol],
+            crate::tui::model::GuardSnapshot {
+                running: true,
+                clock: crate::tui::model::GuardClock::Idle,
+            },
+        );
+        let terminal = render(&model, 80, 30);
+        snap!(buffer_to_string(&terminal));
+    }
+
+    // Intent: during an outage the column counts down and the banner names
+    //   the deadline, the charge floor, and the current charge.
+    // Why it exists: plan/2026-10-23-0548/D4 and D5 -- the operator must see
+    //   when braid will shut down without running a command.
+    // Scenario: 1m 48s on battery with a 5 min timer and 78% charge.
+    #[test]
+    fn snapshot_ups_shutdown_counting() {
+        let model = model_with_ups_guard(&[UpsStatusFlag::Ob], guard_counting(108));
+        let terminal = render(&model, 80, 30);
+        snap!(buffer_to_string(&terminal));
+    }
+
+    // Intent: on battery with the guard down, both the column and the banner
+    //   say so, in red.
+    // Why it exists: plan/2026-10-23-0548/I2 -- a dead guard must never look
+    //   like early shutdown is in force.
+    // Scenario: the guard crashed and the power then failed.
+    #[test]
+    fn snapshot_ups_shutdown_guard_down_on_battery() {
+        let model = model_with_ups_guard(
+            &[UpsStatusFlag::Ob],
+            crate::tui::model::GuardSnapshot {
+                running: false,
+                clock: crate::tui::model::GuardClock::Idle,
+            },
+        );
+        let terminal = render(&model, 80, 30);
+        snap!(buffer_to_string(&terminal));
+    }
+
+    // Intent: the outage banner shows on tabs other than Data.
+    // Why it exists: plan/2026-10-23-0548/D5 -- an operator watching a scrub
+    //   must still see the shutdown deadline.
+    // Scenario: the Scrub tab open mid-outage.
+    #[test]
+    fn snapshot_ups_shutdown_banner_on_scrub_tab() {
+        let mut model = model_with_ups_guard(&[UpsStatusFlag::Ob], guard_counting(108));
+        model.tab = Tab::Scrub;
+        let terminal = render(&model, 80, 30);
+        snap!(buffer_to_string(&terminal));
     }
 
     // Intent: format_ups_load only annotates watts when both load% and
@@ -2897,6 +3026,7 @@ pub(crate) mod tests {
             watts_estimated: None,
             raw_text: String::new(),
             daemon: DaemonStatus::Active,
+            guard: None,
         };
         assert_eq!(format_ups_load(&s), "40%");
         s.watts_estimated = Some(132);
