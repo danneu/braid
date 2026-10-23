@@ -54,6 +54,17 @@ const TWO_DISK_POST_SHOW: &str = "Label: none  uuid: cc86845b-aec3-408e-bef5-553
      \tTotal devices 1 FS bytes used 16.17MiB\n\
      \tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n";
 
+// Logical usage the 2-disk collapse's space check reads: 64 MiB data plus
+// 8 MiB metadata and 16 KiB system, doubled as DUP, fits easily on the
+// 496 MiB survivor.
+const COLLAPSE_DF_JSON: &str = r#"{
+  "filesystem-df": [
+    { "bg-type": "Data", "bg-profile": "RAID1", "total": 67108864, "used": 67108864 },
+    { "bg-type": "Metadata", "bg-profile": "RAID1", "total": 8388608, "used": 8388608 },
+    { "bg-type": "System", "bg-profile": "RAID1", "total": 16384, "used": 16384 }
+  ]
+}"#;
+
 fn usage_raw_three_disk_one_missing() -> String {
     device_usage_raw_body(&[
         remove_missing_usage_live_device(1),
@@ -130,8 +141,9 @@ impl RemoveMissingPool {
     }
 
     /// 2-disk pool with devid 2 reported MISSING; post-remove leaves
-    /// one healthy survivor. Drives the single-survivor preflight
-    /// skip; tests assert `BtrfsDeviceUsageRaw` is never invoked.
+    /// one healthy survivor. Drives the collapse: its space check reads
+    /// usage and df, then the convert balance runs before the device
+    /// remove.
     pub(crate) fn two_disk_one_missing() -> Self {
         Self {
             pre_show: TWO_DISK_PRE_SHOW,
@@ -201,6 +213,13 @@ impl RemoveMissingPool {
                 "btrfs device usage --raw /mnt/storage",
                 &usage_raw,
             ))),
+            CmdRequest::BtrfsFilesystemDfJson { .. } => Some(Ok(mock_ok(
+                "btrfs --format json filesystem df /mnt/storage",
+                COLLAPSE_DF_JSON,
+            ))),
+            CmdRequest::BtrfsBalanceSingle { .. } => {
+                Some(Ok(mock_ok("btrfs balance start -dconvert=single", "")))
+            }
             CmdRequest::BtrfsDeviceRemove { .. } => {
                 remove_done_handler.store(true, Ordering::SeqCst);
                 Some(Ok(mock_ok("btrfs device remove", "")))

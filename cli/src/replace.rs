@@ -1202,14 +1202,10 @@ fn verify_new_target_preflight<R: CommandRunner, F: Filesystem + ?Sized>(
 /// path -- the row's path string can differ from the expected mapper path
 /// without changing which live btrfs device it describes.
 fn source_has_io_errors(stats: &crate::parse::types::BtrfsDeviceStatsOutput, devid: Devid) -> bool {
-    stats.devices.iter().any(|d| {
-        d.devid == devid
-            && (d.read_io_errs > 0
-                || d.write_io_errs > 0
-                || d.flush_io_errs > 0
-                || d.corruption_errs > 0
-                || d.generation_errs > 0)
-    })
+    stats
+        .devices
+        .iter()
+        .any(|d| d.devid == devid && d.has_errors())
 }
 
 /// Shared source-health note body so dry-run stdout and real-run stderr render

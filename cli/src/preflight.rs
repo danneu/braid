@@ -11,9 +11,12 @@ use crate::filesystem::Filesystem;
 use crate::journal;
 use crate::luks::LUKS_DATA_OFFSET_BYTES;
 use crate::mount_check::{self, mount_entry_at_via_fs};
-use crate::parse::parse_cryptsetup_luks_dump;
 use crate::parse::types::{
-    BtrfsBgType, BtrfsDeviceUsageEntry, BtrfsDfOutput, Luks2SegmentSize, UpsSeverity,
+    BtrfsBgType, BtrfsDeviceUsageEntry, BtrfsDeviceUsageOutput, BtrfsDfOutput, Luks2SegmentSize,
+    UpsSeverity,
+};
+use crate::parse::{
+    ParseError, parse_btrfs_device_usage, parse_btrfs_df_json, parse_cryptsetup_luks_dump,
 };
 use crate::preview::PreviewNote;
 use crate::repair_hint;
@@ -358,8 +361,55 @@ pub fn check_raid1_relocation_space(
     Ok(())
 }
 
-/// Check that the surviving device can hold all live data after a 2->1
-/// eviction (RAID1 data -> single, RAID1 metadata/system -> DUP). The demand
+/// Fail-closed probe of the two inputs `check_single_survivor_capacity`
+/// reads, shared by every removal that leaves one disk: `remove`'s 2->1 path
+/// and `remove-missing`'s collapse. A missed capacity refusal there lets the
+/// convert or `btrfs device remove` crash the pool read-only with
+/// `pending-op.json` written, so a spawn error, a nonzero exit, or output it
+/// cannot parse each refuse. `actor` names the command in the refusal.
+pub(crate) fn probe_single_survivor_inputs<R: CommandRunner>(
+    runner: &R,
+    mount_point: &MountPoint,
+    actor: &str,
+) -> Result<(BtrfsDeviceUsageOutput, BtrfsDfOutput), String> {
+    let refusing = format!("Refusing to start {actor} without a validated survivor capacity.");
+    let usage_raw = runner
+        .run(&CmdRequest::BtrfsDeviceUsageRaw {
+            mount_point: mount_point.clone(),
+        })
+        .map_err(|e| {
+            format!("ENOSPC pre-flight (2->1): btrfs device usage spawn failed: {e}. {refusing}")
+        })?;
+    let usage = parse_btrfs_device_usage(&usage_raw).map_err(|e| match e {
+        ParseError::CommandFailed {
+            exit_code, stderr, ..
+        } => format!("btrfs device usage failed (exit {exit_code}): {stderr}"),
+        other => format!(
+            "ENOSPC pre-flight (2->1): btrfs device usage output unparseable: {other}. {refusing}"
+        ),
+    })?;
+
+    let df_raw = runner
+        .run(&CmdRequest::BtrfsFilesystemDfJson {
+            mount_point: mount_point.clone(),
+        })
+        .map_err(|e| {
+            format!("ENOSPC pre-flight (2->1): btrfs filesystem df spawn failed: {e}. {refusing}")
+        })?;
+    let df = parse_btrfs_df_json(&df_raw).map_err(|e| match e {
+        ParseError::CommandFailed {
+            exit_code, stderr, ..
+        } => format!("btrfs filesystem df failed (exit {exit_code}): {stderr}"),
+        other => format!(
+            "ENOSPC pre-flight (2->1): btrfs filesystem df output unparseable: {other}. {refusing}"
+        ),
+    })?;
+    Ok((usage, df))
+}
+
+/// Check that the surviving device can hold all live data after a removal
+/// that leaves one disk (RAID1 data -> single, RAID1 metadata/system -> DUP):
+/// `remove`'s 2->1 path and `remove-missing`'s collapse. The demand
 /// model below assumes those `ONE_DISK_PROFILES`; change the two together.
 ///
 /// Uses logical usage from `btrfs filesystem df` rather than per-device

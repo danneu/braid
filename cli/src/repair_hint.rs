@@ -182,6 +182,22 @@ pub(crate) fn hot_unplugged_bystander_not_yet_missing(devids: &[Devid], actor: &
     )
 }
 
+/// The two routes off a 2-disk pool that never leave the departing disk as
+/// the only holder of any data, for remove's 2->1 health refusal: replace it
+/// with a new disk, or collapse the pool onto the other disk while the
+/// departing one is detached. Detached and relocked, its devid comes back
+/// MISSING at the degraded unlock, so btrfs never writes to it and
+/// `braid remove-missing` accepts it.
+pub(crate) fn unhealthy_two_to_one_routes(name: &DiskName, devid: Devid) -> String {
+    let replace = missing_replace_command(Some(name));
+    format!(
+        "Replace it with a new disk: `{replace}`. With no spare, move the pool \
+         onto the other disk without writing to this one: run `braid lock`, \
+         disconnect {name}, run `braid unlock --allow-degraded`, then \
+         `braid remove-missing --missing-id {devid}`."
+    )
+}
+
 /// The braid command that reopens the pool in a hint's fresh-mount or
 /// reopen step. A command caller passes the one it knows can run: it knows
 /// whether a pending-op journal can exist when it refuses. doctor, which

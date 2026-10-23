@@ -49,7 +49,7 @@ Device replacement always uses `btrfs replace start`, including when the source 
 2. **Devid preservation**: the new device inherits the old devid, keeping the pool topology stable.
 3. **Single operation**: one `btrfs replace start` call vs. three separate commands with partial-failure risk.
 
-`braid remove-missing` is retained for cleanup only (forgetting stale device entries), not for replacement.
+`braid remove-missing` is retained for cleanup (forgetting stale device entries) and for collapsing a 2-disk pool onto its present disk, not for replacement. The collapse is a degraded convert to lower redundancy; [ADR 012](012-intent-cli.md#two-to-one-remove) says why reason 1 does not apply to it.
 When braid blocks a live replacement because the pool has missing devices, the intended next step is repairing the missing device via `braid replace --old <missing-name> --new <new-name>=/dev/disk/by-id/<...>` (the missing devid auto-resolves from `--old`), not forgetting it.
 
 ## See

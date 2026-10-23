@@ -5,12 +5,13 @@ experimental: false
 
 # braid remove-missing
 
-Forget a stale missing-device entry from the pool. This does NOT rebuild data -- use [`braid replace`](replace.md) for that.
+Forget a stale missing-device entry from the pool. On a 2-disk pool with one disk missing, it first moves the pool onto the present disk, which leaves one disk and no redundancy. This does NOT rebuild data -- use [`braid replace`](replace.md) for that.
 
 ## When to use it
 
 - A disk has permanently failed and you want to clean up the pool metadata without replacing it
 - You have already recovered your data and just need btrfs to stop reporting the missing device
+- A 2-disk pool lost one disk, you have no spare, and you accept running on one disk with no redundancy until you `braid add` another
 
 This is a destructive choice: any data that only existed on the missing disk is lost. If you want to rebuild data onto a new disk, use `braid replace` instead.
 
@@ -64,14 +65,17 @@ sudo braid remove-missing --missing-id 3 --yes
 1. Probes the pool to verify missing devices exist
 2. Validates that the specified devid is actually a missing device (not a live one), and that no other member is hot-unplugged but not yet `MISSING`
 3. Resolves the btrfs devid to the UUID-keyed pool member whose recorded devid matches. braid does not probe a MISSING device through its mapper, so it has no observable LUKS UUID and its recorded devid is the only binding
-4. Shows a confirmation prompt with the disk name, devid, and the resulting disk counts (e.g. `Pool: 2 present + 1 missing -> 2 disks`). This interactive prompt is skipped by `--yes` and not shown in `--dry-run`.
+4. Shows a confirmation prompt with the disk name, devid, and the resulting disk counts (e.g. `Pool: 2 present + 1 missing -> 2 disks`). On a 2-disk pool it says the remaining disk converts first and warns `Pool will have 1 disk -- no RAID1 redundancy`. This interactive prompt is skipped by `--yes` and not shown in `--dry-run`.
 5. After confirmation (or straight away with `--yes`), plans again against the live pool: steps 1-3 and the pool's safety checks below. If a check now refuses, or the new plan differs from the confirmed one, braid stops before writing anything. This runs before any `--enqueue` wait (see below), so it does not cover space used while the removal is queued behind another exclusive operation, or while it runs.
-6. Writes a `PoolMutation` journal and runs `btrfs device remove <devid>` to clear the missing device entry
-7. Updates pool.json to remove the member's UUID entry, then advances the journal to post-remove-missing maintenance
-8. If this was the last missing device and 2+ disks remain: runs a soft RAID1 balance (`-dconvert=raid1,soft -mconvert=raid1,soft`) to restore redundancy on any single-profile chunks created during degraded operation
-9. Clears the journal
+6. Writes a `PoolMutation` journal. On a 2-disk pool with one disk missing (the collapse), it then converts the pool to single data and DUP metadata (`btrfs balance start -dconvert=single -mconvert=dup -f`): the kernel refuses to remove a device from a two-device RAID1 pool, and btrfs keeps a missing device off its chunk allocator, so every converted chunk lands on the present disk. See [ADR 012](../design/decisions/012-intent-cli.md#two-to-one-remove). `--dry-run` shows this step before the remove
+7. Runs `btrfs device remove <devid>` to clear the missing device entry
+8. Updates pool.json to remove the member's UUID entry, then advances the journal to post-remove-missing maintenance
+9. If this was the last missing device and 2+ disks remain: runs a soft RAID1 balance (`-dconvert=raid1,soft -mconvert=raid1,soft`) to restore redundancy on any single-profile chunks created during degraded operation
+10. Clears the journal
 
-A sleep inhibitor is held during the removal and the subsequent soft balance (if triggered).
+A sleep inhibitor is held during the collapse convert (if any), the removal, and the subsequent soft balance (if triggered).
+
+braid mounts the pool with `skip_balance`, so if the collapse convert is interrupted (power loss, crash), the balance stays paused. [`braid recover`](recover.md) restores `pool.json` and leaves the balance alone. Run `btrfs balance resume <mount-point>` to finish the convert or `btrfs balance cancel <mount-point>` to stop it, then re-run `braid remove-missing`.
 
 If a btrfs exclusive operation (a running balance, device add/remove/replace, resize, or swap activate) is already in flight on the pool, braid does not fail -- its `btrfs` commands queue behind the in-flight operation (via `--enqueue`) and the kernel runs them when the pool is free. A *paused* balance is the exception and is refused (see Safety checks below).
 
@@ -94,7 +98,8 @@ If a btrfs exclusive operation (a running balance, device add/remove/replace, re
   `btrfs device usage`. The error names the reason. See
   [ADR 012](../design/decisions/012-intent-cli.md#enospc-pre-flight-check)
   for the rules.
-- Refuses on a 2-disk RAID1 pool with one disk missing -- the kernel refuses to drop a RAID1 pool below two devices. Use `braid replace --old <missing-name> --new <new-name>=/dev/disk/by-id/<...>` to repair the dead disk, or `braid add` first and then re-run.
+- On a 2-disk pool with one disk missing, refuses if the present disk cannot hold all data as single plus metadata as DUP, or if braid cannot verify that. This is the same model `braid remove` uses before a 2->1 remove. It also refuses unless `btrfs device usage` lists the target as missing, because the convert is safe only while btrfs keeps the target off its allocator. To keep redundancy instead, use `braid replace --old <missing-name> --new <new-name>=/dev/disk/by-id/<...>`.
+- Refuses if the pool has no present disk to keep.
 - Refuses if the pool changed between planning and the journal write (for example, survivor space was used up or another disk dropped out while the prompt waited). Nothing was written, so re-run the command.
 {{#include ../_includes/mutating-command-refusals.md.inc}}
 

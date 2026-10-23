@@ -94,6 +94,11 @@ healthy >=2-survivor case is intentionally warn-and-proceed on an
   window where the pool keeps taking writes while the operator idles at the
   confirmation prompt — an over-committed survivor is then refused before the
   irreversible `-f` balance, still with no `pending-op.json` stranded.
+- **`remove-missing` collapsing a 2-disk pool** — the same single-survivor
+  check against the present disk, **fail-closed**, before the `-f` convert
+  and the device remove
+  (`cli/src/remove_missing.rs`, sharing
+  `cli/src/preflight.rs#probe_single_survivor_inputs` with `remove`).
 - **`remove` with >=2 survivors (healthy)** — same RAID1 relocation check,
   but **warn-and-proceed** on probe/parse uncertainty. A best-effort miss
   here falls through to `btrfs device remove`, which hits the *clean*

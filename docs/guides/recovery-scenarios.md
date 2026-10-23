@@ -374,6 +374,8 @@ Use this when you do not have a replacement disk. The pool continues with fewer 
 
 When this clears the last missing device and 2+ disks remain, `remove-missing` blocks on a follow-up soft RAID1 balance to restore redundancy on chunks written as `single` during degraded operation. You will see `[wait] pool: restoring RAID1 redundancy...` then `[ok]   pool: RAID1 redundancy restored` before the command returns. The wait scales with how much data was written while degraded: an idle pool finishes in seconds, while a pool written to heavily during degraded mode can take longer. A sleep inhibitor is held for the entire operation. See [`braid remove-missing`](../commands/remove-missing.md) for the full sequence.
 
+On a 2-disk pool, the dead disk was the only other copy, so `remove-missing` collapses the pool onto the present disk: it converts to single data and DUP metadata there, then removes the missing devid. The prompt warns `Pool will have 1 disk -- no RAID1 redundancy`, and the present disk must have room for all the data. The pool then has no redundancy until you `braid add` another disk.
+
 Verify:
 
 ```sh
@@ -388,7 +390,7 @@ A successful result shows no missing devices and no `single` profile rows for da
 | --- | --- | --- |
 | Requires new disk | Yes | No |
 | Rebuilds data | Yes | No |
-| Restores redundancy | Yes | Partial: restores RAID1 profiles when 2+ disks remain, but does not add replacement capacity |
+| Restores redundancy | Yes | Partial: restores RAID1 profiles when 2+ disks remain, but does not add replacement capacity. On a 2-disk pool it leaves one disk with no redundancy |
 | Duration | Hours (large disks) | Minutes |
 | When to use | You have a replacement | No replacement available |
 

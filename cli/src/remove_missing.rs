@@ -1,5 +1,5 @@
 use crate::alert;
-use crate::cmd::{CmdRequest, CommandRunner, Step};
+use crate::cmd::{CmdRequest, CommandRunner, ONE_DISK_PROFILES, Step};
 use crate::config::Config;
 use crate::confirm;
 use crate::filesystem::Filesystem;
@@ -8,7 +8,10 @@ use crate::journal;
 use crate::membership;
 use crate::parse::types::BtrfsDeviceUsageEntry;
 use crate::parse::{ParseError, parse_btrfs_device_usage};
-use crate::pool::{pool_remove_missing_device, restore_raid1_preview_step};
+use crate::pool::{
+    convert_to_one_disk, one_disk_convert_preview_step, pool_remove_missing_device,
+    restore_raid1_preview_step,
+};
 use crate::preflight;
 use crate::preview::{self, PerDiskStyle, PlanFailure, Preview, PreviewNote};
 use crate::probe::{ProbeError, probe_pool};
@@ -149,6 +152,9 @@ struct RemoveMissingWorkPlan {
 impl RemoveMissingWorkPlan {
     fn render_steps(&self) -> Vec<Step> {
         let mut steps = Vec::new();
+        if self.outcome.collapses() {
+            steps.push(one_disk_convert_preview_step(&self.mount_point));
+        }
         steps.push(Step {
             risk: "long",
             description: format!(
@@ -184,6 +190,13 @@ pub(crate) enum RemovalOutcome {
         present: usize,
         remaining_missing: u64,
     },
+    /// The last missing entry of a 2-disk pool: the pool converts to
+    /// `ONE_DISK_PROFILES` on its one present disk before the device remove.
+    /// The kernel refuses to drop RAID1 below two devices, and a MISSING
+    /// device is off the chunk allocator, so every converted chunk lands on
+    /// the present disk
+    /// (docs/design/decisions/012-intent-cli.md#two-to-one-remove).
+    CollapsesToOneDisk,
 }
 
 impl RemovalOutcome {
@@ -191,11 +204,16 @@ impl RemovalOutcome {
         matches!(self, Self::RestoresRedundancy { .. })
     }
 
+    /// True when the removal converts the pool to one disk first.
+    pub(crate) fn collapses(self) -> bool {
+        matches!(self, Self::CollapsesToOneDisk)
+    }
+
     /// Missing entries before the removal. `maybe_restore_raid1` takes this
     /// pre-op count, and the prompt shows it.
     fn missing_before(self) -> u64 {
         match self {
-            Self::RestoresRedundancy { .. } => 1,
+            Self::RestoresRedundancy { .. } | Self::CollapsesToOneDisk => 1,
             Self::StaysDegraded {
                 remaining_missing, ..
             } => remaining_missing + 1,
@@ -261,7 +279,8 @@ impl RemoveMissingPlan {
         }
 
         // Hold a logind sleep inhibitor for the rest of the remove-missing
-        // operation -- covers the btrfs device remove (chunk relocation; can
+        // operation -- covers a collapse's convert balance, the btrfs device
+        // remove (chunk relocation; can
         // run for minutes when the missing device had data allocated) and the
         // post-op maybe_restore_raid1 soft balance, which converts single-profile
         // chunks created during degraded operation back to RAID1. Suspending
@@ -306,7 +325,11 @@ impl RemoveMissingPlan {
         journal::write_journal_tracked(params.paths, &journal, journal_state)
             .map_err(|e| RemoveMissingError::Validation(e.to_string()))?;
 
-        // Execute
+        // Execute. A collapse converts first, so `btrfs device remove`
+        // passes the kernel's RAID1 minimum.
+        if work_plan.outcome.collapses() {
+            convert_to_one_disk(runner, &work_plan.mount_point, params.progress)?;
+        }
         let color_enabled = color_enabled_for_stderr();
         eprint!(
             "{}",
@@ -450,10 +473,11 @@ fn validate_missing_id_target(pool: &PoolState, missing_id: Devid) -> Result<(),
 }
 
 /// Sole production constructor of `RemovalOutcome`, so the plan decides the
-/// post-state once and no consumer can meet a state the planner refuses. Its
-/// only refusal, `None`, is the 2-disk RAID1 floor: the last missing entry
-/// with fewer than two survivors. It reads only the pool's shape, so
-/// `braid remove` asks it too before naming `braid remove-missing`.
+/// post-state once and no consumer can meet a state the planner refuses. It
+/// reads only the pool's shape, so `braid remove` asks it too before naming
+/// `braid remove-missing`, and recover asks it to word its guidance. Its only
+/// refusal, `None`, is a pool with no present device, which could only be a
+/// mounted pool whose every member btrfs has promoted to MISSING.
 pub(crate) fn classify_removal_outcome(
     present: usize,
     missing_count: NonZeroU64,
@@ -468,47 +492,29 @@ pub(crate) fn classify_removal_outcome(
             remaining_missing,
         });
     }
-
-    // Refuse the 2-device RAID1 + 1 missing case. (Zero survivors never get
-    // here: a pool with no present device is not mounted.) The kernel's
-    // btrfs_rm_device calls btrfs_check_raid_min_devices on
-    // `num_devices - 1` (where num_devices is fs_devices->num_devices,
-    // counting present + missing) and rejects with
-    // BTRFS_ERROR_DEV_RAID1_MIN_NOT_MET when that drops below devs_min=2.
-    // Per docs/design/decisions/012-intent-cli.md, remove-missing is cleanup-only;
-    // the documented repair path for a dead disk on a 2-disk pool is
-    // `braid replace --old <missing-name> --new <new-name>=...`. Pools with total_devices > 2
-    // are intentionally out of scope here -- the kernel accepts those
-    // calls, and reasoning about data integrity in multi-missing states
-    // (where the survivor is not guaranteed to mirror every chunk under
-    // btrfs RAID1's ncopies=2 layout) is left to existing/future logic.
-    //
-    // The "RAID1" label comes from device counts, not a probed profile
-    // (PoolState carries none by design). That is sound: per
-    // docs/design/decisions/001-btrfs-raid1.md, braid only ever stabilizes a
-    // 2-device pool as RAID1 (1 drive = single; the 2nd converts to RAID1),
-    // so a braid 2-device pool is RAID1 by construction. Degraded writes can
-    // add transient single chunks, which maybe_restore_raid1 re-mirrors -- it
-    // is never a stable single pool. The runtime backstop is
-    // device_remove_error (pool.rs), which decodes the kernel's real
-    // min-devices rejection regardless of profile, so correctness never
-    // rests on this label.
+    // The last missing entry of a 2-disk pool. The kernel's btrfs_rm_device
+    // calls btrfs_check_raid_min_devices on `num_devices - 1` and rejects a
+    // RAID1 pool below two devices, so the plan converts to
+    // `ONE_DISK_PROFILES` first. That clears the RAID1 alloc bits once the
+    // last RAID1 block group is gone (linux 6.18.33,
+    // `fs/btrfs/block-group.c` (`clear_avail_alloc_bits`)), and the check
+    // passes. "RAID1" comes from the device count, not a probed profile:
+    // braid only ever stabilizes a 2-device pool as RAID1
+    // (docs/design/decisions/001-btrfs-raid1.md), and the convert targets
+    // `ONE_DISK_PROFILES` from any profile mix.
+    if present == 1 {
+        return Some(RemovalOutcome::CollapsesToOneDisk);
+    }
     None
 }
 
-/// remove-missing's refusal at the 2-disk RAID1 floor that
-/// `classify_removal_outcome` detects, naming the devid the operator asked
-/// to remove.
-fn raid1_floor_refusal(missing_id: Devid, missing_count: NonZeroU64) -> String {
-    let repair_command = repair_hint::missing_replace_command(None);
-    let status_hint = repair_hint::see_missing_names_and_devids_in_status(missing_count.get());
+/// remove-missing's refusal when `classify_removal_outcome` finds no present
+/// device to keep, naming the devid the operator asked to remove.
+fn no_survivor_refusal(missing_id: Devid) -> String {
     format!(
-        "cannot remove missing devid {missing_id} -- this is a 2-disk \
-         RAID1 pool with one disk missing, and the kernel refuses \
-         to drop a RAID1 pool below two devices. Repair the dead \
-         disk with `{repair_command}`, or run \
-         `braid add <new-name>=/dev/disk/by-id/<...>` \
-         first and then re-run `braid remove-missing`. {status_hint}",
+        "cannot remove missing devid {missing_id} -- the pool has no present disk \
+         to keep. {}",
+        repair_hint::see_missing_names_and_devids_in_status(1)
     )
 }
 
@@ -591,9 +597,8 @@ pub fn plan_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     // Refuse while another member is hot-unplugged but not yet MISSING.
     // btrfs still allocates chunks on it, so `btrfs device remove` would put
     // relocated copies on a disk that is gone, whatever the free space. It
-    // runs on every pool shape, including the single-survivor path that
-    // skips the space check. After the target check, so a null-backed or
-    // unknown --missing-id keeps its own message.
+    // runs on every pool shape, the collapse included. After the target
+    // check, so a null-backed or unknown --missing-id keeps its own message.
     let bystanders = pool.hot_unplugged_not_missing();
     if !bystanders.is_empty() {
         return Err(PlanFailure::with_notes(
@@ -606,11 +611,11 @@ pub fn plan_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     }
 
     // Before the membership load and the relocation-space check, so the
-    // 2-disk refusal keeps its place in the refusal order.
+    // no-survivor refusal keeps its place in the refusal order.
     let Some(outcome) = classify_removal_outcome(pool.devices.len(), missing_count) else {
         return Err(PlanFailure::with_notes(
             notes,
-            RemoveMissingError::Validation(raid1_floor_refusal(params.missing_id, missing_count)),
+            RemoveMissingError::Validation(no_survivor_refusal(params.missing_id)),
         ));
     };
 
@@ -635,22 +640,36 @@ pub fn plan_remove_missing<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
     // device's data. Without this check, btrfs will either ENOSPC or
     // crash the filesystem to read-only mid-relocation (see tests/repro/).
     //
-    // Skip when only 1 present device survives (devices.len() == 1). The
-    // clean 2-device RAID1 + 1 missing case -- where the survivor mirrors
-    // every chunk and no relocation is needed -- is already rejected by
-    // `classify_removal_outcome` above, so the only single-survivor state
-    // that reaches here is multi-missing (total_devices > 2, >= 2 missing).
-    // There the survivor is NOT guaranteed to hold every chunk: data
-    // mirrored only across the simultaneously-dead devices is already lost
-    // and cannot be relocated, so a relocation-space preflight has nothing
-    // to prove. Per the scope note in `classify_removal_outcome`, that case
-    // is deliberately delegated to the kernel min-devices check and
-    // device_remove_error (pool.rs), not proven safe here. Its missing
-    // members are all btrfs-MISSING: the bystander refusal above already
-    // refused a hot-unplugged one.
-    if pool.devices.len() >= 2
-        && let Err(e) = check_relocation_space(runner, config.mount_point(), params.missing_id)
-    {
+    // The collapse checks the one present disk for the post-convert single +
+    // DUP demand instead. Any other single-survivor state is multi-missing
+    // (total_devices > 2, >= 2 missing). There the survivor is NOT guaranteed
+    // to hold every chunk: data mirrored only across the simultaneously-dead
+    // devices is already lost and cannot be relocated, so a relocation-space
+    // preflight has nothing to prove. That case is deliberately delegated to
+    // the kernel min-devices check and device_remove_error (pool.rs), not
+    // proven safe here. Its missing members are all btrfs-MISSING: the
+    // bystander refusal above already refused a hot-unplugged one.
+    let space = match (outcome, pool.devices.as_slice()) {
+        (RemovalOutcome::CollapsesToOneDisk, [survivor]) => check_collapse_space(
+            runner,
+            config.mount_point(),
+            params.missing_id,
+            survivor.devid,
+        ),
+        (RemovalOutcome::CollapsesToOneDisk, devices) => {
+            Err(RemoveMissingError::Validation(format!(
+                "pool probe lists {} present devices for a 2-disk collapse; refusing to \
+                 remove missing devid {}.",
+                devices.len(),
+                params.missing_id
+            )))
+        }
+        (_, devices) if devices.len() >= 2 => {
+            check_relocation_space(runner, config.mount_point(), params.missing_id)
+        }
+        _ => Ok(()),
+    };
+    if let Err(e) = space {
         return Err(PlanFailure::with_notes(notes, e));
     }
 
@@ -813,6 +832,67 @@ fn check_relocation_space<R: CommandRunner>(
     })
 }
 
+/// Space check for the 2-disk collapse: the present disk `survivor` must hold
+/// all live data as `ONE_DISK_PROFILES`, by the model
+/// `preflight::check_single_survivor_capacity` shares with `remove`'s 2->1
+/// path. Fail-closed on every uncertainty. It also requires
+/// `btrfs device usage` to show the target as missing (marker path, size 0),
+/// because the collapse is safe only while btrfs keeps the target off its
+/// allocator. It skips `validate_missing_target_usage_shape`: once a convert
+/// has finished and the device remove has not, the missing stanza holds no
+/// RAID1 rows, and that check would refuse every re-run.
+fn check_collapse_space<R: CommandRunner>(
+    runner: &R,
+    mount_point: &MountPoint,
+    missing_id: Devid,
+    survivor: Devid,
+) -> Result<(), RemoveMissingError> {
+    let (usage, df) =
+        preflight::probe_single_survivor_inputs(runner, mount_point, "remove-missing")
+            .map_err(RemoveMissingError::Validation)?;
+    let refusing = "Refusing to collapse the pool without a validated survivor capacity.";
+    match classify_usage_target(&usage.devices, missing_id) {
+        UsageTargetState::TrustedMissing(_) => {}
+        UsageTargetState::Absent => {
+            return Err(RemoveMissingError::Validation(format!(
+                "ENOSPC pre-flight (2->1): missing devid {missing_id} is not listed in \
+                 `btrfs device usage --raw {mount_point}`. {refusing}"
+            )));
+        }
+        UsageTargetState::Duplicate(n) => {
+            return Err(RemoveMissingError::Validation(format!(
+                "ENOSPC pre-flight (2->1): missing devid {missing_id} is listed {n} times in \
+                 `btrfs device usage --raw {mount_point}`. {refusing}"
+            )));
+        }
+        UsageTargetState::PresentNotMissing(entry) => {
+            return Err(RemoveMissingError::Validation(format!(
+                "ENOSPC pre-flight (2->1): devid {missing_id} is listed in `btrfs device usage \
+                 --raw {mount_point}` as `{path}` with device size {size}, not as a missing \
+                 device. btrfs may still write to it, so collapsing the pool now could leave \
+                 data on it alone. Re-run `braid status` to re-probe the pool, then re-run \
+                 remove-missing only if the device is still missing.",
+                path = entry.path,
+                size = entry.device_size,
+            )));
+        }
+    }
+    let survivors: Vec<_> = usage
+        .devices
+        .iter()
+        .filter(|d| d.devid == survivor)
+        .collect();
+    let [survivor_entry] = survivors.as_slice() else {
+        return Err(RemoveMissingError::Validation(format!(
+            "ENOSPC pre-flight (2->1): `btrfs device usage --raw {mount_point}` lists the \
+             present devid {survivor} {} times, not once. {refusing}",
+            survivors.len()
+        )));
+    };
+    preflight::check_single_survivor_capacity(&df, survivor_entry)
+        .map_err(RemoveMissingError::Validation)
+}
+
 /// How the targeted devid appears in `btrfs device usage --raw`. The relocation preflight
 /// trusts a stanza as the missing target only when btrfs renders it with the kernel missing
 /// marker AND zero device size -- see BtrfsDeviceUsageEntry::has_missing_marker for why size
@@ -927,6 +1007,14 @@ fn format_remove_missing_confirm(name: &str, devid: Devid, outcome: RemovalOutco
                 outcome.missing_before(),
                 present,
             ));
+        }
+        RemovalOutcome::CollapsesToOneDisk => {
+            msg.push_str(&format!(
+                "  Data on the remaining disk converts to {} first.\n",
+                ONE_DISK_PROFILES.label()
+            ));
+            msg.push_str("\nPool: 1 present + 1 missing -> 1 disk\n");
+            msg.push_str("\nWARNING: Pool will have 1 disk -- no RAID1 redundancy.\n");
         }
         RemovalOutcome::StaysDegraded {
             present,
@@ -1598,97 +1686,81 @@ mod tests {
         }
     }
 
-    /*
-     * Intent: cmd_remove_missing rejects the exact 2-disk RAID1 + 1-missing
-     * case at preflight, with no side effects (no inhibitor acquire, no
-     * journal write, no BtrfsDeviceRemove call).
-     *
-     * Why it exists: The kernel's
-     * btrfs_check_raid_min_devices(num_devices - 1) rejects going below
-     * two devices on RAID1; without this preflight braid would strand
-     * pending-op.json and the sleep inhibitor for a doomed call, then
-     * force the operator into `braid recover` for an operation that was
-     * never going to succeed.
-     *
-     * Scenario: 2-disk NAS, disk2 dies. Operator reaches for
-     * `braid remove-missing --missing-id 2`. braid rejects up-front and
-     * names the supported replace repair path without `replace --missing-id`.
-     */
+    /// The request position of the first `matches` in `calls`, for ordering
+    /// assertions.
+    fn position_of(calls: &[CmdRequest], matches: impl Fn(&CmdRequest) -> bool) -> usize {
+        calls
+            .iter()
+            .position(matches)
+            .unwrap_or_else(|| panic!("request not issued: {calls:?}"))
+    }
+
+    // Intent: remove-missing collapses a 2-disk pool with one disk missing
+    //   onto its present disk: it checks the survivor's space, converts to
+    //   single data and DUP metadata, then removes the missing devid, leaves
+    //   one member in pool.json, clears the journal, and owes no RAID1
+    //   restore.
+    // Why it exists: finding 261022-1230-016. A 2->1 `braid remove` of a
+    //   failing disk can leave data with its only copy on that disk. With the
+    //   disk detached and its devid MISSING, btrfs keeps it off the
+    //   allocator, so this collapse is the route in which that cannot happen.
+    //   The convert must come first: the kernel refuses to drop RAID1 below
+    //   two devices.
+    // Scenario: disk2 of a 2-disk pool throws errors and there is no spare.
+    //   The operator relocks, detaches disk2, unlocks degraded, and runs
+    //   `braid remove-missing --missing-id 2 --yes`.
     #[test]
-    fn single_survivor_rejected_at_preflight() {
+    fn two_disk_collapse_converts_before_removing_missing_devid() {
         let f = PoolFixture::two_disk_devids_pinned();
         let (runner, _remove_done) =
             RemoveMissingPool::two_disk_one_missing().install(MockRunner::default());
         let params = f.remove_missing_params().missing_id(Devid::new(2)).build();
-        let result = cmd_remove_missing(
+
+        cmd_remove_missing(
             &runner,
             &MockFs::storage(vec![]).with_dm(canonical_dm_table()),
             &params,
-        );
+        )
+        .expect("the 2-disk collapse must succeed");
 
-        let err = result.expect_err("remove-missing must reject 2-disk RAID1 + 1 missing");
-        let msg = match err {
-            RemoveMissingError::Validation(m) => m,
-            other => panic!("expected Validation, got {other:?}"),
-        };
+        let calls = runner.requests();
+        let df = position_of(&calls, |c| {
+            matches!(c, CmdRequest::BtrfsFilesystemDfJson { .. })
+        });
+        let convert = position_of(&calls, |c| {
+            matches!(c, CmdRequest::BtrfsBalanceSingle { .. })
+        });
+        let remove = position_of(&calls, |c| {
+            matches!(c, CmdRequest::BtrfsDeviceRemove { .. })
+        });
         assert!(
-            msg.contains("2-disk RAID1 pool with one disk missing"),
-            "error must name the rejected topology; got: {msg}"
+            df < convert && convert < remove,
+            "space check, then convert, then device remove: {calls:?}"
         );
         assert!(
-            msg.contains("braid replace"),
-            "error must name the replace command as the repair path; got: {msg}"
-        );
-        assert!(
-            msg.contains(
-                "braid replace --old <missing-name> --new <new-name>=/dev/disk/by-id/<...>"
-            ),
-            "error must name the full replace command as the repair path; got: {msg}"
-        );
-        assert!(
-            !msg.contains("replace --missing-id"),
-            "error must not request replace --missing-id; got: {msg}"
-        );
-        assert!(
-            !msg.contains("braid recover"),
-            "pre-journal refusal must not direct the operator to recovery: {msg}"
-        );
-
-        assert_eq!(
-            f.inhibitor.acquire_count(),
-            0,
-            "reject must land before the sleep inhibitor is acquired"
-        );
-        assert!(
-            journal::load_journal(&f.paths).unwrap().is_none(),
-            "reject must land before pending-op.json is written"
-        );
-        assert!(
-            !runner
-                .requests()
+            !calls
                 .iter()
-                .any(|c| matches!(c, CmdRequest::BtrfsDeviceRemove { .. })),
-            "reject must land before any btrfs device remove call"
+                .any(|c| matches!(c, CmdRequest::BtrfsBalanceRaid1Soft { .. })),
+            "a one-disk pool owes no RAID1 restore: {calls:?}"
         );
+        let after = membership::load_membership(&f.paths).expect("pool.json");
+        assert_eq!(after.len(), 1, "only disk1 remains: {after:?}");
+        assert!(
+            after.by_name(&DiskName::parse("disk1").unwrap()).is_some(),
+            "disk1 must remain: {after:?}"
+        );
+        assert!(journal::load_journal(&f.paths).unwrap().is_none());
     }
 
-    /*
-     * Intent: the 2-disk RAID1 + 1-missing reject fires in dry-run too --
-     * `cmd_remove_missing` runs `plan_remove_missing` first and surfaces
-     * its `Err` before reaching the `if params.dry_run` branch.
-     *
-     * Why it exists: pins the invariant that the reject lives in
-     * `plan_remove_missing`, not in `execute()`. A future refactor that
-     * moved the check downstream would silently let `--dry-run` print a
-     * doomed plan; this test fails first.
-     *
-     * Scenario: Same 2-disk NAS as the real-run case, operator runs
-     * `braid remove-missing --missing-id 2 --dry-run`. braid still
-     * rejects up-front with the replace hint that omits `replace --missing-id` -- no
-     * inhibitor, no journal, no btrfs calls.
-     */
+    // Intent: the collapse's dry-run shows the convert step before the device
+    //   remove and no RAID1 restore step, and runs neither.
+    // Why it exists: the dry-run is the collapse's only preview under --yes,
+    //   so it must show the redundancy loss as the convert step, the same
+    //   step `braid remove` shows for 2->1.
+    // Scenario: the operator previews `braid remove-missing --missing-id 2
+    //   --dry-run` on a 2-disk pool with disk2 missing.
     #[test]
-    fn single_survivor_rejected_in_dry_run() {
+    fn two_disk_collapse_dry_run_shows_convert_before_remove() {
         let f = PoolFixture::two_disk_devids_pinned();
         let (runner, _remove_done) =
             RemoveMissingPool::two_disk_one_missing().install(MockRunner::default());
@@ -1697,49 +1769,99 @@ mod tests {
             .missing_id(Devid::new(2))
             .dry_run(true)
             .build();
-        let result = cmd_remove_missing(
-            &runner,
-            &MockFs::storage(vec![]).with_dm(canonical_dm_table()),
-            &params,
-        );
+        let fs = MockFs::storage(vec![]).with_dm(canonical_dm_table());
 
-        let err =
-            result.expect_err("remove-missing --dry-run must reject 2-disk RAID1 + 1 missing");
-        let msg = match err {
-            RemoveMissingError::Validation(m) => m,
-            other => panic!("expected Validation, got {other:?}"),
-        };
-        assert!(
-            msg.contains("2-disk RAID1 pool with one disk missing"),
-            "error must name the rejected topology; got: {msg}"
-        );
-        assert!(
-            msg.contains("braid replace"),
-            "error must name the replace command as the repair path; got: {msg}"
-        );
-        assert!(
-            msg.contains(
-                "braid replace --old <missing-name> --new <new-name>=/dev/disk/by-id/<...>"
-            ),
-            "error must name the full replace command as the repair path; got: {msg}"
-        );
-        assert!(
-            !msg.contains("replace --missing-id"),
-            "error must not request replace --missing-id; got: {msg}"
-        );
-
+        let plan = plan_remove_missing(&runner, &fs, &params)
+            .unwrap_or_else(|failure| panic!("collapse must plan: {}", failure.error));
+        let steps = plan.preview().steps;
         assert_eq!(
-            f.inhibitor.acquire_count(),
-            0,
-            "dry-run reject must not acquire the sleep inhibitor"
+            steps.len(),
+            2,
+            "convert, then device remove, nothing else: {steps:?}"
         );
+        assert!(matches!(
+            steps[0].commands.as_slice(),
+            [CmdRequest::BtrfsBalanceSingle { .. }]
+        ));
+        assert!(matches!(
+            steps[1].commands.as_slice(),
+            [CmdRequest::BtrfsDeviceRemove { .. }]
+        ));
         assert!(
-            !runner
-                .requests()
-                .iter()
-                .any(|c| matches!(c, CmdRequest::BtrfsDeviceRemove { .. })),
-            "dry-run reject must not call btrfs device remove"
+            !runner.requests().iter().any(|c| matches!(
+                c,
+                CmdRequest::BtrfsBalanceSingle { .. } | CmdRequest::BtrfsDeviceRemove { .. }
+            )),
+            "planning must not run the convert or the remove"
         );
+    }
+
+    // Intent: the collapse refuses before the journal when the survivor
+    //   cannot hold the data as single + DUP, or when `btrfs device usage`
+    //   lists the target with a real path and size instead of as missing.
+    // Why it exists: a convert that runs out of space can force the pool
+    //   read-only with pending-op.json written. And the collapse is safe only
+    //   while btrfs keeps the target off its allocator; a usage row that says
+    //   the target is present means btrfs may still write to it.
+    // Scenario: a 2-disk pool with disk2 missing, where the survivor is too
+    //   small, or where the probes disagree about disk2.
+    #[test]
+    fn two_disk_collapse_refuses_without_space_or_a_trusted_missing_target() {
+        let full_df = r#"{"filesystem-df": [
+            { "bg-type": "Data", "bg-profile": "RAID1", "total": 471859200, "used": 471859200 },
+            { "bg-type": "Metadata", "bg-profile": "RAID1", "total": 31457280, "used": 31457280 }
+        ]}"#
+        .to_owned();
+        let present_target = device_usage_raw_body(&[
+            relocation_usage_live_device("/dev/mapper/braid-disk1", 1, &[], 452_984_832),
+            relocation_usage_live_device("/dev/mapper/braid-disk2", 2, &[], 452_984_832),
+        ]);
+        let is_df: fn(&CmdRequest) -> bool =
+            |r| matches!(r, CmdRequest::BtrfsFilesystemDfJson { .. });
+        let is_usage: fn(&CmdRequest) -> bool =
+            |r| matches!(r, CmdRequest::BtrfsDeviceUsageRaw { .. });
+        let cases = [
+            (
+                "survivor too small",
+                is_df,
+                full_df,
+                "not enough space on surviving device",
+            ),
+            (
+                "target listed as present",
+                is_usage,
+                present_target,
+                "not as a missing device",
+            ),
+        ];
+        for (case, overrides, stdout, expected) in cases {
+            let f = PoolFixture::two_disk_devids_pinned();
+            let (runner, _remove_done) =
+                RemoveMissingPool::two_disk_one_missing().install(MockRunner::default());
+            let runner = runner
+                .with_handler(move |req| overrides(req).then(|| Ok(mock_ok("btrfs", &stdout))));
+            let params = f.remove_missing_params().missing_id(Devid::new(2)).build();
+
+            let msg = cmd_remove_missing(
+                &runner,
+                &MockFs::storage(vec![]).with_dm(canonical_dm_table()),
+                &params,
+            )
+            .expect_err(case)
+            .to_string();
+            assert!(msg.contains(expected), "{case}: {msg}");
+            assert!(
+                journal::load_journal(&f.paths).unwrap().is_none(),
+                "{case}: refusal must land before pending-op.json"
+            );
+            assert!(
+                !runner.requests().iter().any(|c| matches!(
+                    c,
+                    CmdRequest::BtrfsBalanceSingle { .. } | CmdRequest::BtrfsDeviceRemove { .. }
+                )),
+                "{case}: refusal must land before any btrfs mutation"
+            );
+        }
     }
 
     #[test]
@@ -3517,6 +3639,36 @@ mod tests {
         assert!(msg.contains("2 present + 1 missing -> 2 disks"));
     }
 
+    // Intent: the collapse prompt says the data converts first, shows the
+    //   2 -> 1 shape, and carries the same 1-disk WARNING `braid remove`
+    //   shows, with no rebalance promise.
+    // Why it exists: the collapse leaves a pool with no redundancy, and the
+    //   prompt is the operator's last check that this is the intent, not a
+    //   removal that keeps RAID1.
+    // Scenario: an operator collapses a 2-disk pool after detaching toshiba.
+    #[test]
+    fn remove_missing_confirm_collapse_warns_one_disk() {
+        let msg = format_remove_missing_confirm(
+            "toshiba",
+            Devid::new(2),
+            RemovalOutcome::CollapsesToOneDisk,
+        );
+        assert!(msg.contains("toshiba (devid 2)"), "{msg}");
+        assert!(
+            msg.contains(&format!(
+                "Data on the remaining disk converts to {} first.",
+                ONE_DISK_PROFILES.label()
+            )),
+            "{msg}"
+        );
+        assert!(msg.contains("1 present + 1 missing -> 1 disk"), "{msg}");
+        assert!(
+            msg.contains("WARNING: Pool will have 1 disk -- no RAID1 redundancy."),
+            "{msg}"
+        );
+        assert!(!msg.contains("rebalanced"), "{msg}");
+    }
+
     // Intent: verify the confirm prompt accurately describes residual
     //   degradation and does not promise a rebalance when the pool stays
     //   degraded -- exercising both new branches added for missing_count >= 2.
@@ -3575,32 +3727,32 @@ mod tests {
     }
 
     // Intent: the plan-time classifier maps each (present, missing) pair to
-    //   the one outcome the planner allows, and refuses the 2-disk RAID1
-    //   floor with the operator-facing message.
+    //   the one outcome the planner allows: the last missing entry of a
+    //   2-disk pool collapses it, and only a pool with no present disk
+    //   refuses.
     // Why it exists: it is the only production source of `RemovalOutcome`.
     //   A slip that maps a 3-present, 1-missing pool to StaysDegraded skips
     //   the soft RAID1 balance and leaves degraded single chunks; a slip
-    //   that lets 1 present + 1 missing through would ask the operator to
-    //   confirm a removal the kernel refuses.
-    // Scenario: 2-, 3-, and 4-disk RAID1 pools after one or two disks die,
-    //   each planned with `braid remove-missing`.
+    //   that sends 1 present + 1 missing down the plain removal path asks
+    //   the kernel to drop RAID1 below two devices, which it refuses after
+    //   the journal is written. Finding 261022-1230-016 turned that pair
+    //   from a refusal into the collapse.
+    // Scenario: 1-, 2-, 3-, and 4-disk RAID1 pools after one or two disks
+    //   die, each planned with `braid remove-missing`.
     #[test]
     fn classify_removal_outcome_sweeps_present_missing_pairs() {
         let classify =
             |present, missing| classify_removal_outcome(present, NonZeroU64::new(missing).unwrap());
 
-        assert_eq!(
-            classify(1, 1),
-            None,
-            "1 present + 1 missing is the 2-disk RAID1 floor"
-        );
-        let msg = raid1_floor_refusal(Devid::new(2), NonZeroU64::new(1).unwrap());
+        assert_eq!(classify(0, 1), None, "no present disk is left to keep");
+        let msg = no_survivor_refusal(Devid::new(2));
         assert!(
-            msg.contains("2-disk RAID1 pool with one disk missing"),
-            "refusal must name the rejected topology; got: {msg}"
+            msg.contains("cannot remove missing devid 2") && msg.contains("no present disk"),
+            "refusal must name the devid and the reason; got: {msg}"
         );
 
         for (present, missing, expected) in [
+            (1, 1, RemovalOutcome::CollapsesToOneDisk),
             (2, 1, RemovalOutcome::RestoresRedundancy { present: 2 }),
             (3, 1, RemovalOutcome::RestoresRedundancy { present: 3 }),
             (

@@ -1435,7 +1435,9 @@ fn absent_data_reason(status: DiskStatus) -> Option<&'static str> {
 /// parenthetical is driven by `concerns()` being non-empty, NOT by the verdict
 /// word -- so both `warning` and `failing` carry it when an attribute is out of
 /// spec, while a bare `failing`/`ok`/`unknown` (no concerns) renders without one.
-fn format_smart_human(probe: &SmartProbe) -> String {
+/// Shared with remove's 2->1 health refusal, so it names a disk's SMART state
+/// in the words `braid status` shows.
+pub(crate) fn format_smart_human(probe: &SmartProbe) -> String {
     let verdict = match probe.health {
         SmartHealth::Healthy => "ok",
         SmartHealth::Degraded => "warning",

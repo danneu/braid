@@ -5,12 +5,12 @@ experimental: false
 
 # braid remove
 
-Remove a live disk from the pool. Data migrates off the disk before it is detached.
+Remove a live disk from the pool. Data migrates off the disk before it is detached. Going from two disks to one, the pool first converts off RAID1 while the disk is still in it, so the disk can hold the only copy of some data until the removal finishes (step 5).
 
 ## When to use it
 
 - Shrinking the pool (retiring a drive you no longer need)
-- Removing a drive that is still online and healthy
+- Removing a drive that is still online and healthy. On a 2-disk pool, braid refuses a drive that shows btrfs errors or a bad SMART verdict (see Safety checks below)
 
 If the disk is already dead or missing, use [`braid replace`](replace.md) to rebuild data onto a new disk, or [`braid remove-missing`](remove-missing.md) to forget the entry without rebuilding.
 
@@ -45,10 +45,10 @@ sudo braid remove toshiba3 --yes
 ## What happens under the hood
 
 1. Probes the pool to verify the disk is a live member
-2. Checks that the remaining disks have room for the data being migrated (see the space rule under Safety checks below)
+2. Checks that the remaining disks have room for the data being migrated (see the space rule under Safety checks below). When one disk would remain, it also checks the departing disk's btrfs error counters and SMART health (see the health rule under Safety checks below)
 3. Shows a confirmation prompt with the disk's name and devid, its model/size/serial (best-effort from the live backing device via lsblk -- omitted if unavailable), and the resulting disk count (e.g. `Pool: 3 disks -> 2 disks`). When one disk would remain, the prompt also carries a `WARNING:` line that the pool loses RAID1 redundancy. This interactive prompt, warning included, is skipped by `--yes` and not shown in `--dry-run`; dry-run shows the redundancy loss as the balance step of step 5 instead (see [ADR 022](../design/decisions/022-dry-run-preview-model.md#confirmation-ui)).
 4. After confirmation (or straight away with `--yes`), plans again against the live pool: steps 1-2 and the pool's safety checks below. If a check now refuses, or the new plan differs from the confirmed one, braid stops before writing anything. This runs before any `--enqueue` wait (see below), so it does not cover changes while the removal is queued behind another exclusive operation, or while it runs.
-5. If removing the second-to-last disk (going from 2 to 1): first balances the pool off RAID1, then removes the device. Data converts to single, and metadata and system convert to DUP (two copies on the one disk), which `braid status` then shows. See [btrfs balance profiles](../internals/btrfs/balance-profiles.md) for why metadata keeps two copies.
+5. If removing the second-to-last disk (going from 2 to 1): first balances the pool off RAID1, then removes the device. Data converts to single, and metadata and system convert to DUP (two copies on the one disk), which `braid status` then shows. See [btrfs balance profiles](../internals/btrfs/balance-profiles.md) for why metadata keeps two copies. The disk being removed is still in the pool during this balance, so btrfs can put some converted data on it alone. That data has one copy, on the departing disk, until step 6 finishes. This is why braid refuses an unhealthy disk here (see [ADR 012](../design/decisions/012-intent-cli.md#two-to-one-remove)).
 6. Runs `btrfs device remove` to migrate all data off the disk (this is the long-running step)
 7. Closes the LUKS mapper on the removed disk
 8. Updates pool.json to remove the member's UUID entry
@@ -63,7 +63,7 @@ If a btrfs exclusive operation (a running balance, device add/remove/replace, re
 
 - Refuses if the pool is not mounted
 - Refuses if the named disk is hot-unplugged: its LUKS mapper is open but `cryptsetup status` reports `device: (null)`, and btrfs has not promoted it to MISSING. Re-plugging alone never reopens the mapper, so braid gives the reopen route: `braid lock` then `braid unlock` if the disk is back, or `braid lock` then `braid unlock --allow-degraded` if it is gone, then re-run `braid remove`. If the disk is hot-unplugged after the journal is written, the route reopens with `braid recover` instead. See [Hot-unplug while pool is mounted](../guides/recovery-scenarios.md#hot-unplug-while-pool-is-mounted).
-- Refuses if the named disk is otherwise not a live member of the pool. If missing devices are detected, it suggests `braid replace --old <missing-name> --new <new-name>=/dev/disk/by-id/<...>`, and also `braid remove-missing` unless that command would refuse the pool's shape (the last missing disk of a 2-disk RAID1 pool)
+- Refuses if the named disk is otherwise not a live member of the pool. If missing devices are detected, it suggests `braid replace --old <missing-name> --new <new-name>=/dev/disk/by-id/<...>`, and also `braid remove-missing` whenever the pool has a present disk to keep (on a 2-disk pool, remove-missing collapses the pool onto that disk)
 - Refuses to remove the last disk from the pool
 - Refuses if there are missing devices in the pool (resolve those first)
 - Refuses if the remaining disks lack space for the removed disk's data
@@ -75,6 +75,16 @@ If a btrfs exclusive operation (a running balance, device add/remove/replace, re
   the reason. See
   [ADR 012](../design/decisions/012-intent-cli.md#enospc-pre-flight-check)
   for the policy.
+- When one disk would remain, refuses if the departing disk has any nonzero
+  `btrfs device stats` counter, if braid cannot read those counters, or if
+  SMART on its live backing device reads `failing` or `warning` (the verdict
+  `braid status` shows). The counters are the raw totals, so an acked alert
+  still refuses. If SMART reports nothing, as on virtio disks and many USB
+  bridges, braid prints a `[warn]` row and goes ahead. The refusal names two
+  safe routes: `braid replace` onto a new disk, or, with no spare, `braid lock`,
+  disconnect the disk, `braid unlock --allow-degraded`, then
+  [`braid remove-missing`](remove-missing.md) to collapse the pool onto the
+  other disk without writing to this one.
 - Refuses if the pool changed between planning and the journal write (for example, survivor space was used up, a balance was paused, or a disk dropped out while the prompt waited). Nothing was written, so re-run the command.
 {{#include ../_includes/mutating-command-refusals.md.inc}}
 

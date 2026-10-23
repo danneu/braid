@@ -16,9 +16,9 @@
 # Topology choice — 2 disks, removing one:
 #   In a 2-disk RAID1 pool, removing one disk leaves only 1 device,
 #   which makes RemovePlan::execute in cli/src/remove.rs run
-#   pool_balance_single() *before* btrfs device remove. That pre-balance
+#   convert_to_one_disk() *before* btrfs device remove. That pre-balance
 #   is the long, reliably observable phase. The 3→2 path was tried
-#   first and removed: in that topology pool_balance_single is skipped
+#   first and removed: in that topology convert_to_one_disk is skipped
 #   (it only runs when `remaining == 1`), leaving only the kernel
 #   `btrfs device remove` step, which on the test runner's fast virtual
 #   disks completes well under a second — too fast to observe via
@@ -118,7 +118,7 @@ with subtest("Start remove and wait for balance to be in flight"):
     machine.execute(remove_cmd_bg("disk2"))
 
     # Poll for the kernel entering the balance state. The 2→1 remove
-    # path runs `pool_balance_single` first, which is the long phase
+    # path runs `convert_to_one_disk` first, which is the long phase
     # we want to observe. `btrfs balance status` is the same query
     # progress monitoring uses (see cli/src/progress.rs).
     saw_running = False

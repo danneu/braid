@@ -14,8 +14,8 @@
 #   repair step. Unit tests pin the skip gate; this proves the full recipe.
 #
 # Scenario:
-# - A 2-disk RAID1 NAS loses disk2. `remove-missing` alone would refuse (can't
-#   drop RAID1 below two devices), so the operator first `braid add disk3`
+# - A 2-disk RAID1 NAS loses disk2. `remove-missing` alone would collapse the
+#   pool onto disk1 with no redundancy, so the operator first `braid add disk3`
 #   (pool stays degraded, disk3 empty), then `braid remove-missing` to drop the
 #   dead member and rebalance onto disk3, converging to a healthy pool.
 

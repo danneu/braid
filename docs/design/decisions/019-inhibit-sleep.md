@@ -84,7 +84,7 @@ The new-target check is deliberately **two-tier**: the primary gate (`cli/src/re
 The protected scope includes:
 
 - journal write
-- the optional pre-remove `pool_balance_single` (RAID1→single) when only one device will remain
+- the optional pre-remove `convert_to_one_disk` (RAID1→single) when only one device will remain
 - `btrfs device remove` data migration
 - post-remove LUKS mapper close and membership persistence
 
@@ -93,6 +93,7 @@ The protected scope includes:
 The protected scope includes:
 
 - journal write
+- on a 2-disk collapse, the pre-remove `convert_to_one_disk` balance
 - `btrfs device remove <devid>` (chunk relocation via
   `btrfs_shrink_device`; can run for minutes when the missing device had data
   allocated because surviving RAID1 stripes are rewritten into newly allocated

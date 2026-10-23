@@ -334,6 +334,27 @@ pub struct DeviceErrorStats {
     pub flush_io_errs: u64,
 }
 
+impl DeviceErrorStats {
+    /// Every counter under the field name btrfs prints, so health checks and
+    /// their messages name the same five counters.
+    pub fn counters(&self) -> [(&'static str, u64); 5] {
+        [
+            ("write_io_errs", self.write_io_errs),
+            ("read_io_errs", self.read_io_errs),
+            ("flush_io_errs", self.flush_io_errs),
+            ("corruption_errs", self.corruption_errs),
+            ("generation_errs", self.generation_errs),
+        ]
+    }
+
+    /// True when any raw counter is nonzero. Raw, not net of an acked
+    /// baseline: replace's source warning and remove's 2->1 gate ask whether
+    /// the disk has ever logged an error.
+    pub fn has_errors(&self) -> bool {
+        self.counters().iter().any(|(_, count)| *count > 0)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BtrfsDeviceStatsOutput {
     pub devices: Vec<DeviceErrorStats>,

@@ -13,12 +13,12 @@
 # Topology choice — 2 disks, not 3:
 #   This test deliberately exercises the 2→1 removal path. In a 2-disk
 #   RAID1 pool, removing one disk leaves only 1 device, which makes
-#   RemovePlan::execute in cli/src/remove.rs run pool_balance_single()
+#   RemovePlan::execute in cli/src/remove.rs run convert_to_one_disk()
 #   *before* btrfs device remove. That pre-balance is the long, reliably
 #   observable phase the inhibitor must protect.
 #
 #   The 3→2 path was tried first and removed: in that topology,
-#   pool_balance_single is skipped (it only runs when `remaining == 1`),
+#   convert_to_one_disk is skipped (it only runs when `remaining == 1`),
 #   leaving only the kernel `btrfs device remove` step, which on the
 #   test runner's fast virtual disks completes well under a second —
 #   before any external poll can catch it. The 2→1 path is a real

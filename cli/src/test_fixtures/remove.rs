@@ -36,6 +36,26 @@ const TWO_DISK_DF_JSON: &str = r#"{
 
 const THREE_DISK_DF_JSON: &str = TWO_DISK_DF_JSON;
 
+// Clean counters for every devid either topology has, so the 2->1 health
+// gate passes unless a test registers dirty stats.
+const CLEAN_DEVICE_STATS_JSON: &str = r#"{"device-stats": [
+  {"device": "/dev/mapper/braid-disk1", "devid": 1, "write_io_errs": 0, "read_io_errs": 0, "flush_io_errs": 0, "corruption_errs": 0, "generation_errs": 0},
+  {"device": "/dev/mapper/braid-disk2", "devid": 2, "write_io_errs": 0, "read_io_errs": 0, "flush_io_errs": 0, "corruption_errs": 0, "generation_errs": 0},
+  {"device": "/dev/mapper/braid-disk3", "devid": 3, "write_io_errs": 0, "read_io_errs": 0, "flush_io_errs": 0, "corruption_errs": 0, "generation_errs": 0}
+]}"#;
+
+// A passing SATA drive with no concerning attributes, which `parse_smartctl`
+// reads as Healthy, so the 2->1 health gate adds no SMART-unknown note.
+const HEALTHY_SMARTCTL_JSON: &str = r#"{
+  "smart_status": {"passed": true},
+  "device": {"protocol": "ATA"},
+  "ata_smart_attributes": {"table": [
+    {"name": "Reallocated_Sector_Ct", "raw": {"value": 0}},
+    {"name": "Current_Pending_Sector", "raw": {"value": 0}},
+    {"name": "Offline_Uncorrectable", "raw": {"value": 0}}
+  ]}
+}"#;
+
 // `data + 2*metadata + 2*system` = 60 + 2*30 + 2*~0 MiB = ~120 MiB demand,
 // which exceeds the 100 MiB survivor `device_size` in
 // `overcommitted_survivor_usage_stdout`. Pairs with that usage body to drive
@@ -169,6 +189,14 @@ impl RemovalPool {
             CmdRequest::BtrfsFilesystemDfJson { .. } => Some(Ok(mock_ok(
                 "btrfs --format json filesystem df /mnt/storage",
                 df_json,
+            ))),
+            CmdRequest::BtrfsDeviceStatsJson { .. } => Some(Ok(mock_ok(
+                "btrfs --format json device stats /mnt/storage",
+                CLEAN_DEVICE_STATS_JSON,
+            ))),
+            CmdRequest::SmartctlHealthJson { device } => Some(Ok(mock_ok(
+                &format!("smartctl -H -A {device} --json"),
+                HEALTHY_SMARTCTL_JSON,
             ))),
             CmdRequest::BtrfsBalanceSingle { .. } => {
                 Some(Ok(mock_ok("btrfs balance start", "")))

@@ -7,8 +7,14 @@ use crate::inhibit::AcquireSleepInhibitor;
 use crate::journal;
 use crate::mapper_close::{CloseContext, close_mapper_best_effort};
 use crate::membership;
-use crate::parse::{ParseError, parse_btrfs_device_usage, parse_btrfs_df_json};
-use crate::pool::{DeviceIdentity, pool_balance_single, pool_remove_device, validate_pool_topology};
+use crate::parse::types::SmartHealth;
+use crate::parse::{
+    ParseError, parse_btrfs_device_stats, parse_btrfs_device_usage, parse_smartctl,
+};
+use crate::pool::{
+    DeviceIdentity, convert_to_one_disk, one_disk_convert_preview_step, pool_remove_device,
+    validate_pool_topology,
+};
 use crate::preflight;
 use crate::preview::{self, PerDiskStyle, PlanFailure, Preview, PreviewNote};
 use crate::probe::{ProbeError, probe_pool};
@@ -92,8 +98,8 @@ fn absent_from_membership_error(name: &str) -> RemoveError {
 /// Refusal for a pool.json member with no live mapper: closed, or open on a
 /// devid btrfs has promoted to MISSING. It names `braid remove-missing` only
 /// when remove-missing would accept the pool's shape
-/// (`cli/src/remove_missing.rs#classify_removal_outcome`), since it refuses
-/// at the 2-disk RAID1 floor.
+/// (`cli/src/remove_missing.rs#classify_removal_outcome`), so the hint never
+/// sends the operator to a refusal.
 fn not_live_member_error(name: &str, pool: &PoolState) -> String {
     let mut msg = format!("disk '{name}' is not a live member of the pool.");
     let Some(missing_count) = std::num::NonZeroU64::new(pool.missing_count) else {
@@ -267,13 +273,7 @@ impl RemoveWorkPlan {
         let mapper_path = self.target_mapper.dev_path();
         let mut steps = Vec::new();
         if self.remaining == 1 {
-            steps.push(Step {
-                risk: "long",
-                description: format!("btrfs balance (RAID1 -> {})", ONE_DISK_PROFILES.label()),
-                commands: vec![CmdRequest::BtrfsBalanceSingle {
-                    mount_point: self.mount_point.clone(),
-                }],
-            });
+            steps.push(one_disk_convert_preview_step(&self.mount_point));
         }
         steps.push(Step {
             risk: "long",
@@ -299,8 +299,8 @@ impl RemoveWorkPlan {
 
 impl RemovePlan {
     /// Build a `Preview` carrying any plan-derived notes. The 1-disk
-    /// `WARNING:` line stays in `execute()` behind the `!params.yes`
-    /// gate and does not appear here.
+    /// `WARNING:` lines stay in `format_remove_confirm`, which `execute()`
+    /// calls behind the `!params.yes` gate, and do not appear here.
     pub fn preview(&self) -> Preview {
         Preview {
             notes: self.notes.clone(),
@@ -344,7 +344,7 @@ impl RemovePlan {
         // Confirm
         if !params.yes {
             let hw = confirm::query_disk_hw_info(runner, &self.work_plan.target_underlying);
-            let mut prompt = format!(
+            let prompt = format!(
                 "{}\n",
                 format_remove_confirm(
                     &RemoveConfirmDisk {
@@ -356,12 +356,6 @@ impl RemovePlan {
                     self.work_plan.total,
                 )
             );
-            if self.work_plan.remaining == 1 {
-                // Confirmation UI only: this is the go/no-go gate. The
-                // dry-run preview already shows the consequence as the
-                // `RAID1 -> ...` balance step; see `preview()`.
-                prompt.push_str("WARNING: Pool will have 1 disk -- no RAID1 redundancy.\n\n");
-            }
             params
                 .confirm
                 .confirm(&prompt)
@@ -414,7 +408,7 @@ impl RemovePlan {
             .map_err(|e| RemoveError::Validation(e.to_string()))?;
 
         // (Post-journal) last-moment safety gate: catch drift in the small
-        // window between the pre-journal re-plan and pool_balance_single.
+        // window between the pre-journal re-plan and convert_to_one_disk.
         // BtrfsBalanceSingle ships -f, which skips btrfs-progs' missing-device
         // safety timeout (reference/btrfs-progs/cmds/balance.c:558-561).
         // Without this gate, a disk going MISSING here could subject the pool
@@ -452,18 +446,7 @@ impl RemovePlan {
         // the same mapper between plan and execute.
         let color_enabled = color_enabled_for_stderr();
         if work_plan.remaining == 1 {
-            let target = ONE_DISK_PROFILES.label();
-            emit_status(&status_line(
-                StatusTag::Wait,
-                color_enabled,
-                &format!("pool: balancing RAID1 to {target}..."),
-            ));
-            pool_balance_single(runner, &work_plan.mount_point, params.progress)?;
-            emit_status(&status_line(
-                StatusTag::Ok,
-                color_enabled,
-                &format!("pool: balanced to {target}"),
-            ));
+            convert_to_one_disk(runner, &work_plan.mount_point, params.progress)?;
         }
         let device_path = work_plan.target_mapper.dev_path();
         emit_status(&status_line(
@@ -569,7 +552,8 @@ impl RemovePlan {
 /// operation and loaded config under the pool lock. Owns pool probe / mounted
 /// validation, mutation preflight, UPS preflight, target device lookup,
 /// missing-device guard, work-plan construction, the eviction-space
-/// preflight, and the membership snapshots the journal records. On success,
+/// preflight, the 2->1 target health gate, and the membership snapshots the
+/// journal records. On success,
 /// accumulated notes move into `plan.notes`; on post-preflight failure,
 /// accumulated notes stay on `PlanFailure::notes` so `cmd_remove` can render
 /// them before returning the error. `RemovePlan::recheck_before_journal` runs
@@ -702,6 +686,18 @@ pub fn plan_remove<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
         }
         Err(e) => {
             return Err(PlanFailure::with_notes(notes, e));
+        }
+    }
+
+    // 2->1 only: the convert balance can leave the target holding the only
+    // copy of some data, so an unhealthy target refuses. After the space
+    // check, so a refusal that names the collapse route never sends the
+    // operator to a collapse that would refuse for space.
+    if work_plan.remaining == 1 {
+        match check_two_to_one_target_health(runner, config.mount_point(), &work_plan) {
+            Ok(Some(note)) => notes.push(note),
+            Ok(None) => {}
+            Err(e) => return Err(PlanFailure::with_notes(notes, e)),
         }
     }
 
@@ -872,49 +868,8 @@ fn check_single_survivor<R: CommandRunner>(
     mount_point: &MountPoint,
     target_devid: Devid,
 ) -> Result<(), RemoveError> {
-    let usage_raw = runner
-        .run(&CmdRequest::BtrfsDeviceUsageRaw {
-            mount_point: mount_point.clone(),
-        })
-        .map_err(|e| {
-            RemoveError::Validation(format!(
-                "ENOSPC pre-flight (2->1): btrfs device usage spawn failed: {e}. \
-                 Refusing to start remove without a validated survivor capacity."
-            ))
-        })?;
-    let usage = parse_btrfs_device_usage(&usage_raw).map_err(|e| match e {
-        ParseError::CommandFailed {
-            exit_code, stderr, ..
-        } => RemoveError::Validation(format!(
-            "btrfs device usage failed (exit {exit_code}): {stderr}"
-        )),
-        other => RemoveError::Validation(format!(
-            "ENOSPC pre-flight (2->1): btrfs device usage output unparseable: {other}. \
-             Refusing to start remove without a validated survivor capacity."
-        )),
-    })?;
-
-    let df_raw = runner
-        .run(&CmdRequest::BtrfsFilesystemDfJson {
-            mount_point: mount_point.clone(),
-        })
-        .map_err(|e| {
-            RemoveError::Validation(format!(
-                "ENOSPC pre-flight (2->1): btrfs filesystem df spawn failed: {e}. \
-                 Refusing to start remove without a validated survivor capacity."
-            ))
-        })?;
-    let df = parse_btrfs_df_json(&df_raw).map_err(|e| match e {
-        ParseError::CommandFailed {
-            exit_code, stderr, ..
-        } => RemoveError::Validation(format!(
-            "btrfs filesystem df failed (exit {exit_code}): {stderr}"
-        )),
-        other => RemoveError::Validation(format!(
-            "ENOSPC pre-flight (2->1): btrfs filesystem df output unparseable: {other}. \
-             Refusing to start remove without a validated survivor capacity."
-        )),
-    })?;
+    let (usage, df) = preflight::probe_single_survivor_inputs(runner, mount_point, "remove")
+        .map_err(RemoveError::Validation)?;
 
     let survivor = usage
         .devices
@@ -931,6 +886,87 @@ fn check_single_survivor<R: CommandRunner>(
     preflight::check_single_survivor_capacity(&df, survivor).map_err(RemoveError::Validation)
 }
 
+/// Why an unhealthy disk refuses a 2->1 remove, shared by every refusal of
+/// `check_two_to_one_target_health`.
+const TWO_TO_ONE_WINDOW: &str = "A 2->1 remove converts RAID1 to single while this disk is still \
+     in the pool, so until the removal finishes, some data has its only copy on it.";
+
+/// Health gate for the 2->1 path only. Its convert balance runs while the
+/// target is still writable, so the target can hold the only copy of some
+/// data until `btrfs device remove` finishes
+/// (docs/design/decisions/012-intent-cli.md#two-to-one-remove). Refuses on
+/// any nonzero raw btrfs error counter for the target devid, on a stats probe
+/// it cannot read or that has no row for the devid, and on a SMART verdict
+/// of failing or warning. SMART unknown only returns a Warn note: disks
+/// that never report SMART would otherwise never pass, and the counters
+/// still fail closed for them. Every refusal names both routes in
+/// `repair_hint::unhealthy_two_to_one_routes`.
+fn check_two_to_one_target_health<R: CommandRunner>(
+    runner: &R,
+    mount_point: &MountPoint,
+    work_plan: &RemoveWorkPlan,
+) -> Result<Option<PreviewNote>, RemoveError> {
+    let name = &work_plan.name;
+    let devid = work_plan.target_devid;
+    let refuse = |signal: String| {
+        RemoveError::Validation(format!(
+            "{signal} {TWO_TO_ONE_WINDOW} {}",
+            repair_hint::unhealthy_two_to_one_routes(name, devid)
+        ))
+    };
+
+    let stats = runner
+        .run(&CmdRequest::BtrfsDeviceStatsJson {
+            mount_point: mount_point.clone(),
+        })
+        .map_err(|e| e.to_string())
+        .and_then(|raw| parse_btrfs_device_stats(&raw).map_err(|e| e.to_string()))
+        .map_err(|e| {
+            refuse(format!(
+                "cannot check disk '{name}' (devid {devid}) for btrfs errors: \
+                 `btrfs device stats` failed: {e}."
+            ))
+        })?;
+    let rows: Vec<_> = stats.devices.iter().filter(|d| d.devid == devid).collect();
+    if rows.is_empty() {
+        return Err(refuse(format!(
+            "cannot check disk '{name}' (devid {devid}) for btrfs errors: \
+             `btrfs device stats` lists no devid {devid}."
+        )));
+    }
+    if let Some(dirty) = rows.iter().find(|d| d.has_errors()) {
+        let counts: Vec<String> = dirty
+            .counters()
+            .iter()
+            .filter(|(_, count)| *count > 0)
+            .map(|(field, count)| format!("{field} {count}"))
+            .collect();
+        return Err(refuse(format!(
+            "disk '{name}' (devid {devid}) has btrfs errors ({}).",
+            counts.join(", ")
+        )));
+    }
+
+    // Like `braid status`, a smartctl that fails to run counts as unknown.
+    let smart = runner
+        .run(&CmdRequest::SmartctlHealthJson {
+            device: work_plan.target_underlying.clone(),
+        })
+        .map(|raw| parse_smartctl(&raw))
+        .ok();
+    match smart.map(|probe| (probe.health, probe)) {
+        Some((SmartHealth::Healthy, _)) => Ok(None),
+        Some((SmartHealth::Failing | SmartHealth::Degraded, probe)) => Err(refuse(format!(
+            "SMART reports disk '{name}' (devid {devid}) as {}.",
+            crate::status::format_smart_human(&probe)
+        ))),
+        Some((SmartHealth::Unknown, _)) | None => Ok(Some(PreviewNote::Warn(format!(
+            "SMART health of disk '{name}' (devid {devid}) is unknown, so only its \
+             btrfs error counters were checked before this 2->1 remove."
+        )))),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Confirmation formatter
 // ---------------------------------------------------------------------------
@@ -941,6 +977,10 @@ struct RemoveConfirmDisk<'a> {
     devid: Devid,
 }
 
+/// The go/no-go prompt. On 2->1 it also carries the 1-disk `WARNING:` and
+/// the window in which the departing disk can hold the only copy of some
+/// data. That warning is confirmation UI, not a `PreviewNote`: `--yes` and
+/// `--dry-run` never show it, and dry-run shows the loss as the balance step.
 fn format_remove_confirm(disk: &RemoveConfirmDisk, remaining: usize, total: usize) -> String {
     let mut msg = "Remove from pool:\n".to_string();
     let hw_line = disk.hw.and_then(confirm::format_hw_info_line);
@@ -949,12 +989,18 @@ fn format_remove_confirm(disk: &RemoveConfirmDisk, remaining: usize, total: usiz
     } else {
         msg.push_str(&format!("  {}\n", disk.name));
     }
-    let migrate_word = if remaining == 1 { "disk" } else { "disks" };
+    let fate = if remaining == 1 {
+        format!(
+            "pool converts to {}, then data migrates to remaining disk",
+            ONE_DISK_PROFILES.label()
+        )
+    } else {
+        "data will migrate to remaining disks".to_owned()
+    };
     msg.push_str(&format!(
-        "  {:width$}devid {} | data will migrate to remaining {}\n",
+        "  {:width$}devid {} | {fate}\n",
         "",
         disk.devid,
-        migrate_word,
         width = disk.name.len() + 2,
     ));
     msg.push_str(&format!(
@@ -964,6 +1010,14 @@ fn format_remove_confirm(disk: &RemoveConfirmDisk, remaining: usize, total: usiz
         remaining,
         if remaining == 1 { "disk" } else { "disks" },
     ));
+    if remaining == 1 {
+        msg.push_str(&format!(
+            "\nWARNING: Pool will have 1 disk -- no RAID1 redundancy.\n\
+             Once the balance starts, some data has its only copy on {} until \
+             the removal finishes.\n",
+            disk.name
+        ));
+    }
     msg
 }
 
@@ -1630,7 +1684,9 @@ mod tests {
             "the 3->2 re-plan must re-probe survivor space: {calls:?}"
         );
         assert_eq!(
-            stderr.matches("[warn] ENOSPC pre-flight check failed:").count(),
+            stderr
+                .matches("[warn] ENOSPC pre-flight check failed:")
+                .count(),
             1,
             "the re-plan's soft warning must print once: {stderr}"
         );
@@ -2175,6 +2231,291 @@ mod tests {
         assert!(msg.contains(NOTHING_WRITTEN), "{msg}");
     }
 
+    // --- 2->1 target health gate tests ---
+
+    /// `btrfs --format json device stats` stdout with one row per
+    /// `(devid, read_io_errs)` pair; every other counter is zero.
+    fn device_stats_json(rows: &[(u64, u64)]) -> String {
+        let rows: Vec<String> = rows
+            .iter()
+            .map(|(devid, read)| {
+                format!(
+                    r#"{{"device": "/dev/mapper/braid-disk{devid}", "devid": {devid}, "write_io_errs": 0, "read_io_errs": {read}, "flush_io_errs": 0, "corruption_errs": 0, "generation_errs": 0}}"#
+                )
+            })
+            .collect();
+        format!(r#"{{"device-stats": [{}]}}"#, rows.join(", "))
+    }
+
+    /// Answers `btrfs device stats` with `device_stats_json(rows)`.
+    fn device_stats_handler(
+        rows: &[(u64, u64)],
+    ) -> impl Fn(&CmdRequest) -> Option<Result<RawCommandOutput, CmdError>> + Send + Sync + 'static
+    {
+        let body = device_stats_json(rows);
+        move |req| match req {
+            CmdRequest::BtrfsDeviceStatsJson { .. } => {
+                Some(Ok(mock_ok("btrfs --format json device stats", &body)))
+            }
+            _ => None,
+        }
+    }
+
+    // Intent: a 2->1 remove refuses before any balance or journal when btrfs
+    //   counts I/O errors on the departing disk, and names its devid and the
+    //   counter.
+    // Why it exists: finding 261022-1230-016. The 2->1 convert runs while the
+    //   target is still writable, so the allocator can put the only copy of
+    //   converted data on it until `btrfs device remove` finishes. remove never
+    //   read the target's health, so it opened that window on a disk that
+    //   throws errors, the usual reason to retire one.
+    // Scenario: disk2 (devid 2) has logged read errors, and the operator runs
+    //   `braid remove disk2 --yes` on a 2-disk pool.
+    #[test]
+    fn cmd_remove_2to1_refuses_target_with_btrfs_io_errors() {
+        let f = PoolFixture::two_disk_healthy();
+        let runner = RemovalPool::two_disk()
+            .install(MockRunner::default())
+            .with_handler(device_stats_handler(&[(1, 0), (2, 3)]));
+        let fs = MockFs::storage(vec![]).with_dm(canonical_dm_table());
+
+        let msg = cmd_remove(&runner, &fs, &f.remove_params().build())
+            .expect_err("a 2->1 remove of a disk with I/O errors must refuse")
+            .to_string();
+
+        assert_stopped_before_journal(&f, &runner);
+        assert!(
+            msg.contains("devid 2"),
+            "the refusal must name the departing devid: {msg}"
+        );
+        assert!(
+            msg.contains("read_io_errs 3"),
+            "the refusal must name the nonzero counter: {msg}"
+        );
+        assert!(
+            msg.contains("braid replace --old disk2")
+                && msg.contains("braid unlock --allow-degraded")
+                && msg.contains("braid remove-missing --missing-id 2"),
+            "the refusal must name both safe routes: {msg}"
+        );
+    }
+
+    /// Answers `smartctl -H -A <dev> --json` for the target's live backing
+    /// path `/dev/vdc` with `output`, or fails to spawn when it is `None`.
+    fn smartctl_handler(
+        output: Option<RawCommandOutput>,
+    ) -> impl Fn(&CmdRequest) -> Option<Result<RawCommandOutput, CmdError>> + Send + Sync + 'static
+    {
+        move |req| match req {
+            CmdRequest::SmartctlHealthJson { device } if device == "/dev/vdc" => Some(
+                output
+                    .clone()
+                    .ok_or_else(|| CmdError::Failed("smartctl not found".into())),
+            ),
+            _ => None,
+        }
+    }
+
+    // Intent: a 2->1 remove refuses when SMART on the departing disk's live
+    //   backing device reads failing or warning, and names the verdict.
+    // Why it exists: finding 261022-1230-016. Reallocated and pending sectors
+    //   are the pre-failure signs btrfs counters miss until a read hits them,
+    //   and the departing disk can hold the only copy of some data during a
+    //   2->1 remove.
+    // Scenario: disk2's counters are clean, but SMART reports either a failed
+    //   self-assessment or 8 reallocated sectors.
+    #[test]
+    fn plan_remove_2to1_refuses_target_with_failing_or_warning_smart() {
+        let failing = r#"{"smart_status": {"passed": false}}"#;
+        let warning = r#"{
+            "smart_status": {"passed": true},
+            "device": {"protocol": "ATA"},
+            "ata_smart_attributes": {"table": [
+                {"name": "Reallocated_Sector_Ct", "raw": {"value": 8}}
+            ]}
+        }"#;
+        for (body, verdict) in [
+            (failing, "as failing."),
+            (warning, "as warning (8 reallocated)."),
+        ] {
+            let f = PoolFixture::two_disk_healthy();
+            let runner = RemovalPool::two_disk()
+                .install(MockRunner::default())
+                .with_handler(smartctl_handler(Some(mock_ok("smartctl", body))));
+            let fs = MockFs::storage(vec![]).with_dm(canonical_dm_table());
+
+            let failure = plan_remove(&runner, &fs, &f.remove_params().build())
+                .err()
+                .unwrap_or_else(|| panic!("SMART {verdict} must refuse a 2->1 remove"));
+            let msg = failure.error.to_string();
+            assert!(
+                msg.contains(&format!("SMART reports disk 'disk2' (devid 2) {verdict}")),
+                "the refusal must name the SMART verdict: {msg}"
+            );
+            assert!(msg.contains("braid remove-missing --missing-id 2"), "{msg}");
+        }
+    }
+
+    // Intent: SMART unknown on the departing disk only warns: the 2->1 plan
+    //   goes ahead with a Warn note naming the disk, whether smartctl fails
+    //   to run or reports no SMART data.
+    // Why it exists: virtio disks and many USB bridges never report SMART.
+    //   Refusing on unknown would block a 2->1 remove on them for good, and
+    //   the btrfs counters still fail closed for them.
+    // Scenario: a 2-disk pool on virtio disks, where smartctl either cannot
+    //   be spawned or exits with no output.
+    #[test]
+    fn plan_remove_2to1_warns_when_target_smart_is_unknown() {
+        let no_output = RawCommandOutput {
+            cmd: "smartctl".into(),
+            stdout: String::new(),
+            stderr: "Unable to detect device type".into(),
+            exit_status: 1,
+        };
+        for output in [None, Some(no_output)] {
+            let f = PoolFixture::two_disk_healthy();
+            let runner = RemovalPool::two_disk()
+                .install(MockRunner::default())
+                .with_handler(smartctl_handler(output));
+            let fs = MockFs::storage(vec![]).with_dm(canonical_dm_table());
+
+            let plan = plan_remove(&runner, &fs, &f.remove_params().dry_run(true).build())
+                .unwrap_or_else(|failure| {
+                    panic!("SMART unknown must not refuse: {}", failure.error)
+                });
+            let rendered = plan.preview().render();
+            assert!(
+                rendered.contains("[warn] SMART health of disk 'disk2' (devid 2) is unknown"),
+                "the dry-run must carry the SMART-unknown warning:\n{rendered}"
+            );
+        }
+    }
+
+    // Intent: a 2->1 remove refuses when it cannot read the departing disk's
+    //   btrfs counters: the stats probe fails to spawn, exits nonzero, prints
+    //   unparseable output, or lists no row for the target devid.
+    // Why it exists: the departing disk can become the only holder of some
+    //   data, so per docs/dev/safety-heuristics.md every uncertainty on this
+    //   branch is a hard error, unlike replace's warn-only source probe.
+    // Scenario: `btrfs device stats` misbehaves while the operator removes
+    //   disk2 from a 2-disk pool.
+    #[test]
+    fn plan_remove_2to1_refuses_when_target_stats_are_unreadable() {
+        let output = |stdout: &str, exit_status: i32| RawCommandOutput {
+            cmd: "btrfs --format json device stats".into(),
+            stdout: stdout.into(),
+            stderr: "ERROR: cannot get dev stats".into(),
+            exit_status,
+        };
+        // `None` fails to spawn.
+        let cases: [(&str, Option<RawCommandOutput>, &str); 4] = [
+            ("spawn failure", None, "`btrfs device stats` failed"),
+            (
+                "nonzero exit",
+                Some(output("", 1)),
+                "`btrfs device stats` failed",
+            ),
+            (
+                "unparseable",
+                Some(output("not json", 0)),
+                "`btrfs device stats` failed",
+            ),
+            (
+                "no target row",
+                Some(output(&device_stats_json(&[(1, 0)]), 0)),
+                "lists no devid 2",
+            ),
+        ];
+        for (case, stats, expected) in cases {
+            let f = PoolFixture::two_disk_healthy();
+            let runner = RemovalPool::two_disk()
+                .install(MockRunner::default())
+                .with_handler(move |req| match req {
+                    CmdRequest::BtrfsDeviceStatsJson { .. } => Some(
+                        stats
+                            .clone()
+                            .ok_or_else(|| CmdError::Failed("btrfs not found".into())),
+                    ),
+                    _ => None,
+                });
+            let fs = MockFs::storage(vec![]).with_dm(canonical_dm_table());
+
+            let failure = plan_remove(&runner, &fs, &f.remove_params().build())
+                .err()
+                .unwrap_or_else(|| panic!("{case}: unreadable stats must refuse"));
+            let msg = failure.error.to_string();
+            assert!(
+                msg.contains("cannot check disk 'disk2' (devid 2) for btrfs errors")
+                    && msg.contains(expected),
+                "{case}: the refusal must say why the counters are unreadable: {msg}"
+            );
+        }
+    }
+
+    // Intent: a 3->2 remove runs neither health probe.
+    // Why it exists: the gate exists for the 2->1 window. With two or more
+    //   survivors, `btrfs device remove` takes the target off the allocator
+    //   before it relocates anything, and RAID1 copies stay on the survivors,
+    //   so a dirty or unknown target must not refuse or warn.
+    // Scenario: disk2 has I/O errors, and the operator removes it from a
+    //   healthy 3-disk pool.
+    #[test]
+    fn plan_remove_3to2_skips_target_health_probes() {
+        let f = PoolFixture::three_disk_healthy();
+        let runner = RemovalPool::three_disk()
+            .install(MockRunner::default())
+            .with_handler(device_stats_handler(&[(1, 0), (2, 3), (3, 0)]));
+        let fs = MockFs::storage(vec![]).with_dm(canonical_dm_table());
+
+        let plan = plan_remove(&runner, &fs, &f.remove_params().build())
+            .unwrap_or_else(|failure| panic!("3->2 must not gate on health: {}", failure.error));
+
+        assert!(
+            plan.notes.is_empty(),
+            "3->2 must add no health note: {:?}",
+            plan.notes
+        );
+        let calls = runner.requests();
+        assert!(
+            !calls.iter().any(|c| matches!(
+                c,
+                CmdRequest::BtrfsDeviceStatsJson { .. } | CmdRequest::SmartctlHealthJson { .. }
+            )),
+            "3->2 must not probe target health: {calls:?}"
+        );
+    }
+
+    // Intent: the pre-journal re-plan re-runs the 2->1 health gate, so a
+    //   disk that logs errors while the prompt waits refuses with nothing
+    //   written.
+    // Why it exists: finding 261022-1230-016 puts the gate only in
+    //   plan_remove and relies on 015's whole re-plan for its freshness at
+    //   the journal. This pins that reliance.
+    // Scenario: disk2 is clean when the operator starts the 2->1 remove and
+    //   logs read errors before they answer the prompt.
+    #[test]
+    fn execute_refuses_before_journal_when_target_gains_errors_at_prompt() {
+        let f = PoolFixture::two_disk_healthy();
+        let params = f.remove_params().build();
+        let fs = MockFs::storage(vec![]).with_dm(canonical_dm_table());
+        let clean = RemovalPool::two_disk().install(MockRunner::default());
+        let plan = plan_remove(&clean, &fs, &params).expect("plan on a clean disk");
+
+        let dirty = RemovalPool::two_disk()
+            .install(MockRunner::default())
+            .with_handler(device_stats_handler(&[(1, 0), (2, 3)]));
+        let result = plan.execute(&dirty, &fs, &params);
+
+        match result {
+            Err(RemoveError::ReplanRefused { source }) => {
+                let msg = source.to_string();
+                assert!(msg.contains("read_io_errs 3"), "{msg}");
+            }
+            other => panic!("expected ReplanRefused, got: {other:?}"),
+        }
+        assert_stopped_before_journal(&f, &dirty);
+    }
+
     // --- Confirmation formatter tests ---
 
     #[test]
@@ -2223,6 +2564,42 @@ mod tests {
             "singular 'disk' when 1 remaining"
         );
         assert!(msg.contains("2 disks -> 1 disk"));
+    }
+
+    // Intent: the 2->1 prompt says the pool converts before the data moves,
+    //   and states the window in which the departing disk holds the only
+    //   copy of some data. A 3->2 prompt says neither.
+    // Why it exists: finding 261022-1230-016. The prompt said only "data will
+    //   migrate to remaining disk", which hides that the convert runs while
+    //   the departing disk can still receive new single chunks.
+    // Scenario: the operator removes toshiba from a 2-disk pool, then from a
+    //   3-disk pool.
+    #[test]
+    fn remove_confirm_2to1_states_the_single_copy_window() {
+        let disk = RemoveConfirmDisk {
+            name: "toshiba",
+            hw: None,
+            devid: Devid::new(2),
+        };
+        let two_to_one = format_remove_confirm(&disk, 1, 2);
+        assert!(
+            two_to_one.contains(&format!(
+                "devid 2 | pool converts to {}, then data migrates to remaining disk",
+                ONE_DISK_PROFILES.label()
+            )),
+            "{two_to_one}"
+        );
+        assert!(
+            two_to_one.contains(
+                "Once the balance starts, some data has its only copy on toshiba until \
+                 the removal finishes."
+            ),
+            "{two_to_one}"
+        );
+
+        let three_to_two = format_remove_confirm(&disk, 2, 3);
+        assert!(!three_to_two.contains("only copy"), "{three_to_two}");
+        assert!(!three_to_two.contains("converts"), "{three_to_two}");
     }
 
     #[test]
@@ -2971,15 +3348,17 @@ mod tests {
     }
 
     /* Intent: plan_remove's refusal for a target with no live mapper names
-     * `braid remove-missing` only when remove-missing would accept the
-     * pool's shape.
-     * Why it exists: remove-missing refuses the last missing entry of a
-     * 2-disk RAID1 pool, so naming it there sent the operator to a refusal.
+     * `braid remove-missing` whenever remove-missing would accept the pool's
+     * shape, which since the 2-disk collapse includes a 2-disk pool.
+     * Why it exists: remove-missing once refused the last missing entry of
+     * a 2-disk RAID1 pool, so remove left it out there. Finding
+     * 261022-1230-016 made remove-missing collapse that pool onto its
+     * present disk, so the hint must now name it there too.
      * Scenario: disk2 died and btrfs lists it MISSING with no mapper, once
      * in a 2-disk pool and once in a 3-disk pool.
      */
     #[test]
-    fn plan_remove_not_live_target_names_remove_missing_above_raid1_floor() {
+    fn plan_remove_not_live_target_names_remove_missing() {
         const TWO_DISK_DISK2_MISSING: &str = "Label: none  uuid: cc86845b-aec3-408e-bef5-553affc1f2b1\n\
              \tTotal devices 2 FS bytes used 16.17MiB\n\
              \tdevid    1 size 496.00MiB used 121.56MiB path /dev/mapper/braid-disk1\n\
@@ -2994,7 +3373,7 @@ mod tests {
                 PoolFixture::two_disk_healthy(),
                 RemovalPool::two_disk(),
                 TWO_DISK_DISK2_MISSING,
-                false,
+                true,
             ),
             (
                 PoolFixture::three_disk_healthy(),

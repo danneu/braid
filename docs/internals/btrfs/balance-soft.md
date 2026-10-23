@@ -184,13 +184,16 @@ The journaled operation decides which balance is owed:
   degraded. The idempotent `,soft` filter makes this safe even when nothing
   needs converting.
 
-`braid remove` is deliberately not part of this replay. It is the only mutation
-whose pre-mutation phase can issue a balance -- the RAID1 -> single conversion
-in the 2->1 case. A paused balance found while recovering a `remove` may be that
-unfinished conversion-to-single, not owed RAID1 maintenance, so recover neither
-resumes nor soft-replays it. Resuming it would finish converting to single
-without removing the device, then clear the journal, silently halving
-redundancy. Recover instead directs the operator to re-run `braid remove`.
+`braid remove` is deliberately not part of this replay. Its 2->1 case converts
+RAID1 -> single before the device remove. A paused balance found while
+recovering a `remove` may be that unfinished conversion-to-single, not owed
+RAID1 maintenance, so recover neither resumes nor soft-replays it. Resuming it
+would finish converting to single without removing the device, then clear the
+journal, silently halving redundancy. Recover instead directs the operator to
+re-run `braid remove`. The `remove-missing` collapse of a 2-disk pool converts
+the same way before its device remove, owes no soft convert, and gets the same
+treatment: recover never resumes its paused convert and tells the operator to
+resume or cancel it before re-running `braid remove-missing`.
 
 ## Sources
 

@@ -83,7 +83,11 @@ a degraded `smart` object while `alert_active` is `false` -- this is intentional
 and is documented so the two SMART signals (the live diagnostic probe vs the
 smartd latch) are not conflated. smartd remains the single SMART alert source
 because it watches continuously between status runs and applies its own vendor
-thresholds; the live probe is a point-in-time diagnostic.
+thresholds; the live probe is a point-in-time diagnostic. A 2->1 `braid remove`
+runs the same probe on the departing disk and refuses on a `failing` or
+`warning` verdict
+([ADR 012](012-intent-cli.md#two-to-one-remove)); that is a refusal input
+for one command, and it still never feeds the alert latch.
 
 ## Consequences
 

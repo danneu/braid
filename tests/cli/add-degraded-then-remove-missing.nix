@@ -8,9 +8,9 @@
 #
 # Why: the degraded add deliberately defers redundancy restoration to the
 # purpose-built repair path. This is the documented `add`-then-`remove-missing`
-# workflow for a 2-disk degraded pool (`remove-missing` alone refuses below two
-# devices). Only unit tests pin the skip gate; this proves the full operator
-# recipe converges to a healthy RAID1 pool.
+# workflow for a 2-disk degraded pool (`remove-missing` alone would collapse the
+# pool onto one disk with no redundancy). Only unit tests pin the skip gate;
+# this proves the full operator recipe converges to a healthy RAID1 pool.
 #
 # Scenario: a 2-disk RAID1 NAS loses disk2. The operator mounts degraded, runs
 # `braid add disk3` (the pool stays degraded, disk3 empty), then

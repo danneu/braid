@@ -1803,11 +1803,11 @@ pub fn plan_recover<R: CommandRunner + Sync, F: Filesystem + ?Sized>(
             owed_balance: (targets.len() >= 2).then_some(OwedRaid1Balance::RestoreSingle),
         },
         journal::OpKind::Remove { .. } => RecoverCompletion::GenericLivePool {
-            // No resume, no replay. `braid remove` is the only mutation whose
-            // pre-mutation phase issues a balance (the RAID1 -> single
-            // conversion in the 2->1 case), so a paused balance observed here
-            // may belong to an unfinished pre-remove rather than to a
-            // post-mutation rebalance. Resuming it would complete the
+            // No resume, no replay. A 2->1 `braid remove` converts to
+            // `ONE_DISK_PROFILES` before its device remove (as does the
+            // remove-missing collapse, whose arm above also never resumes
+            // it), so a paused balance observed here may belong to an
+            // unfinished pre-remove rather than to a post-mutation rebalance. Resuming it would complete the
             // conversion-to-single without removing the device, then journal
             // clear would silently halve redundancy. The recovery_guidance
             // message directs the operator to re-run `braid remove` instead,
@@ -3546,8 +3546,8 @@ fn execute_remove_missing_pool_mutation_recovery<
         membership::save_membership(&journal.pre_membership, params.paths)?;
         journal::clear_journal(params.paths).map_err(|e| RecoverError::Journal(e.to_string()))?;
         eprintln!(
-            "remove-missing did not complete -- missing devid {devid} is still recorded. \
-             Re-run braid remove-missing to retry."
+            "{}",
+            remove_missing_not_committed_guidance(&pool, devid, params.config.mount_point())
         );
         return Ok(());
     }
@@ -3582,6 +3582,37 @@ fn execute_remove_missing_pool_mutation_recovery<
             owed_balance,
             inhibitor_already_held: false,
         },
+    )
+}
+
+/// What recover says after an uncommitted remove-missing. A collapse, which
+/// `cli/src/remove_missing.rs#classify_removal_outcome` picks from the live
+/// pool's shape, converts before its device remove, and every braid mount
+/// uses `skip_balance`, so a crash can leave that convert paused. Recover
+/// leaves it alone, like a paused `braid remove` convert, but the re-run
+/// refuses while it is paused, so the guidance names both ways out.
+fn remove_missing_not_committed_guidance(
+    pool: &PoolState,
+    devid: Devid,
+    mount_point: &MountPoint,
+) -> String {
+    let retry = format!(
+        "remove-missing did not complete -- missing devid {devid} is still recorded. \
+         Re-run braid remove-missing to retry."
+    );
+    let collapse = std::num::NonZeroU64::new(pool.missing_count)
+        .and_then(|missing| {
+            crate::remove_missing::classify_removal_outcome(pool.devices.len(), missing)
+        })
+        .is_some_and(|outcome| outcome.collapses());
+    if !collapse {
+        return retry;
+    }
+    format!(
+        "{retry} If `braid status` shows a paused balance, the interrupted collapse left \
+         its convert paused, and remove-missing refuses until it ends: run \
+         `btrfs balance resume {mount_point}` to finish the convert, or \
+         `btrfs balance cancel {mount_point}`, then re-run braid remove-missing."
     )
 }
 
@@ -12290,7 +12321,9 @@ mod tests {
     // Intent: RemoveMissing::PoolMutation recovery exits recovery mode when
     // the primary remove did not commit.
     // Why it exists: recover may restore bookkeeping, but it must not retry
-    // btrfs device remove behind the user's back.
+    // btrfs device remove behind the user's back. The live shape (disk1
+    // present, devid 2 missing) is a collapse, whose convert may be paused;
+    // the empty request log proves recover neither probes nor resumes it.
     // Scenario: the journal exists but btrfs still reports the same missing
     // devid, so recovery restores pre-operation pool.json and asks for rerun.
     #[test]
@@ -12322,6 +12355,49 @@ mod tests {
         assert!(!f.paths.pending_op_json().exists());
         let recovered = membership::load_membership(&f.paths).unwrap();
         assert!(recovered.by_name(&disk_name("disk2")).is_some());
+    }
+
+    // Intent: after an uncommitted remove-missing, recover names the paused
+    // convert's way out only when the live pool is a collapse shape.
+    // Why it exists: a collapse converts before its device remove, braid
+    // mounts with `skip_balance`, and the re-run refuses a paused balance, so
+    // a bare "re-run" would send the operator to a refusal. A 3-disk pool's
+    // remove-missing issues no pre-remove balance, so it keeps the bare text.
+    // Scenario: a crash during the collapse convert of a 2-disk pool leaves
+    // disk1 present and devid 2 missing; a 3-disk pool with devid 3 missing
+    // crashes during its device remove.
+    #[test]
+    fn remove_missing_not_committed_guidance_names_paused_convert_only_on_collapse() {
+        let mp = MountPoint::new("/mnt/storage".into());
+        let collapse = remove_missing_not_committed_guidance(
+            &pool_state_disk1_with_missing_devid2(),
+            Devid::new(2),
+            &mp,
+        );
+        assert!(
+            collapse.starts_with("remove-missing did not complete -- missing devid 2"),
+            "{collapse}"
+        );
+        assert!(
+            collapse.contains("`btrfs balance resume /mnt/storage`")
+                && collapse.contains("`btrfs balance cancel /mnt/storage`"),
+            "{collapse}"
+        );
+
+        let three_disk = remove_missing_not_committed_guidance(
+            &mounted_pool_state(&[
+                (1, Some(("disk1", "/dev/vda"))),
+                (2, Some(("disk2", "/dev/vdb"))),
+                (3, None),
+            ]),
+            Devid::new(3),
+            &mp,
+        );
+        assert!(!three_disk.contains("btrfs balance"), "{three_disk}");
+        assert!(
+            three_disk.ends_with("Re-run braid remove-missing to retry."),
+            "{three_disk}"
+        );
     }
 
     // Intent: RemoveMissing::PoolMutation recovery rejects mixed live state.
@@ -20054,7 +20130,7 @@ mod tests {
 
     /// Two-disk Remove journal modeling an interrupted 2->1 remove: pre =
     /// {disk1, disk2}, target = {disk1}. Shutdown landed during the
-    /// pre-remove `pool_balance_single`, so the live pool still has both
+    /// pre-remove `convert_to_one_disk`, so the live pool still has both
     /// disks but the kernel has a paused convert-to-single balance.
     fn remove_2to1_journal() -> journal::Journal {
         let pre = membership_from(vec![
@@ -20082,12 +20158,11 @@ mod tests {
     /// Intent: When `cmd_recover` finds a paused balance after rebuilding
     /// pool.json from an interrupted `OpKind::Remove`, it MUST NOT auto-resume
     /// it. The operator's recovery path is to re-run `braid remove`, which
-    /// re-issues the appropriate `pool_balance_single` itself.
+    /// re-issues the convert itself.
     ///
-    /// Why it exists: `braid remove` is the only mutation whose pre-mutation
-    /// phase issues a balance (the RAID1 -> single conversion in the 2->1
-    /// case via `pool_balance_single`). A shutdown landing during that
-    /// pre-balance leaves the kernel with a paused convert-to-single balance
+    /// Why it exists: a 2->1 `braid remove` converts to `ONE_DISK_PROFILES`
+    /// (via `convert_to_one_disk`) before its device remove. A shutdown
+    /// landing during that pre-balance leaves the kernel with a paused convert
     /// against a still-2-disk pool. If `replay_owed_raid1_maintenance` ran on
     /// this remove path, recover could finish the conversion to single without
     /// ever removing the device, then clear the journal, silently halving
@@ -20096,7 +20171,7 @@ mod tests {
     /// for the 2->1 pre-balance path.
     ///
     /// Scenario: Operator started `braid remove disk2` against a 2-disk
-    /// RAID1 pool; UPS LB fired during the pre-remove `pool_balance_single`.
+    /// RAID1 pool; UPS LB fired during the pre-remove `convert_to_one_disk`.
     /// Pool comes up with both disks still present and a paused balance.
     /// Recover writes the recovered membership ({disk1, disk2} = pre), skips
     /// balance probing and replay, clears the journal, and prints guidance to
@@ -20184,6 +20259,98 @@ mod tests {
             !f.paths.pending_op_json().exists(),
             "journal must be cleared so the operator can re-run braid remove cleanly"
         );
+    }
+
+    /// Intent: `cmd_recover` on an uncommitted remove-missing collapse
+    /// restores the pre-operation pool.json and clears the journal without
+    /// probing, resuming, or replaying any balance.
+    ///
+    /// Why it exists: the collapse converts to `ONE_DISK_PROFILES` before
+    /// its device remove, so a crash can leave that convert paused. Its
+    /// journal owes no RAID1 restore, and recover must leave the paused
+    /// convert to the operator, as for a 2->1 `braid remove`. No balance
+    /// request is mocked, so any balance probe or resume on this path fails
+    /// the test with a missing mock.
+    ///
+    /// Scenario: a 2-disk pool lost disk2, and the operator ran
+    /// `braid remove-missing --missing-id 2`. Power failed during the
+    /// convert. The pool comes up mounted with disk1 present and devid 2
+    /// still missing.
+    #[test]
+    fn cmd_recover_remove_missing_collapse_not_committed_leaves_balance_alone() {
+        let f = PoolFixture::empty();
+        let fs =
+            MockFs::new(&[]).with_luks_dm("braid-disk1", "11111111-1111-1111-1111-111111111111");
+
+        let mut journal = remove_missing_journal();
+        journal.op = OpKind::RemoveMissing {
+            phase: journal::RemoveMissingPhase::PoolMutation,
+            devid: Devid::new(2),
+            restore_raid1_after_commit: false,
+        };
+        journal::write_journal(&f.paths, &journal).unwrap();
+
+        let show = ok_raw(
+            "btrfs filesystem show /mnt/storage",
+            "Label: none  uuid: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n\
+             \tTotal devices 2 FS bytes used 1.00GiB\n\
+             \tdevid    1 size 10.00GiB used 2.00GiB path /dev/mapper/braid-disk1\n\
+             \tdevid    2 size 0 used 0 path MISSING\n",
+        );
+        let (mp_req, mp_out) = mountpoint_ok();
+        let runner = MockRunner::default()
+            .with_output(mp_req, mp_out)
+            .with_output(
+                CmdRequest::BtrfsFilesystemShow {
+                    mount_point: MountPoint::new("/mnt/storage".into()),
+                },
+                show,
+            )
+            .with_output(
+                CmdRequest::CryptsetupStatus {
+                    mapper: MapperName::from_basename("braid-disk1".into()),
+                },
+                cryptsetup_status_active("braid-disk1", "/dev/vda"),
+            )
+            .with_output(
+                CmdRequest::CryptsetupLuksUuid {
+                    device: "/dev/vda".into(),
+                },
+                cryptsetup_uuid_ok("/dev/vda", "11111111-1111-1111-1111-111111111111"),
+            );
+
+        let resolver = resolver_for(&[("/dev/vda", "virtio-disk1")]);
+        let inhibitor = RequestCountInhibitor::new(runner.clone());
+        cmd_recover(
+            &runner,
+            &fs,
+            &resolver,
+            &f.recover_params()
+                .passphrase_file(None)
+                .sleep_inhibitor(&inhibitor)
+                .build(),
+        )
+        .expect("recover should restore the pre-collapse state and leave the balance alone");
+
+        assert_eq!(inhibitor.acquire_count(), 0);
+        assert!(
+            !runner.requests().iter().any(|r| matches!(
+                r,
+                CmdRequest::BtrfsBalanceStatus { .. }
+                    | CmdRequest::BtrfsBalanceSingle { .. }
+                    | CmdRequest::BtrfsBalanceRaid1Soft { .. }
+                    | CmdRequest::BtrfsDeviceRemove { .. }
+            )),
+            "recover must not touch the balance or rerun the device remove: {:?}",
+            runner.requests()
+        );
+        let recovered = membership::load_membership(&f.paths).unwrap();
+        assert!(
+            recovered.by_name(&disk_name("disk1")).is_some()
+                && recovered.by_name(&disk_name("disk2")).is_some(),
+            "pool.json must keep the pre-collapse members"
+        );
+        assert!(!f.paths.pending_op_json().exists());
     }
 
     // Intent

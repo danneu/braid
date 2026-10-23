@@ -23,7 +23,7 @@ Replace plan/apply with five intent commands:
 |---------|---------|------|
 | `braid add <name=by_id>...` | Format + join pool, or recover identity-verified LUKS device | Destructive (new disk), safe (returning braid disk with matching FSID), or refused (non-braid LUKS, foreign pool, no pool to verify) |
 | `braid remove <name>` | Migrate data off present disk, detach from pool | Long-running |
-| `braid remove-missing --missing-id <devid>` | Clean up a stale missing-device entry; restores RAID1 profiles if this clears the last missing device | Long-running |
+| `braid remove-missing --missing-id <devid>` | Clean up a stale missing-device entry; restores RAID1 profiles if this clears the last missing device; on a 2-disk pool, collapses the pool onto its present disk | Long-running |
 | `braid replace --old <name> --new <name=by_id>` | Replace a disk (live or dead) using `btrfs replace start`; restores RAID1 profiles for missing-path when clearing the last missing device | In-place swap (preserves devid) |
 | `braid status` | Display pool health and disk info | Read-only |
 
@@ -64,7 +64,7 @@ The dry-run preview itself stays on stdout. Side-effect-free probes that neverth
 - Both paths use `btrfs replace start` — the sole replacement primitive. Live disks replace in-place; missing disks are rebuilt from RAID redundancy by devid.
 - `--missing-id` is only valid when `--old` is dead/missing. Rejected with live `--old`. Validated against `PoolState::missing_devids` (live btrfs state via `probe::probe_pool`).
 - The missing devid is auto-resolved from `--old`'s identity, independent of how many devices are missing. If `--old`'s disk was hot-unplugged and btrfs still lists it through its open mapper (null-underlying, before promotion to MISSING), the LUKS UUID that mapper records binds `--old` to the devid btrfs holds the mapper at, and replace refuses until btrfs promotes that devid. Otherwise, including once btrfs reports the device MISSING, `--old` has no observable LUKS UUID, so its persisted pool.json devid binds it, and only to a `PoolState::missing_devids` entry no open mapper holds (`cli/src/types.rs#PoolState::devid_only_missing`; see [decision 024](024-luks-uuid-identity.md)). Because `--old`'s name already identifies the member, no missing-count gate is needed; `--missing-id` is an optional cross-check (it must equal that devid, else `OldMapperDevidMismatch` or `OldDevidMismatch`) and is never required.
-- Mixed state (live `--old` + pool has missing devices) is rejected -- operator must repair the missing device first with `braid replace --old <missing-name> --new <new-name>=/dev/disk/by-id/<...>`. `braid remove-missing` is only for intentional cleanup (forgetting stale entries without rebuilding data).
+- Mixed state (live `--old` + pool has missing devices) is rejected -- operator must repair the missing device first with `braid replace --old <missing-name> --new <new-name>=/dev/disk/by-id/<...>`. `braid remove-missing` is only for intentional cleanup: forgetting stale entries without rebuilding data, or collapsing a 2-disk pool onto its present disk.
 - No replacement path uses `btrfs device add`. Missing-path replace may run a post-commit soft RAID1 balance only when it clears the last missing device.
 
 ### ENOSPC pre-flight check
@@ -124,8 +124,7 @@ copy on a disk that is gone. RAID1 tolerates one failed write per chunk, so the
 removal could report success while some chunks hold one real copy. No space
 arithmetic prevents that. Only promotion to MISSING, by a relock and a
 degraded unlock, takes the device off the allocator. The refusal therefore runs
-on every pool shape, including the single-survivor path that skips the space
-check. With it in place, every non-missing usage stanza with a nonzero size
+on every pool shape, the collapse included. With it in place, every non-missing usage stanza with a nonzero size
 belongs to a present member, so the survivor set needs no second filter.
 Counting only probe-present members as survivors was rejected: it corrects the
 number but not where the kernel writes.
@@ -157,15 +156,95 @@ Single-survivor cases use a path-specific check:
   plan/execute drift window -- a survivor over-committed by writes during
   the confirmation + inhibitor wait is caught before the irreversible `-f`
   balance and fails clean, with no `pending-op.json` stranded.
-- **`remove-missing` on a 2-device RAID1 pool with 1 missing
-  (`pool.total_devices == 2 && pool.devices.len() == 1 && pool.missing_count == 1`):**
-  rejected at preflight. `btrfs_rm_device` runs
-  `btrfs_check_raid_min_devices(num_devices - 1)` and returns
-  `BTRFS_ERROR_DEV_RAID1_MIN_NOT_MET` whenever the remaining device
-  count would drop below the RAID1 minimum of 2, so the call is
-  guaranteed to fail at the kernel level. The supported repair paths
-  for that case are `braid replace` (preferred)
-  or `braid add` followed by `braid remove-missing`.
+- **`remove-missing` collapse (one present disk, the last missing one
+  targeted; `cli/src/remove_missing.rs#classify_removal_outcome`):** the
+  same single-survivor model, against the present disk, fail-closed on
+  every probe uncertainty (`cli/src/preflight.rs#probe_single_survivor_inputs`).
+  It also requires the target's usage stanza to carry the missing marker
+  and zero size, as the relocation check does, because the collapse is
+  safe only while btrfs keeps the target off its allocator. It skips the
+  RAID1 allocation-shape check: once the convert has finished and the
+  device remove has not, the missing stanza holds no RAID1 rows, so that
+  check would refuse every re-run. See
+  [Two-to-one remove](#two-to-one-remove).
+
+### Two-to-one remove
+
+The kernel refuses to drop a RAID1 pool below two devices, so a 2->1
+`remove` converts the pool to `ONE_DISK_PROFILES` (single data, DUP
+metadata and system) before `btrfs device remove`. The convert runs while
+the departing disk is still a writable member. The chunk allocator uses
+every writable device and tries the ones with the most free space first
+(linux 6.18.33, `fs/btrfs/volumes.c` (`gather_device_info`)), and only
+`btrfs_rm_device` takes a device off the allocator. So once the balance
+starts, some data has its only copy on the departing disk until the
+removal finishes, which can take hours. If that disk fails in the window,
+that data is lost. A 3->2 remove has no such window: `btrfs device remove`
+takes the target off the allocator before it relocates anything, and the
+RAID1 copies stay on the survivors.
+
+`remove` therefore gates the 2->1 path on the departing disk's health
+(`cli/src/remove.rs#check_two_to_one_target_health`). It refuses when any
+raw `btrfs device stats` counter for the target devid is nonzero, when it
+cannot read those counters or finds no row for the devid, and when SMART on
+the live backing device reads failing or warning. Like every planner check,
+the gate runs again in the pre-journal re-plan. The counters are raw, not
+net of the acked baseline: the usual retire flow is an alert, `braid ack`,
+then `remove`, and ack moves the counters into the baseline, so a baseline
+gate would pass the very disk it exists for. SMART unknown only warns.
+virtio disks and many USB bridges never report SMART, so refusing there
+would block a 2->1 remove on them for good, and the counters still fail
+closed for them. Every other uncertainty refuses, because the target can
+become the only holder of data
+([safety heuristics](../../dev/safety-heuristics.md)). A warning alone was
+rejected: `--yes` runs never read it.
+
+The refusal names two routes in which the departing disk never holds the
+only copy of anything: `braid replace` onto a new disk, or, with no spare,
+the collapse below. The window stays open for a target that is clean on
+both signals. That risk is about that of the survivor failing in the same
+hours, which the operator accepts by choosing a one-disk pool. Steering the
+allocator was rejected: a balance devid filter picks which chunks move, not
+where the new chunk goes, and shrinking the target only changes which disk
+has more free space at the start.
+
+The collapse is `remove-missing` on a 2-disk pool with one disk missing
+(`cli/src/remove_missing.rs#RemovalOutcome::CollapsesToOneDisk`). It runs
+`btrfs balance start -dconvert=single -mconvert=dup -f`, then
+`btrfs device remove` on the missing devid. A MISSING device never joins
+the allocator's device list (linux 6.18.33, `fs/btrfs/volumes.c`
+(`add_missing_dev`, `gather_device_info`)), so every converted chunk lands
+on the present disk. Balance allows single and DUP there because it counts
+writable devices only (`fs/btrfs/volumes.c` (`btrfs_balance`)). Once the
+last RAID1 block group is gone, btrfs drops RAID1 from the available
+profiles (`fs/btrfs/block-group.c` (`clear_avail_alloc_bits`)), so the
+device remove passes `btrfs_check_raid_min_devices`. The device remove
+alone fails that check, which is why remove-missing used to refuse this
+shape, so an operator with no spare had no route. btrfs-progs warns that a
+convert with a missing device can be dangerous (btrfs-progs v6.19.1,
+`cmds/balance.c` (`cmd_balance_start`)), and
+[ADR 001](001-btrfs-raid1.md#replacement-strategy) avoids a degraded balance
+for that reason. Neither applies to the collapse: the missing device is off
+the allocator, so no chunk can land on it, and the present disk already
+holds the only live copy of all data, so the convert drops no copy that
+still exists. `-f`, which the metadata downgrade needs, also skips that
+warning's countdown. braid's confirmation prompt stands in for it, and
+`--yes` skips both. braid mounts
+with `skip_balance`, so a crash leaves the convert paused. Recover never
+resumes it, as for a paused 2->1 `remove` convert, and since the re-run
+refuses a paused balance, recover's guidance names `btrfs balance resume`
+and `btrfs balance cancel`
+(`cli/src/recover.rs#remove_missing_not_committed_guidance`).
+
+The ideal is an offline 2->1 inside `remove`: detach the departing disk
+first, mount the survivor degraded, convert, then remove the missing devid,
+so no 2->1 remove can hit the window, healthy target or not. It was not
+chosen. `remove` would mount degraded without the explicit
+`--allow-degraded` that [principle 1](../principles.md#1-resilient-by-default)
+requires, a healthy 2->1 remove would stop being online, and a failure
+partway would leave the pool unmounted or degraded-mounted in journal
+states recover does not handle. If every 2->1 remove needs the guarantee,
+build that, reusing the collapse step.
 
 ### NixOS-native automation
 

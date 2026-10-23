@@ -197,11 +197,22 @@ with subtest("Interactive 2->1 remove: piping 'yes' at the real prompt proceeds 
     machine.succeed(
         "printf 'yes\\n' | braid remove disk2 >/tmp/rm2.out 2>/tmp/rm2.err"
     )
-    # Principle 13: 2->1 remove triggers pool_balance_single (RAID1 to single
+    # Principle 13: 2->1 remove triggers convert_to_one_disk (RAID1 to single
     # data, DUP metadata) and pool_remove_device. Pin the [wait]/[ok] rows.
     rm2_err = machine.succeed("cat /tmp/rm2.err")
     assert "WARNING: Pool will have 1 disk -- no RAID1 redundancy." in rm2_err, (
         f"interactive accept must still show the no-RAID1 warning; got: {rm2_err!r}"
+    )
+    # The 2->1 health gate (docs/design/decisions/012-intent-cli.md#two-to-one-remove)
+    # reads clean btrfs counters on disk2 and no SMART data from the virtio
+    # disk, so it warns and goes ahead. Exactly once: the pre-journal re-plan
+    # runs the gate again but prints only notes the plan has not shown.
+    smart_warn = "[warn] SMART health of disk 'disk2' (devid 2) is unknown"
+    assert rm2_err.count(smart_warn) == 1, (
+        f"expected one SMART-unknown warn row, got: {rm2_err!r}"
+    )
+    assert "Once the balance starts, some data has its only copy on disk2" in rm2_err, (
+        f"the 2->1 prompt must state the single-copy window; got: {rm2_err!r}"
     )
     bal_wait = "[wait] pool: balancing RAID1 to single data, DUP metadata..."
     bal_ok = "[ok]   pool: balanced to single data, DUP metadata"

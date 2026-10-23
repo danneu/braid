@@ -480,8 +480,47 @@ fn pool_balance_raid1<R: CommandRunner + Sync>(
     Ok(())
 }
 
-/// Pre-remove convert to `ONE_DISK_PROFILES`, with progress.
-pub fn pool_balance_single<R: CommandRunner + Sync>(
+/// The dry-run step for the convert to `ONE_DISK_PROFILES` that runs before
+/// a removal leaves one disk. Shared by `remove`'s 2->1 path and
+/// `remove-missing`'s collapse, so both show the same step for the same
+/// command.
+pub(crate) fn one_disk_convert_preview_step(mount_point: &MountPoint) -> Step {
+    Step {
+        risk: "long",
+        description: format!("btrfs balance (RAID1 -> {})", ONE_DISK_PROFILES.label()),
+        commands: vec![CmdRequest::BtrfsBalanceSingle {
+            mount_point: mount_point.clone(),
+        }],
+    }
+}
+
+/// Run the convert to `ONE_DISK_PROFILES` between its `[wait]`/`[ok]` rows.
+/// The one execute path for the step `one_disk_convert_preview_step` shows,
+/// so `remove` and `remove-missing` print the same rows.
+pub(crate) fn convert_to_one_disk<R: CommandRunner + Sync>(
+    runner: &R,
+    mount_point: &MountPoint,
+    progress: ProgressOutput,
+) -> Result<(), PoolError> {
+    let color_enabled = color_enabled_for_stderr();
+    let target = ONE_DISK_PROFILES.label();
+    emit_status(&status_line(
+        StatusTag::Wait,
+        color_enabled,
+        &format!("pool: balancing RAID1 to {target}..."),
+    ));
+    pool_balance_single(runner, mount_point, progress)?;
+    emit_status(&status_line(
+        StatusTag::Ok,
+        color_enabled,
+        &format!("pool: balanced to {target}"),
+    ));
+    Ok(())
+}
+
+/// Convert to `ONE_DISK_PROFILES`, with progress. Private, so every
+/// caller runs it through `convert_to_one_disk`.
+fn pool_balance_single<R: CommandRunner + Sync>(
     runner: &R,
     mount_point: &MountPoint,
     progress: ProgressOutput,
